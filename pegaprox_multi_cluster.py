@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PegaProx Server - Backend for Cluster Management for Proxmox VE
-Version: 0.6 Beta
+PegaProx Server - Cluster Management Backend for Proxmox VE
+Version: 0.6.1 Beta
 
 Copyright (C) 2025-2026 PegaProx Team
 
@@ -53,6 +53,26 @@ TODO: CODE SPLITTING before v1.0!! 30k lines in one file is insane - NS
 DONE: general API rate limiting - LW jan 2026 (env: PEGAPROX_API_RATE_LIMIT)
 
 ═══════════════════════════════════════════════════════════════════════════════
+
+RELEASE NOTES v0.6.1 Beta - 25.01.2026
+
+Got some bug reports right after release (thanks everyone who tested!)
+GitHub: https://github.com/PegaProx/project-pegaprox/issues/4
+
+Fixes in this release:
+- LW: Fixed itemsPerPage declaration order for pre-compiled builds
+      Browser-Babel was forgiving but compiled JS needs strict order
+- NS: Fixed forceStop parameter - was applied to LXC instead of QEMU (oops!)
+- NS: Complete SQLite migration for all config files
+- MK: Fixed alerts/affinity rules create/delete
+- NS: Task panel now updates immediately on cluster switch
+- LW: Added build.sh for JSX pre-compilation (15s -> 2s load time!)
+- NS: Auto-updater now installs pip packages with sudo support
+- ALL: Switched from unpkg to jsdelivr (faster CDN)
+
+Breaking: None (automatic migration handles everything)
+
+═══════════════════════════════════════════════════════════════════════════════
 """
 
 # CRITICAL: Gevent MUST be first!! dont move this!! - NS
@@ -101,6 +121,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning, module='asyncio')
 from flask import Flask, jsonify, request, send_from_directory, Response, make_response
 from flask_cors import CORS
 from flask_sock import Sock
+from flask_compress import Compress  # NS: Gzip compression for faster loading
 from datetime import datetime, timedelta, date  # timedelta for session expiry calc, date for password expiry
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -257,8 +278,8 @@ app = Flask(__name__)
 # =============================================================================
 # VERSION INFO
 # =============================================================================
-PEGAPROX_VERSION = "Beta 0.6"
-PEGAPROX_BUILD = "2026.01"  # Year.Month of release
+PEGAPROX_VERSION = "Beta 0.6.1"
+PEGAPROX_BUILD = "2026.01.25"  # Year.Month.Day of release
 
 # ============================================
 # CORS Configuration (Security)
@@ -324,6 +345,15 @@ CORS(app, supports_credentials=True, resources={
     }
 })
 sock = Sock(app)
+
+# NS: Gzip compression - reduces transfer size by 70-80%
+app.config['COMPRESS_MIMETYPES'] = [
+    'text/html', 'text/css', 'text/xml', 'text/plain',
+    'application/json', 'application/javascript', 'application/xml'
+]
+app.config['COMPRESS_LEVEL'] = 6  # Balance between speed and compression
+app.config['COMPRESS_MIN_SIZE'] = 500  # Only compress if > 500 bytes
+Compress(app)
 
 # =============================================================================
 # REQUEST VALIDATION & RATE LIMITING
@@ -418,12 +448,12 @@ def add_security_headers(response):
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
             "https://cdn.jsdelivr.net https://cdn.tailwindcss.com "
-            "https://unpkg.com https://cdnjs.cloudflare.com; "
+            "https://cdnjs.cloudflare.com; "
         "style-src 'self' 'unsafe-inline' "
             "https://fonts.googleapis.com https://cdn.jsdelivr.net; "
         "font-src 'self' data: https://fonts.gstatic.com https://fonts.googleapis.com; "
         "img-src 'self' data: blob:; "
-        "connect-src 'self' wss: ws: https://unpkg.com https://cdn.jsdelivr.net; "
+        "connect-src 'self' wss: ws: https://cdn.jsdelivr.net; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self'"
@@ -9045,9 +9075,12 @@ echo "AGENT_INSTALLED_OK"
             data = {}
             # force stop = immediate termination (like pulling the plug)
             # normal stop/shutdown = graceful via ACPI
+            # NS: forceStop only works for QEMU VMs, not LXC containers!
+            # Fixed 25.01.2026 - was incorrectly applied to LXC
             if action == 'stop' and force:
                 self.logger.info(f"Force stopping {vm_type}/{vmid}")
-                if vm_type == 'lxc': data['forceStop'] = 1
+                if vm_type == 'qemu': 
+                    data['forceStop'] = 1
             
             self.logger.info(f"VM Action: {action} on {vm_type}/{vmid}@{node}" + (" FORCE" if force else ""))
             resp = self._api_post(url, data=data if data else None)
@@ -17467,24 +17500,88 @@ def check_pegaprox_update():
         }), 200
 
 
+
 @app.route('/api/pegaprox/update', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
 def perform_pegaprox_update():
     """Perform PegaProx update from GitHub
     
     NS: Full auto-update - Jan 2026
-    Downloads new files, creates backup, replaces files, restarts server
+    Downloads ALL files (except protected paths), installs new packages, restarts server
+    
+    Protected paths (NEVER overwritten):
+    - config/         (database, settings, encrypted data)
+    - ssl/            (SSL certificates)
+    - *.db            (local databases)
+    - *.enc           (encrypted files)
+    - *.pem           (SSL/TLS certificates)
+    - *.key           (private keys)
     """
     try:
         data = request.json or {}
         force = data.get('force', False)
         
-        # First check for updates
-        response = requests.get(GITHUB_VERSION_URL, timeout=10)
-        if response.status_code != 200:
-            return jsonify({'error': 'Failed to check for updates'}), 500
+        # GitHub raw URL base
+        REPO_BASE = "https://raw.githubusercontent.com/PegaProx/project-pegaprox/main"
         
-        remote_version = response.json()
+        # Protected paths - NEVER overwrite these
+        PROTECTED_PATTERNS = [
+            'config/', 'ssl/', 'certs/',
+            '.db', '.enc', '.pem', '.key', '.crt', '.p12'
+        ]
+        
+        def is_protected(path):
+            """Check if a path should be protected from updates"""
+            path_lower = path.lower()
+            for pattern in PROTECTED_PATTERNS:
+                if pattern.endswith('/'):
+                    # Directory pattern
+                    if path_lower.startswith(pattern) or f'/{pattern}' in path_lower:
+                        return True
+                else:
+                    # File extension pattern
+                    if path_lower.endswith(pattern):
+                        return True
+            return False
+        
+        # Files to download (relative paths)
+        # NS: Add new files here when they're added to the repo
+        UPDATE_FILES = [
+            ('pegaprox_multi_cluster.py', 'pegaprox_multi_cluster.py'),
+            ('web/index.html', 'web/index.html'),
+            ('requirements.txt', 'requirements.txt'),
+            ('version.json', 'version.json'),
+            ('deploy.sh', 'deploy.sh'),
+            # Static files (optional, for offline mode)
+            ('static/css/tailwind.min.css', 'static/css/tailwind.min.css'),
+        ]
+        
+        # First check for updates
+        try:
+            response = requests.get(GITHUB_VERSION_URL, timeout=10)
+        except requests.RequestException as e:
+            return jsonify({
+                'error': 'Cannot reach update server',
+                'details': str(e),
+                'hint': 'Check your internet connection or try again later'
+            }), 503
+        
+        if response.status_code == 404:
+            return jsonify({
+                'error': 'Update server not found',
+                'details': 'The GitHub repository may not be set up yet',
+                'hint': 'Please check https://github.com/PegaProx/project-pegaprox'
+            }), 404
+        elif response.status_code != 200:
+            return jsonify({
+                'error': f'Failed to check for updates (HTTP {response.status_code})'
+            }), 500
+        
+        try:
+            remote_version = response.json()
+        except:
+            return jsonify({'error': 'Invalid version data from server'}), 500
+        
         new_version = remote_version.get('version', '0.0')
         
         # Check if update is needed
@@ -17508,16 +17605,11 @@ def perform_pegaprox_update():
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'pegaprox.update_started', f"Update to version {new_version} initiated")
         
-        # Get file URLs from version.json
-        files = remote_version.get('files', {})
-        backend_url = files.get('backend')
-        frontend_url = files.get('frontend')
+        # Use file list from version.json if available, otherwise use defaults
+        if 'update_files' in remote_version:
+            UPDATE_FILES = [(f, f) for f in remote_version['update_files']]
         
-        if not backend_url and not frontend_url:
-            # Fallback: Try default GitHub raw URLs
-            repo_base = "https://raw.githubusercontent.com/PegaProx/project-pegaprox/main"
-            backend_url = f"{repo_base}/pegaprox_multi_cluster.py"
-            frontend_url = f"{repo_base}/index.html"
+        current_dir = os.path.dirname(os.path.abspath(__file__))
         
         # Create backup directory
         backup_dir = os.path.join(CONFIG_DIR, 'backups')
@@ -17528,95 +17620,152 @@ def perform_pegaprox_update():
         backup_path = os.path.join(backup_dir, backup_name)
         os.makedirs(backup_path, exist_ok=True)
         
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        current_backend = os.path.abspath(__file__)
-        current_frontend = os.path.join(current_dir, 'index.html')
-        
-        # Backup current files
+        # Backup current files (only files we're going to update)
         backed_up_files = []
-        try:
-            if os.path.exists(current_backend):
-                backup_backend = os.path.join(backup_path, os.path.basename(current_backend))
-                shutil.copy2(current_backend, backup_backend)
-                backed_up_files.append(('backend', backup_backend))
-                logging.info(f"Backed up backend to {backup_backend}")
-            
-            if os.path.exists(current_frontend):
-                backup_frontend = os.path.join(backup_path, 'index.html')
-                shutil.copy2(current_frontend, backup_frontend)
-                backed_up_files.append(('frontend', backup_frontend))
-                logging.info(f"Backed up frontend to {backup_frontend}")
+        for remote_path, local_path in UPDATE_FILES:
+            # Skip protected files (they won't be updated anyway)
+            if is_protected(local_path):
+                continue
                 
-        except Exception as e:
-            logging.error(f"Backup failed: {e}")
-            return jsonify({'error': f'Backup failed: {e}'}), 500
+            full_path = os.path.join(current_dir, local_path)
+            if os.path.exists(full_path):
+                try:
+                    backup_file_path = os.path.join(backup_path, local_path)
+                    backup_dir_path = os.path.dirname(backup_file_path)
+                    if backup_dir_path:  # Only makedirs if there's a directory part
+                        os.makedirs(backup_dir_path, exist_ok=True)
+                    shutil.copy2(full_path, backup_file_path)
+                    backed_up_files.append((local_path, backup_file_path))
+                    logging.info(f"Backed up: {local_path}")
+                except Exception as e:
+                    logging.warning(f"Could not backup {local_path}: {e}")
         
-        # Download new files
+        logging.info(f"Backed up {len(backed_up_files)} files to {backup_path}")
+        
+        # Download and replace files
         downloaded_files = []
-        try:
-            # Download backend
-            if backend_url:
-                logging.info(f"Downloading backend from {backend_url}")
-                resp = requests.get(backend_url, timeout=60)
-                if resp.status_code == 200:
-                    new_backend_path = current_backend + '.new'
-                    with open(new_backend_path, 'w', encoding='utf-8') as f:
-                        f.write(resp.text)
-                    downloaded_files.append(('backend', new_backend_path, current_backend))
-                    logging.info(f"Downloaded backend ({len(resp.text)} bytes)")
-                else:
-                    raise Exception(f"Failed to download backend: HTTP {resp.status_code}")
+        failed_files = []
+        skipped_protected = []
+        
+        for remote_path, local_path in UPDATE_FILES:
+            # NS: Skip protected files (config, ssl, keys, etc.)
+            if is_protected(local_path):
+                skipped_protected.append(local_path)
+                logging.info(f"Skipped (protected): {local_path}")
+                continue
             
-            # Download frontend
-            if frontend_url:
-                logging.info(f"Downloading frontend from {frontend_url}")
-                resp = requests.get(frontend_url, timeout=60)
-                if resp.status_code == 200:
-                    new_frontend_path = current_frontend + '.new'
-                    with open(new_frontend_path, 'w', encoding='utf-8') as f:
-                        f.write(resp.text)
-                    downloaded_files.append(('frontend', new_frontend_path, current_frontend))
-                    logging.info(f"Downloaded frontend ({len(resp.text)} bytes)")
-                else:
-                    raise Exception(f"Failed to download frontend: HTTP {resp.status_code}")
-                    
-        except Exception as e:
-            logging.error(f"Download failed: {e}")
-            # Cleanup downloaded files
-            for _, new_path, _ in downloaded_files:
-                try:
-                    os.remove(new_path)
-                except:
-                    pass
-            return jsonify({'error': f'Download failed: {e}'}), 500
-        
-        # Replace files
-        replaced_files = []
-        try:
-            for file_type, new_path, target_path in downloaded_files:
-                # Atomic replace: rename new file to target
-                if os.path.exists(target_path):
-                    os.replace(new_path, target_path)
-                else:
-                    shutil.move(new_path, target_path)
-                replaced_files.append(file_type)
-                logging.info(f"Replaced {file_type}: {target_path}")
+            url = f"{REPO_BASE}/{remote_path}"
+            full_path = os.path.join(current_dir, local_path)
+            
+            try:
+                logging.info(f"Downloading: {remote_path}")
+                resp = requests.get(url, timeout=60)
                 
-        except Exception as e:
-            logging.error(f"Replace failed: {e}")
-            # Try to restore from backup
-            for file_type, backup_file in backed_up_files:
-                try:
-                    if file_type == 'backend':
-                        shutil.copy2(backup_file, current_backend)
-                    elif file_type == 'frontend':
-                        shutil.copy2(backup_file, current_frontend)
-                    logging.info(f"Restored {file_type} from backup")
-                except Exception as restore_err:
-                    logging.error(f"Failed to restore {file_type}: {restore_err}")
-            return jsonify({'error': f'Update failed, restored from backup: {e}'}), 500
+                if resp.status_code == 200:
+                    # Create directory if needed
+                    dir_path = os.path.dirname(full_path)
+                    if dir_path:
+                        os.makedirs(dir_path, exist_ok=True)
+                    
+                    # Write to temp file first
+                    temp_path = full_path + '.new'
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        f.write(resp.text)
+                    
+                    # Atomic replace
+                    os.replace(temp_path, full_path)
+                    downloaded_files.append(local_path)
+                    logging.info(f"Updated: {local_path} ({len(resp.text)} bytes)")
+                    
+                elif resp.status_code == 404:
+                    # File doesn't exist in repo - skip silently (might be optional)
+                    logging.debug(f"Skipped (not in repo): {remote_path}")
+                else:
+                    failed_files.append((local_path, f"HTTP {resp.status_code}"))
+                    logging.warning(f"Failed to download {remote_path}: HTTP {resp.status_code}")
+                    
+            except Exception as e:
+                failed_files.append((local_path, str(e)))
+                logging.error(f"Error downloading {remote_path}: {e}")
         
-        log_audit(user, 'pegaprox.update_completed', f"Updated to version {new_version}")
+        # Install new Python packages
+        pip_result = None
+        requirements_path = os.path.join(current_dir, 'requirements.txt')
+        if os.path.exists(requirements_path):
+            try:
+                logging.info("Installing Python packages from requirements.txt...")
+                
+                # NS: Try multiple methods for pip install
+                # 1. venv pip (no sudo needed)
+                # 2. system pip with sudo (for service accounts)
+                # 3. system pip with --user (fallback)
+                
+                venv_pip = os.path.join(current_dir, 'venv', 'bin', 'pip')
+                venv_pip_win = os.path.join(current_dir, 'venv', 'Scripts', 'pip.exe')
+                
+                pip_result = None
+                
+                # Method 1: Try venv pip first (preferred)
+                if os.path.exists(venv_pip):
+                    logging.info("Using venv pip...")
+                    result = subprocess.run(
+                        [venv_pip, 'install', '-r', requirements_path, '--quiet'],
+                        capture_output=True, text=True, timeout=120
+                    )
+                    if result.returncode == 0:
+                        pip_result = "success (venv)"
+                        logging.info("Python packages installed successfully (venv)")
+                    else:
+                        logging.warning(f"venv pip failed: {result.stderr[:100]}")
+                
+                elif os.path.exists(venv_pip_win):
+                    logging.info("Using venv pip (Windows)...")
+                    result = subprocess.run(
+                        [venv_pip_win, 'install', '-r', requirements_path, '--quiet'],
+                        capture_output=True, text=True, timeout=120
+                    )
+                    if result.returncode == 0:
+                        pip_result = "success (venv)"
+                
+                # Method 2: Try sudo pip (for service accounts)
+                if not pip_result:
+                    system_pip = shutil.which('pip3') or shutil.which('pip')
+                    if system_pip:
+                        logging.info("Trying sudo pip install...")
+                        result = subprocess.run(
+                            ['sudo', system_pip, 'install', '-r', requirements_path, '--quiet'],
+                            capture_output=True, text=True, timeout=120
+                        )
+                        if result.returncode == 0:
+                            pip_result = "success (sudo)"
+                            logging.info("Python packages installed successfully (sudo)")
+                        else:
+                            logging.warning(f"sudo pip failed: {result.stderr[:100]}")
+                            
+                            # Method 3: Fallback to --user install
+                            logging.info("Trying pip install --user...")
+                            result = subprocess.run(
+                                [system_pip, 'install', '-r', requirements_path, '--user', '--quiet'],
+                                capture_output=True, text=True, timeout=120
+                            )
+                            if result.returncode == 0:
+                                pip_result = "success (--user)"
+                                logging.info("Python packages installed successfully (--user)")
+                            else:
+                                pip_result = f"failed: {result.stderr[:100]}"
+                                logging.error(f"All pip methods failed")
+                    else:
+                        pip_result = "skipped (pip not found)"
+                        logging.warning("pip not found, skipping package installation")
+                    
+            except subprocess.TimeoutExpired:
+                pip_result = "timeout"
+                logging.error("pip install timed out")
+            except Exception as e:
+                pip_result = f"error: {str(e)}"
+                logging.error(f"pip install failed: {e}")
+        
+        log_audit(user, 'pegaprox.update_completed', f"Updated to version {new_version}, {len(downloaded_files)} files")
         
         # Schedule restart
         restart_delay = 3  # seconds
@@ -17627,7 +17776,6 @@ def perform_pegaprox_update():
             
             # Try systemd first
             try:
-                # Check if running as systemd service
                 result = subprocess.run(['systemctl', 'is-active', 'pegaprox'], 
                                        capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
@@ -17641,7 +17789,6 @@ def perform_pegaprox_update():
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception as e:
                 logging.error(f"Failed to restart: {e}")
-                # Last resort: exit and let supervisor/systemd restart
                 os._exit(0)
         
         import threading
@@ -17652,7 +17799,11 @@ def perform_pegaprox_update():
             'message': f'Update to version {new_version} complete! Server restarting in {restart_delay} seconds...',
             'updated_version': new_version,
             'backup_path': backup_path,
-            'replaced_files': replaced_files,
+            'files_updated': downloaded_files,
+            'files_failed': failed_files,
+            'files_protected': skipped_protected,
+            'files_backed_up': len(backed_up_files),
+            'pip_install': pip_result,
             'restarting': True,
             'restart_delay': restart_delay
         })
@@ -17660,7 +17811,6 @@ def perform_pegaprox_update():
     except Exception as e:
         logging.error(f"Update error: {e}")
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/pegaprox/update/rollback', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -25524,7 +25674,13 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None):
     
     # Run in a separate thread
     def run_server():
-        asyncio.run(main())
+        try:
+            asyncio.run(main())
+        except (KeyboardInterrupt, SystemExit):
+            pass  # Clean shutdown, no traceback
+        except RuntimeError as e:
+            if "cannot be called from a running event loop" not in str(e):
+                raise  # Re-raise if it's a different RuntimeError
     
     ws_thread = threading.Thread(target=run_server, daemon=True)
     ws_thread.start()
@@ -32041,11 +32197,12 @@ def download_static_files():
     # Files to download - NS: all libs needed for offline mode
     # Note: noVNC is loaded from Proxmox directly (no download needed)
     # Tailwind CDN is a JIT compiler - for offline we use a pre-built CSS subset
+    # NS: switched from unpkg to jsdelivr - much faster!
     static_files = {
         'js': [
-            ('react.production.min.js', 'https://unpkg.com/react@18/umd/react.production.min.js'),
-            ('react-dom.production.min.js', 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js'),
-            ('babel.min.js', 'https://unpkg.com/@babel/standalone/babel.min.js'),
+            ('react.production.min.js', 'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js'),
+            ('react-dom.production.min.js', 'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js'),
+            ('babel.min.js', 'https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js'),
             ('xterm.min.js', 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js'),
             ('xterm-addon-fit.min.js', 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js'),
         ],

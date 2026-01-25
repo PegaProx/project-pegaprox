@@ -1,17 +1,28 @@
 {
-    "version": "0.6.0",
+    "version": "0.6.1",
     "build": "2026.01.25",
     "release_date": "2026-01-25",
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
+    "update_files": [
+        "pegaprox_multi_cluster.py",
+        "web/index.html",
+        "web/index.html.original",
+        "requirements.txt",
+        "version.json",
+        "deploy.sh",
+        "static/css/tailwind.min.css",
+        "static/js/react.production.min.js",
+        "static/js/react-dom.production.min.js",
+        "static/js/babel.min.js"
+    ],
     "changelog": [
-        "Complete SQLite Migration - cluster_alerts, esxi_storages, storage_clusters, affinity_rules",
-        "Fixed VM ACL delete not working",
-        "Fixed Taskbar not updating on cluster switch",
-        "Fixed Alerts create/delete functionality",
-        "Fixed Affinity Rules VM selection display",
-        "Automatic JSON to SQLite migration on startup",
-        "Improved stale task detection logic"
+        "Fixed itemsPerPage declaration order for pre-compiled builds (Issue #4)",
+        "Switched from unpkg.com to jsdelivr.net (faster CDN) (Issue #4)",
+        "Added loading screen during initialization",
+        "Auto-updater now supports sudo pip install",
+        "Fixed forceStop parameter - was incorrectly applied to LXC instead of QEMU",
+        "Renamed to 'PegaProx Cluster Management for Proxmox VE'"
     ],
     "breaking_changes": []
 }
