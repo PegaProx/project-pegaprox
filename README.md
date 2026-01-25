@@ -136,6 +136,7 @@ sudo systemctl restart pegaprox
 
 ### What's New in v0.6.1
 - Fixed Force Stop for LXC containers
+- Fixed Web Updater
 - Fixed pagination error in pre-compiled builds ([#4](https://github.com/PegaProx/project-pegaprox/issues/4))
 - Added `update.sh` for easy updates
 - Added `build.sh` for JSX pre-compilation (devs only)
