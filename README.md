@@ -118,7 +118,7 @@ python3 pegaprox_multi_cluster.py
 **Option 1: Update Script (Recommended)**
 ```bash
 #Download it
-curl -o https://raw.githubusercontent.com/PegaProx/project-pegaprox/refs/heads/main/update.sh
+curl -O https://raw.githubusercontent.com/PegaProx/project-pegaprox/refs/heads/main/update.sh
 
 #Permissions
 chmod +x update.sh
@@ -130,8 +130,8 @@ chmod +x update.sh
 **Option 2: Manual**
 ```bash
 curl -O https://raw.githubusercontent.com/PegaProx/project-pegaprox/main/pegaprox_multi_cluster.py
-curl -o web/index.html https://raw.githubusercontent.com/PegaProx/project-pegaprox/main/web/index.html
-curl -o https://raw.githubusercontent.com/PegaProx/project-pegaprox/main/requirements.txt
+curl -O web/index.html https://raw.githubusercontent.com/PegaProx/project-pegaprox/main/web/index.html
+curl -O https://raw.githubusercontent.com/PegaProx/project-pegaprox/main/requirements.txt
 
 # Install dependencies (choose one):
 pip3 install -r requirements.txt                # System Python
