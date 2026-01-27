@@ -112,6 +112,19 @@ pip install -r requirements.txt
 python3 pegaprox_multi_cluster.py
 ```
 
+### Option 3: Docker Image (Dev)
+This solution is only for development and testing and you should take special care about
+the sqlite db in the config path.
+```bash
+# Clone the repository
+git clone https://github.com/PegaProx/project-pegaprox.git
+
+# Build Docker Image
+docker build -t pegaprox .
+
+# Run the image
+docker run -p 5000:5000 pegaprox
+```
 
 ## Updating to v0.6.1
 
