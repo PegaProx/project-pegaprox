@@ -29,6 +29,9 @@
       - Marcus Kellermann (MK) - Backend Developer
       - Laura Weber (LW) - Frontend Developer
     
+    Contributors:
+      - Florian Paul Azim Hoberg @gyptazy
+
     Started: September 2025
     Last major refactor: January 2026
     License: AGPL-3.0
@@ -1621,6 +1624,9 @@
                 forWeekly: 'für wöchentlich',
                 days: 'Tage',
                 lastRun: 'Letzter Lauf',
+
+                // Snapshots
+                snapshots: 'Snapshots',
                 
                 // Reports - NS Jan 2026
                 reports: 'Berichte',
@@ -2802,7 +2808,7 @@
                 tagColor: 'Farbe',
                 noTags: 'Keine Tags definiert',
                 assignedVms: 'Zugewiesene VMs',
-                
+
                 affinityRules: 'Affinitätsregeln',
                 customScripts: 'Eigene Skripte',
                 scriptsDesc: 'Führe eigene .sh oder .py Skripte auf Cluster-Nodes aus',
@@ -2836,6 +2842,16 @@
                 enforceRule: 'Regel erzwingen',
                 enforceRuleHint: 'Migration blockieren wenn Regel verletzt würde',
                 
+                // NS: Snapshots
+                snapshotsOverview: 'Übersicht',
+                snapshotsCleanUp: 'Cleanup',
+                snapshotsDesc: 'Übersicht der ältesten Snapshots im Cluster',
+                snapshotsHint: 'Übersicht von allen Snapshots über alle Gäste und Nodes',
+                snapshotsType: 'Art',
+                snapshotsDate: 'Erstellt',
+                snapshotsAge: 'Alter',
+                snapshotsAction: 'Aktion',
+
                 // Console Settings - NS Jan 2026
                 consoleSettings: 'Konsolen-Ports',
                 vncPort: 'VNC Port',
@@ -3544,6 +3560,9 @@
                 datacenterOverview: 'Datacenter Overview',
                 noRunningVms: 'No running VMs',
                 
+                // Snapshots
+                snapshots: 'Snapshots',
+
                 // Automation Tab - NS Jan 2026
                 automation: 'Automation',
                 schedulesDesc: 'Automatically start, stop, reboot or snapshot VMs on a schedule',
@@ -4705,7 +4724,7 @@
                 tagColor: 'Color',
                 noTags: 'No tags defined',
                 assignedVms: 'Assigned VMs',
-                
+
                 affinityRules: 'Affinity Rules',
                 customScripts: 'Custom Scripts',
                 scriptsDesc: 'Run custom .sh or .py scripts on cluster nodes',
@@ -4739,6 +4758,16 @@
                 enforceRule: 'Enforce Rule',
                 enforceRuleHint: 'Block migrations that would violate this rule',
                 
+                // NS: Snapshots
+                snapshotsOverview: 'Overview',
+                snapshotsCleanUp: 'Cleanup',
+                snapshotsDesc: 'Overview of the oldest snapshots in the cluster',
+                snapshotsHint: 'Overview of the oldest snapshots over all guests within the cluster.',
+                snapshotsType: 'Type',
+                snapshotsDate: 'Created',
+                snapshotsAge: 'Age',
+                snapshotsAction: 'Action',
+
                 // Console Settings - NS Jan 2026
                 consoleSettings: 'Console Ports',
                 vncPort: 'VNC Port',
@@ -17508,7 +17537,7 @@
             const [snapshots, setSnapshots] = useState([]);
             const [snapshotLoading, setSnapshotLoading] = useState(false);
             const [showCreateSnapshot, setShowCreateSnapshot] = useState(false);
-            
+
             // Replication states
             const [replications, setReplications] = useState([]);
             
@@ -29151,7 +29180,65 @@
             const [showAlertModal, setShowAlertModal] = useState(false);
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
-            
+
+            // NS: Snapshot Tab - Jan 2026
+            const [filterDate, setFilterDate] = useState('');
+            const [snapshotsSubTab, setSnapshotsTab] = useState('overview');
+            const [snapshots, setSnapshots] = useState([]);
+
+            const fetchSnapshots = async (body = null) => {
+                try {
+                    const res = await fetch('/api/snapshots/overview', {
+                        method: body ? 'POST' : 'GET',
+                        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+                        credentials: 'include',
+                        body: body ? JSON.stringify(body) : undefined
+                    });
+
+                    if (!res.ok) {
+                        throw new Error(`HTTP ${res.status}`);
+                    }
+
+                    const data = await res.json();
+                    setSnapshots(data.snapshots ?? data ?? []);
+                } catch (err) {
+                    console.error('Snapshot fetch failed:', err);
+                    setSnapshots([]);
+                }
+            };
+
+            const applyFilter = async () => {
+                await fetchSnapshots({
+                    date: filterDate,
+                    tab: snapshotsSubTab
+                });
+            };
+
+            useEffect(() => {
+                if (activeTab !== 'snapshots') return;
+                fetchSnapshots();
+            }, [activeTab]);
+
+            const deleteSnapshot = async (snap) => {
+                if (!window.confirm(`Delete snapshot "${snap.snapshot_name}" from VM ${snap.vmid}?`)) {
+                    return;
+                }
+
+                await fetch('/api/snapshots/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        snapshots: [snap]
+                    })
+                });
+
+                await fetchSnapshots(
+                    filterDate
+                        ? { date: filterDate, tab: snapshotsSubTab }
+                        : null
+                );
+            };
+
             // Custom Scripts state - MK Jan 2026
             const [customScripts, setCustomScripts] = useState([]);
             const [showScriptModal, setShowScriptModal] = useState(false);
@@ -31167,6 +31254,7 @@
                                                 { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
                                                 { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
                                                 { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
+                                                { id: 'snapshots', labelKey: 'snapshots', icon: Icons.Archive },
                                                 { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
                                             ].map(tab => (
                                                 <button
@@ -31772,6 +31860,139 @@
                                                                 </div>
                                                             </div>
                                                         </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Snapshots Tab - NS gyptazy 2026 - Overall snapshot overview */}
+                                        {activeTab === 'snapshots' && (
+                                            <div className="space-y-6">
+
+                                                {/* Sub-Tab Navigation + Date Filter */}
+                                                <div className="flex items-center justify-between border-b border-proxmox-border pb-2">
+
+                                                    {/* Sub-Tabs */}
+                                                    <div className="flex items-center gap-1">
+                                                        {[
+                                                            { id: 'overview', label: t('snapshotsOverview') || 'Overview', icon: Icons.Camera }
+                                                        ].map(sub => (
+                                                            <button
+                                                                key={sub.id}
+                                                                onClick={() => setSnapshotsTab(sub.id)}
+                                                                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-colors ${
+                                                                    snapshotsSubTab === sub.id
+                                                                        ? 'bg-proxmox-orange text-white'
+                                                                        : 'text-gray-400 hover:text-white hover:bg-proxmox-hover'
+                                                                }`}
+                                                            >
+                                                                <sub.icon className="w-4 h-4" />
+                                                                {sub.label}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+
+                                                    {/* Date Filter (Overview + Cleanup only) */}
+                                                    {(snapshotsSubTab === 'overview' || snapshotsSubTab === 'cleanup') && (
+                                                        <div className="flex items-center gap-2">
+                                                            <input
+                                                                type="date"
+                                                                value={filterDate}
+                                                                onChange={(e) => setFilterDate(e.target.value)}
+                                                                className="rounded-lg bg-proxmox-dark border border-proxmox-border px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-proxmox-orange"
+                                                            />
+                                                            <button
+                                                                onClick={applyFilter}
+                                                                disabled={!filterDate}
+                                                                className="rounded-lg bg-proxmox-orange px-4 py-2 text-sm font-medium text-white hover:bg-proxmox-orange/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                            >
+                                                                {t('filter') || 'Filter'}
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* Snapshots Overview Sub-Tab */}
+                                                {snapshotsSubTab === 'overview' && (
+                                                    <div className="space-y-4">
+
+                                                        <p className="text-sm text-gray-400">
+                                                            {t('snapshotsDesc') || 'Overview of VM snapshots across the cluster.'}
+                                                        </p>
+
+                                                        {!Array.isArray(snapshots) || snapshots.length === 0 ? (
+                                                            <div className="bg-proxmox-dark rounded-xl p-8 text-center">
+                                                                <Icons.Camera className="mx-auto mb-3 w-10 h-10 text-gray-600" />
+                                                                <p className="text-gray-500">
+                                                                    {t('noSnapshots') || 'No snapshots found'}
+                                                                </p>
+                                                                <p className="text-xs text-gray-600 mt-2">
+                                                                    {t('snapshotsHint') || 'Create snapshots on VMs to see them listed here'}
+                                                                </p>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="overflow-x-auto bg-proxmox-dark rounded-xl border border-gray-800">
+                                                                <table className="min-w-full text-sm">
+                                                                    <thead className="bg-black/40 text-gray-400">
+                                                                        <tr>
+                                                                            <th className="px-4 py-3 text-left">VM ID</th>
+                                                                            <th className="px-4 py-3 text-left">VM Name</th>
+                                                                            <th className="px-4 py-3 text-left">{t('snapshotsType') || 'Type'}</th>
+                                                                            <th className="px-4 py-3 text-left">Node</th>
+                                                                            <th className="px-4 py-3 text-left">Snapshot Name</th>
+                                                                            <th className="px-4 py-3 text-left">{t('snapshotsDate') || 'Created'}</th>
+                                                                            <th className="px-4 py-3 text-left">{t('snapshotsAge') || 'Age'}</th>
+                                                                            <th className="px-4 py-3 text-right w-12">{t('snapshotsAction') || 'Action'}</th>
+                                                                        </tr>
+                                                                    </thead>
+
+                                                                    <tbody className="divide-y divide-gray-800">
+                                                                    {snapshots.map((snap, idx) => (
+                                                                        <tr
+                                                                        key={`${snap.vmid}-${snap.snapshot_name}-${idx}`}
+                                                                        className="group hover:bg-white/5 transition-colors"
+                                                                        >
+                                                                        <td className="px-4 py-3 text-gray-300">
+                                                                            {snap.vmid ?? '-'}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-gray-200">
+                                                                            {snap.vm_name ?? '-'}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-gray-200">
+                                                                            {snap.vm_type ?? '-'}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-gray-300">
+                                                                            {snap.node ?? '-'}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 font-mono text-gray-200">
+                                                                            {snap.snapshot_name ?? '-'}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-gray-300">
+                                                                            {snap.snapshot_date ?? '-'}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-gray-400">
+                                                                            {snap.age ?? '-'}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-right">
+                                                                            <button
+                                                                            onClick={() => deleteSnapshot(snap)}
+                                                                            className="opacity-0 group-hover:opacity-100 transition
+                                                                                        text-red-500 hover:text-red-400"
+                                                                            title="Delete snapshot"
+                                                                            >
+                                                                            {Icons.Trash2 ? (
+                                                                                <Icons.Trash2 className="w-4 h-4" />
+                                                                            ) : (
+                                                                                '🗑'
+                                                                            )}
+                                                                            </button>
+                                                                        </td>
+                                                                        </tr>
+                                                                    ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 )}
                                             </div>

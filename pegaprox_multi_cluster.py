@@ -26,6 +26,9 @@ Dev Team:
   MK - Marcus Kellermann (Backend)  
   LW - Laura Weber (Frontend, but helps here too sometimes)
 
+Contributors:
+  Florian Paul Azim Hoberg @gyptazy
+
 Started as a weekend project in Sept 2025, got way out of hand lol
 Now its a proper multi-cluster thing
 
@@ -131,6 +134,7 @@ from urllib.parse import urlparse, urljoin, quote as url_quote, urlencode  # MK:
 import struct
 # import redis  # for session storage, not implemented yet
 from collections import defaultdict  # for some counters
+from datetime import datetime, timezone
 
 # Production server imports
 GEVENT_AVAILABLE = False
@@ -25083,6 +25087,127 @@ def rollback_snapshot_api(cluster_id, node, vm_type, vmid, snapname):
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'snapshot.restored', f"{vm_type.upper()} {vmid} - rolled back to snapshot '{snapname}'")
+        return jsonify({'message': f'Rollback zu {snapname} gestartet', 'task': result.get('task')})
+    else:
+        return jsonify({'error': result['error']}), 500
+
+
+@app.route('/api/snapshots/overview', methods=['GET', 'POST'])
+@require_auth(perms=['vm.view'])
+def snapshots_overview():
+    snapshots = []
+    user = request.session.get('user', '')
+    users_db = load_users()
+    user_data = users_db.get(user, {})
+    user_data['username'] = user
+    cutoff_date = None
+    data = request.get_json(silent=True) or {}
+    date_compare = data.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    filter_limit = data.get("limit", 10)
+    is_admin = user_data.get('role') == ROLE_ADMIN
+    user_clusters = user_data.get('clusters', [])
+
+    for cluster_id, mgr in cluster_managers.items():
+        if not mgr.is_connected:
+            continue
+
+        if not is_admin and user_clusters and cluster_id not in user_clusters:
+            continue
+
+        try:
+            resources = mgr.get_vm_resources()
+
+            for r in resources:
+                vmid = r.get('vmid')
+                node = r.get('node')
+                vm_name = r.get('name') or ''
+                vm_type = r.get('type', 'qemu')
+
+                if not vmid or not node:
+                    continue
+
+                manager = cluster_managers[cluster_id]
+                snapshots_present = manager.get_snapshots(node, vmid, vm_type)
+
+                for snap in snapshots_present:
+                    snap_name = snap.get('name')
+                    snap_ts = snap.get('snaptime')
+
+                    # skip invalid + implicit snapshot
+                    if not snap_name or not snap_ts or snap_name == 'current':
+                        continue
+
+                    snap_dt = datetime.fromtimestamp(snap_ts, tz=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    age_seconds = int((now - snap_dt).total_seconds())
+                    cutoff_date = datetime.strptime(date_compare, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+                    if snap_dt >= cutoff_date:
+                        continue
+
+                    if age_seconds < 3600:
+                        age = f"{age_seconds // 60} min"
+                    elif age_seconds < 86400:
+                        age = f"{age_seconds // 3600} h"
+                    else:
+                        age = f"{age_seconds // 86400} days"
+
+                    snapshots.append({
+                        "vmid": vmid,
+                        "vm_name": vm_name,
+                        "vm_type": vm_type,
+                        "node": node,
+                        "snapshot_name": snap_name,
+                        "snapshot_date": snap_dt.strftime('%Y-%m-%d %H:%M'),
+                        "age": age,
+                        "cluster_id": cluster_id
+                    })
+
+        except Exception as e:
+            logging.debug(f"Snapshot gathering failed for cluster {cluster_id}: {e}")
+
+    # Sort and filter snapshots
+    snapshots.sort(key=lambda s: s["snapshot_date"], reverse=False)
+    snapshots = snapshots[:filter_limit]
+
+    return jsonify({
+        "snapshots": snapshots
+    })
+
+
+@app.route('/api/snapshots/delete', methods=['POST'])
+@require_auth(perms=['vm.view', 'vm.snapshot'])
+def snapshots_overview_delete():
+    user = request.session.get('user', '')
+    users_db = load_users()
+    user_data = users_db.get(user, {})
+    user_data['username'] = user
+    data = request.get_json(silent=True) or {}
+    snapshots = data.get('snapshots', [])
+    is_admin = user_data.get('role') == ROLE_ADMIN
+    user_clusters = user_data.get('clusters', [])
+
+    for cluster_id, mgr in cluster_managers.items():
+        if not mgr.is_connected:
+            continue
+
+        if not is_admin and user_clusters and cluster_id not in user_clusters:
+            continue
+
+        for snapshot in snapshots:
+            try:
+                node = snapshot.get('node')
+                vmid = snapshot.get('vmid')
+                snapname = snapshot.get('snapshot_name')
+                vm_type = snapshot.get('vm_type', 'qemu')
+                mgr = cluster_managers[cluster_id]
+                result = mgr.delete_snapshot(node, vmid, vm_type, snapname)
+            except Exception as e:
+                logging.debug(f"Snapshot deletion failed for snapshot {cluster_id}: {e}")
+
+    if result['success']:
+        user = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(user, 'snapshot.deleted', f"{vm_type.upper()} {vmid} - snapshot '{snapname}' deleted")
         return jsonify({'message': f'Rollback zu {snapname} gestartet', 'task': result.get('task')})
     else:
         return jsonify({'error': result['error']}), 500
