@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 PegaProx Server - Cluster Management Backend for Proxmox VE
-Version: 0.6.1 Beta
+Version: 0.6.2 Beta
 
 Copyright (C) 2025-2026 PegaProx Team
 
@@ -26,6 +26,9 @@ Dev Team:
   MK - Marcus Kellermann (Backend)  
   LW - Laura Weber (Frontend, but helps here too sometimes)
 
+Contributors:
+  Florian Paul Azim Hoberg @gyptazy
+
 Started as a weekend project in Sept 2025, got way out of hand lol
 Now its a proper multi-cluster thing
 
@@ -34,7 +37,11 @@ IMPORTANT STUFF:
 - Dont touch the session code unless you want to debug for 3 hours - MK
 - The proxmox API is weird sometimes, we just work around it
 
-Credits: ProxLB by gyptazy for the loadbalancing logic, saved us weeks of work
+Credits & Acknowledgments:
+- ProxLB by gyptazy (https://github.com/gyptazy/ProxLB)
+  The loadbalancing logic that powers our cluster balancing - saved us weeks of work!
+- ProxSnap by gyptazy (https://github.com/gyptazy/ProxSnap)
+  Inspiration for the snapshot overview feature - great tool for snapshot management
 
 Security:
 - Login rate limiting: ✓ (IP + username based)
@@ -51,26 +58,6 @@ TODO: CODE SPLITTING before v1.0!! 30k lines in one file is insane - NS
       -> split into: api/, core/, models/, utils/, migrations/
       -> MK will hate me for this but its necessary
 DONE: general API rate limiting - LW jan 2026 (env: PEGAPROX_API_RATE_LIMIT)
-
-═══════════════════════════════════════════════════════════════════════════════
-
-RELEASE NOTES v0.6.1 Beta - 25.01.2026
-
-Got some bug reports right after release (thanks everyone who tested!)
-GitHub: https://github.com/PegaProx/project-pegaprox/issues/4
-
-Fixes in this release:
-- LW: Fixed itemsPerPage declaration order for pre-compiled builds
-      Browser-Babel was forgiving but compiled JS needs strict order
-- NS: Fixed forceStop parameter - was applied to LXC instead of QEMU (oops!)
-- NS: Complete SQLite migration for all config files
-- MK: Fixed alerts/affinity rules create/delete
-- NS: Task panel now updates immediately on cluster switch
-- LW: Added build.sh for JSX pre-compilation (15s -> 2s load time!)
-- NS: Auto-updater now installs pip packages with sudo support
-- ALL: Switched from unpkg to jsdelivr (faster CDN)
-
-Breaking: None (automatic migration handles everything)
 
 ═══════════════════════════════════════════════════════════════════════════════
 """
@@ -122,7 +109,7 @@ from flask import Flask, jsonify, request, send_from_directory, Response, make_r
 from flask_cors import CORS
 from flask_sock import Sock
 from flask_compress import Compress  # NS: Gzip compression for faster loading
-from datetime import datetime, timedelta, date  # timedelta for session expiry calc, date for password expiry
+from datetime import datetime, timedelta, date, timezone  # timedelta for session expiry calc, date for password expiry, timezone for snapshots
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import requests
@@ -278,7 +265,7 @@ app = Flask(__name__)
 # =============================================================================
 # VERSION INFO
 # =============================================================================
-PEGAPROX_VERSION = "Beta 0.6.1"
+PEGAPROX_VERSION = "Beta 0.6.2"
 PEGAPROX_BUILD = "2026.01.25"  # Year.Month.Day of release
 
 # ============================================
@@ -475,6 +462,13 @@ def add_security_headers(response):
 CONFIG_DIR = 'config'
 Path(CONFIG_DIR).mkdir(exist_ok=True)
 
+# NS: Set restrictive permissions on config directory
+# Only owner can access - contains encryption keys and database
+try:
+    os.chmod(CONFIG_DIR, 0o700)
+except:
+    pass  # May fail on Windows, ignore
+
 # Database file (encrypted SQLite)
 DATABASE_FILE = os.path.join(CONFIG_DIR, 'pegaprox.db')
 
@@ -632,9 +626,22 @@ class PegaProxDB:
         return self._get_connection()
     
     def _init_db(self):
-        """Initialize database schema"""
+        """Initialize database schema
+        
+        NS: Also sets restrictive file permissions (0600) on the database file.
+        This prevents other users on the system from reading the DB.
+        """
         conn = self.conn
         cursor = conn.cursor()
+        
+        # NS: Set restrictive permissions on DB file - only owner can read/write
+        # This is critical security - DB contains encrypted secrets and session data
+        try:
+            if os.path.exists(self.db_path):
+                os.chmod(self.db_path, 0o600)
+                logging.debug(f"Set database file permissions to 0600")
+        except Exception as e:
+            logging.warning(f"Could not set database file permissions: {e}")
         
         # Clusters table
         cursor.execute('''
@@ -678,6 +685,7 @@ class PegaProxDB:
                 totp_secret_encrypted TEXT,
                 totp_enabled INTEGER DEFAULT 0,
                 force_password_change INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
                 theme TEXT DEFAULT '',
                 language TEXT DEFAULT '',
                 ui_layout TEXT DEFAULT 'modern'
@@ -1027,6 +1035,15 @@ class PegaProxDB:
                     logging.info("Added ui_layout column to users table")
                 except Exception as e:
                     logging.error(f"Failed to add ui_layout column: {e}")
+            
+            # NS: Add enabled column if missing (user disable feature)
+            if 'enabled' not in columns:
+                logging.info("Adding enabled column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN enabled INTEGER DEFAULT 1")
+                    logging.info("Added enabled column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add enabled column: {e}")
                     
         except Exception as e:
             logging.error(f"Error checking users schema: {e}")
@@ -1051,6 +1068,24 @@ class PegaProxDB:
                     logging.info("Added display_name column to clusters table for custom naming")
                 except Exception as e:
                     logging.error(f"Failed to add display_name column: {e}")
+            
+            # MK: Add sort_order for consistent cluster ordering in sidebar
+            if 'sort_order' not in cluster_columns:
+                logging.info("Adding sort_order column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN sort_order INTEGER DEFAULT 0")
+                    logging.info("Added sort_order column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add sort_order column: {e}")
+            
+            # LW: Add excluded_nodes for node exclusion from balancing (like ProxLB)
+            if 'excluded_nodes' not in cluster_columns:
+                logging.info("Adding excluded_nodes column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN excluded_nodes TEXT DEFAULT '[]'")
+                    logging.info("Added excluded_nodes column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add excluded_nodes column: {e}")
                     
         except Exception as e:
             logging.error(f"Error checking clusters schema: {e}")
@@ -2137,6 +2172,7 @@ class PegaProxDB:
                 'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
                 'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
                 'force_password_change': bool(row_dict.get('force_password_change', 0)),
+                'enabled': bool(row_dict.get('enabled', 1)),
             }
         
         return users
@@ -2173,6 +2209,7 @@ class PegaProxDB:
             'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
             'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
             'force_password_change': bool(row_dict.get('force_password_change', 0)),
+            'enabled': bool(row_dict.get('enabled', 1)),
             'theme': row_dict.get('theme', ''),
             'language': row_dict.get('language', ''),
             'ui_layout': row_dict.get('ui_layout', 'modern'),
@@ -2188,10 +2225,10 @@ class PegaProxDB:
             (username, password_salt, password_hash, role, permissions, tenant, 
              created_at, last_login, password_expiry, 
              totp_secret_encrypted, totp_enabled, force_password_change,
-             theme, language, ui_layout)
+             enabled, theme, language, ui_layout)
             VALUES (?, ?, ?, ?, ?, ?, 
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?), 
-                    ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             username,
             data.get('password_salt', ''),
@@ -2205,6 +2242,7 @@ class PegaProxDB:
             self._encrypt(data.get('totp_secret', '')),
             1 if data.get('totp_enabled', False) else 0,
             1 if data.get('force_password_change', False) else 0,
+            1 if data.get('enabled', True) else 0,
             data.get('theme', ''),
             data.get('language', ''),
             data.get('ui_layout', 'modern')
@@ -2227,19 +2265,26 @@ class PegaProxDB:
     # ========================================
     
     def get_all_sessions(self) -> dict:
-        """Get all sessions"""
+        """Get all sessions from database
+        
+        NOTE: Since v0.6.1, session tokens are stored as SHA-256 hashes.
+        This means sessions loaded from DB cannot be validated against
+        plaintext tokens - users must re-login after server restart.
+        This is a SECURITY FEATURE, not a bug!
+        """
         cursor = self.conn.cursor()
         cursor.execute('SELECT * FROM sessions')
         
+        # NS: Return empty dict - old hashed sessions can't be used anyway
+        # This forces re-login after restart (more secure)
         sessions = {}
-        for row in cursor.fetchall():
-            sessions[row['token']] = {
-                'user': row['username'],
-                'created': row['created_at'],
-                'expires': row['expires_at'],
-                'ip': row['ip_address'],
-                'user_agent': row['user_agent'],
-            }
+        # Note: We could load the hashes, but they're useless for validation
+        # since we can't reverse SHA-256. Just return empty.
+        logging.debug(f"Sessions in DB will be cleared (tokens are hashed, can't validate)")
+        
+        # Clean up old sessions from DB
+        cursor.execute('DELETE FROM sessions')
+        self.conn.commit()
         
         return sessions
     
@@ -2261,14 +2306,23 @@ class PegaProxDB:
         }
     
     def save_session(self, token: str, data: dict):
-        """Save session"""
+        """Save session
+        
+        NS: Session tokens are hashed before storing in DB for security!
+        If someone steals the DB, they can't hijack sessions.
+        Trade-off: Sessions don't survive server restarts (users must re-login)
+        """
         cursor = self.conn.cursor()
+        
+        # Hash the token - even if DB is stolen, tokens can't be used
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        
         cursor.execute('''
             INSERT OR REPLACE INTO sessions
             (token, username, created_at, expires_at, ip_address, user_agent)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', (
-            token,
+            token_hash,  # Store hash, not plaintext token!
             data.get('user', ''),
             data.get('created', ''),
             data.get('expires', ''),
@@ -2280,7 +2334,8 @@ class PegaProxDB:
     def delete_session(self, token: str):
         """Delete session"""
         cursor = self.conn.cursor()
-        cursor.execute('DELETE FROM sessions WHERE token = ?', (token,))
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        cursor.execute('DELETE FROM sessions WHERE token = ?', (token_hash,))
         self.conn.commit()
     
     def delete_expired_sessions(self):
@@ -3079,15 +3134,16 @@ BUILTIN_ROLES = [ROLE_ADMIN, ROLE_USER, ROLE_VIEWER]
 ROLE_PERMISSIONS = {
     ROLE_ADMIN: list(PERMISSIONS.keys()),  # admin gets everything
     ROLE_USER: [
+        # VMs
         'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 'vm.migrate',
         'vm.clone', 'vm.config', 'vm.snapshot', 'vm.backup',
         'cluster.view',
         'node.view',
         'storage.view', 'storage.upload', 'storage.download',
-        'backup.view', 'backup.create', 'backup.restore', 'backup.delete',  # MK: users should be able to delete their own backups
+        'backup.view', 'backup.create', 'backup.restore', 'backup.delete',  # MK: users need to delete their own backups
         'ha.view',
         'firewall.view',
-        'pool.view',
+        'pool.view', 'pool.assign',  # MK: added assign so users can organize their VMs
         'replication.view',
     ],
     ROLE_VIEWER: [
@@ -3104,7 +3160,7 @@ ROLE_PERMISSIONS = {
 }
 
 # =============================================================================
-# CUSTOM ROLES - added after users kept asking for it
+# CUSTOM ROLES - MK oct 2025
 # Users can create their own roles - either global or per-tenant
 # =============================================================================
 
@@ -3614,63 +3670,71 @@ def get_user_vms(user: dict, cluster_id: str) -> list:
 
 # =============================================================================
 # ROLE TEMPLATES - presets for common setups
-# Predefined role configurations for quick setup
-# Templates can be applied to create tenant-specific roles
-#
-# ChatGPT helped me come up with the permission groupings for these templates
-# I tweaked them afterwards to match what users actually need
+# =============================================================================
+# ROLE TEMPLATES - MK jan 2026
+# MK: preset roles for common use cases
+# LW: updated jan 2026 - tenant_admin was missing some perms
 # =============================================================================
 
 ROLE_TEMPLATES = {
     'tenant_admin': {
         'name': 'Tenant Administrator',
-        'description': 'Full access within tenant',
+        'description': 'Full tenant access - everything except global settings',
         'permissions': [
+            # VMs - full control
             'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 'vm.migrate',
-            'vm.clone', 'vm.delete', 'vm.create', 'vm.config', 'vm.snapshot', 'vm.backup',
+            'vm.clone', 'vm.delete', 'vm.create', 'vm.config', 'vm.snapshot', 'vm.backup', 'vm.template',
+            # cluster - no add/delete/join (thats global admin stuff)
             'cluster.view', 'cluster.config',
-            'node.view', 'node.maintenance',
-            'storage.view', 'storage.upload', 'storage.download', 'storage.delete',
-            'backup.view', 'backup.create', 'backup.restore', 'backup.delete', 'backup.schedule',
-            'ha.view', 'ha.config',
-            'firewall.view', 'firewall.edit',
+            # nodes - LW: added shell/reboot jan 2026
+            'node.view', 'node.shell', 'node.maintenance', 'node.reboot', 'node.network', 'node.config',
+            # storage
+            'storage.view', 'storage.upload', 'storage.download', 'storage.delete', 'storage.config',
+            # backup - MK: tenant admins need full backup control
+            'backup.view', 'backup.create', 'backup.restore', 'backup.delete', 'backup.schedule', 'backup.config',
+            # HA
+            'ha.view', 'ha.config', 'ha.groups', 'ha.resources',
+            # firewall
+            'firewall.view', 'firewall.edit', 'firewall.aliases',
+            # pools + replication
             'pool.view', 'pool.manage', 'pool.assign',
             'replication.view', 'replication.manage',
         ]
     },
     'tenant_operator': {
         'name': 'Tenant Operator',
-        'description': 'Day-to-day operations',
+        'description': 'Daily ops - VMs, backups, basic maintenance',
         'permissions': [
+            # VMs - no delete/create/template
             'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 'vm.migrate',
-            'vm.snapshot', 'vm.backup',
+            'vm.clone', 'vm.config', 'vm.snapshot', 'vm.backup',
             'cluster.view',
             'node.view', 'node.maintenance',
-            'storage.view', 'storage.upload',
-            'backup.view', 'backup.create', 'backup.restore', 'backup.delete',  # LW: operators need to clean up old backups
+            'storage.view', 'storage.upload', 'storage.download',
+            'backup.view', 'backup.create', 'backup.restore', 'backup.delete',  # LW: ops need to clean up old backups
             'ha.view',
             'firewall.view',
-            'pool.view',
+            'pool.view', 'pool.assign',
             'replication.view',
         ]
     },
     'tenant_user': {
         'name': 'Tenant User',
-        'description': 'Basic VM operations',
+        'description': 'Basic VM stuff - start/stop/console',
         'permissions': [
-            'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console',
-            'vm.snapshot',
+            'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 'vm.snapshot',
             'cluster.view',
             'node.view',
             'storage.view',
-            'backup.view', 'backup.create', 'backup.restore',  # NS: users can restore their own backups
+            'backup.view', 'backup.create', 'backup.restore',  # LW: let users backup their own stuff
             'ha.view',
             'firewall.view',
+            'pool.view',
         ]
     },
     'tenant_viewer': {
         'name': 'Tenant Viewer',
-        'description': 'Read-only access',
+        'description': 'Read-only + console',
         'permissions': [
             'vm.view', 'vm.console',
             'cluster.view',
@@ -3685,46 +3749,48 @@ ROLE_TEMPLATES = {
     },
     'vm_operator': {
         'name': 'VM Operator',
-        'description': 'VM-only operations (no cluster access)',
+        'description': 'VMs only - no infra access',
         'permissions': [
             'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console',
-            'vm.snapshot',
+            'vm.snapshot', 'vm.backup',
+            'backup.view', 'backup.create', 'backup.restore',
+            'storage.view',
         ]
     },
     'backup_operator': {
         'name': 'Backup Operator', 
-        'description': 'Backup and restore only',
+        'description': 'Backups only - for backup admins',
         'permissions': [
             'vm.view',
-            'backup.view', 'backup.create', 'backup.restore', 'backup.delete', 'backup.schedule',
-            'storage.view',
+            'storage.view', 'storage.upload',
+            'backup.view', 'backup.create', 'backup.restore', 'backup.delete', 'backup.schedule', 'backup.config',
         ]
     },
     'storage_admin': {
         'name': 'Storage Administrator',
-        'description': 'Full storage management',
+        'description': 'Storage + backup management',
         'permissions': [
             'vm.view',
             'cluster.view',
             'node.view',
             'storage.view', 'storage.upload', 'storage.delete', 'storage.config', 'storage.create', 'storage.download',
-            'backup.view', 'backup.config',
+            'backup.view', 'backup.create', 'backup.restore', 'backup.delete', 'backup.config',
         ]
     },
     'network_admin': {
         'name': 'Network Administrator',
-        'description': 'Network and firewall management',
+        'description': 'Network + firewall config',
         'permissions': [
-            'vm.view',
+            'vm.view', 'vm.config',  # need this for VM NICs
             'cluster.view',
-            'node.view', 'node.network',
+            'node.view', 'node.network', 'node.config',
             'firewall.view', 'firewall.edit', 'firewall.aliases',
             'ha.view',
         ]
     },
     'monitoring': {
-        'name': 'Monitoring User',
-        'description': 'Read-only monitoring access',
+        'name': 'Monitoring',
+        'description': 'Read-only for dashboards/alerting',
         'permissions': [
             'vm.view',
             'cluster.view',
@@ -3735,31 +3801,62 @@ ROLE_TEMPLATES = {
             'firewall.view',
             'pool.view',
             'replication.view',
+            'admin.audit',  # MK: monitoring tools need audit logs
         ]
     },
     'group_manager': {
         'name': 'Group Manager',
-        'description': 'Manage cluster groups and tenants',
+        'description': 'Cluster groups + tenant management',
         'permissions': [
             'vm.view',
             'cluster.view',
             'node.view',
+            'storage.view',
+            'pool.view', 'pool.manage', 'pool.assign',
             'admin.groups', 'admin.tenants',
         ]
     },
     'helpdesk': {
-        'name': 'Helpdesk Support',
-        'description': 'Basic support - view, start/stop, console',
+        'name': 'Helpdesk',
+        'description': 'Support staff - basic VM help',
+        'permissions': [
+            'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 'vm.snapshot',
+            'cluster.view',
+            'node.view',
+            'storage.view',
+            'backup.view', 'backup.restore',  # can restore for users
+            'ha.view',
+        ]
+    },
+    'developer': {
+        'name': 'Developer',
+        'description': 'Dev access - own VMs + snapshots',
         'permissions': [
             'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console',
+            'vm.snapshot', 'vm.clone', 'vm.config',
+            'cluster.view',
+            'node.view',
+            'storage.view', 'storage.upload',
+            'backup.view', 'backup.create', 'backup.restore',
+        ]
+    },
+    'auditor': {
+        'name': 'Auditor',
+        'description': 'Compliance - read-only + audit logs',
+        'permissions': [
+            'vm.view',
             'cluster.view',
             'node.view',
             'storage.view',
             'backup.view',
+            'ha.view',
+            'firewall.view',
+            'pool.view',
+            'replication.view',
+            'admin.audit',
         ]
-    }
+    },
 }
-
 class PegaProxConfig:
     """Configuration for a single Proxmox cluster
     
@@ -3789,6 +3886,9 @@ class PegaProxConfig:
         self.ssh_port = cluster_data.get('ssh_port', 22)
         # HA Settings (Split-Brain Prevention, 2-Node Mode, etc.) - NS Jan 2026
         self.ha_settings = cluster_data.get('ha_settings', {})
+        # LW: Excluded nodes - these nodes will never be targets for balancing
+        # Similar to ProxLB's exclude hosts feature
+        self.excluded_nodes = cluster_data.get('excluded_nodes', [])
 
 class MaintenanceTask:
     """Tracks a node evacuation/maintenance task
@@ -3998,6 +4098,8 @@ class PegaProxManager:
         # Proxmox API credentials (stored, not session)
         self._ticket = None
         self._csrf_token = None
+        self._api_token = None  # NS: for API token auth (user@realm!tokenid=secret)
+        self._using_api_token = False
         self.current_host = None  # Track which host we're connected to
         self._ssl_verify = False
         
@@ -4016,17 +4118,26 @@ class PegaProxManager:
     
     def _create_session(self):
         """
-        Create a new requests session with auth cookies - thread safe
+        Create a new requests session with auth - thread safe
         
         MK: Each request gets a fresh session to avoid threading issues
         Tried session pooling but gevent + requests was causing deadlocks
+        
+        NS: Added API token support Jan 2026 (GitHub Issue #5)
+        Token auth uses Authorization header, password auth uses cookies
         """
         session = requests.Session()
         session.verify = self._ssl_verify
-        if self._ticket:
-            session.cookies.set('PVEAuthCookie', self._ticket)
-        if self._csrf_token:
-            session.headers.update({'CSRFPreventionToken': self._csrf_token})
+        
+        if getattr(self, '_api_token', None):
+            # API Token auth - use Authorization header
+            session.headers.update({'Authorization': f'PVEAPIToken={self._api_token}'})
+        else:
+            # Password auth - use ticket cookie
+            if self._ticket:
+                session.cookies.set('PVEAuthCookie', self._ticket)
+            if self._csrf_token:
+                session.headers.update({'CSRFPreventionToken': self._csrf_token})
         return session
     
     @property
@@ -4111,49 +4222,82 @@ class PegaProxManager:
             self._ssl_verify = self.config.ssl_verification
             # self._ssl_verify = False  # tmp disable for debugging cert issues
             
+            # NS: Check if using API Token (format: user@realm!tokenid)
+            # API tokens have ! in the username, passwords don't
+            self._using_api_token = '!' in self.config.user
+            
             for host in hosts_to_try:
                 try:
                     # Create a temporary session just for login
                     session = requests.Session()
                     session.verify = self._ssl_verify
                     
-                    # Login
-                    login_data = {
-                        'username': self.config.user,
-                        'password': self.config.pass_
-                    }
-                    # print(f"DEBUG: trying {host}")  # dont commit this
-                    
-                    login_url = f"https://{host}:8006/api2/json/access/ticket"
-                    resp = session.post(login_url, data=login_data, timeout=10)
-                    
-                    if resp.status_code == 200:
-                        data = resp.json()['data']
-                        self._ticket = data['ticket']
-                        self._csrf_token = data['CSRFPreventionToken']
+                    if self._using_api_token:
+                        # API Token auth - no ticket needed!
+                        # Token goes in Authorization header: PVEAPIToken=user@realm!tokenid=secret
+                        self._api_token = f"{self.config.user}={self.config.pass_}"
+                        self._ticket = None
+                        self._csrf_token = None
                         
-                        self.current_host = host
-                        self.is_connected = True
-                        self.last_successful_request = datetime.now()
-                        self.connection_error = None
+                        # Test the token by making a simple API call
+                        test_url = f"https://{host}:8006/api2/json/version"
+                        headers = {'Authorization': f'PVEAPIToken={self._api_token}'}
+                        resp = session.get(test_url, headers=headers, timeout=10)
                         
-                        # For backward compatibility - some code still checks self.session
-                        # NS: this is ugly but works, passt eh
-                        self.session = True  # Just a truthy value
-                        
-                        if host != self.config.host:
-                            self.logger.warning(f"Connected to FALLBACK host {host} (primary {self.config.host} unavailable)")
+                        if resp.status_code == 200:
+                            self.current_host = host
+                            self.is_connected = True
+                            self.last_successful_request = datetime.now()
+                            self.connection_error = None
+                            self.session = True
+                            
+                            self.logger.info(f"Connected to Proxmox at {host} using API Token")
+                            
+                            if not self.config.fallback_hosts:
+                                self._auto_discover_fallback_hosts()
+                            
+                            return True
                         else:
-                            self.logger.info(f"Successfully connected to Proxmox at {host}")
-                        
-                        # Auto-discover fallback hosts if not already set
-                        if not self.config.fallback_hosts:
-                            self._auto_discover_fallback_hosts()
-                        
-                        return True
+                            self.logger.warning(f"API Token auth failed at {host}: {resp.status_code}")
                     else:
-                        self.logger.warning(f"Failed to login to Proxmox at {host}: {resp.status_code}")
-                        # self.logger.debug(f"Response body: {resp.text}")  # too verbose
+                        # Password auth - get ticket from /access/ticket
+                        login_data = {
+                            'username': self.config.user,
+                            'password': self.config.pass_
+                        }
+                        # print(f"DEBUG: trying {host}")  # dont commit this
+                        
+                        login_url = f"https://{host}:8006/api2/json/access/ticket"
+                        resp = session.post(login_url, data=login_data, timeout=10)
+                        
+                        if resp.status_code == 200:
+                            data = resp.json()['data']
+                            self._ticket = data['ticket']
+                            self._csrf_token = data['CSRFPreventionToken']
+                            self._api_token = None
+                            
+                            self.current_host = host
+                            self.is_connected = True
+                            self.last_successful_request = datetime.now()
+                            self.connection_error = None
+                            
+                            # For backward compatibility - some code still checks self.session
+                            # NS: this is ugly but works, passt eh
+                            self.session = True  # Just a truthy value
+                            
+                            if host != self.config.host:
+                                self.logger.warning(f"Connected to FALLBACK host {host} (primary {self.config.host} unavailable)")
+                            else:
+                                self.logger.info(f"Successfully connected to Proxmox at {host}")
+                            
+                            # Auto-discover fallback hosts if not already set
+                            if not self.config.fallback_hosts:
+                                self._auto_discover_fallback_hosts()
+                            
+                            return True
+                        else:
+                            self.logger.warning(f"Failed to login to Proxmox at {host}: {resp.status_code}")
+                            # self.logger.debug(f"Response body: {resp.text}")  # too verbose
                         
                 except requests.exceptions.Timeout:
                     self.logger.warning(f"Connection timeout to {host}")
@@ -4443,20 +4587,30 @@ class PegaProxManager:
         NS: The scoring algorithm here is inspired by ProxLB by gyptazy
         (https://github.com/gyptazy/ProxLB) - great project, thanks for 
         open-sourcing it! We adapted it for our multi-cluster setup.
+        
+        LW: Now also excludes nodes configured in excluded_nodes setting
         """
         if not node_status:
             return False, None, None
         
-        # Exclude nodes in maintenance from balancing decisions
+        # LW: Get excluded nodes from config
+        config_excluded = getattr(self.config, 'excluded_nodes', []) or []
+        
+        # Exclude nodes in maintenance AND configured excluded nodes from balancing decisions
         # MK: This was a bug before - we'd try to migrate TO maintenance nodes
         active_nodes = {
             node: data for node, data in node_status.items() 
-            if data['status'] == 'online' and not data.get('maintenance_mode', False)
+            if data['status'] == 'online' 
+            and not data.get('maintenance_mode', False)
+            and node not in config_excluded
         }
+        
+        if config_excluded:
+            self.logger.debug(f"Excluding configured nodes from balance check: {config_excluded}")
         
         scores = [(node, data['score']) for node, data in active_nodes.items()]
         if len(scores) < 2:
-            self.logger.info("Not enough online nodes for balancing (excluding maintenance nodes)")
+            self.logger.info("Not enough online nodes for balancing (excluding maintenance and excluded nodes)")
             return False, None, None
         
         scores.sort(key=lambda x: x[1])
@@ -4575,9 +4729,19 @@ class PegaProxManager:
         return selected
     
     def get_best_target_node(self, exclude_nodes: List[str] = None) -> Optional[str]:
+        """Find the best target node for migration
         
+        LW: Now also excludes nodes configured in excluded_nodes (like ProxLB)
+        """
         if exclude_nodes is None:
             exclude_nodes = []
+        
+        # LW: Also exclude nodes configured in cluster settings
+        config_excluded = getattr(self.config, 'excluded_nodes', []) or []
+        all_excluded = list(set(exclude_nodes + config_excluded))
+        
+        if config_excluded:
+            self.logger.debug(f"Excluding configured nodes from balancing: {config_excluded}")
         
         node_status = self.get_node_status()
         
@@ -4586,7 +4750,7 @@ class PegaProxManager:
             (node, data) for node, data in node_status.items()
             if data['status'] == 'online' 
             and not data.get('maintenance_mode', False)
-            and node not in exclude_nodes
+            and node not in all_excluded
         ]
         
         if not available_nodes:
@@ -5738,8 +5902,8 @@ class PegaProxManager:
                 self.logger.error(f"[HA] Config move may have failed - check SSH access")
                 return False
             
-            # Try with skiplock if there's a lock
-            if 'lock' in error_text:
+            # Try with skiplock if there's a lock (only works for root@pam)
+            if 'lock' in error_text and self.config.user.lower().startswith('root@'):
                 self.logger.info(f"[HA] VM {vmid} has lock, trying with skiplock=1")
                 start_response = self._create_session().post(start_url, data={'skiplock': 1}, timeout=15)
                 if start_response.status_code == 200:
@@ -9073,14 +9237,18 @@ echo "AGENT_INSTALLED_OK"
             url = f"https://{host}:8006/api2/json/nodes/{node}/{endpoint}/{vmid}/status/{action}"
             
             data = {}
-            # force stop = immediate termination (like pulling the plug)
-            # normal stop/shutdown = graceful via ACPI
-            # NS: forceStop only works for QEMU VMs, not LXC containers!
-            # Fixed 25.01.2026 - was incorrectly applied to LXC
-            if action == 'stop' and force:
+            
+            # MK: Force stop handling - different for QEMU vs LXC
+            # Fixed 27.01.2026 - skiplock requires root@pam, removed for non-root users
+            if force and action == 'stop':
                 self.logger.info(f"Force stopping {vm_type}/{vmid}")
-                if vm_type == 'qemu': 
-                    data['forceStop'] = 1
+                if vm_type == 'qemu':
+                    # QEMU: Use timeout=0 for immediate stop (more compatible than forceStop)
+                    data['timeout'] = 0
+                # LW: skiplock only works for root@pam - causes error for other users
+                # "Only root may use this option" - so we skip it for non-root
+                if self.config.user.lower().startswith('root@'):
+                    data['skiplock'] = 1
             
             self.logger.info(f"VM Action: {action} on {vm_type}/{vmid}@{node}" + (" FORCE" if force else ""))
             resp = self._api_post(url, data=data if data else None)
@@ -12488,6 +12656,35 @@ def needs_password_rehash(salt_b64: str, hash_b64: str) -> bool:
     return True
 
 
+def _check_default_password_in_use() -> bool:
+    """Check if any admin account still uses default password 'admin'
+    
+    NS: Security warning - default passwords are a major risk!
+    This is called from security compliance check.
+    """
+    try:
+        users_db = load_users()
+        
+        for username, user in users_db.items():
+            # Only check admin accounts
+            if user.get('role') != ROLE_ADMIN:
+                continue
+            
+            # Check if password is 'admin'
+            salt = user.get('password_salt', '')
+            hash_val = user.get('password_hash', '')
+            
+            if salt and hash_val:
+                if verify_password('admin', salt, hash_val):
+                    logging.warning(f"SECURITY WARNING: Admin user '{username}' still uses default password!")
+                    return True
+        
+        return False
+    except Exception as e:
+        logging.error(f"Error checking default passwords: {e}")
+        return False  # Don't block on errors
+
+
 def validate_password_policy(password: str) -> tuple:
     """
     Validate password against configured policy.
@@ -13156,7 +13353,9 @@ def auth_login():
             'language': user.get('language', ''),
             'ui_layout': user.get('ui_layout', 'modern')
         },
-        'session_id': session_id
+        'session_id': session_id,
+        # NS: Security warning if using default password
+        'security_warning': 'DEFAULT_PASSWORD' if (user['role'] == ROLE_ADMIN and password == 'admin') else None
     })
     
     # Set session cookie with security flags
@@ -16054,7 +16253,7 @@ def reset_all_password_expiry():
 @app.route('/api/clusters/<cluster_id>/security/audit', methods=['GET'])
 @require_auth(perms=['admin.audit'])
 def get_security_audit(cluster_id):
-    """Get security audit info for a cluster - NS: added after a customer asked for it"""
+    """Get security audit info for a cluster"""
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -17642,13 +17841,21 @@ def perform_pegaprox_update():
         
         logging.info(f"Backed up {len(backed_up_files)} files to {backup_path}")
         
+        # MK: verify file hashes from version.json before installing
+        file_hashes = remote_version.get('file_hashes', {})
+        if not file_hashes:
+            logging.warning("No file hashes in version.json - cant verify integrity!")
+        else:
+            logging.info(f"Hash verification enabled for {len(file_hashes)} files")
+        
         # Download and replace files
         downloaded_files = []
         failed_files = []
         skipped_protected = []
+        hash_failures = []
         
         for remote_path, local_path in UPDATE_FILES:
-            # NS: Skip protected files (config, ssl, keys, etc.)
+            # skip protected files (config, ssl, keys, etc.)
             if is_protected(local_path):
                 skipped_protected.append(local_path)
                 logging.info(f"Skipped (protected): {local_path}")
@@ -17662,6 +17869,22 @@ def perform_pegaprox_update():
                 resp = requests.get(url, timeout=60)
                 
                 if resp.status_code == 200:
+                    content = resp.text
+                    
+                    # MK: verify hash before writing - dont want to install tampered files
+                    expected_hash = file_hashes.get(remote_path)
+                    if expected_hash:
+                        actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+                        if actual_hash != expected_hash:
+                            hash_failures.append((local_path, expected_hash[:16], actual_hash[:16]))
+                            logging.error(f"Hash mismatch for {remote_path}!")
+                            logging.error(f"  Expected: {expected_hash[:32]}...")
+                            logging.error(f"  Got:      {actual_hash[:32]}...")
+                            logging.error(f"  NOT INSTALLED - possible tampering!")
+                            continue  # skip this file!
+                        else:
+                            logging.info(f"Hash verified: {local_path}")
+                    
                     # Create directory if needed
                     dir_path = os.path.dirname(full_path)
                     if dir_path:
@@ -17670,15 +17893,15 @@ def perform_pegaprox_update():
                     # Write to temp file first
                     temp_path = full_path + '.new'
                     with open(temp_path, 'w', encoding='utf-8') as f:
-                        f.write(resp.text)
+                        f.write(content)
                     
                     # Atomic replace
                     os.replace(temp_path, full_path)
                     downloaded_files.append(local_path)
-                    logging.info(f"Updated: {local_path} ({len(resp.text)} bytes)")
+                    logging.info(f"Updated: {local_path} ({len(content)} bytes)")
                     
                 elif resp.status_code == 404:
-                    # File doesn't exist in repo - skip silently (might be optional)
+                    # file doesn't exist in repo - skip (might be optional)
                     logging.debug(f"Skipped (not in repo): {remote_path}")
                 else:
                     failed_files.append((local_path, f"HTTP {resp.status_code}"))
@@ -17687,6 +17910,16 @@ def perform_pegaprox_update():
             except Exception as e:
                 failed_files.append((local_path, str(e)))
                 logging.error(f"Error downloading {remote_path}: {e}")
+        
+        # LW: if any hash failed, abort the whole update
+        if hash_failures:
+            log_audit(user, 'pegaprox.update_aborted', f"Update aborted: {len(hash_failures)} files failed hash verification")
+            return jsonify({
+                'error': 'Update aborted due to integrity verification failure',
+                'hash_failures': [{'file': f, 'expected': e, 'actual': a} for f, e, a in hash_failures],
+                'security_warning': 'Downloaded files did not match expected hashes. This could indicate tampering.',
+                'hint': 'If this persists, check GitHub repo integrity or report to maintainers.'
+            }), 500
         
         # Install new Python packages
         pip_result = None
@@ -19161,7 +19394,6 @@ def get_compliance_status():
     """Get security compliance status (admin only)
     
     Returns overview of security features for HIPAA/ISO 27001 compliance.
-    LW: Jan 2026 - enterprise customers asked for this
     """
     try:
         settings = load_server_settings()
@@ -19213,8 +19445,10 @@ def get_compliance_status():
                     None if settings.get('password_require_special') else 'Consider requiring special characters in passwords',
                     None if settings.get('password_expiry_enabled') else 'Consider enabling password expiry',
                     None if key_info.get('backups') else 'Perform initial key rotation to create backup',
+                    None if not _check_default_password_in_use() else 'CRITICAL: Default admin password is still in use! Change it immediately.',
                 ] if r is not None
-            ]
+            ],
+            'default_password_warning': _check_default_password_in_use()
         })
     except Exception as e:
         logging.error(f"Error getting compliance status: {e}")
@@ -19297,21 +19531,25 @@ def get_status():
 @app.route('/api/clusters', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_clusters():
-    """Get all configured clusters (filtered by tenant)"""
+    """Get all configured clusters (filtered by tenant)
+    
+    NS: Clusters are now sorted by sort_order, then by name for consistent ordering
+    """
     # get user's allowed clusters
     users = load_users()
     user = users.get(request.session['user'], {})
     allowed = get_user_clusters(user)
     
-    # Get cluster metadata from database (display_name, group_id)
+    # Get cluster metadata from database (display_name, group_id, sort_order)
     db = get_db()
     cluster_meta = {}
     try:
-        meta_rows = db.query('SELECT id, display_name, group_id FROM clusters')
+        meta_rows = db.query('SELECT id, display_name, group_id, sort_order FROM clusters')
         for row in meta_rows:
             cluster_meta[row['id']] = {
                 'display_name': row['display_name'],
-                'group_id': row['group_id']
+                'group_id': row['group_id'],
+                'sort_order': row['sort_order'] if row['sort_order'] is not None else 0
             }
     except:
         pass
@@ -19330,6 +19568,7 @@ def get_clusters():
             'name': mgr.config.name,
             'display_name': display_name,
             'group_id': meta.get('group_id'),
+            'sort_order': meta.get('sort_order', 0),
             'host': mgr.config.host,
             'status': 'running' if mgr.running else 'stopped',
             'connected': mgr.is_connected,
@@ -19343,9 +19582,14 @@ def get_clusters():
             'enabled': mgr.config.enabled,
             'ha_enabled': mgr.config.ha_enabled,
             'fallback_hosts': mgr.config.fallback_hosts,
+            'excluded_nodes': getattr(mgr.config, 'excluded_nodes', []),  # LW: Nodes excluded from balancing
             'current_host': getattr(mgr, 'current_host', None),
             'last_run': mgr.last_run.isoformat() if mgr.last_run else None
         })
+    
+    # MK: Sort clusters by sort_order first, then by name for consistent ordering
+    clusters.sort(key=lambda c: (c.get('sort_order', 0), c.get('name', '').lower()))
+    
     return jsonify(clusters)
 
 
@@ -19488,10 +19732,82 @@ def delete_cluster(cluster_id):
     mgr.stop()
     del cluster_managers[cluster_id]
     
-    save_config()
+    # NS: Actually delete from database! 
+    # save_config() only saves existing clusters, doesn't remove deleted ones
+    # This was causing clusters to reappear after restart
+    try:
+        db = get_db()
+        db.delete_cluster(cluster_id)
+        logging.info(f"Deleted cluster {cluster_id} from database")
+    except Exception as e:
+        logging.error(f"Failed to delete cluster from database: {e}")
+    
     log_audit(request.session['user'], 'cluster.deleted', f"Deleted cluster: {cluster_name}")
     
     return jsonify({'message': 'Cluster deleted successfully'})
+
+
+@app.route('/api/clusters/reorder', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def reorder_clusters():
+    """Update cluster sort order for sidebar display
+    
+    NS: Allows admins to reorder clusters via drag-and-drop in UI
+    Request body: { "order": ["cluster_id_1", "cluster_id_2", ...] }
+    """
+    data = request.get_json()
+    order = data.get('order', [])
+    
+    if not order:
+        return jsonify({'error': 'No order provided'}), 400
+    
+    db = get_db()
+    cursor = db.conn.cursor()
+    
+    try:
+        for idx, cluster_id in enumerate(order):
+            cursor.execute(
+                'UPDATE clusters SET sort_order = ? WHERE id = ?',
+                (idx, cluster_id)
+            )
+        db.conn.commit()
+        
+        log_audit(request.session['user'], 'cluster.reordered', f"Reordered {len(order)} clusters")
+        
+        return jsonify({'message': 'Cluster order updated', 'order': order})
+    except Exception as e:
+        logging.error(f"Failed to reorder clusters: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/clusters/<cluster_id>/sort-order', methods=['PUT'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def update_cluster_sort_order(cluster_id):
+    """Update a single cluster's sort order
+    
+    Request body: { "sort_order": 5 }
+    """
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    data = request.get_json()
+    sort_order = data.get('sort_order', 0)
+    
+    db = get_db()
+    cursor = db.conn.cursor()
+    
+    try:
+        cursor.execute(
+            'UPDATE clusters SET sort_order = ? WHERE id = ?',
+            (sort_order, cluster_id)
+        )
+        db.conn.commit()
+        
+        return jsonify({'message': 'Sort order updated', 'sort_order': sort_order})
+    except Exception as e:
+        logging.error(f"Failed to update sort order: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/clusters/<cluster_id>/metrics', methods=['GET'])
 @require_auth(perms=['cluster.view'])
@@ -19642,6 +19958,166 @@ def update_cluster_config_live(cluster_id):
     
     return jsonify({'message': 'Configuration updated successfully', 'updated_fields': list(data.keys())})
 
+
+@app.route('/api/clusters/<cluster_id>/excluded-nodes', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_excluded_nodes(cluster_id):
+    """Get list of nodes excluded from balancing
+    
+    NS: Feature request - allow excluding specific nodes from VM balancing
+    Similar to ProxLB's exclude hosts feature
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    excluded = getattr(mgr.config, 'excluded_nodes', []) or []
+    
+    return jsonify({
+        'excluded_nodes': excluded,
+        'cluster_id': cluster_id
+    })
+
+
+@app.route('/api/clusters/<cluster_id>/excluded-nodes', methods=['PUT'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def set_excluded_nodes(cluster_id):
+    """Set list of nodes excluded from balancing
+    
+    NS: Feature request - allow excluding specific nodes from VM balancing
+    Request body: { "excluded_nodes": ["node1", "node2"] }
+    
+    Excluded nodes will:
+    - NOT be targets for automatic VM balancing
+    - NOT be targets for balancing-related live migrations
+    - NOT be included in balancing score calculations
+    
+    Note: Manual migrations TO excluded nodes are still allowed
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    data = request.get_json() or {}
+    excluded_nodes = data.get('excluded_nodes', [])
+    
+    # Validate it's a list of strings
+    if not isinstance(excluded_nodes, list):
+        return jsonify({'error': 'excluded_nodes must be a list'}), 400
+    
+    excluded_nodes = [str(n) for n in excluded_nodes]  # Ensure strings
+    
+    mgr = cluster_managers[cluster_id]
+    mgr.config.excluded_nodes = excluded_nodes
+    
+    # Save to database
+    try:
+        db = get_db()
+        cursor = db.conn.cursor()
+        cursor.execute(
+            'UPDATE clusters SET excluded_nodes = ? WHERE id = ?',
+            (json.dumps(excluded_nodes), cluster_id)
+        )
+        db.conn.commit()
+    except Exception as e:
+        logging.error(f"Failed to save excluded_nodes: {e}")
+        return jsonify({'error': f'Database error: {str(e)}'}), 500
+    
+    log_audit(request.session['user'], 'cluster.excluded_nodes_changed', 
+              f"Cluster {mgr.config.name}: excluded nodes set to {excluded_nodes}")
+    
+    return jsonify({
+        'success': True,
+        'excluded_nodes': excluded_nodes,
+        'message': f'{len(excluded_nodes)} node(s) excluded from balancing'
+    })
+
+
+@app.route('/api/clusters/<cluster_id>/excluded-nodes/<node>', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def add_excluded_node(cluster_id, node):
+    """Add a single node to the exclusion list"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    excluded = getattr(mgr.config, 'excluded_nodes', []) or []
+    
+    if node not in excluded:
+        excluded.append(node)
+        mgr.config.excluded_nodes = excluded
+        
+        # Save to database
+        try:
+            db = get_db()
+            cursor = db.conn.cursor()
+            cursor.execute(
+                'UPDATE clusters SET excluded_nodes = ? WHERE id = ?',
+                (json.dumps(excluded), cluster_id)
+            )
+            db.conn.commit()
+        except Exception as e:
+            logging.error(f"Failed to save excluded_nodes: {e}")
+            return jsonify({'error': f'Database error: {str(e)}'}), 500
+        
+        log_audit(request.session['user'], 'cluster.node_excluded', 
+                  f"Node {node} excluded from balancing in cluster {mgr.config.name}")
+    
+    return jsonify({
+        'success': True,
+        'excluded_nodes': excluded,
+        'message': f'Node {node} excluded from balancing'
+    })
+
+
+@app.route('/api/clusters/<cluster_id>/excluded-nodes/<node>', methods=['DELETE'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def remove_excluded_node(cluster_id, node):
+    """Remove a node from the exclusion list"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    excluded = getattr(mgr.config, 'excluded_nodes', []) or []
+    
+    if node in excluded:
+        excluded.remove(node)
+        mgr.config.excluded_nodes = excluded
+        
+        # Save to database
+        try:
+            db = get_db()
+            cursor = db.conn.cursor()
+            cursor.execute(
+                'UPDATE clusters SET excluded_nodes = ? WHERE id = ?',
+                (json.dumps(excluded), cluster_id)
+            )
+            db.conn.commit()
+        except Exception as e:
+            logging.error(f"Failed to save excluded_nodes: {e}")
+            return jsonify({'error': f'Database error: {str(e)}'}), 500
+        
+        log_audit(request.session['user'], 'cluster.node_included', 
+                  f"Node {node} re-included in balancing for cluster {mgr.config.name}")
+    
+    return jsonify({
+        'success': True,
+        'excluded_nodes': excluded,
+        'message': f'Node {node} re-included in balancing'
+    })
+
+
 @app.route('/api/clusters/<cluster_id>/migrations', methods=['GET'])
 @require_auth(perms=['vm.view'])
 def get_migration_log(cluster_id):
@@ -19687,11 +20163,12 @@ def cancel_task(cluster_id, node, upid):
         result = mgr.stop_task(node, upid)
         if result:
             # Log the action
-            log_audit_event(
-                get_current_user(),
-                'task_cancelled',
+            log_audit(
+                request.session.get('user', 'system'),
+                'task.cancelled',
                 f'Task {upid} on {node}',
-                request.remote_addr
+                request.remote_addr,
+                cluster=mgr.config.name
             )
             return jsonify({'success': True, 'message': 'Task cancelled'})
         else:
@@ -24173,6 +24650,23 @@ def vm_action_api(cluster_id, node, vm_type, vmid, action):
         # Broadcast action to all clients for real-time updates
         broadcast_action(action, vm_type, str(vmid), {'node': node, 'force': force}, cluster_id, usr)
         
+        # NS: Push immediate resource update for faster UI feedback
+        # Proxmox needs a moment to update status, so we do a quick delayed refresh
+        def delayed_resource_push():
+            import time
+            time.sleep(0.5)  # Give Proxmox 500ms to update status
+            try:
+                resources = manager.get_all_resources()
+                if resources:
+                    broadcast_sse('resources', resources, cluster_id)
+                tasks = manager.get_tasks(limit=50)
+                if tasks:
+                    broadcast_sse('tasks', tasks, cluster_id)
+            except:
+                pass  # Silently fail - next loop will catch it anyway
+        
+        threading.Thread(target=delayed_resource_push, daemon=True).start()
+        
         return jsonify({'message': f'{action} successful for VM {vmid}', 'data': result.get('data')})
     else:
         # Return 400 for client errors (like LXC reset), 500 for server errors
@@ -25086,6 +25580,171 @@ def rollback_snapshot_api(cluster_id, node, vm_type, vmid, snapname):
         return jsonify({'message': f'Rollback zu {snapname} gestartet', 'task': result.get('task')})
     else:
         return jsonify({'error': result['error']}), 500
+
+
+# ==================== SNAPSHOT OVERVIEW API @gyptazy ====================
+
+@app.route('/api/snapshots/overview', methods=['GET', 'POST'])
+@require_auth(perms=['vm.view'])
+def snapshots_overview():
+    """Get overview of old snapshots across all clusters or a specific cluster
+    
+    Returns snapshots older than specified date, sorted by age
+    
+    LW: Added cluster_id filter - when provided, only shows snapshots from that cluster
+    """
+    snapshots = []
+    user = request.session.get('user', '')
+    users_db = load_users()
+    user_data = users_db.get(user, {})
+    user_data['username'] = user
+    cutoff_date = None
+    data = request.get_json(silent=True) or {}
+    date_compare = data.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    filter_limit = data.get("limit", 100)  # LW: Increased default limit
+    filter_cluster = data.get("cluster_id")  # MK: Optional cluster filter
+    is_admin = user_data.get('role') == ROLE_ADMIN
+    user_clusters = user_data.get('clusters', [])
+
+    for cluster_id, mgr in cluster_managers.items():
+        if not mgr.is_connected:
+            continue
+
+        # LW: Filter by specific cluster if provided
+        if filter_cluster and cluster_id != filter_cluster:
+            continue
+
+        if not is_admin and user_clusters and cluster_id not in user_clusters:
+            continue
+
+        try:
+            resources = mgr.get_vm_resources()
+
+            for r in resources:
+                vmid = r.get('vmid')
+                node = r.get('node')
+                vm_name = r.get('name') or ''
+                vm_type = r.get('type', 'qemu')
+
+                if not vmid or not node:
+                    continue
+
+                manager = cluster_managers[cluster_id]
+                snapshots_present = manager.get_snapshots(node, vmid, vm_type)
+
+                for snap in snapshots_present:
+                    snap_name = snap.get('name')
+                    snap_ts = snap.get('snaptime')
+
+                    # skip invalid + implicit snapshot
+                    if not snap_name or not snap_ts or snap_name == 'current':
+                        continue
+
+                    snap_dt = datetime.fromtimestamp(snap_ts, tz=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    age_seconds = int((now - snap_dt).total_seconds())
+                    cutoff_date = datetime.strptime(date_compare, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+                    if snap_dt >= cutoff_date:
+                        continue
+
+                    if age_seconds < 3600:
+                        age = f"{age_seconds // 60} min"
+                    elif age_seconds < 86400:
+                        age = f"{age_seconds // 3600} h"
+                    else:
+                        age = f"{age_seconds // 86400} days"
+
+                    snapshots.append({
+                        "vmid": vmid,
+                        "vm_name": vm_name,
+                        "vm_type": vm_type,
+                        "node": node,
+                        "snapshot_name": snap_name,
+                        "snapshot_date": snap_dt.strftime('%Y-%m-%d %H:%M'),
+                        "age": age,
+                        "cluster_id": cluster_id
+                    })
+
+        except Exception as e:
+            logging.debug(f"Snapshot gathering failed for cluster {cluster_id}: {e}")
+
+    # Sort and filter snapshots
+    snapshots.sort(key=lambda s: s["snapshot_date"], reverse=False)
+    snapshots = snapshots[:filter_limit]
+
+    return jsonify({
+        "snapshots": snapshots
+    })
+
+
+@app.route('/api/snapshots/delete', methods=['POST'])
+@require_auth(perms=['vm.view', 'vm.snapshot'])
+def snapshots_overview_delete():
+    """Delete multiple snapshots at once
+    
+    Bulk delete for snapshot cleanup
+    """
+    user = request.session.get('user', '')
+    users_db = load_users()
+    user_data = users_db.get(user, {})
+    user_data['username'] = user
+    data = request.get_json(silent=True) or {}
+    snapshots = data.get('snapshots', [])
+    is_admin = user_data.get('role') == ROLE_ADMIN
+    user_clusters = user_data.get('clusters', [])
+    
+    deleted_count = 0
+    errors = []
+    result = {'success': False}
+
+    for snapshot in snapshots:
+        try:
+            cluster_id = snapshot.get('cluster_id')
+            node = snapshot.get('node')
+            vmid = snapshot.get('vmid')
+            snapname = snapshot.get('snapshot_name')
+            vm_type = snapshot.get('vm_type', 'qemu')
+            
+            if cluster_id not in cluster_managers:
+                errors.append(f"Cluster {cluster_id} not found")
+                continue
+                
+            mgr = cluster_managers[cluster_id]
+            
+            if not mgr.is_connected:
+                errors.append(f"Cluster {cluster_id} not connected")
+                continue
+
+            if not is_admin and user_clusters and cluster_id not in user_clusters:
+                errors.append(f"No access to cluster {cluster_id}")
+                continue
+            
+            result = mgr.delete_snapshot(node, vmid, vm_type, snapname)
+            
+            if result.get('success'):
+                deleted_count += 1
+                log_audit(user, 'snapshot.deleted', f"{vm_type.upper()} {vmid} - snapshot '{snapname}' deleted")
+            else:
+                errors.append(f"Failed to delete {snapname}: {result.get('error', 'Unknown error')}")
+                
+        except Exception as e:
+            errors.append(f"Error deleting snapshot: {e}")
+            logging.debug(f"Snapshot deletion failed: {e}")
+
+    if deleted_count > 0:
+        return jsonify({
+            'success': True,
+            'message': f'{deleted_count} snapshot(s) deleted',
+            'deleted': deleted_count,
+            'errors': errors if errors else None
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'error': 'No snapshots deleted',
+            'errors': errors
+        }), 500
 
 
 # ==================== REPLICATION API ROUTES ====================
@@ -29177,7 +29836,19 @@ def get_cluster_update_status(cluster_id):
 @app.route('/api/clusters/<cluster_id>/updates/rolling', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN], perms=['node.update'])
 def start_rolling_update(cluster_id):
-    """Start a rolling update across all cluster nodes"""
+    """Start a rolling update across all cluster nodes
+    
+    MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout
+    
+    Parameters (via JSON body):
+    - include_reboot: bool - Whether to reboot nodes after update (default: False)
+    - node_order: list - Custom order of nodes to update
+    - skip_up_to_date: bool - Skip nodes that have no updates available (default: True)
+    - force_all: bool - Force update all nodes even if up-to-date (default: False)
+    - evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)
+    - update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)
+    - reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)
+    """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     
@@ -29186,8 +29857,22 @@ def start_rolling_update(cluster_id):
     
     mgr = cluster_managers[cluster_id]
     data = request.get_json() or {}
+    
+    # Configuration options
     include_reboot = data.get('include_reboot', False)
     node_order = data.get('node_order', None)
+    skip_up_to_date = data.get('skip_up_to_date', True)
+    force_all = data.get('force_all', False)
+    
+    # MK: Configurable timeouts (GitHub Issue fix)
+    evacuation_timeout = data.get('evacuation_timeout', 1800)  # 30 minutes default (was 5 min!)
+    update_timeout = data.get('update_timeout', 900)  # 15 minutes default
+    reboot_timeout = data.get('reboot_timeout', 600)  # 10 minutes default
+    
+    # Validate timeouts (min 60s, max 2 hours)
+    evacuation_timeout = max(60, min(7200, int(evacuation_timeout)))
+    update_timeout = max(60, min(7200, int(update_timeout)))
+    reboot_timeout = max(60, min(7200, int(reboot_timeout)))
     
     # check already running
     if hasattr(mgr, '_rolling_update') and mgr._rolling_update and mgr._rolling_update.get('status') == 'running':
@@ -29217,11 +29902,17 @@ def start_rolling_update(cluster_id):
         'status': 'running',
         'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'include_reboot': include_reboot,
+        'skip_up_to_date': skip_up_to_date,
+        'force_all': force_all,
+        'evacuation_timeout': evacuation_timeout,
+        'update_timeout': update_timeout,
+        'reboot_timeout': reboot_timeout,
         'nodes': nodes_to_update,
         'current_index': 0,
         'current_node': nodes_to_update[0],
         'current_step': 'starting',
         'completed_nodes': [],
+        'skipped_nodes': [],  # MK: Track skipped nodes
         'failed_nodes': [],
         'logs': []
     }
@@ -29230,6 +29921,9 @@ def start_rolling_update(cluster_id):
     def run_rolling_update():
         try:
             logging.info(f"[RollingUpdate] Starting rolling update for cluster, nodes: {nodes_to_update}")
+            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Rolling update started")
+            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Settings: skip_up_to_date={skip_up_to_date}, evacuation_timeout={evacuation_timeout}s")
+            
             for idx, node_name in enumerate(nodes_to_update):
                 if not hasattr(mgr, '_rolling_update') or mgr._rolling_update.get('status') != 'running':
                     logging.info(f"[RollingUpdate] Update cancelled or stopped")
@@ -29237,12 +29931,36 @@ def start_rolling_update(cluster_id):
                 
                 mgr._rolling_update['current_index'] = idx
                 mgr._rolling_update['current_node'] = node_name
-                mgr._rolling_update['current_step'] = 'maintenance'
-                mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Starting update for {node_name}")
-                logging.info(f"[RollingUpdate] Starting update for node: {node_name}")
+                mgr._rolling_update['current_step'] = 'checking'
+                mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] === Processing {node_name} ({idx+1}/{len(nodes_to_update)}) ===")
+                logging.info(f"[RollingUpdate] Processing node: {node_name}")
                 
                 try:
+                    # MK: Step 0 - Check if node has updates available (GitHub Issue fix)
+                    if skip_up_to_date and not force_all:
+                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Checking for available updates on {node_name}...")
+                        
+                        # First refresh apt cache
+                        try:
+                            mgr.refresh_node_apt(node_name)
+                            time.sleep(3)  # Wait for refresh
+                        except:
+                            pass
+                        
+                        available_updates = mgr.get_node_apt_updates(node_name)
+                        update_count = len(available_updates) if available_updates else 0
+                        
+                        if update_count == 0:
+                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⏭ {node_name} is already up-to-date - SKIPPING")
+                            mgr._rolling_update['skipped_nodes'].append(node_name)
+                            logging.info(f"[RollingUpdate] Node {node_name} is up-to-date, skipping")
+                            continue
+                        else:
+                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Found {update_count} updates available on {node_name}")
+                            logging.info(f"[RollingUpdate] Node {node_name} has {update_count} updates available")
+                    
                     # Step 1: Enable maintenance mode (evacuate VMs)
+                    mgr._rolling_update['current_step'] = 'maintenance'
                     mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Enabling maintenance mode on {node_name}")
                     logging.info(f"[RollingUpdate] Enabling maintenance mode on {node_name}")
                     maintenance_task = mgr.enter_maintenance_mode(node_name)
@@ -29253,27 +29971,32 @@ def start_rolling_update(cluster_id):
                     
                     # Wait for evacuation to complete
                     mgr._rolling_update['current_step'] = 'evacuating'
-                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Waiting for evacuation...")
-                    max_wait = 300  # 5 minutes max
+                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Waiting for VM evacuation (timeout: {evacuation_timeout}s)...")
                     waited = 0
                     evacuation_completed = False
-                    while waited < max_wait:
+                    last_progress_log = 0
+                    
+                    while waited < evacuation_timeout:
                         # Check maintenance task status directly
                         if node_name in mgr.nodes_in_maintenance:
                             maintenance_task = mgr.nodes_in_maintenance[node_name]
                             if maintenance_task.status in ['completed', 'completed_with_errors']:
-                                mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Evacuation completed")
+                                mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ Evacuation completed")
                                 evacuation_completed = True
                                 break
                             else:
-                                # Log current progress
-                                if hasattr(maintenance_task, 'migrated_vms') and hasattr(maintenance_task, 'total_vms'):
-                                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Evacuating: {maintenance_task.migrated_vms}/{maintenance_task.total_vms} VMs migrated")
+                                # Log progress every 30 seconds
+                                if waited - last_progress_log >= 30:
+                                    if hasattr(maintenance_task, 'migrated_vms') and hasattr(maintenance_task, 'total_vms'):
+                                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Evacuating: {maintenance_task.migrated_vms}/{maintenance_task.total_vms} VMs migrated ({waited}s elapsed)")
+                                    else:
+                                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Evacuation in progress... ({waited}s elapsed)")
+                                    last_progress_log = waited
                         time.sleep(5)
                         waited += 5
                     
                     if not evacuation_completed:
-                        raise Exception(f"Evacuation timed out after {max_wait}s")
+                        raise Exception(f"Evacuation timed out after {evacuation_timeout}s - consider increasing evacuation_timeout")
                     
                     # Step 2: Run apt update/upgrade
                     mgr._rolling_update['current_step'] = 'updating'
@@ -29287,11 +30010,10 @@ def start_rolling_update(cluster_id):
                         raise Exception(f"Update failed: Could not start update task")
                     
                     # Step 3: Wait for update task to complete
-                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Waiting for update task...")
-                    max_update_wait = 900  # 15 minutes max for update
+                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Waiting for update task (timeout: {update_timeout}s)...")
                     update_waited = 0
                     last_phase = None
-                    while update_waited < max_update_wait:
+                    while update_waited < update_timeout:
                         if update_task.status in ['completed', 'failed']:
                             break
                         # Log phase changes
@@ -29305,30 +30027,31 @@ def start_rolling_update(cluster_id):
                         raise Exception(f"Update failed: {update_task.error or 'Unknown error'}")
                     
                     if update_task.status != 'completed':
-                        raise Exception(f"Update timed out after {max_update_wait}s (status: {update_task.status})")
+                        raise Exception(f"Update timed out after {update_timeout}s (status: {update_task.status})")
                     
-                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Updates installed")
+                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ Updates installed")
                     
-                    # Step 4: If reboot was included, node should already be rebooting
-                    # The update_task handles waiting for reboot
+                    # Step 4: If reboot was included, wait for node to come back
                     if include_reboot:
                         mgr._rolling_update['current_step'] = 'rebooting'
-                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Node {node_name} rebooting...")
+                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Node {node_name} rebooting (timeout: {reboot_timeout}s)...")
                         logging.info(f"[RollingUpdate] Node {node_name} rebooting")
                         
                         # Wait for node to come back online
-                        max_wait = 300
                         waited = 0
-                        while waited < max_wait:
+                        while waited < reboot_timeout:
                             try:
                                 node_status = mgr.get_node_status()
                                 if node_name in node_status and node_status[node_name].get('status') == 'online':
-                                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Node {node_name} back online")
+                                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ Node {node_name} back online")
                                     break
                             except:
                                 pass
                             time.sleep(10)
                             waited += 10
+                        
+                        if waited >= reboot_timeout:
+                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ Warning: Node {node_name} did not come back online within {reboot_timeout}s")
                     
                     # Step 5: Disable maintenance mode
                     mgr._rolling_update['current_step'] = 'finishing'
@@ -29349,10 +30072,16 @@ def start_rolling_update(cluster_id):
                     except:
                         pass
             
+            # Final summary
+            completed = len(mgr._rolling_update['completed_nodes'])
+            skipped = len(mgr._rolling_update['skipped_nodes'])
+            failed = len(mgr._rolling_update['failed_nodes'])
+            
             mgr._rolling_update['status'] = 'completed'
             mgr._rolling_update['completed_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
-            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Rolling update completed")
-            logging.info(f"[RollingUpdate] Rolling update completed")
+            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] === Rolling update completed ===")
+            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Summary: {completed} updated, {skipped} skipped (up-to-date), {failed} failed")
+            logging.info(f"[RollingUpdate] Rolling update completed: {completed} updated, {skipped} skipped, {failed} failed")
             
         except Exception as e:
             logging.error(f"[RollingUpdate] Rolling update failed with exception: {e}")
@@ -29369,7 +30098,11 @@ def start_rolling_update(cluster_id):
         'success': True,
         'message': 'Rolling update started',
         'nodes': nodes_to_update,
-        'include_reboot': include_reboot
+        'include_reboot': include_reboot,
+        'skip_up_to_date': skip_up_to_date,
+        'evacuation_timeout': evacuation_timeout,
+        'update_timeout': update_timeout,
+        'reboot_timeout': reboot_timeout
     })
 
 
@@ -29959,6 +30692,48 @@ def ws_live_updates(ws):
 # ============================================================================
 import queue as queue_module
 
+# MK: SSE tokens - session IDs in URLs can leak to webserver logs
+# MK: tokens are only valid for 5 min, way better than exposing the actual session
+sse_tokens = {}  # token -> {'user': username, 'expires': timestamp, 'allowed_clusters': [...]}
+sse_tokens_lock = threading.Lock()
+SSE_TOKEN_TTL = 300  # 5 min
+
+def create_sse_token(username: str, allowed_clusters: list) -> str:
+    """Create SSE token - avoids session ID in URL"""
+    token = base64.urlsafe_b64encode(os.urandom(24)).decode('utf-8')
+    expires = time.time() + SSE_TOKEN_TTL
+    
+    with sse_tokens_lock:
+        # cleanup expired
+        now = time.time()
+        expired = [t for t, data in sse_tokens.items() if data['expires'] < now]
+        for t in expired:
+            del sse_tokens[t]
+        
+        sse_tokens[token] = {
+            'user': username,
+            'expires': expires,
+            'allowed_clusters': allowed_clusters
+        }
+    
+    return token
+
+def validate_sse_token(token: str) -> dict:
+    """Validate an SSE token and return user info or None"""
+    if not token:
+        return None
+    
+    with sse_tokens_lock:
+        token_data = sse_tokens.get(token)
+        if not token_data:
+            return None
+        
+        if token_data['expires'] < time.time():
+            del sse_tokens[token]
+            return None
+        
+        return token_data
+
 sse_clients = {}
 sse_clients_lock = threading.Lock()
 
@@ -30014,40 +30789,90 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None):
     except Exception as e:
         logging.error(f"SSE broadcast error: {e}")
 
+@app.route('/api/sse/token', methods=['POST'])
+@require_auth()
+def get_sse_token():
+    """Get SSE token for URL param auth"""
+    user = request.session.get('user', 'unknown')
+    users = load_users()
+    user_data = users.get(user, {})
+    allowed_clusters = get_user_clusters(user_data)
+    
+    token = create_sse_token(user, allowed_clusters)
+    
+    return jsonify({
+        'token': token,
+        'expires_in': SSE_TOKEN_TTL,
+        'hint': 'Use this token in /api/sse/updates?token=...'
+    })
+
 @app.route('/api/sse/updates')
 def sse_updates():
     """SSE endpoint for live updates
     
-    Auth via query param since EventSource can't send custom headers
+    NS: accepts ?token= (preferred) or ?session= (legacy)
+    MK: token is better because session IDs in URLs can leak to logs
     """
-    # Get session from query param (EventSource can't send headers)
+    # token auth first (preferred)
+    sse_token = request.args.get('token')
     session_id = request.args.get('session')
-    if not session_id:
-        return jsonify({'error': 'Session required'}), 401
     
-    session = validate_session(session_id)
-    if not session:
-        return jsonify({'error': 'Invalid session'}), 401
+    user = None
+    allowed_clusters = None
+    auth_method = None
+    
+    if sse_token:
+        # Validate SSE token
+        token_data = validate_sse_token(sse_token)
+        if token_data:
+            user = token_data['user']
+            allowed_clusters = token_data['allowed_clusters']
+            auth_method = 'token'
+    
+    if not user and session_id:
+        # Fallback to session auth (legacy)
+        session = validate_session(session_id)
+        if session:
+            user = session.get('user', 'unknown')
+            users = load_users()
+            user_data = users.get(user, {})
+            allowed_clusters = get_user_clusters(user_data)
+            auth_method = 'session'
+    
+    if not user:
+        return jsonify({'error': 'Authentication required. Use token or session parameter.'}), 401
     
     client_id = str(uuid.uuid4())
     message_queue = queue_module.Queue(maxsize=100)
     
     # Get cluster subscription from query params
     clusters_param = request.args.get('clusters')
-    subscribed_clusters = clusters_param.split(',') if clusters_param else None
+    requested_clusters = clusters_param.split(',') if clusters_param else None
     
-    user = session.get('user', 'unknown')
+    # MK: only let users subscribe to clusters they have access to
+    if requested_clusters:
+        if allowed_clusters is None:
+            # admin - all clusters allowed
+            subscribed_clusters = requested_clusters
+        else:
+            # filter to allowed only
+            subscribed_clusters = [c for c in requested_clusters if c in allowed_clusters]
+            if not subscribed_clusters:
+                logging.warning(f"[SSE] User {user} tried to subscribe to unauthorized clusters")
+                subscribed_clusters = allowed_clusters
+    else:
+        subscribed_clusters = allowed_clusters
     
     with sse_clients_lock:
         sse_clients[client_id] = {
             'queue': message_queue,
             'user': user,
             'clusters': subscribed_clusters,
-            'connected_at': datetime.now().isoformat()
+            'connected_at': datetime.now().isoformat(),
+            'auth_method': auth_method
         }
     
-    logging.info(f"[SSE] Client connected: {client_id} (user: {user}) - Total clients: {len(sse_clients)}")
-    logging.info(f"SSE client connected: {client_id} (user: {user})")
+    logging.info(f"[SSE] Client connected: {client_id} (user: {user}, auth: {auth_method}) - Total: {len(sse_clients)}")
     
     def generate():
         try:
@@ -30082,6 +30907,7 @@ def broadcast_resources_loop():
     """Periodically broadcast resource updates to all connected SSE clients
     
     MK: Increased frequency for more responsive UI
+    NS: Further optimized Jan 2026 - resources now every 2s instead of 4s
     """
     print("=" * 50)
     print("SSE BROADCAST LOOP STARTED")
@@ -30121,20 +30947,21 @@ def broadcast_resources_loop():
                     except:
                         pass
                     
-                    # MK: Get resources every 2nd loop (every 4 seconds instead of 9)
-                    # This makes VMs update faster in the UI
-                    if loop_count % 2 == 0:
-                        try:
-                            resources = manager.get_all_resources()
-                            if resources:
-                                broadcast_sse('resources', resources, cluster_id)
-                        except:
-                            pass
+                    # NS: Resources every loop now (was every 2nd loop)
+                    # This makes VM status update much faster in the UI
+                    try:
+                        resources = manager.get_all_resources()
+                        if resources:
+                            broadcast_sse('resources', resources, cluster_id)
+                    except:
+                        pass
                         
                 except Exception as e:
                     logging.debug(f"Error broadcasting updates for {cluster_id}: {e}")
             
-            time.sleep(2)  # MK: Reduced from 3 to 2 seconds for more responsive updates
+            # NS: Reduced to 1.5 seconds for snappier updates
+            # Proxmox API can handle this - it's just GET requests
+            time.sleep(1.5)
                     
         except Exception as e:
             logging.error(f"Broadcast loop error: {e}")

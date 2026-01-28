@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!--
     PegaProx - Cluster Management for Proxmox VE
-    Version: 0.6.1 Beta
+    Version: 0.6.2 Beta
     Website: https://pegaprox.com
     GitHub:  https://github.com/PegaProx/project-pegaprox
     
@@ -29,6 +29,9 @@
       - Marcus Kellermann (MK) - Backend Developer
       - Laura Weber (LW) - Frontend Developer
     
+    Contributors:
+      - Florian Paul Azim Hoberg @gyptazy
+    
     Started: September 2025
     Last major refactor: January 2026
     License: AGPL-3.0
@@ -40,6 +43,8 @@
     Credits:
       - ProxLB by gyptazy (https://github.com/gyptazy/ProxLB)
         Load balancing logic is based on this project. Thanks!
+      - ProxSnap by gyptazy (https://github.com/gyptazy/ProxSnap)
+        Inspiration for the snapshot overview feature. Great tool!
     
     Some parts were optimized with AI assistance (Claude/ChatGPT).
     We've marked those sections. Most of the core logic is hand-written.
@@ -94,18 +99,46 @@
     -->
     
     <!-- Smart Script Loader - CDN first, local fallback for offline -->
+    <!-- SRI Hashes for supply chain security - verify these match official releases -->
     <script>
         // NS: Global flag to know when libs are ready
         window.pegaproxLibsReady = false;
         
-        function loadScriptWithFallback(cdnUrl, localUrl) {
+        // SRI Hashes for supply chain security - verify CDN scripts haven't been tampered with
+        // IMPORTANT: Update these hashes when upgrading library versions!
+        // Generate hashes at: https://www.srihash.org/ or use jsDelivr's ?integrity query
+        // Example: curl -s https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js | openssl dgst -sha384 -binary | openssl base64 -A
+        // Empty string = skip SRI check (use during development, fill in for production)
+        const SRI_HASHES = {
+            // React 18.2.0 - https://unpkg.com/react@18.2.0/umd/react.production.min.js
+            'react@18': '',
+            // React-DOM 18.2.0
+            'react-dom@18': '',
+            // Babel Standalone 7.x
+            'babel@7': '',
+            // noVNC 1.4.0
+            'novnc@1.4.0': '',
+            // xterm.js 5.3.0
+            'xterm@5.3.0': '',
+            // xterm-addon-fit 0.8.0
+            'xterm-addon-fit@0.8.0': ''
+        };
+        
+        function loadScriptWithFallback(cdnUrl, localUrl, integrityKey) {
             return new Promise(function(resolve) {
                 var script = document.createElement('script');
                 script.src = cdnUrl;
+                
+                // Add SRI hash if available (supply chain protection)
+                if (integrityKey && SRI_HASHES[integrityKey]) {
+                    script.integrity = SRI_HASHES[integrityKey];
+                    script.crossOrigin = 'anonymous';
+                }
+                
                 script.onload = resolve;
                 script.onerror = function() {
-                    // CDN failed (offline?) - try local
-                    console.log('CDN unavailable, trying local:', localUrl);
+                    // CDN failed (offline or integrity check failed) - try local
+                    console.log('CDN unavailable or integrity check failed, trying local:', localUrl);
                     var local = document.createElement('script');
                     local.src = localUrl;
                     local.onload = resolve;
@@ -122,16 +155,19 @@
         // Load in sequence - using jsdelivr instead of unpkg (faster + better caching)
         loadScriptWithFallback(
             'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js',
-            '/static/js/react.production.min.js'
+            '/static/js/react.production.min.js',
+            'react@18'
         ).then(function() {
             return loadScriptWithFallback(
                 'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js',
-                '/static/js/react-dom.production.min.js'
+                '/static/js/react-dom.production.min.js',
+                'react-dom@18'
             );
         }).then(function() {
             return loadScriptWithFallback(
                 'https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js',
-                '/static/js/babel.min.js'
+                '/static/js/babel.min.js',
+                'babel@7'
             );
         }).then(function() {
             // All libs loaded - transform babel scripts
@@ -160,6 +196,10 @@
                 script.src = '/static/js/rfb.js';
                 script.onerror = function() {
                     this.src = 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
+                    if (SRI_HASHES['novnc@1.4.0']) {
+                        this.integrity = SRI_HASHES['novnc@1.4.0'];
+                        this.crossOrigin = 'anonymous';
+                    }
                 };
                 script.onload = resolve;
                 document.head.appendChild(script);
@@ -1004,6 +1044,9 @@
         const API_URL = window.location.origin + '/api';
         // const API_URL = 'http://localhost:5000/api';  // local dev
         // const API_URL = 'https://pegaprox.internal/api' // old staging
+        
+        // MK: Central version constant - keep in sync with backend PEGAPROX_VERSION
+        const PEGAPROX_VERSION = "Beta 0.6.2";
         const DEBUG = false; // set true for verbose logging
 
         // =====================================================
@@ -1244,6 +1287,8 @@
                 userLogout: 'Abmeldung',
                 passwordChanged: 'Passwort geändert',
                 clusterAdded: 'Cluster hinzugefügt',
+                apiTokenWarningTitle: 'API Token Authentifizierung',
+                apiTokenWarningDesc: 'Die Verwendung von API Tokens wird unterstützt, aber nicht alle Funktionen werden korrekt funktionieren. Features die SSH-Zugriff benötigen (SMBIOS Auto-Config, Rolling Updates, 2-Node HA, Node Shell) erfordern Passwort-Authentifizierung. PegaProx empfiehlt einen dedizierten privilegierten Benutzer oder root mit Passwort für volle Funktionalität.',
                 clusterDeleted: 'Cluster gelöscht',
                 clusterConfigChanged: 'Cluster-Konfiguration geändert',
                 vmStarted: 'VM gestartet',
@@ -1328,6 +1373,28 @@
                 // Cluster
                 clusters: 'Cluster',
                 noClusterSelected: 'Kein Cluster ausgewählt',
+                allClustersOverview: 'Alle Cluster Übersicht',
+                allClusters: 'Alle Cluster',
+                multiClusterSummary: 'Zusammenfassung aller verwalteten Cluster',
+                clustersConnected: 'Cluster verbunden',
+                clusterOverview: 'Cluster Übersicht',
+                vmsRunning: 'VMs laufend',
+                vmsStopped: 'VMs gestoppt',
+                noClustersConfigured: 'Keine Cluster konfiguriert',
+                addClusterToStart: 'Füge einen Cluster hinzu um zu beginnen',
+                clickClusterTip: 'Klicke auf eine Cluster-Zeile oder wähle aus der Sidebar um Details anzuzeigen und Ressourcen zu verwalten.',
+                health: 'Zustand',
+                average: 'Durchschnitt',
+                noDataAvailable: 'Keine Daten verfügbar',
+                clickToManage: 'Klicken zum Verwalten',
+                sortBy: 'Sortieren nach',
+                ungrouped: 'Nicht gruppiert',
+                alerts: 'Warnungen',
+                updated: 'Aktualisiert',
+                justNow: 'gerade eben',
+                topResources: 'Top Ressourcen',
+                highestCpuUsage: 'Höchste CPU- und RAM-Auslastung über alle Cluster',
+                clickToOpenVm: 'Klicken um VM zu öffnen',
                 selectCluster: 'Wähle einen Cluster aus der Liste aus',
                 addFirstCluster: 'Ersten Cluster hinzufügen',
                 connectCluster: 'Verbinde einen Proxmox Cluster mit PegaProx',
@@ -1335,6 +1402,8 @@
                 host: 'Host',
                 username: 'Benutzername',
                 password: 'Passwort',
+                passwordOrToken: 'Passwort / Token',
+                apiTokenHint: 'Für API Tokens: user@realm!tokenid',
                 sslVerification: 'SSL Verifizierung',
                 connecting: 'Verbinde...',
                 addNewCluster: 'Neuen Cluster hinzufügen',
@@ -1561,7 +1630,7 @@
                 quickActions: 'Schnellaktionen',
                 moreActions: 'Weitere Aktionen',
                 xOfYResources: 'von',
-                resourcesLabel: 'Ressourcen',
+                resourcesLabel: 'Ressourcen Verwaltung',
                 startClone: 'Klonen starten',
                 vmStillRunning: 'Die VM läuft noch. Sie wird vor dem Löschen gestoppt.',
                 ctStillRunning: 'Der Container läuft noch. Er wird vor dem Löschen gestoppt.',
@@ -1581,6 +1650,9 @@
                 switchTabToReconnect: 'Tab wechseln und zurück um neu zu verbinden',
                 deleteInterfaceConfirm: 'Interface wirklich löschen?',
                 noMigrationsYet: 'Noch keine Migrationen',
+                showMore: 'Alle anzeigen',
+                showLess: 'Weniger anzeigen',
+                olderMigrations: 'ältere Migrationen',
                 paused: 'Pausiert',
                 performanceMetrics: 'Performance-Metriken',
                 hour: 'Stunde',
@@ -1686,6 +1758,23 @@
                 storage: 'Storage',
                 backup: 'Backup',
                 replication: 'Replikation',
+                balancing: 'Balancing',
+                excludedNodes: 'Ausgeschlossene Nodes',
+                excludedNodesDesc: 'Diese Nodes werden niemals als Ziel für automatisches VM-Balancing oder Migrationsempfehlungen verwendet.',
+                selectNodeToExclude: 'Node zum Ausschließen wählen...',
+                exclude: 'Ausschließen',
+                excludedFromBalancing: 'Vom Balancing ausgeschlossen',
+                reincludedInBalancing: 'wieder ins Balancing aufgenommen',
+                excludeNode: 'Node vom Balancing ausschließen',
+                noExcludedNodes: 'Keine Nodes ausgeschlossen - alle Nodes nehmen am Balancing teil',
+                confirmExcludeNode: 'Ausschließen',
+                fromBalancing: 'vom Balancing',
+                allNodesExcluded: 'Alle Nodes sind ausgeschlossen - Balancing ist effektiv deaktiviert',
+                howExclusionWorks: 'Wie Node-Ausschluss funktioniert',
+                exclusionRule1: 'Ausgeschlossene Nodes werden NICHT als Ziel für automatisches VM-Balancing verwendet',
+                exclusionRule2: 'Ausgeschlossene Nodes erhalten keine VMs während Load-Balancing-Migrationen',
+                exclusionRule3: 'Ausgeschlossene Nodes sind weiterhin sichtbar und können manuelle Migrationen empfangen',
+                exclusionRule4: 'VMs auf ausgeschlossenen Nodes können trotzdem migriert werden, wenn der Node überlastet ist',
                 
                 // NS: Backup translations - Dec 2025
                 createBackup: 'Backup erstellen',
@@ -2379,6 +2468,11 @@
                 alreadyUpToDate: 'Bereits auf dem neuesten Stand!',
                 installUpdate: 'Update installieren',
                 updateAvailable: 'Update verfügbar!',
+                newVersionAvailable: 'Neue Version verfügbar!',
+                updateTo: 'Update auf',
+                currentVersion: 'Aktuelle Version',
+                viewUpdate: 'Update ansehen',
+                later: 'Später',
                 whatsNew: 'Was ist neu',
                 breakingChanges: 'Wichtige Änderungen',
                 doNotCloseWindow: 'Bitte dieses Fenster nicht schließen...',
@@ -2492,6 +2586,13 @@
                 cancelRollingUpdate: 'Rolling Update abbrechen',
                 confirmRollingUpdate: 'Rolling Update bestätigen',
                 rollingUpdateWarning: 'Alle Nodes werden nacheinander aktualisiert. VMs werden automatisch migriert.',
+                skipUpToDate: 'Aktuelle Nodes überspringen',
+                skipUpToDateHint: 'Nodes ohne Updates werden übersprungen',
+                advancedOptions: 'Erweiterte Optionen',
+                evacuationTimeout: 'Evakuierungs-Timeout',
+                evacuationTimeoutHint: 'Wartezeit für VM-Migration vor Timeout',
+                hour: 'Stunde',
+                hours: 'Stunden',
                 estimatedTime: 'Geschätzte Zeit',
                 minutes: 'Minuten',
                 updateHistory: 'Update-Verlauf',
@@ -2920,6 +3021,18 @@
                 monitor: 'Überwachung',
                 configure: 'Konfiguration',
                 console: 'Konsole',
+                
+                
+                snapshots: 'Snapshots',
+                snapshotsOverview: 'Snapshot Übersicht',
+                snapshotsCleanUp: 'Cleanup',
+                snapshotsDesc: 'Übersicht der ältesten Snapshots in diesem Cluster',
+                snapshotsHint: 'Übersicht von allen Snapshots über alle Gäste und Nodes',
+                snapshotsType: 'Art',
+                snapshotsDate: 'Erstellt',
+                snapshotsAge: 'Alter',
+                snapshotsAction: 'Aktion',
+                noSnapshots: 'Keine Snapshots gefunden',
             },
             en: {
                 // General
@@ -3147,6 +3260,8 @@
                 userLogout: 'Logout',
                 passwordChanged: 'Password changed',
                 clusterAdded: 'Cluster added',
+                apiTokenWarningTitle: 'API Token Authentication',
+                apiTokenWarningDesc: 'Using API tokens is supported but not all features will work correctly. Features requiring SSH access (SMBIOS Auto-Config, Rolling Updates, 2-Node HA, Node Shell) need password authentication. PegaProx recommends using a dedicated privileged user or root with password for full functionality.',
                 clusterDeleted: 'Cluster deleted',
                 clusterConfigChanged: 'Cluster config changed',
                 vmStarted: 'VM started',
@@ -3231,6 +3346,28 @@
                 // Cluster
                 clusters: 'Clusters',
                 noClusterSelected: 'No Cluster Selected',
+                allClustersOverview: 'All Clusters Overview',
+                allClusters: 'All Clusters',
+                multiClusterSummary: 'Summary of all managed clusters',
+                clustersConnected: 'Clusters Connected',
+                clusterOverview: 'Cluster Overview',
+                vmsRunning: 'VMs Running',
+                vmsStopped: 'VMs Stopped',
+                noClustersConfigured: 'No clusters configured',
+                addClusterToStart: 'Add a cluster to get started',
+                clickClusterTip: 'Click on a cluster row or select from the sidebar to view detailed information and manage resources.',
+                health: 'Health',
+                average: 'Average',
+                noDataAvailable: 'No data available',
+                clickToManage: 'Click to manage',
+                sortBy: 'Sort by',
+                ungrouped: 'Ungrouped',
+                alerts: 'Alerts',
+                updated: 'Updated',
+                justNow: 'just now',
+                topResources: 'Top Resources',
+                highestCpuUsage: 'Highest CPU and RAM usage across all clusters',
+                clickToOpenVm: 'Click to open VM',
                 selectCluster: 'Select a cluster from the list',
                 addFirstCluster: 'Add First Cluster',
                 connectCluster: 'Connect a Proxmox cluster with PegaProx',
@@ -3238,6 +3375,8 @@
                 host: 'Host',
                 username: 'Username',
                 password: 'Password',
+                passwordOrToken: 'Password / Token',
+                apiTokenHint: 'For API tokens: user@realm!tokenid',
                 sslVerification: 'SSL Verification',
                 connecting: 'Connecting...',
                 addNewCluster: 'Add New Cluster',
@@ -3464,7 +3603,7 @@
                 quickActions: 'Quick Actions',
                 moreActions: 'More Actions',
                 xOfYResources: 'of',
-                resourcesLabel: 'Resources',
+                resourcesLabel: 'Resource Management',
                 startClone: 'Start Clone',
                 vmStillRunning: 'The VM is still running. It will be stopped before deletion.',
                 ctStillRunning: 'The container is still running. It will be stopped before deletion.',
@@ -3484,6 +3623,9 @@
                 switchTabToReconnect: 'Switch tab and back to reconnect',
                 deleteInterfaceConfirm: 'Really delete interface?',
                 noMigrationsYet: 'No migrations yet',
+                showMore: 'Show all',
+                showLess: 'Show less',
+                olderMigrations: 'older migrations',
                 paused: 'Paused',
                 performanceMetrics: 'Performance Metrics',
                 hour: 'Hour',
@@ -3589,6 +3731,23 @@
                 storage: 'Storage',
                 backup: 'Backup',
                 replication: 'Replication',
+                balancing: 'Balancing',
+                excludedNodes: 'Excluded Nodes',
+                excludedNodesDesc: 'These nodes will never be targets for automatic VM balancing or migration recommendations.',
+                selectNodeToExclude: 'Select node to exclude...',
+                exclude: 'Exclude',
+                excludedFromBalancing: 'Excluded from balancing',
+                reincludedInBalancing: 're-included in balancing',
+                excludeNode: 'Exclude a node from balancing',
+                noExcludedNodes: 'No nodes excluded - all nodes participate in balancing',
+                confirmExcludeNode: 'Exclude',
+                fromBalancing: 'from balancing',
+                allNodesExcluded: 'All nodes are excluded - balancing is effectively disabled',
+                howExclusionWorks: 'How node exclusion works',
+                exclusionRule1: 'Excluded nodes will NOT be targets for automatic VM balancing',
+                exclusionRule2: 'Excluded nodes will NOT receive VMs during load balancing migrations',
+                exclusionRule3: 'Excluded nodes are still visible and can receive manual migrations',
+                exclusionRule4: 'VMs on excluded nodes may still be migrated away if the node is overloaded',
                 
                 // NS: Backup translations - Dec 2025
                 createBackup: 'Create Backup',
@@ -4307,6 +4466,11 @@
                 alreadyUpToDate: 'Already up to date!',
                 installUpdate: 'Install Update',
                 updateAvailable: 'Update Available!',
+                newVersionAvailable: 'New Version Available!',
+                updateTo: 'Update to',
+                currentVersion: 'Current version',
+                viewUpdate: 'View Update',
+                later: 'Later',
                 whatsNew: "What's New",
                 breakingChanges: 'Breaking Changes',
                 doNotCloseWindow: 'Please do not close this window...',
@@ -4413,6 +4577,13 @@
                 cancelRollingUpdate: 'Cancel Rolling Update',
                 confirmRollingUpdate: 'Confirm Rolling Update',
                 rollingUpdateWarning: 'All nodes will be updated one by one. VMs will be migrated automatically.',
+                skipUpToDate: 'Skip up-to-date nodes',
+                skipUpToDateHint: 'Nodes without updates will be skipped',
+                advancedOptions: 'Advanced Options',
+                evacuationTimeout: 'Evacuation Timeout',
+                evacuationTimeoutHint: 'How long to wait for VMs to migrate before timeout',
+                hour: 'hour',
+                hours: 'hours',
                 estimatedTime: 'Estimated time',
                 minutes: 'minutes',
                 updateHistory: 'Update History',
@@ -4823,6 +4994,18 @@
                 monitor: 'Monitor',
                 configure: 'Configure',
                 console: 'Console',
+                
+                
+                snapshots: 'Snapshots',
+                snapshotsOverview: 'Snapshot Overview',
+                snapshotsCleanUp: 'Cleanup',
+                snapshotsDesc: 'Overview of the oldest snapshots in this cluster',
+                snapshotsHint: 'Overview of the oldest snapshots over all guests within the cluster.',
+                snapshotsType: 'Type',
+                snapshotsDate: 'Created',
+                snapshotsAge: 'Age',
+                snapshotsAction: 'Action',
+                noSnapshots: 'No snapshots found',
             }
         };
 
@@ -4989,6 +5172,12 @@
                         const userTheme = data.user?.theme;
                         if (userTheme && PEGAPROX_THEMES[userTheme]) {
                             applyTheme(userTheme);
+                        }
+                        // NS: Security warning for default password
+                        if (data.security_warning === 'DEFAULT_PASSWORD') {
+                            setTimeout(() => {
+                                alert('⚠️ SECURITY WARNING!\n\nYou are using the default admin password.\nPlease change it immediately in Settings → Users!');
+                            }, 500);
                         }
                         return { success: true };
                     } else {
@@ -5232,7 +5421,7 @@
                         
                         {/* Footer */}
                         <p className="text-center text-gray-500 text-sm mt-6">
-                            PegaProx Cluster Management v0.6 Beta
+                            PegaProx Cluster Management {PEGAPROX_VERSION}
                         </p>
                     </div>
                 </div>
@@ -5613,6 +5802,12 @@
             Lock: () => (
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+            ),
+            Ban: ({ className }) => (
+                <svg className={className || "w-5 h-5"} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10" strokeWidth={2} />
+                    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" strokeWidth={2} strokeLinecap="round" />
                 </svg>
             ),
             UserX: () => (
@@ -7190,7 +7385,8 @@
                                 </div>
                             </div>
                         )}
-
+                        
+                        
                         {/* Options */}
                         {activeSection === 'options' && (
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
@@ -10503,6 +10699,9 @@
             const [updateStatus, setUpdateStatus] = useState(null);
             const [rollingUpdate, setRollingUpdate] = useState(null);
             const [includeReboot, setIncludeReboot] = useState(true);
+            const [skipUpToDate, setSkipUpToDate] = useState(true);  // MK: Skip nodes without updates
+            const [evacuationTimeout, setEvacuationTimeout] = useState(1800);  // MK: 30 min default
+            const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);  // MK: Toggle for timeouts
             const [showConfirm, setShowConfirm] = useState(false);
             const [expanded, setExpanded] = useState(false);
             const [selectedNode, setSelectedNode] = useState(null);
@@ -10677,7 +10876,11 @@
                         method: 'POST',
                         credentials: 'include',
                         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ include_reboot: includeReboot })
+                        body: JSON.stringify({ 
+                            include_reboot: includeReboot,
+                            skip_up_to_date: skipUpToDate,
+                            evacuation_timeout: evacuationTimeout
+                        })
                     });
                     const data = await response.json();
                     if (data.success) {
@@ -11305,6 +11508,51 @@
                                         <span className="text-white">{t('includeReboot')}</span>
                                         {hasKernelUpdates && <span className="text-xs text-red-400">(Recommended)</span>}
                                     </label>
+                                    
+                                    
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={skipUpToDate}
+                                            onChange={(e) => setSkipUpToDate(e.target.checked)}
+                                            className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark text-proxmox-orange focus:ring-proxmox-orange"
+                                        />
+                                        <span className="text-white">{t('skipUpToDate') || 'Skip up-to-date nodes'}</span>
+                                    </label>
+                                    
+                                    {/* NS: Advanced options toggle */}
+                                    <button
+                                        onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
+                                        className="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1"
+                                    >
+                                        <Icons.ChevronRight className={`w-3 h-3 transition-transform ${showAdvancedOptions ? 'rotate-90' : ''}`} />
+                                        {t('advancedOptions') || 'Advanced Options'}
+                                    </button>
+                                    
+                                    {showAdvancedOptions && (
+                                        <div className="ml-4 space-y-2 p-3 bg-proxmox-dark rounded-lg">
+                                            <div>
+                                                <label className="text-xs text-gray-400 block mb-1">
+                                                    {t('evacuationTimeout') || 'Evacuation Timeout'} ({t('seconds') || 'seconds'})
+                                                </label>
+                                                <select
+                                                    value={evacuationTimeout}
+                                                    onChange={(e) => setEvacuationTimeout(parseInt(e.target.value))}
+                                                    className="w-full bg-proxmox-darker border border-proxmox-border rounded px-3 py-1.5 text-sm text-white"
+                                                >
+                                                    <option value={300}>5 {t('minutes') || 'minutes'}</option>
+                                                    <option value={600}>10 {t('minutes') || 'minutes'}</option>
+                                                    <option value={1200}>20 {t('minutes') || 'minutes'}</option>
+                                                    <option value={1800}>30 {t('minutes') || 'minutes'} ({t('default') || 'default'})</option>
+                                                    <option value={3600}>1 {t('hour') || 'hour'}</option>
+                                                    <option value={7200}>2 {t('hours') || 'hours'}</option>
+                                                </select>
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                    {t('evacuationTimeoutHint') || 'How long to wait for VMs to migrate before timeout'}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                                 
                                 <div className="bg-proxmox-dark rounded-lg p-3 mb-4 text-sm">
@@ -11320,6 +11568,12 @@
                                         <span>{t('estimatedTime')}:</span>
                                         <span className="text-white">~{(updateStatus?.summary?.total_nodes || 1) * (includeReboot ? 10 : 5)} {t('minutes')}</span>
                                     </div>
+                                    {skipUpToDate && (
+                                        <div className="flex justify-between text-gray-400 mt-1">
+                                            <span>{t('note') || 'Note'}:</span>
+                                            <span className="text-green-400 text-xs">{t('skipUpToDateHint') || 'Up-to-date nodes will be skipped'}</span>
+                                        </div>
+                                    )}
                                 </div>
                                 
                                 <div className="flex gap-3 justify-end">
@@ -17092,8 +17346,10 @@
         }
 
         // Migration History Component
-        function MigrationHistory({ logs }) {
+        // LW: Limited to 10 items by default (GitHub Issue - list was too long)
+        function MigrationHistory({ logs, maxItems = 10 }) {
             const { t } = useTranslation();
+            
             if (!logs || logs.length === 0) {
                 return (
                     <div className="text-center py-8 text-gray-500">
@@ -17102,43 +17358,603 @@
                     </div>
                 );
             }
+            
+            // LW: Only show last 10 migrations (newest first)
+            const reversedLogs = logs.slice().reverse();
+            const displayLogs = reversedLogs.slice(0, maxItems);
+            const hiddenCount = reversedLogs.length - maxItems;
 
             return (
-                <div className="relative space-y-4">
-                    <div className="timeline-line" />
-                    {logs.slice().reverse().map((log, idx) => (
-                        <div 
-                            key={idx} 
-                            className="relative pl-12 animate-slide-in"
-                            style={{ animationDelay: `${idx * 100}ms` }}
-                        >
-                            <div className={`absolute left-2 w-6 h-6 rounded-full flex items-center justify-center ${
-                                log.success 
-                                    ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
-                                    : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                            }`}>
-                                {log.success ? <Icons.Check /> : <Icons.X />}
+                <div className="space-y-4">
+                    <div className="relative space-y-4">
+                        <div className="timeline-line" />
+                        {displayLogs.map((log, idx) => (
+                            <div 
+                                key={idx} 
+                                className="relative pl-12 animate-slide-in"
+                                style={{ animationDelay: `${idx * 50}ms` }}
+                            >
+                                <div className={`absolute left-2 w-6 h-6 rounded-full flex items-center justify-center ${
+                                    log.success 
+                                        ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                                        : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                }`}>
+                                    {log.success ? <Icons.Check /> : <Icons.X />}
+                                </div>
+                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className="font-medium text-white">{log.vm}</span>
+                                        {log.dry_run && (
+                                            <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
+                                                Dry Run
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-2 text-sm text-gray-400">
+                                        <span className="font-mono">{log.from_node}</span>
+                                        <Icons.ArrowRight />
+                                        <span className="font-mono">{log.to_node}</span>
+                                    </div>
+                                    <div className="mt-2 text-xs text-gray-500">
+                                        {new Date(log.timestamp).toLocaleString('de-DE')}
+                                    </div>
+                                </div>
                             </div>
-                            <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4">
-                                <div className="flex items-center justify-between mb-2">
-                                    <span className="font-medium text-white">{log.vm}</span>
-                                    {log.dry_run && (
-                                        <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
-                                            Dry Run
-                                        </span>
+                        ))}
+                    </div>
+                    
+                    {/* LW: Show count of hidden older migrations */}
+                    {hiddenCount > 0 && (
+                        <div className="text-center py-2 text-xs text-gray-500">
+                            + {hiddenCount} {t('olderMigrations') || 'older migrations'}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW: All Clusters Overview - GitHub Feature Request #16
+        // added a bunch of stuff here - storage, sparklines, sorting etc
+        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], onSelectCluster, onSelectVm }) {
+            const { t } = useTranslation();
+            const [sortBy, setSortBy] = useState('name');
+            const [sortDir, setSortDir] = useState('asc');
+            const [cpuHistory, setCpuHistory] = useState({});
+            const [ramHistory, setRamHistory] = useState({});
+            
+            // sparkline history
+            useEffect(() => {
+                clusters.forEach(cluster => {
+                    const status = allMetrics[cluster.id]?.data || {};
+                    const cpu = status.resources?.cpu?.percent || 0;
+                    const ram = status.resources?.memory?.percent || 0;
+                    
+                    setCpuHistory(prev => ({
+                        ...prev,
+                        [cluster.id]: [...(prev[cluster.id] || []).slice(-9), cpu]
+                    }));
+                    setRamHistory(prev => ({
+                        ...prev,
+                        [cluster.id]: [...(prev[cluster.id] || []).slice(-9), ram]
+                    }));
+                });
+            }, [allMetrics]);
+            
+            // stats per cluster
+            const clusterStats = clusters.map(cluster => {
+                const status = allMetrics[cluster.id]?.data || {};
+                const lastUpdate = allMetrics[cluster.id]?.lastUpdate;
+                const nodes = status.nodes || {};
+                const guests = status.guests || {};
+                const resources = status.resources || {};
+                
+                const nodeCount = nodes.total || 0;
+                const onlineNodes = nodes.online || 0;
+                const offlineNodes = nodes.offline || 0;
+                const avgCpu = resources.cpu?.percent || 0;
+                const avgMem = resources.memory?.percent || 0;
+                const avgStorage = resources.storage?.percent || 0;
+                
+                const vmsRunning = (guests.vms?.running || 0) + (guests.containers?.running || 0);
+                const vmsStopped = (guests.vms?.stopped || 0) + (guests.containers?.stopped || 0);
+                const totalVms = vmsRunning + vmsStopped;
+                
+                // health score calculation - cpu/ram/storage weighted
+                const healthScore = cluster.connected 
+                    ? Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgStorage * 0.2 + (nodeCount > 0 ? (offlineNodes / nodeCount) * 100 * 0.2 : 0)))
+                    : 0;
+                
+                // Count alerts/warnings
+                const alerts = [];
+                if (!cluster.connected) alerts.push({ type: 'error', msg: 'Offline' });
+                if (offlineNodes > 0) alerts.push({ type: 'warning', msg: `${offlineNodes} node(s) offline` });
+                if (avgCpu > 90) alerts.push({ type: 'error', msg: 'CPU critical' });
+                else if (avgCpu > 80) alerts.push({ type: 'warning', msg: 'CPU high' });
+                if (avgMem > 90) alerts.push({ type: 'error', msg: 'RAM critical' });
+                else if (avgMem > 80) alerts.push({ type: 'warning', msg: 'RAM high' });
+                if (avgStorage > 90) alerts.push({ type: 'error', msg: 'Storage critical' });
+                else if (avgStorage > 80) alerts.push({ type: 'warning', msg: 'Storage high' });
+                
+                return {
+                    ...cluster,
+                    nodeCount, onlineNodes, offlineNodes,
+                    avgCpu, avgMem, avgStorage,
+                    totalVms, runningVms: vmsRunning,
+                    healthScore: Math.round(healthScore),
+                    hasMetrics: nodeCount > 0 || cluster.connected,
+                    lastUpdate,
+                    alerts,
+                    cpuHistory: cpuHistory[cluster.id] || [],
+                    ramHistory: ramHistory[cluster.id] || []
+                };
+            });
+            
+            // sorting
+            const sortedStats = [...clusterStats].sort((a, b) => {
+                let aVal, bVal;
+                switch (sortBy) {
+                    case 'health': aVal = a.healthScore; bVal = b.healthScore; break;
+                    case 'nodes': aVal = a.nodeCount; bVal = b.nodeCount; break;
+                    case 'vms': aVal = a.totalVms; bVal = b.totalVms; break;
+                    case 'cpu': aVal = a.avgCpu; bVal = b.avgCpu; break;
+                    case 'ram': aVal = a.avgMem; bVal = b.avgMem; break;
+                    default: aVal = (a.display_name || a.name).toLowerCase(); bVal = (b.display_name || b.name).toLowerCase();
+                }
+                if (typeof aVal === 'string') return sortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+                return sortDir === 'asc' ? aVal - bVal : bVal - aVal;
+            });
+            
+            // group by cluster group
+            const groupedClusters = {};
+            const ungroupedClusters = [];
+            sortedStats.forEach(cluster => {
+                const group = clusterGroups.find(g => g.id === cluster.group_id);
+                if (group) {
+                    if (!groupedClusters[group.id]) groupedClusters[group.id] = { group, clusters: [] };
+                    groupedClusters[group.id].clusters.push(cluster);
+                } else {
+                    ungroupedClusters.push(cluster);
+                }
+            });
+            
+            // totals for the header cards
+            const totals = {
+                clusters: clusters.length,
+                connectedClusters: clusters.filter(c => c.connected).length,
+                totalNodes: clusterStats.reduce((acc, c) => acc + c.nodeCount, 0),
+                onlineNodes: clusterStats.reduce((acc, c) => acc + c.onlineNodes, 0),
+                totalVms: clusterStats.reduce((acc, c) => acc + c.totalVms, 0),
+                runningVms: clusterStats.reduce((acc, c) => acc + c.runningVms, 0),
+                avgCpu: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgCpu, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
+                avgMem: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgMem, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
+                avgStorage: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgStorage, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
+                totalAlerts: clusterStats.reduce((acc, c) => acc + c.alerts.length, 0)
+            };
+            
+            // MK: sparkline svg - kept it simple
+            const Sparkline = ({ data, color, height = 20, width = 60 }) => {
+                if (!data || data.length < 2) return <div style={{ width, height }} className="bg-proxmox-dark/50 rounded" />;
+                const max = Math.max(...data, 1);
+                const min = Math.min(...data, 0);
+                const range = max - min || 1;
+                const points = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * height}`).join(' ');
+                return (
+                    <svg width={width} height={height} className="overflow-visible">
+                        <polyline fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={points} />
+                        <circle cx={width} cy={height - ((data[data.length - 1] - min) / range) * height} r="2" fill={color} />
+                    </svg>
+                );
+            };
+            
+            // circular progress - reusable
+            const CircularProgress = ({ value, size = 60, strokeWidth = 6, color }) => {
+                const radius = (size - strokeWidth) / 2;
+                const circumference = radius * 2 * Math.PI;
+                const offset = circumference - (value / 100) * circumference;
+                return (
+                    <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
+                        <svg className="transform -rotate-90 overflow-visible" width={size} height={size}>
+                            <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="currentColor" strokeWidth={strokeWidth} className="text-gray-700" />
+                            <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset} className="transition-all duration-500" />
+                        </svg>
+                        <div className="absolute inset-0 flex items-center justify-center">
+                            <span className="text-xs font-bold text-white">{value.toFixed(0)}%</span>
+                        </div>
+                    </div>
+                );
+            };
+            
+            const getHealthColor = (score) => {
+                if (score >= 80) return { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500/30', color: '#22c55e' };
+                if (score >= 60) return { bg: 'bg-yellow-500/20', text: 'text-yellow-400', border: 'border-yellow-500/30', color: '#eab308' };
+                if (score >= 40) return { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/30', color: '#f97316' };
+                return { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30', color: '#ef4444' };
+            };
+            
+            const formatLastUpdate = (date) => {
+                if (!date) return '-';
+                const now = new Date();
+                const diff = Math.floor((now - new Date(date)) / 1000);
+                if (diff < 10) return t('justNow') || 'just now';
+                if (diff < 60) return `${diff}s ago`;
+                if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+                return new Date(date).toLocaleTimeString();
+            };
+            
+            const SortButton = ({ field, label }) => (
+                <button
+                    onClick={() => { setSortBy(field); setSortDir(sortBy === field && sortDir === 'asc' ? 'desc' : 'asc'); }}
+                    className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${sortBy === field ? 'bg-proxmox-orange/20 text-proxmox-orange font-medium' : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'}`}
+                >
+                    {label} {sortBy === field && (sortDir === 'asc' ? '↑' : '↓')}
+                </button>
+            );
+            
+            // cluster card component
+            const ClusterCard = ({ cluster }) => {
+                const healthColors = getHealthColor(cluster.healthScore);
+                const hasAlerts = cluster.alerts.length > 0;
+                const errorCount = cluster.alerts.filter(a => a.type === 'error').length;
+                
+                return (
+                    <div
+                        onClick={() => onSelectCluster(cluster)}
+                        className="group relative bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden cursor-pointer hover:border-proxmox-orange/50 transition-all duration-300 hover:shadow-lg hover:shadow-proxmox-orange/10"
+                    >
+                        <div className={`h-1.5 ${cluster.connected ? 'bg-gradient-to-r from-green-500 via-emerald-500 to-green-500' : 'bg-gradient-to-r from-red-500 via-red-600 to-red-500'}`} />
+                        
+                        <div className="p-5">
+                            {/* Header */}
+                            <div className="flex items-start justify-between mb-4">
+                                <div className="flex items-center gap-3">
+                                    <div className={`relative w-12 h-12 rounded-xl ${cluster.connected ? 'bg-gradient-to-br from-green-500/20 to-emerald-500/20' : 'bg-gradient-to-br from-red-500/20 to-red-600/20'} flex items-center justify-center`}>
+                                        <Icons.Server className={`w-6 h-6 ${cluster.connected ? 'text-green-400' : 'text-red-400'}`} />
+                                        {cluster.connected && <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full border-2 border-proxmox-card animate-pulse" />}
+                                    </div>
+                                    <div>
+                                        <h3 className="font-semibold text-white text-base group-hover:text-proxmox-orange transition-colors">
+                                            {cluster.display_name || cluster.name}
+                                        </h3>
+                                        <p className="text-xs text-gray-500">{cluster.host}</p>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex items-center gap-2">
+                                    {/* Alerts Badge */}
+                                    {hasAlerts && (
+                                        <div className="relative group/alerts">
+                                            <div className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 ${errorCount > 0 ? 'bg-red-500/20 border border-red-500/30' : 'bg-yellow-500/20 border border-yellow-500/30'}`}>
+                                                <Icons.AlertTriangle className={`w-3.5 h-3.5 ${errorCount > 0 ? 'text-red-400' : 'text-yellow-400'}`} />
+                                                <span className={`text-xs font-medium ${errorCount > 0 ? 'text-red-400' : 'text-yellow-400'}`}>{cluster.alerts.length}</span>
+                                            </div>
+                                            {/* tooltip */}
+                                            <div className="absolute right-0 top-full mt-1 z-50 hidden group-hover/alerts:block">
+                                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-2 shadow-xl min-w-[160px]">
+                                                    {cluster.alerts.map((alert, i) => (
+                                                        <div key={i} className={`text-xs py-0.5 ${alert.type === 'error' ? 'text-red-400' : 'text-yellow-400'}`}>
+                                                            • {alert.msg}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    
+                                    {/* Health Badge */}
+                                    {cluster.connected && (
+                                        <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`}>
+                                            <span className={`text-xs font-semibold ${healthColors.text}`}>{cluster.healthScore}%</span>
+                                        </div>
+                                    )}
+                                    {!cluster.connected && (
+                                        <div className="px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/30">
+                                            <span className="text-xs font-semibold text-red-400">Offline</span>
+                                        </div>
                                     )}
                                 </div>
-                                <div className="flex items-center gap-2 text-sm text-gray-400">
-                                    <span className="font-mono">{log.from_node}</span>
-                                    <Icons.ArrowRight />
-                                    <span className="font-mono">{log.to_node}</span>
+                            </div>
+                            
+                            {/* Stats Grid */}
+                            {cluster.hasMetrics ? (
+                                <div className="grid grid-cols-5 gap-3">
+                                    {/* Nodes */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className={`text-xl font-bold ${cluster.onlineNodes === cluster.nodeCount ? 'text-green-400' : 'text-yellow-400'}`}>
+                                            {cluster.onlineNodes}/{cluster.nodeCount}
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('nodes')}</div>
+                                    </div>
+                                    
+                                    {/* CPU */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex flex-col items-center gap-1">
+                                            <CircularProgress value={cluster.avgCpu} size={44} strokeWidth={4} color={cluster.avgCpu > 80 ? '#ef4444' : cluster.avgCpu > 60 ? '#eab308' : '#22c55e'} />
+                                            <Sparkline data={cluster.cpuHistory} color={cluster.avgCpu > 80 ? '#ef4444' : '#22c55e'} height={14} width={40} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">CPU</div>
+                                    </div>
+                                    
+                                    {/* RAM */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex flex-col items-center gap-1">
+                                            <CircularProgress value={cluster.avgMem} size={44} strokeWidth={4} color={cluster.avgMem > 80 ? '#ef4444' : cluster.avgMem > 60 ? '#eab308' : '#3b82f6'} />
+                                            <Sparkline data={cluster.ramHistory} color={cluster.avgMem > 80 ? '#ef4444' : '#3b82f6'} height={14} width={40} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">RAM</div>
+                                    </div>
+                                    
+                                    {/* Storage */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex justify-center">
+                                            <CircularProgress value={cluster.avgStorage} size={44} strokeWidth={4} color={cluster.avgStorage > 80 ? '#ef4444' : cluster.avgStorage > 60 ? '#eab308' : '#8b5cf6'} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('storage') || 'Disk'}</div>
+                                    </div>
+                                    
+                                    {/* VMs */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="text-xl font-bold">
+                                            <span className="text-green-400">{cluster.runningVms}</span>
+                                            <span className="text-gray-500 text-sm">/{cluster.totalVms}</span>
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('vms')}</div>
+                                    </div>
                                 </div>
-                                <div className="mt-2 text-xs text-gray-500">
-                                    {new Date(log.timestamp).toLocaleString('de-DE')}
+                            ) : (
+                                <div className="flex items-center justify-center h-20 text-gray-500 text-sm">
+                                    <Icons.AlertCircle className="w-4 h-4 mr-2" />
+                                    {t('noDataAvailable') || 'No data available'}
+                                </div>
+                            )}
+                            
+                            {/* Footer */}
+                            <div className="mt-4 pt-3 border-t border-proxmox-border/50 flex items-center justify-between">
+                                <span className="text-xs text-gray-500">
+                                    {t('updated') || 'Updated'}: {formatLastUpdate(cluster.lastUpdate)}
+                                </span>
+                                <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+            
+            return (
+                <div className="space-y-6">
+                    {/* Header */}
+                    <div className="relative overflow-hidden bg-gradient-to-r from-proxmox-card via-proxmox-dark to-proxmox-card border border-proxmox-border rounded-2xl p-6">
+                        <div className="absolute inset-0 bg-gradient-to-r from-proxmox-orange/5 via-transparent to-blue-500/5" />
+                        <div className="relative flex items-center justify-between flex-wrap gap-4">
+                            <div className="flex items-center gap-4">
+                                <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-proxmox-orange to-orange-600 flex items-center justify-center shadow-lg shadow-orange-500/20">
+                                    <Icons.Grid className="w-7 h-7 text-white" />
+                                </div>
+                                <div>
+                                    <h1 className="text-2xl font-bold text-white">{t('allClustersOverview') || 'All Clusters Overview'}</h1>
+                                    <p className="text-gray-400 text-sm">{t('multiClusterSummary') || 'Summary of all managed clusters'}</p>
+                                </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-3">
+                                {/* alerts */}
+                                {totals.totalAlerts > 0 && (
+                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                        <Icons.AlertTriangle className="w-4 h-4 text-red-400" />
+                                        <span className="text-sm text-red-400 font-medium">{totals.totalAlerts} {t('alerts') || 'Alerts'}</span>
+                                    </div>
+                                )}
+                                
+                                {/* Live indicator */}
+                                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 border border-green-500/30 rounded-full">
+                                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                    <span className="text-xs text-green-400 font-medium">Live</span>
                                 </div>
                             </div>
                         </div>
+                    </div>
+                    
+                    {/* Stats Grid */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+                        {[
+                            { icon: Icons.Server, value: `${totals.connectedClusters}/${totals.clusters}`, label: t('clusters'), color: 'proxmox-orange', hoverColor: 'proxmox-orange' },
+                            { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline') || 'Nodes', color: 'blue-400', hoverColor: 'blue-500' },
+                            { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning') || 'Running', color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
+                            { icon: Icons.Square, value: totals.totalVms - totals.runningVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
+                        ].map((stat, i) => (
+                            <div key={i} className={`bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-${stat.hoverColor}/30 transition-all group`}>
+                                <div className="flex items-center gap-3">
+                                    <div className={`w-10 h-10 rounded-lg bg-${stat.color}/20 flex items-center justify-center group-hover:scale-110 transition-transform`}>
+                                        <stat.icon className={`w-5 h-5 text-${stat.color}`} />
+                                    </div>
+                                    <div>
+                                        <div className={`text-xl font-bold ${stat.valueColor || 'text-white'}`}>{stat.value}</div>
+                                        <div className="text-xs text-gray-500">{stat.label}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                        
+                        {/* circular gauges */}
+                        {[
+                            { value: totals.avgCpu, label: 'CPU', color: totals.avgCpu > 80 ? '#ef4444' : totals.avgCpu > 60 ? '#eab308' : '#22c55e' },
+                            { value: totals.avgMem, label: 'RAM', color: totals.avgMem > 80 ? '#ef4444' : totals.avgMem > 60 ? '#eab308' : '#3b82f6' },
+                            { value: totals.avgStorage, label: t('storage') || 'Disk', color: totals.avgStorage > 80 ? '#ef4444' : totals.avgStorage > 60 ? '#eab308' : '#8b5cf6' },
+                        ].map((stat, i) => (
+                            <div key={i} className="bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-proxmox-border transition-all">
+                                <div className="flex items-center gap-3">
+                                    <CircularProgress value={stat.value || 0} size={44} strokeWidth={4} color={stat.color} />
+                                    <div>
+                                        <div className="text-sm font-bold text-white">{stat.label}</div>
+                                        <div className="text-xs text-gray-500">{t('average') || 'Avg'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    
+                    {/* Sort Controls */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm text-gray-500 mr-1">{t('sortBy') || 'Sort by'}:</span>
+                            <SortButton field="name" label={t('name') || 'Name'} />
+                            <SortButton field="health" label={t('health') || 'Health'} />
+                            <SortButton field="nodes" label={t('nodes') || 'Nodes'} />
+                            <SortButton field="vms" label="VMs" />
+                            <SortButton field="cpu" label="CPU" />
+                            <SortButton field="ram" label="RAM" />
+                        </div>
+                    </div>
+                    
+                    {/* Grouped Clusters */}
+                    {Object.values(groupedClusters).map(({ group, clusters: groupClusters }) => (
+                        <div key={group.id} className="space-y-4">
+                            <div className="flex items-center gap-3 px-1">
+                                <div className="w-4 h-4 rounded" style={{ backgroundColor: group.color || '#E86F2D' }} />
+                                <h3 className="text-base font-semibold text-white">{group.name}</h3>
+                                <span className="text-sm text-gray-500">({groupClusters.length} {t('clusters')})</span>
+                            </div>
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                {groupClusters.map(cluster => <ClusterCard key={cluster.id} cluster={cluster} />)}
+                            </div>
+                        </div>
                     ))}
+                    
+                    {/* Ungrouped Clusters */}
+                    {ungroupedClusters.length > 0 && (
+                        <div className="space-y-4">
+                            {Object.keys(groupedClusters).length > 0 && (
+                                <div className="flex items-center gap-3 px-1">
+                                    <Icons.Folder className="w-4 h-4 text-gray-500" />
+                                    <h3 className="text-base font-semibold text-white">{t('ungrouped') || 'Ungrouped'}</h3>
+                                    <span className="text-sm text-gray-500">({ungroupedClusters.length})</span>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                {ungroupedClusters.map(cluster => <ClusterCard key={cluster.id} cluster={cluster} />)}
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* top vms table */}
+                    {topGuests.length > 0 && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                            <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                                        <Icons.Activity className="w-5 h-5 text-cyan-400" />
+                                    </div>
+                                    <div>
+                                        <h3 className="font-semibold text-white">{t('topResources') || 'Top Resources'}</h3>
+                                        <p className="text-xs text-gray-500">{t('highestCpuUsage') || 'Highest CPU and RAM usage across all clusters'}</p>
+                                    </div>
+                                </div>
+                                <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">Top 10</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead className="bg-proxmox-dark/50">
+                                        <tr className="text-left text-xs text-gray-400">
+                                            <th className="px-4 py-3 font-medium">{t('type')}</th>
+                                            <th className="px-4 py-3 font-medium">{t('name')}</th>
+                                            <th className="px-4 py-3 font-medium">{t('cluster')}</th>
+                                            <th className="px-4 py-3 font-medium">{t('node')}</th>
+                                            <th className="px-4 py-3 font-medium">CPU</th>
+                                            <th className="px-4 py-3 font-medium">RAM</th>
+                                            <th className="px-4 py-3 font-medium">{t('status')}</th>
+                                            <th className="px-4 py-3 w-10"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-proxmox-border/50">
+                                        {topGuests.map((guest, idx) => {
+                                            const cpuPercent = ((guest.cpu || 0) * 100).toFixed(1);
+                                            const memPercent = guest.maxmem > 0 ? ((guest.mem / guest.maxmem) * 100).toFixed(1) : 0;
+                                            const isVM = guest.type === 'qemu';
+                                            const guestCluster = clusters.find(c => c.id === guest.cluster_id);
+                                            
+                                            return (
+                                                <tr 
+                                                    key={`${guest.cluster_id}-${guest.vmid}`} 
+                                                    className="hover:bg-proxmox-hover/50 transition-colors cursor-pointer group"
+                                                    onClick={() => {
+                                                        if (guestCluster && onSelectVm) {
+                                                            onSelectVm(guestCluster, guest.vmid, guest.node);
+                                                        }
+                                                    }}
+                                                    title={t('clickToOpenVm') || 'Click to open VM'}
+                                                >
+                                                    <td className="px-4 py-3">
+                                                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isVM ? 'bg-blue-500/20' : 'bg-purple-500/20'}`}>
+                                                            {isVM ? (
+                                                                <Icons.Monitor className="w-4 h-4 text-blue-400" />
+                                                            ) : (
+                                                                <Icons.Layers className="w-4 h-4 text-purple-400" />
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="font-medium text-white group-hover:text-proxmox-orange transition-colors">{guest.name || `VM ${guest.vmid}`}</div>
+                                                        <div className="text-xs text-gray-500">ID: {guest.vmid}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className="text-sm text-gray-300">{guest.cluster_name}</span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className="text-sm text-gray-400">{guest.node}</span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                <div 
+                                                                    className={`h-full rounded-full transition-all ${cpuPercent > 80 ? 'bg-red-500' : cpuPercent > 60 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                                                    style={{ width: `${Math.min(cpuPercent, 100)}%` }}
+                                                                />
+                                                            </div>
+                                                            <span className={`text-xs font-medium ${cpuPercent > 80 ? 'text-red-400' : cpuPercent > 60 ? 'text-yellow-400' : 'text-green-400'}`}>
+                                                                {cpuPercent}%
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                <div 
+                                                                    className={`h-full rounded-full transition-all ${memPercent > 80 ? 'bg-red-500' : memPercent > 60 ? 'bg-yellow-500' : 'bg-blue-500'}`}
+                                                                    style={{ width: `${Math.min(memPercent, 100)}%` }}
+                                                                />
+                                                            </div>
+                                                            <span className="text-xs text-gray-400">{memPercent}%</span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${
+                                                            guest.status === 'running' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+                                                        }`}>
+                                                            <div className={`w-1.5 h-1.5 rounded-full ${guest.status === 'running' ? 'bg-green-400' : 'bg-gray-400'}`} />
+                                                            {guest.status === 'running' ? t('running') : t('stopped')}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Empty State */}
+                    {clusters.length === 0 && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-12 text-center">
+                            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-proxmox-orange/20 to-orange-600/20 flex items-center justify-center">
+                                <Icons.Server className="w-8 h-8 text-proxmox-orange" />
+                            </div>
+                            <h3 className="text-lg font-semibold text-white mb-2">{t('noClustersConfigured') || 'No clusters configured'}</h3>
+                            <p className="text-gray-500 text-sm">{t('addClusterToStart') || 'Add a cluster to get started'}</p>
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -20791,7 +21607,7 @@
                             document.head.appendChild(link);
                         }
 
-                        // Load xterm.js - try local first
+                        // Load xterm.js - try local first, with SRI for CDN
                         if (!window.Terminal) {
                             await new Promise((resolve, reject) => {
                                 const script = document.createElement('script');
@@ -20799,6 +21615,10 @@
                                 script.onload = resolve;
                                 script.onerror = () => {
                                     script.src = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js';
+                                    if (SRI_HASHES['xterm@5.3.0']) {
+                                        script.integrity = SRI_HASHES['xterm@5.3.0'];
+                                        script.crossOrigin = 'anonymous';
+                                    }
                                     script.onload = resolve;
                                     script.onerror = reject;
                                 };
@@ -20814,6 +21634,10 @@
                                 script.onload = resolve;
                                 script.onerror = () => {
                                     script.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js';
+                                    if (SRI_HASHES['xterm-addon-fit@0.8.0']) {
+                                        script.integrity = SRI_HASHES['xterm-addon-fit@0.8.0'];
+                                        script.crossOrigin = 'anonymous';
+                                    }
                                     script.onload = resolve;
                                     script.onerror = reject;
                                 };
@@ -24501,19 +25325,39 @@
                                         onChange={e => setConfig({...config, user: e.target.value})}
                                         required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
+                                        placeholder="root@pam or user@pam!tokenid"
                                     />
+                                    <p className="mt-1 text-xs text-gray-500">{t('apiTokenHint') || 'For API tokens use: user@realm!tokenid'}</p>
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('passwordOrToken') || t('password')}</label>
                                     <input
                                         type="password"
                                         value={config.pass}
                                         onChange={e => setConfig({...config, pass: e.target.value})}
                                         required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
+                                        placeholder={config.user.includes('!') ? 'Token Secret' : 'Password'}
                                     />
                                 </div>
                             </div>
+                            
+                            {/* LW: API Token Warning */}
+                            {config.user.includes('!') && (
+                                <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                    <div className="flex items-start gap-3">
+                                        <span className="text-yellow-400 text-xl">⚠️</span>
+                                        <div>
+                                            <p className="font-medium text-yellow-200">
+                                                {t('apiTokenWarningTitle') || 'API Token Authentication'}
+                                            </p>
+                                            <p className="text-sm text-yellow-300/80 mt-1">
+                                                {t('apiTokenWarningDesc') || 'Using API tokens is supported but not all features will work correctly. Features requiring SSH access (SMBIOS Auto-Config, Rolling Updates, 2-Node HA, Node Shell) need password authentication. PegaProx recommends using a dedicated privileged user or root with password for full functionality.'}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* SSH Key (Optional) */}
                             <div className="pt-4 border-t border-proxmox-border">
@@ -25109,6 +25953,11 @@
             const [editingRole, setEditingRole] = useState(null);
             const [selectedTenantForPerms, setSelectedTenantForPerms] = useState('');  // for per-tenant user perms
             
+            
+            const [filterDate, setFilterDate] = useState('');
+            const [snapshotsSubTab, setSnapshotsTab] = useState('overview');
+            const [snapshots, setSnapshots] = useState([]);
+            
             // Server settings state
             const [serverSettings, setServerSettings] = useState({
                 domain: '',
@@ -25172,6 +26021,16 @@
                     fetchTemplates();
                 }
             }, [isOpen]);
+            
+            // MK: Listen for navigate-to-updates event from update notification modal
+            useEffect(() => {
+                const handleNavigateUpdates = () => {
+                    setActiveTab('updates');
+                    checkForUpdates();
+                };
+                window.addEventListener('pegaprox-navigate-updates', handleNavigateUpdates);
+                return () => window.removeEventListener('pegaprox-navigate-updates', handleNavigateUpdates);
+            }, []);
             
             // fetch tenants - NS
             // LW: added error logging after it silently failed once during testing
@@ -25790,6 +26649,52 @@
                 }
             };
             
+            
+            const fetchSnapshots = async (body = null) => {
+                try {
+                    const res = await fetch(`${API_URL}/snapshots/overview`, {
+                        method: body ? 'POST' : 'GET',
+                        headers: body ? { 'Content-Type': 'application/json', ...getAuthHeaders() } : getAuthHeaders(),
+                        credentials: 'include',
+                        body: body ? JSON.stringify(body) : undefined
+                    });
+                    if (!res.ok) {
+                        throw new Error(`HTTP ${res.status}`);
+                    }
+                    const data = await res.json();
+                    setSnapshots(data.snapshots ?? data ?? []);
+                } catch (err) {
+                    console.error('Snapshot fetch failed:', err);
+                    setSnapshots([]);
+                }
+            };
+            
+            const applySnapshotFilter = async () => {
+                await fetchSnapshots({
+                    date: filterDate,
+                    tab: snapshotsSubTab
+                });
+            };
+            
+            const deleteSnapshot = async (snap) => {
+                if (!window.confirm(`Delete snapshot "${snap.snapshot_name}" from VM ${snap.vmid}?`)) {
+                    return;
+                }
+                try {
+                    await fetch(`${API_URL}/snapshots/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                        credentials: 'include',
+                        body: JSON.stringify({ snapshots: [snap] })
+                    });
+                    addToast('Snapshot deleted', 'success');
+                    await fetchSnapshots(filterDate ? { date: filterDate, tab: snapshotsSubTab } : null);
+                } catch (err) {
+                    console.error('Snapshot delete failed:', err);
+                    addToast('Failed to delete snapshot', 'error');
+                }
+            };
+            
             const handleResetPassword = async (username) => {
                 if (!newPasswordValue || newPasswordValue.length < 4) {
                     addToast(t('passwordTooShort'), 'error');
@@ -25876,6 +26781,7 @@
                 try {
                     const response = await fetch(`${API_URL}/users/${username}`, {
                         method: 'PUT',
+                        credentials: 'include',
                         headers: {
                             'Content-Type': 'application/json',
                             ...getAuthHeaders()
@@ -25894,6 +26800,7 @@
                         addToast(data.error || 'Error updating user', 'error');
                     }
                 } catch (err) {
+                    console.error('Error updating user:', err);
                     addToast('Error updating user', 'error');
                 }
             };
@@ -26014,7 +26921,7 @@
                                 </div>
                                 <div>
                                     <h2 className="text-xl font-bold text-white">{t('pegaproxSettings')}</h2>
-                                    <p className="text-sm text-gray-400">PegaProx Beta 0.6</p>
+                                    <p className="text-sm text-gray-400">PegaProx {PEGAPROX_VERSION}</p>
                                 </div>
                             </div>
                             <button onClick={onClose} className="p-2 rounded-lg hover:bg-proxmox-dark text-gray-400 hover:text-white">
@@ -28165,7 +29072,7 @@
                                                 </h3>
                                                 <div className="mt-2 space-y-1">
                                                     <p className="text-2xl font-bold text-proxmox-orange">
-                                                        PegaProx {updateInfo?.current_version || 'Beta 0.6'}
+                                                        PegaProx {updateInfo?.current_version || PEGAPROX_VERSION}
                                                     </p>
                                                     <p className="text-sm text-gray-400">
                                                         Build: {updateInfo?.current_build || '2026.01'}
@@ -28375,7 +29282,7 @@
                                             <img src="/images/pegaprox.png" alt="PegaProx" className="w-20 h-20 object-contain" />
                                         </div>
                                         <h2 className="text-3xl font-bold text-white">PegaProx</h2>
-                                        <p className="text-xl text-proxmox-orange mt-1">Version 0.6 Beta</p>
+                                        <p className="text-xl text-proxmox-orange mt-1">{PEGAPROX_VERSION}</p>
                                         <p className="text-sm text-gray-400 mt-2">Multi-Cluster Proxmox Management</p>
                                         <p className="text-xs text-gray-500 mt-1">Build 2026.01 • © 2025-2026 PegaProx Team</p>
                                     </div>
@@ -28438,6 +29345,32 @@
                                                         >
                                                             <Icons.Github className="w-4 h-4" />
                                                             github.com/gyptazy/ProxLB
+                                                            <Icons.ExternalLink className="w-3 h-3" />
+                                                        </a>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            
+                                            {/* ProxSnap Credit */}
+                                            <div className="bg-proxmox-darker rounded-lg p-4">
+                                                <div className="flex items-start gap-4">
+                                                    <div className="w-12 h-12 rounded-lg bg-blue-500/20 flex items-center justify-center flex-shrink-0">
+                                                        <Icons.Camera />
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="font-medium text-white">ProxSnap by gyptazy</h4>
+                                                        <p className="text-sm text-gray-400 mt-1">
+                                                            The snapshot overview feature was inspired by ProxSnap - a powerful CLI tool 
+                                                            for managing Proxmox snapshots. Thanks to gyptazy for the great contribution!
+                                                        </p>
+                                                        <a 
+                                                            href="https://github.com/gyptazy/ProxSnap" 
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="inline-flex items-center gap-1 text-sm text-proxmox-orange hover:underline mt-2"
+                                                        >
+                                                            <Icons.Github className="w-4 h-4" />
+                                                            github.com/gyptazy/ProxSnap
                                                             <Icons.ExternalLink className="w-3 h-3" />
                                                         </a>
                                                     </div>
@@ -28869,7 +29802,7 @@
                                                     >
                                                         <td className="px-4 py-2">
                                                             <span className={`inline-block w-2 h-2 rounded-full ${
-                                                                isRunning ? 'bg-blue-500' :
+                                                                isRunning ? 'bg-blue-500 animate-pulse' :
                                                                 isFailed ? 'bg-red-500' :
                                                                 'bg-green-500'
                                                             }`} />
@@ -29071,6 +30004,8 @@
             const [showAssignGroup, setShowAssignGroup] = useState(null); // Cluster to assign to group
             const [selectedCluster, setSelectedCluster] = useState(null);
             const [clusterMetrics, setClusterMetrics] = useState({});
+            const [allClusterMetrics, setAllClusterMetrics] = useState({}); // LW: metrics cache for overview page
+            const [topGuests, setTopGuests] = useState([]); // top vms for overview table
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
             const [lastUpdate, setLastUpdate] = useState(null);
@@ -29082,11 +30017,14 @@
             const [error, setError] = useState(null);
             const [toasts, setToasts] = useState([]);
             const [activeTab, setActiveTab] = useState('overview');
+            const [resourcesSubTab, setResourcesSubTab] = useState('management'); 
             const [showUserMenu, setShowUserMenu] = useState(false);
             const [showSettings, setShowSettings] = useState(false);
             const [showProfile, setShowProfile] = useState(false);
             const [wsConnected, setWsConnected] = useState(false);
             const [tasks, setTasks] = useState([]);
+            const [showUpdateNotification, setShowUpdateNotification] = useState(false); // LW: Show update modal on login
+            const [pendingUpdate, setPendingUpdate] = useState(null); // LW: Store update info for notification
             
             // NS: Task update timestamp to prevent race conditions
             // This was causing tasks to "jump back" when SSE and polling raced
@@ -29139,6 +30077,12 @@
             const [clusterTags, setClusterTags] = useState([]);  // available tags in current cluster
             const [showTagEditor, setShowTagEditor] = useState(null);  // {clusterId, vmid, vmName}
             const [newTagName, setNewTagName] = useState('');
+            
+            
+            const [snapshotFilterDate, setSnapshotFilterDate] = useState('');
+            const [globalSnapshots, setGlobalSnapshots] = useState([]);
+            const [snapshotSortBy, setSnapshotSortBy] = useState('age'); // vmid, vm_name, node, snapshot_name, snapshot_date, age
+            const [snapshotSortDir, setSnapshotSortDir] = useState('desc');
             
             // MK: Scheduled Actions state
             const [schedules, setSchedules] = useState([]);
@@ -29382,6 +30326,96 @@
             // Get tags for a VM (from local state)
             const getVmTags = (clusterId, vmid) => {
                 return vmTags[clusterId]?.[vmid] || [];
+            };
+            
+            // ============================================
+              
+            // LW: Added cluster filter and sorting
+            // ============================================
+            
+            const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {
+                try {
+                    const body = {};
+                    if (clusterId) body.cluster_id = clusterId;
+                    if (filterDate) body.date = filterDate;
+                    
+                    const res = await authFetch(`${API_URL}/snapshots/overview`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    if (res && res.ok) {
+                        const data = await res.json();
+                        setGlobalSnapshots(data.snapshots ?? data ?? []);
+                    } else {
+                        setGlobalSnapshots([]);
+                    }
+                } catch (err) {
+                    console.error('Snapshot fetch failed:', err);
+                    setGlobalSnapshots([]);
+                }
+            };
+            
+            const applySnapshotFilter = async (clusterId) => {
+                await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
+            };
+            
+            const deleteGlobalSnapshot = async (snap, clusterId) => {
+                if (!window.confirm(`Delete snapshot "${snap.snapshot_name}" from VM ${snap.vmid}?`)) {
+                    return;
+                }
+                try {
+                    await authFetch(`${API_URL}/snapshots/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ snapshots: [snap] })
+                    });
+                    addToast('Snapshot deleted', 'success');
+                    await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
+                } catch (err) {
+                    console.error('Snapshot delete failed:', err);
+                    addToast('Failed to delete snapshot', 'error')
+                }
+            };
+            
+            
+            const sortedSnapshots = useMemo(() => {
+                if (!globalSnapshots || globalSnapshots.length === 0) return [];
+                
+                return [...globalSnapshots].sort((a, b) => {
+                    let aVal = a[snapshotSortBy];
+                    let bVal = b[snapshotSortBy];
+                    
+                    // Handle age specially - extract number
+                    if (snapshotSortBy === 'age') {
+                        const extractNum = (val) => {
+                            if (!val) return 0;
+                            const match = val.match(/(\d+)/);
+                            return match ? parseInt(match[1]) : 0;
+                        };
+                        aVal = extractNum(aVal);
+                        bVal = extractNum(bVal);
+                    }
+                    
+                    // Handle numeric fields
+                    if (snapshotSortBy === 'vmid') {
+                        aVal = parseInt(aVal) || 0;
+                        bVal = parseInt(bVal) || 0;
+                    }
+                    
+                    if (aVal < bVal) return snapshotSortDir === 'asc' ? -1 : 1;
+                    if (aVal > bVal) return snapshotSortDir === 'asc' ? 1 : -1;
+                    return 0;
+                });
+            }, [globalSnapshots, snapshotSortBy, snapshotSortDir]);
+            
+            const toggleSnapshotSort = (field) => {
+                if (snapshotSortBy === field) {
+                    setSnapshotSortDir(snapshotSortDir === 'asc' ? 'desc' : 'asc');
+                } else {
+                    setSnapshotSortBy(field);
+                    setSnapshotSortDir('asc');
+                }
             };
             
             // ============================================
@@ -29695,7 +30729,7 @@
                         });
                         
                         // update nodeAlerts based on HA status
-                        // NS: Include cluster_id to filter correctly!
+                        // LW: Include cluster_id to filter correctly!
                         if (data.nodes && clusterId) {
                             const newAlerts = { ...nodeAlerts };
                             Object.entries(data.nodes).forEach(([nodeName, nodeData]) => {
@@ -29900,21 +30934,61 @@
                 let reconnectTimeout = null;
                 let reconnectAttempts = 0;
                 let isClosing = false;
+                let sseToken = null;
+                let tokenRefreshInterval = null;
                 
-                const connectSSE = () => {
+                // Get SSE token (more secure than session ID in URL)
+                const getSseToken = async () => {
+                    try {
+                        const resp = await authFetch(`${API_URL}/sse/token`, { method: 'POST' });
+                        if (resp && resp.ok) {
+                            const data = await resp.json();
+                            sseToken = data.token;
+                            console.log('SSE token obtained (expires in', data.expires_in, 's)');
+                            return true;
+                        }
+                    } catch (e) {
+                        console.warn('Failed to get SSE token, falling back to session:', e);
+                    }
+                    return false;
+                };
+                
+                const connectSSE = async () => {
                     if (isClosing) return;
                     
                     console.log('Connecting to SSE...');
                     
-                    // SSE with session as query param (EventSource can't reliably send headers)
-                    // MK: Also using withCredentials for cookie support as backup
-                    const sseUrl = `${API_URL}/sse/updates?session=${encodeURIComponent(sessionId)}`;
+                    // Try to get SSE token first (preferred - doesn't expose session in logs)
+                    await getSseToken();
+                    
+                    // Use token if available, otherwise fall back to session
+                    let sseUrl;
+                    if (sseToken) {
+                        sseUrl = `${API_URL}/sse/updates?token=${encodeURIComponent(sseToken)}`;
+                    } else {
+                        // Fallback to session (legacy, less secure)
+                        console.warn('SSE: Using session ID (token unavailable)');
+                        sseUrl = `${API_URL}/sse/updates?session=${encodeURIComponent(sessionId)}`;
+                    }
+                    
                     eventSource = new EventSource(sseUrl, { withCredentials: true });
                     
                     eventSource.onopen = () => {
                         console.log('SSE connected');
                         reconnectAttempts = 0;
                         setWsConnected(true);
+                        
+                        // Refresh token every 4 minutes (token valid for 5 min)
+                        if (tokenRefreshInterval) clearInterval(tokenRefreshInterval);
+                        tokenRefreshInterval = setInterval(async () => {
+                            const newToken = await getSseToken();
+                            if (newToken && eventSource) {
+                                // Reconnect with new token
+                                console.log('SSE: Refreshing token...');
+                                eventSource.close();
+                                connectSSE();
+                            }
+                        }, 4 * 60 * 1000);
                     };
                     
                     eventSource.onmessage = (event) => {
@@ -29964,7 +31038,8 @@
                                     }
                                 }
                             } else if (data.type === 'metrics') {
-                                // NS: ONLY process metrics for the currently selected cluster
+                                // Only update detailed clusterMetrics for the selected cluster
+                                // LW: allClusterMetrics is updated via fetchClusters using datacenter/status API
                                 if (currentCluster && data.cluster_id === currentCluster.id) {
                                     setClusterMetrics(data.data);
                                     setLastUpdate(new Date());
@@ -30059,6 +31134,7 @@
                 return () => {
                     isClosing = true;
                     if (reconnectTimeout) clearTimeout(reconnectTimeout);
+                    if (tokenRefreshInterval) clearInterval(tokenRefreshInterval);
                     if (eventSource) eventSource.close();
                 };
             }, [user, sessionId]);  // React to both user and sessionId changes
@@ -30079,6 +31155,33 @@
                 const interval = setInterval(fetchClusters, 30000);
                 return () => clearInterval(interval);
             }, []);
+            
+            // LW: Check for updates on login (admins only)
+            useEffect(() => {
+                if (!isAdmin) return;
+                
+                const checkForUpdate = async () => {
+                    try {
+                        const resp = await fetch(`${API_URL}/pegaprox/check-update`, {
+                            credentials: 'include',
+                            headers: getAuthHeaders()
+                        });
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            if (data.update_available) {
+                                setPendingUpdate(data);
+                                setShowUpdateNotification(true);
+                            }
+                        }
+                    } catch (e) {
+                        console.log('Update check failed:', e);
+                    }
+                };
+                
+                // Delay check slightly to let UI settle
+                const timer = setTimeout(checkForUpdate, 2000);
+                return () => clearTimeout(timer);
+            }, [isAdmin]);
 
             useEffect(() => {
                 // Reset data when switching clusters to avoid showing old data
@@ -30088,6 +31191,11 @@
                 setTasks([]);
                 setKnownNodes({}); // NS: Clear known nodes when switching clusters
                 setNodeAlerts({}); // Also clear node alerts
+                setGlobalSnapshots([]); 
+                setResourcesSubTab('management');
+                setSnapshotFilterDate(''); 
+                setSnapshotSortBy('age'); 
+                setSnapshotSortDir('desc');
                 
                 if (selectedCluster) {
                     // Fetch new data
@@ -30134,6 +31242,51 @@
                             const updated = data.find(c => c.id === selectedCluster.id);
                             if (updated) setSelectedCluster(updated);
                         }
+                        
+                        // fetch status for all clusters (overview)
+                        const connectedClusters = data.filter(c => c.connected);
+                        const allGuests = [];
+                        
+                        for (const cluster of connectedClusters) {
+                            try {
+                                // datacenter status
+                                const statusResp = await authFetch(`${API_URL}/clusters/${cluster.id}/datacenter/status`);
+                                if (statusResp && statusResp.ok) {
+                                    const statusData = await statusResp.json();
+                                    setAllClusterMetrics(prev => ({
+                                        ...prev,
+                                        [cluster.id]: {
+                                            data: statusData,
+                                            lastUpdate: new Date()
+                                        }
+                                    }));
+                                }
+                                
+                                // get vms/cts for the top guests table
+                                const resourcesResp = await authFetch(`${API_URL}/clusters/${cluster.id}/resources`);
+                                if (resourcesResp && resourcesResp.ok) {
+                                    const resources = await resourcesResp.json();
+                                    resources.filter(r => r.type === 'qemu' || r.type === 'lxc').forEach(r => {
+                                        allGuests.push({
+                                            ...r,
+                                            cluster_id: cluster.id,
+                                            cluster_name: cluster.display_name || cluster.name
+                                        });
+                                    });
+                                }
+                            } catch (e) {
+                                console.log(`Failed to fetch data for cluster ${cluster.id}:`, e);
+                            }
+                        }
+                        
+                        // sort by combined cpu+ram usage
+                        const runningGuests = allGuests.filter(g => g.status === 'running');
+                        runningGuests.sort((a, b) => {
+                            const aScore = ((a.cpu || 0) * 100) + (a.maxmem > 0 ? (a.mem / a.maxmem) * 100 : 0);
+                            const bScore = ((b.cpu || 0) * 100) + (b.maxmem > 0 ? (b.mem / b.maxmem) * 100 : 0);
+                            return bScore - aScore;
+                        });
+                        setTopGuests(runningGuests.slice(0, 10));
                     }
                 } catch (error) {
                     console.error('fetching clusters:', error);
@@ -30460,6 +31613,28 @@
             const handleVmAction = async (resource, action) => {
                 if (!selectedCluster) return;
                 
+                // NS: Optimistic UI update - show expected status immediately
+                // This makes the UI feel much snappier while we wait for Proxmox
+                const expectedStatus = {
+                    'start': 'running',
+                    'stop': 'stopped',
+                    'shutdown': 'stopped',
+                    'reboot': 'running',
+                    'reset': 'running',
+                    'suspend': 'suspended',
+                    'resume': 'running'
+                };
+                
+                if (expectedStatus[action]) {
+                    setClusterResources(prev => 
+                        prev.map(r => 
+                            r.vmid === resource.vmid && r.node === resource.node 
+                                ? { ...r, status: expectedStatus[action], _optimistic: true }
+                                : r
+                        )
+                    );
+                }
+                
                 try {
                     const response = await fetch(
                         `${API_URL}/clusters/${selectedCluster.id}/vms/${resource.node}/${resource.type}/${resource.vmid}/${action}`,
@@ -30468,14 +31643,18 @@
                     
                     if (response && response.ok) {
                         addToast(`${action} ${t('successful') || 'successful'}: ${resource.name || resource.vmid}`);
-                        // Refresh resources after a short delay
+                        // SSE will push the real status update, but fetch as backup
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 2000);
                     } else {
                         const err = await response.json();
                         addToast(err.error || `${action} ${t('actionFailed')}`, 'error');
+                        // Revert optimistic update on error
+                        fetchClusterResources(selectedCluster.id);
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
+                    // Revert optimistic update on error
+                    fetchClusterResources(selectedCluster.id);
                 }
             };
 
@@ -30753,7 +31932,12 @@
                     <header className="sticky top-0 z-30 border-b border-proxmox-border bg-proxmox-dark/80 backdrop-blur-xl">
                         <div className="max-w-[1600px] mx-auto px-6 py-4">
                             <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-4">
+                                {/* MK: Click logo to return to All Clusters Overview */}
+                                <button 
+                                    onClick={() => setSelectedCluster(null)}
+                                    className="flex items-center gap-4 hover:opacity-80 transition-opacity"
+                                    title={t('allClustersOverview') || 'All Clusters Overview'}
+                                >
                                     {/* PegaProx Logo */}
                                     <img 
                                         src="/images/pegaprox.png" 
@@ -30771,11 +31955,11 @@
                                             <path d="M12 2C9.5 2 7 3.5 6 6c-1.5 0-3 1-3 3 0 1.5 1 2.5 2 3l1 6c0 1 1 2 2 2h8c1 0 2-1 2-2l1-6c1-.5 2-1.5 2-3 0-2-1.5-3-3-3-1-2.5-3.5-4-6-4zm0 2c2 0 3.5 1 4 3H8c.5-2 2-3 4-3zM5 9h14c.5 0 1 .5 1 1s-.5 1.5-1 2l-1 5H6l-1-5c-.5-.5-1-1-1-2s.5-1 1-1zm7 1a2 2 0 100 4 2 2 0 000-4z"/>
                                         </svg>
                                     </div>
-                                    <div>
+                                    <div className="text-left">
                                         <h1 className="text-xl font-bold">PegaProx</h1>
                                         <p className="text-xs text-gray-500">{t('clusterManagement')}</p>
                                     </div>
-                                </div>
+                                </button>
                                 <div className="flex items-center gap-3">
                                     {/* NS: Global Search - Jan 2026 */}
                                     <div className="relative">
@@ -31066,6 +32250,29 @@
                                         </div>
                                     ) : (
                                         <div className="space-y-3">
+                                            {/* MK: overview button */}
+                                            <button
+                                                onClick={() => setSelectedCluster(null)}
+                                                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
+                                                    !selectedCluster 
+                                                        ? 'bg-gradient-to-r from-proxmox-orange/20 to-orange-600/10 border border-proxmox-orange/30 text-white' 
+                                                        : 'bg-proxmox-card border border-proxmox-border hover:border-proxmox-orange/30 text-gray-300 hover:text-white'
+                                                }`}
+                                            >
+                                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                                                    !selectedCluster ? 'bg-proxmox-orange/20' : 'bg-proxmox-dark'
+                                                }`}>
+                                                    <Icons.Grid className="w-4 h-4" />
+                                                </div>
+                                                <div className="flex-1 text-left">
+                                                    <div className="text-sm font-medium">{t('allClusters') || 'All Clusters'}</div>
+                                                    <div className="text-xs text-gray-500">{clusters.length} {t('clusters').toLowerCase()}</div>
+                                                </div>
+                                                {!selectedCluster && (
+                                                    <div className="w-2 h-2 rounded-full bg-proxmox-orange" />
+                                                )}
+                                            </button>
+                                            
                                             {/* Grouped Clusters */}
                                             {clusterGroups.map(group => {
                                                 const groupClusters = clusters.filter(c => c.group_id === group.id);
@@ -31346,51 +32553,211 @@
 
                                         {/* Resources Tab */}
                                         {activeTab === 'resources' && (
-                                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
-                                                <ResourceTable 
-                                                    resources={clusterResources} 
-                                                    clusterId={selectedCluster.id}
-                                                    clusters={clusters}
-                                                    sourceCluster={selectedCluster}
-                                                    onVmAction={handleVmAction}
-                                                    onOpenConsole={handleOpenConsole}
-                                                    onOpenConfig={handleOpenConfig}
-                                                    onMigrate={handleMigrate}
-                                                    onBulkMigrate={handleBulkMigrate}
-                                                    onDelete={handleDeleteVm}
-                                                    onClone={handleCloneVm}
-                                                    onForceStop={handleForceStop}
-                                                    onCrossClusterMigrate={handleCrossClusterMigrate}
-                                                    nodes={Object.keys(clusterMetrics)}
-                                                    onOpenTags={(resource) => {
-                                                        loadVmTags(selectedCluster.id, resource.vmid);
-                                                        loadClusterTags(selectedCluster.id);
-                                                        setShowTagEditor({ 
-                                                            clusterId: selectedCluster.id, 
-                                                            vmid: resource.vmid, 
-                                                            vmName: resource.name || `VM ${resource.vmid}` 
-                                                        });
-                                                    }}
-                                                    highlightedVm={highlightedVm}
-                                                />
-                                                
-                                                {/* Create VM/CT Buttons */}
-                                                <div className="flex gap-3 mt-4">
+                                            <div className="space-y-4">
+                                                {/* Sub-Tab Navigation */}
+                                                <div className="flex items-center gap-1 border-b border-proxmox-border pb-2">
                                                     <button
-                                                        onClick={() => setShowCreateVm('qemu')}
-                                                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors"
+                                                        onClick={() => setResourcesSubTab('management')}
+                                                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-colors ${
+                                                            resourcesSubTab === 'management'
+                                                                ? 'bg-proxmox-orange text-white'
+                                                                : 'text-gray-400 hover:text-white hover:bg-proxmox-hover'
+                                                        }`}
                                                     >
-                                                        <Icons.Plus />
-                                                        {t('createVm')}
+                                                        <Icons.Server className="w-4 h-4" />
+                                                        {t('resourcesLabel') || 'Resources'}
                                                     </button>
                                                     <button
-                                                        onClick={() => setShowCreateVm('lxc')}
-                                                        className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors"
+                                                        onClick={() => { setResourcesSubTab('snapshots'); fetchGlobalSnapshots(selectedCluster.id); }}
+                                                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-colors ${
+                                                            resourcesSubTab === 'snapshots'
+                                                                ? 'bg-proxmox-orange text-white'
+                                                                : 'text-gray-400 hover:text-white hover:bg-proxmox-hover'
+                                                        }`}
                                                     >
-                                                        <Icons.Plus />
-                                                        {t('createContainer')}
+                                                        <Icons.Camera className="w-4 h-4" />
+                                                        {t('snapshotsOverview') || 'Snapshot Overview'}
                                                     </button>
                                                 </div>
+                                                
+                                                {/* Resources Management Sub-Tab */}
+                                                {resourcesSubTab === 'management' && (
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                                        <ResourceTable 
+                                                            resources={clusterResources} 
+                                                            clusterId={selectedCluster.id}
+                                                            clusters={clusters}
+                                                            sourceCluster={selectedCluster}
+                                                            onVmAction={handleVmAction}
+                                                            onOpenConsole={handleOpenConsole}
+                                                            onOpenConfig={handleOpenConfig}
+                                                            onMigrate={handleMigrate}
+                                                            onBulkMigrate={handleBulkMigrate}
+                                                            onDelete={handleDeleteVm}
+                                                            onClone={handleCloneVm}
+                                                            onForceStop={handleForceStop}
+                                                            onCrossClusterMigrate={handleCrossClusterMigrate}
+                                                            nodes={Object.keys(clusterMetrics)}
+                                                            onOpenTags={(resource) => {
+                                                                loadVmTags(selectedCluster.id, resource.vmid);
+                                                                loadClusterTags(selectedCluster.id);
+                                                                setShowTagEditor({ 
+                                                                    clusterId: selectedCluster.id, 
+                                                                    vmid: resource.vmid, 
+                                                                    vmName: resource.name || `VM ${resource.vmid}` 
+                                                                });
+                                                            }}
+                                                            highlightedVm={highlightedVm}
+                                                        />
+                                                        
+                                                        {/* Create VM/CT Buttons */}
+                                                        <div className="flex gap-3 mt-4">
+                                                            <button
+                                                                onClick={() => setShowCreateVm('qemu')}
+                                                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors"
+                                                            >
+                                                                <Icons.Plus />
+                                                                {t('createVm')}
+                                                            </button>
+                                                            <button
+                                                                onClick={() => setShowCreateVm('lxc')}
+                                                                className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors"
+                                                            >
+                                                                <Icons.Plus />
+                                                                {t('createContainer')}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                
+                                                {/* Snapshot Overview Sub-Tab @gyptazy */}
+                                                {resourcesSubTab === 'snapshots' && (
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 space-y-4">
+                                                        <div className="flex items-center justify-between">
+                                                            <div>
+                                                                <h3 className="text-lg font-semibold text-white">{t('snapshotsOverview') || 'Snapshot Overview'}</h3>
+                                                                <p className="text-sm text-gray-400 mt-1">
+                                                                    {t('snapshotsDesc') || 'Overview of the oldest snapshots in this cluster'}
+                                                                </p>
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <input
+                                                                    type="date"
+                                                                    value={snapshotFilterDate}
+                                                                    onChange={(e) => setSnapshotFilterDate(e.target.value)}
+                                                                    className="rounded-lg bg-proxmox-dark border border-proxmox-border px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-proxmox-orange"
+                                                                />
+                                                                <button
+                                                                    onClick={() => applySnapshotFilter(selectedCluster.id)}
+                                                                    disabled={!snapshotFilterDate}
+                                                                    className="rounded-lg bg-proxmox-orange px-4 py-2 text-sm font-medium text-white hover:bg-proxmox-orange/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                >
+                                                                    {t('filter') || 'Filter'}
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => fetchGlobalSnapshots(selectedCluster.id)}
+                                                                    className="p-2 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-400 hover:text-white"
+                                                                    title="Refresh"
+                                                                >
+                                                                    <Icons.RotateCw className="w-4 h-4" />
+                                                                </button>
+                                                            </div>
+                                                        </div>
+
+                                                        {!Array.isArray(sortedSnapshots) || sortedSnapshots.length === 0 ? (
+                                                            <div className="bg-proxmox-dark rounded-xl p-8 text-center">
+                                                                <Icons.Camera className="mx-auto mb-3 w-10 h-10 text-gray-600" />
+                                                                <p className="text-gray-500">
+                                                                    {t('noSnapshots') || 'No snapshots found'}
+                                                                </p>
+                                                                <p className="text-xs text-gray-600 mt-2">
+                                                                    {t('snapshotsHint') || 'Create snapshots on VMs to see them listed here'}
+                                                                </p>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="overflow-x-auto bg-proxmox-dark rounded-xl border border-gray-800">
+                                                                <table className="min-w-full text-sm">
+                                                                    <thead className="bg-black/40 text-gray-400">
+                                                                        <tr>
+                                                                            <th 
+                                                                                className="px-4 py-3 text-left cursor-pointer hover:text-white"
+                                                                                onClick={() => toggleSnapshotSort('vmid')}
+                                                                            >
+                                                                                VM ID {snapshotSortBy === 'vmid' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
+                                                                            </th>
+                                                                            <th 
+                                                                                className="px-4 py-3 text-left cursor-pointer hover:text-white"
+                                                                                onClick={() => toggleSnapshotSort('vm_name')}
+                                                                            >
+                                                                                VM Name {snapshotSortBy === 'vm_name' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
+                                                                            </th>
+                                                                            <th 
+                                                                                className="px-4 py-3 text-left cursor-pointer hover:text-white"
+                                                                                onClick={() => toggleSnapshotSort('vm_type')}
+                                                                            >
+                                                                                {t('snapshotsType') || 'Type'} {snapshotSortBy === 'vm_type' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
+                                                                            </th>
+                                                                            <th 
+                                                                                className="px-4 py-3 text-left cursor-pointer hover:text-white"
+                                                                                onClick={() => toggleSnapshotSort('node')}
+                                                                            >
+                                                                                Node {snapshotSortBy === 'node' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
+                                                                            </th>
+                                                                            <th 
+                                                                                className="px-4 py-3 text-left cursor-pointer hover:text-white"
+                                                                                onClick={() => toggleSnapshotSort('snapshot_name')}
+                                                                            >
+                                                                                Snapshot {snapshotSortBy === 'snapshot_name' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
+                                                                            </th>
+                                                                            <th 
+                                                                                className="px-4 py-3 text-left cursor-pointer hover:text-white"
+                                                                                onClick={() => toggleSnapshotSort('snapshot_date')}
+                                                                            >
+                                                                                {t('snapshotsDate') || 'Created'} {snapshotSortBy === 'snapshot_date' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
+                                                                            </th>
+                                                                            <th 
+                                                                                className="px-4 py-3 text-left cursor-pointer hover:text-white"
+                                                                                onClick={() => toggleSnapshotSort('age')}
+                                                                            >
+                                                                                {t('snapshotsAge') || 'Age'} {snapshotSortBy === 'age' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
+                                                                            </th>
+                                                                            <th className="px-4 py-3 text-right w-12">{t('snapshotsAction') || 'Action'}</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody className="divide-y divide-gray-800">
+                                                                        {sortedSnapshots.map((snap, idx) => (
+                                                                            <tr
+                                                                                key={`${snap.vmid}-${snap.snapshot_name}-${idx}`}
+                                                                                className="group hover:bg-white/5 transition-colors"
+                                                                            >
+                                                                                <td className="px-4 py-3 text-gray-300">{snap.vmid ?? '-'}</td>
+                                                                                <td className="px-4 py-3 text-gray-200">{snap.vm_name ?? '-'}</td>
+                                                                                <td className="px-4 py-3">
+                                                                                    <span className={`px-2 py-1 rounded text-xs ${snap.vm_type === 'qemu' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'}`}>
+                                                                                        {snap.vm_type === 'qemu' ? 'VM' : 'CT'}
+                                                                                    </span>
+                                                                                </td>
+                                                                                <td className="px-4 py-3 text-gray-300">{snap.node ?? '-'}</td>
+                                                                                <td className="px-4 py-3 font-mono text-gray-200">{snap.snapshot_name ?? '-'}</td>
+                                                                                <td className="px-4 py-3 text-gray-300">{snap.snapshot_date ?? '-'}</td>
+                                                                                <td className="px-4 py-3 text-yellow-400">{snap.age ?? '-'}</td>
+                                                                                <td className="px-4 py-3 text-right">
+                                                                                    <button
+                                                                                        onClick={() => deleteGlobalSnapshot(snap, selectedCluster.id)}
+                                                                                        className="opacity-0 group-hover:opacity-100 transition text-red-500 hover:text-red-400"
+                                                                                        title="Delete snapshot"
+                                                                                    >
+                                                                                        <Icons.Trash className="w-4 h-4" />
+                                                                                    </button>
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </div>
                                         )}
 
@@ -31952,6 +33319,93 @@
                                                         step={60}
                                                         unit="s"
                                                     />
+                                                    
+                                                    {/* LW: Excluded Nodes Section - GitHub Feature Request */}
+                                                    <div className="pt-4 border-t border-proxmox-border">
+                                                        <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                                                            <Icons.Ban className="w-4 h-4 text-red-400" />
+                                                            {t('excludedNodes') || 'Excluded Nodes'}
+                                                        </h4>
+                                                        <p className="text-xs text-gray-500 mb-3">
+                                                            {t('excludedNodesDesc') || 'These nodes will never be targets for automatic VM balancing.'}
+                                                        </p>
+                                                        
+                                                        {/* Current excluded nodes */}
+                                                        {(selectedCluster.excluded_nodes || []).length > 0 ? (
+                                                            <div className="space-y-2 mb-3">
+                                                                {(selectedCluster.excluded_nodes || []).map(nodeName => (
+                                                                    <div key={nodeName} className="flex items-center justify-between bg-proxmox-dark rounded-lg p-2">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <Icons.Server className="w-4 h-4 text-red-400" />
+                                                                            <span className="text-sm">{nodeName}</span>
+                                                                        </div>
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                try {
+                                                                                    const res = await fetch(`${API_URL}/clusters/${selectedCluster.id}/excluded-nodes/${nodeName}`, {
+                                                                                        method: 'DELETE',
+                                                                                        credentials: 'include',
+                                                                                        headers: getAuthHeaders()
+                                                                                    });
+                                                                                    if (res.ok) {
+                                                                                        fetchClusters();
+                                                                                        addToast(`${nodeName} ${t('reincludedInBalancing') || 're-included in balancing'}`, 'success');
+                                                                                    }
+                                                                                } catch(e) { console.error(e); }
+                                                                            }}
+                                                                            className="text-xs text-green-400 hover:text-green-300"
+                                                                        >
+                                                                            {t('include') || 'Include'}
+                                                                        </button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="text-xs text-gray-600 mb-3 p-2 bg-proxmox-dark rounded-lg">
+                                                                {t('noExcludedNodes') || 'No nodes excluded'}
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {/* Add node dropdown */}
+                                                        <div className="flex gap-2">
+                                                            <select
+                                                                id="excludeNodeSelect"
+                                                                className="flex-1 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
+                                                                defaultValue=""
+                                                            >
+                                                                <option value="" disabled>{t('selectNodeToExclude') || 'Select node to exclude...'}</option>
+                                                                {Object.keys(clusterMetrics || {})
+                                                                    .filter(n => !(selectedCluster.excluded_nodes || []).includes(n))
+                                                                    .map(nodeName => (
+                                                                        <option key={nodeName} value={nodeName}>{nodeName}</option>
+                                                                    ))
+                                                                }
+                                                            </select>
+                                                            <button
+                                                                onClick={async () => {
+                                                                    const select = document.getElementById('excludeNodeSelect');
+                                                                    const nodeName = select?.value;
+                                                                    if (!nodeName) return;
+                                                                    try {
+                                                                        const res = await fetch(`${API_URL}/clusters/${selectedCluster.id}/excluded-nodes/${nodeName}`, {
+                                                                            method: 'POST',
+                                                                            credentials: 'include',
+                                                                            headers: getAuthHeaders()
+                                                                        });
+                                                                        if (res.ok) {
+                                                                            fetchClusters();
+                                                                            addToast(`${nodeName} ${t('excludedFromBalancing') || 'excluded from balancing'}`, 'success');
+                                                                            select.value = '';
+                                                                        }
+                                                                    } catch(e) { console.error(e); }
+                                                                }}
+                                                                className="px-3 py-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 text-sm flex items-center gap-1"
+                                                            >
+                                                                <Icons.Ban className="w-4 h-4" />
+                                                                {t('exclude') || 'Exclude'}
+                                                            </button>
+                                                        </div>
+                                                    </div>
                                                 </div>
 
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 space-y-6">
@@ -32171,17 +33625,69 @@
                                         )}
                                     </div>
                                 ) : (
-                                    <div className="flex flex-col items-center justify-center h-96 bg-proxmox-card border border-proxmox-border rounded-xl">
-                                        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-proxmox-orange/20 to-orange-600/20 flex items-center justify-center mb-4">
-                                            <Icons.Activity />
-                                        </div>
-                                        <h3 className="text-lg font-semibold mb-2">{t('noClusterSelected')}</h3>
-                                        <p className="text-gray-500 text-sm">{t('selectCluster')}</p>
-                                    </div>
+                                    /* show overview when no cluster selected */
+                                    <AllClustersOverview 
+                                        clusters={clusters}
+                                        allMetrics={allClusterMetrics}
+                                        clusterGroups={clusterGroups}
+                                        topGuests={topGuests}
+                                        onSelectCluster={setSelectedCluster}
+                                        onSelectVm={(cluster, vmid, node) => {
+                                            // jump to vm
+                                            setSelectedCluster(cluster);
+                                            setHighlightedVm({ vmid, node });
+                                            setTimeout(() => setHighlightedVm(null), 5000);
+                                        }}
+                                    />
                                 )}
                             </div>
                         </div>
                     </div>
+
+                    {/* LW: Update Notification Modal - shown on login when update available */}
+                    {showUpdateNotification && pendingUpdate && (
+                        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl max-w-md w-full animate-scale-in overflow-hidden">
+                                <div className="p-6 text-center">
+                                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-green-500/20 to-emerald-500/20 flex items-center justify-center">
+                                        <Icons.Download className="w-8 h-8 text-green-400" />
+                                    </div>
+                                    <h2 className="text-xl font-bold text-white mb-2">
+                                        {t('newVersionAvailable') || 'New Version Available!'}
+                                    </h2>
+                                    <p className="text-gray-400 mb-2">
+                                        {t('updateTo') || 'Update to'} <span className="text-green-400 font-semibold">{pendingUpdate.latest_version}</span>
+                                    </p>
+                                    <p className="text-sm text-gray-500 mb-6">
+                                        {t('currentVersion') || 'Current version'}: {pendingUpdate.current_version}
+                                    </p>
+                                    
+                                    <div className="flex gap-3">
+                                        <button
+                                            onClick={() => setShowUpdateNotification(false)}
+                                            className="flex-1 px-4 py-2.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg text-gray-300 transition-colors"
+                                        >
+                                            {t('later') || 'Later'}
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowUpdateNotification(false);
+                                                setShowSettings(true);
+                                                // Small delay to let settings modal open, then navigate to updates tab
+                                                setTimeout(() => {
+                                                    const event = new CustomEvent('pegaprox-navigate-updates');
+                                                    window.dispatchEvent(event);
+                                                }, 100);
+                                            }}
+                                            className="flex-1 px-4 py-2.5 bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 rounded-lg text-white font-medium transition-all"
+                                        >
+                                            {t('viewUpdate') || 'View Update'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Config Modal */}
                     {configVm && selectedCluster && (
@@ -32445,7 +33951,7 @@
                                 ))}
                             </div>
                             <div className="text-center mt-4 text-xs text-gray-600">
-                                <p>PegaProx v0.6 Beta • {t('madeWithLove') || 'Made with ❤️ for the Proxmox community'}</p>
+                                <p>PegaProx {PEGAPROX_VERSION} • {t('madeWithLove') || 'Made with ❤️ for the Proxmox community'}</p>
                             </div>
                         </div>
                     </footer>

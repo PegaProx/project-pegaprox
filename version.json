@@ -1,28 +1,27 @@
 {
-    "version": "0.6.1",
-    "build": "2026.01.25",
-    "release_date": "2026-01-25",
+    "version": "0.6.2",
+    "build": "2026.01.28",
+    "release_date": "2026-01-28",
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
     "update_files": [
         "pegaprox_multi_cluster.py",
         "web/index.html",
-        "web/index.html.original",
-        "requirements.txt",
-        "version.json",
-        "deploy.sh",
-        "static/css/tailwind.min.css",
-        "static/js/react.production.min.js",
-        "static/js/react-dom.production.min.js",
-        "static/js/babel.min.js"
+        "web/index.html.original"
     ],
     "changelog": [
-        "Fixed itemsPerPage declaration order for pre-compiled builds (Issue #4)",
-        "Switched from unpkg.com to jsdelivr.net (faster CDN) (Issue #4)",
-        "Added loading screen during initialization",
-        "Auto-updater now supports sudo pip install",
-        "Fixed forceStop parameter - was incorrectly applied to LXC instead of QEMU",
-        "Renamed to 'PegaProx Cluster Management for Proxmox VE'"
+        "Added Cluster Overview",
+        "Added Balancing exception",
+        "Added Snapshot Overview @gyptazy",
+        "Added Developer and Auditor role templates",
+        "Security: SSE cluster isolation - users can only subscribe to allowed clusters",
+        "Security: Update mechanism verifies file hashes before applying",
+        "Security: SSE tokens replace session IDs in URLs (5 min TTL)",
+        "Security: SRI hash support for CDN scripts",
+        "Fixed: Permission templates updated - tenant_admin now has full control",
+        "Fixed: Update check endpoint corrected",
+        "Improved: All role templates reviewed and permissions fixed",
+        "Various bugfixes"
     ],
     "breaking_changes": []
 }
