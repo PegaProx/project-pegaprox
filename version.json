@@ -1,7 +1,7 @@
 {
-    "version": "0.6.3",
-    "build": "2026.01.30",
-    "release_date": "2026-01-30",
+    "version": "0.6.4",
+    "build": "2026.02.01",
+    "release_date": "2026-02-01",
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
     "update_files": [
@@ -10,16 +10,21 @@
         "web/index.html.original"
     ],
     "changelog": [
-        "Added: Unused Disks Management - view, reattach, or delete detached disks in Hardware tab",
-        "Added: ReattachDiskModal - full UI for reattaching unused disks with bus type selection (SCSI/VirtIO/SATA/IDE)",
-        "Added: API error handling with automatic retry logic (up to 3 attempts with increasing delay)",
-        "Added: Config load error display with manual retry button",
-        "Added: Rolling updates support without evacuating VMs",
-        "Added: EFI and Secure Boot options in VM Configuration wizard",
-        "Added: Experimental Update Scheduler button in Update Manager",
-        "Fixed: BulkMigrateModal missing useTranslation hook causing 't is not defined' error",
-        "Fixed: Cross-cluster VM migration timeout issues",
-        "Improved: Clear error state on successful config reload"
+        "Important: Due to high demand, PegaProx releases will now be weekly due to shortage of our capacity to handle support requests. Please wait patiently.",
+        "Added: SSH Rate Limiting for large clusters (15+ nodes) - prevents connection exhaustion during batch operations",
+        "Added: Two-tier SSH system - HA operations (fencing, heartbeat) always have priority over normal operations",
+        "Added: SSH retry logic with exponential backoff (3 attempts: immediate, 2s, 4s delay)",
+        "Added: Pool Permissions - grant users/groups access to Proxmox Resource Pools (requires manual refresh due to Proxmox API)",
+        "Added: Pool Manager - create, edit, delete pools and assign VMs directly from PegaProx",
+        "Added: Proxmox Native HA Settings in Datacenter Options",
+        "Added: Expanded Datacenter Options (bandwidth limits, tag settings, resource scheduling)",
+        "Added: More functions in Setup Wizard",
+        "Added: Dynamic password policy hints in all password forms (fetched from server settings)",
+        "Fixed: Password Policy Bug in Settings Modal (ReferenceError: settings is not defined)",
+        "Fixed: Theme save issue",
+        "Fixed: Bulk Migration Modal now fully translated (German/English)",
+        "Improved: SSH_MAX_CONCURRENT default increased to 25 (configurable via environment variable)",
+        "Improved: 1 second delay between nodes during batch deploy operations"
     ],
     "breaking_changes": []
 }
