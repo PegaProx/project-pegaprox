@@ -172,6 +172,12 @@
                 'babel@7'
             );
         }).then(function() {
+            return loadScriptWithFallback(
+                'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js',
+                '/static/js/chart.umd.min.js',
+                'chart.js@4'
+            );
+        }).then(function() {
             // All libs loaded - transform babel scripts
             window.pegaproxLibsReady = true;
             if (window.Babel) {
@@ -6618,6 +6624,196 @@
         // VM Metrics Modal - Shows detailed graphs
         // LW: RRD data from Proxmox, charts built with SVG
         // Oct 2025: Added timeframe selector after user feedback
+        // Helper functions moved outside component
+        const formatBytes = (bytes) => {
+            if (bytes === 0) return '0 B';
+            if (!bytes || isNaN(bytes)) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            if (bytes < 1) return bytes.toFixed(2) + ' B';
+            
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            if (i < 0) return bytes.toFixed(1) + ' B';
+            if (i >= sizes.length) return (bytes / Math.pow(k, sizes.length - 1)).toFixed(1) + ' ' + sizes[sizes.length - 1];
+            
+            return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+        };
+        
+        const formatTime = (ts) => {
+            if (!ts) return '';
+            return new Date(ts * 1000).toLocaleString();
+        };
+
+        // Chart.js line chart component - uses canvas for interactive charts
+        const LineChart = React.memo(function LineChart({ data, timestamps, label, color, unit, formatValue, yMin, yMax }) {
+            const canvasRef = React.useRef(null);
+            const chartRef = React.useRef(null);
+            const formatRef = React.useRef(formatValue);
+            formatRef.current = formatValue;
+            
+            // Stable fingerprint of data to avoid re-creating chart on parent re-renders
+            const dataFingerprint = React.useMemo(() => {
+                if (!data || data.length === 0) return '';
+                return data.length + ':' + (data[0] || 0) + ':' + (data[Math.floor(data.length/2)] || 0) + ':' + (data[data.length-1] || 0);
+            }, [data]);
+            
+            // Cleanup on unmount
+            React.useEffect(() => {
+                return () => {
+                    if (chartRef.current) {
+                        chartRef.current.destroy();
+                        chartRef.current = null;
+                    }
+                };
+            }, []);
+            
+            // Create/update chart only when data actually changes
+            React.useEffect(() => {
+                if (!dataFingerprint || !canvasRef.current || !window.Chart) return;
+                
+                // Destroy previous chart
+                if (chartRef.current) {
+                    chartRef.current.destroy();
+                    chartRef.current = null;
+                }
+                
+                // Sanitize data - RRD can have NaN/null
+                const cleanData = [];
+                for (let i = 0; i < data.length; i++) {
+                    const v = data[i];
+                    cleanData.push((v === null || v === undefined || v !== v) ? 0 : v);
+                }
+                
+                // Build time labels
+                const labels = [];
+                if (timestamps && timestamps.length === cleanData.length) {
+                    for (let i = 0; i < timestamps.length; i++) {
+                        const d = new Date(timestamps[i] * 1000);
+                        labels.push(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+                    }
+                } else {
+                    for (let i = 0; i < cleanData.length; i++) {
+                        labels.push(String(i));
+                    }
+                }
+                
+                // Decimate if needed
+                let finalData = cleanData;
+                let finalLabels = labels;
+                if (cleanData.length > 200) {
+                    const step = Math.ceil(cleanData.length / 200);
+                    finalData = [];
+                    finalLabels = [];
+                    for (let i = 0; i < cleanData.length; i += step) {
+                        finalData.push(cleanData[i]);
+                        finalLabels.push(labels[i]);
+                    }
+                }
+                
+                // Set canvas dimensions explicitly
+                const canvas = canvasRef.current;
+                const parent = canvas.parentElement;
+                if (parent) {
+                    canvas.width = parent.clientWidth || 600;
+                    canvas.height = 180;
+                }
+                
+                const unitStr = unit || '%';
+                const ctx = canvas.getContext('2d');
+                
+                try {
+                    const chart = new window.Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: finalLabels,
+                            datasets: [{
+                                label: label,
+                                data: finalData,
+                                borderColor: color,
+                                backgroundColor: color + '33',
+                                fill: true,
+                                tension: 0.4,
+                                pointRadius: 0,
+                                pointHitRadius: 8,
+                                borderWidth: 2,
+                            }]
+                        },
+                        options: {
+                            responsive: false,
+                            animation: false,
+                            normalized: true,
+                            interaction: {
+                                mode: 'nearest',
+                                intersect: false,
+                            },
+                            plugins: {
+                                legend: { display: false },
+                                tooltip: {
+                                    enabled: true,
+                                    mode: 'nearest',
+                                    intersect: false,
+                                    backgroundColor: 'rgba(30, 30, 40, 0.95)',
+                                    titleColor: '#e5e7eb',
+                                    bodyColor: '#fff',
+                                    callbacks: {
+                                        label: function(c) {
+                                            var val = c.parsed.y;
+                                            var fn = formatRef.current;
+                                            var str = fn ? fn(val) : val.toFixed(2);
+                                            return ' ' + label + ': ' + str + (unitStr.trim() ? unitStr : '');
+                                        }
+                                    }
+                                },
+                                decimation: false,
+                            },
+                            scales: {
+                                x: {
+                                    ticks: {
+                                        color: '#6b7280',
+                                        font: { size: 10 },
+                                        maxTicksLimit: 8,
+                                        maxRotation: 0,
+                                    },
+                                    grid: { color: 'rgba(75, 85, 99, 0.3)' }
+                                },
+                                y: {
+                                    beginAtZero: true,
+                                    min: yMin,
+                                    max: yMax,
+                                    ticks: {
+                                        color: '#6b7280',
+                                        font: { size: 10 },
+                                        callback: function(value) {
+                                            var fn = formatRef.current;
+                                            if (fn) return fn(value) + (unitStr.trim() ? unitStr : '');
+                                            return value.toFixed(yMax && yMax <= 10 ? 1 : 0) + unitStr;
+                                        }
+                                    },
+                                    grid: { color: 'rgba(75, 85, 99, 0.3)' }
+                                }
+                            }
+                        }
+                    });
+                    chartRef.current = chart;
+                } catch(e) {
+                    console.error('Chart.js error for ' + label + ':', e);
+                }
+            }, [dataFingerprint, label, color, unit, yMin, yMax]);
+            
+            if (!data || data.length === 0) return null;
+            
+            return(
+                React.createElement('div', { className: 'bg-proxmox-dark rounded-lg p-4' },
+                    React.createElement('div', { className: 'flex justify-between items-center mb-2' },
+                        React.createElement('span', { className: 'text-sm font-medium text-gray-300' }, label),
+                    ),
+                    React.createElement('div', { style: { width: '100%', height: '180px' } },
+                        React.createElement('canvas', { ref: canvasRef })
+                    )
+                )
+            );
+        });
+
         function VmMetricsModal({ vm, clusterId, onClose }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
@@ -6650,69 +6846,14 @@
                 fetchMetrics();
             }, [timeframe, vm.vmid]);
             
-            // NS: I know this is duplicated like 5 times... will fix later
-            const formatBytes = (bytes) => {
-                if (!bytes) return '0 B';
-                const k = 1024;
-                const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-                const i = Math.floor(Math.log(bytes) / Math.log(k));
-                return(bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
-            };
+
             
-            const formatTime = (ts) => {
-                if (!ts) return '';
-                return new Date(ts * 1000).toLocaleString();
-            };
-            
-            // Simple line chart component
-            const LineChart = ({ data, label, color, unit = '%', formatValue }) => {
-                if (!data || data.length === 0) return null;
-                
-                const max = Math.max(...data, 1);
-                const min = Math.min(...data, 0);
-                const range = max - min || 1;
-                const h = 120;
-                const w = 400;
-                
-                const pts = data.map((val, idx) => {
-                    const x = (idx / (data.length - 1)) * w;
-                    const y = h - ((val - min) / range) * h;
-                    return `${x},${y}`;
-                }).join(' ');
-                
-                const current = data[data.length - 1] || 0;
-                const avg = data.reduce((a, b) => a + b, 0) / data.length;
-                
-                return(
-                    <div className="bg-proxmox-dark rounded-lg p-4">
-                        <div className="flex justify-between items-center mb-2">
-                            <span className="text-sm font-medium text-gray-300">{label}</span>
-                            <div className="text-xs text-gray-500">
-                                <span className="mr-3">Current: <span className="text-white">{formatValue ? formatValue(current) : current.toFixed(1)}{unit}</span></span>
-                                <span>Avg: <span className="text-white">{formatValue ? formatValue(avg) : avg.toFixed(1)}{unit}</span></span>
-                            </div>
-                        </div>
-                        <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
-                            <defs>
-                                <linearGradient id={`gradient-${label}`} x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%" stopColor={color} stopOpacity="0.3" />
-                                    <stop offset="100%" stopColor={color} stopOpacity="0" />
-                                </linearGradient>
-                            </defs>
-                            <polygon
-                                fill={`url(#gradient-${label})`}
-                                points={`0,${h} ${pts} ${w},${h}`}
-                            />
-                            <polyline
-                                fill="none"
-                                stroke={color}
-                                strokeWidth="2"
-                                points={pts}
-                            />
-                        </svg>
-                    </div>
-                );
-            };
+            // Prepare memory data in GB
+            const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
+            const memDataGB = React.useMemo(() => {
+                if (!data || !data.metrics || !data.metrics.memory || !maxMemGB) return [];
+                return data.metrics.memory.map(p => (p / 100) * maxMemGB);
+            }, [data, maxMemGB]);
             
             return(
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
@@ -6754,19 +6895,25 @@
                                 <div className="space-y-4">
                                     <LineChart 
                                         data={data.metrics.cpu} 
+                                        timestamps={data.timestamps}
                                         label="CPU" 
                                         color="#3b82f6" 
                                         unit="%" 
                                     />
                                     <LineChart 
-                                        data={data.metrics.memory} 
+                                        data={memDataGB} 
+                                        timestamps={data.timestamps}
                                         label="Memory" 
                                         color="#22c55e" 
-                                        unit="%" 
+                                        unit=" GB" 
+                                        yMin={0}
+                                        yMax={maxMemGB}
+                                        formatValue={(v) => v.toFixed(2)}
                                     />
                                     <div className="grid grid-cols-2 gap-4">
                                         <LineChart 
                                             data={data.metrics.disk_read} 
+                                            timestamps={data.timestamps}
                                             label="Disk Read" 
                                             color="#eab308" 
                                             unit="/s"
@@ -6774,6 +6921,7 @@
                                         />
                                         <LineChart 
                                             data={data.metrics.disk_write} 
+                                            timestamps={data.timestamps}
                                             label="Disk Write" 
                                             color="#f97316" 
                                             unit="/s"
@@ -6783,6 +6931,7 @@
                                     <div className="grid grid-cols-2 gap-4">
                                         <LineChart 
                                             data={data.metrics.net_in} 
+                                            timestamps={data.timestamps}
                                             label="Network In" 
                                             color="#06b6d4" 
                                             unit="/s"
@@ -6790,6 +6939,7 @@
                                         />
                                         <LineChart 
                                             data={data.metrics.net_out} 
+                                            timestamps={data.timestamps}
                                             label="Network Out" 
                                             color="#8b5cf6" 
                                             unit="/s"
