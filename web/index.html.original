@@ -27782,12 +27782,24 @@
                             term.write(`\x1b[33m${t('ipFetchFailed')}: ${e.message}\x1b[0m\r\n`);
                         }
 
-                        // Connect WebSocket - Shell runs on main port + 2
+                        // Connect WebSocket - Shell runs on main port + 2 or reuse same port if reverse proxy is used
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
-                        const sshPortNum = mainPort + 2;
-                        setSshPort(sshPortNum);
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?session=${sessionId || ''}&ip=${encodeURIComponent(nodeIp)}`;
+                        const currentPort = parseInt(window.location.port);
+                        
+                        // Heuristic: If standard port (80/443/swallowed), assume Proxy -> Same Host
+                        // If non-standard port (e.g. 5000), assume Direct -> Port + 2
+                        const isStandardPort = !currentPort || currentPort === 80 || currentPort === 443;
+                        const wsHost = isStandardPort ? window.location.host : `${window.location.hostname}:${currentPort + 2}`;
+                        
+                        console.log(`SSH: Mode=${isStandardPort ? 'Proxy (Same Host)' : 'Direct (Port+2)'}, Host=${wsHost}`);
+                        
+                        if (!isStandardPort) {
+                            setSshPort(currentPort + 2);
+                        } else {
+                            setSshPort(null);
+                        }
+
+                        const wsUrl = `${wsProtocol}//${wsHost}/api/clusters/${clusterId}/nodes/${node}/shellws?session=${sessionId || ''}&ip=${encodeURIComponent(nodeIp)}`;
                         
                         term.write(`${t('connectingWs')} (Port ${sshPortNum})...\r\n`);
                         console.log('SSH WebSocket connecting to:', wsUrl);
@@ -30026,12 +30038,23 @@
                         
                         if(cancelled) return;
                         
-                        // Build WebSocket URL - VNC runs on main port + 1
+                        // Build WebSocket URL - use VNC runs on main port + 1 or reuse same port if reverse proxy is used
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
-                        const vncPortNum = mainPort + 1;
-                        setVncPort(vncPortNum);
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?session=${encodeURIComponent(sessionId)}`;
+                        const currentPort = parseInt(window.location.port);
+                        // Heuristic: If standard port (80/443/swallowed), assume Proxy -> Same Host
+                        // If non-standard port (e.g. 5000), assume Direct -> Port + 1
+                        const isStandardPort = !currentPort || currentPort === 80 || currentPort === 443;
+                        const wsHost = isStandardPort ? window.location.host : `${window.location.hostname}:${currentPort + 1}`;
+                        
+                        console.log(`VNC: Mode=${isStandardPort ? 'Proxy (Same Host)' : 'Direct (Port+1)'}, Host=${wsHost}`);
+                        
+                        if (!isStandardPort) {
+                            setVncPort(currentPort + 1);
+                        } else {
+                            setVncPort(null);
+                        }
+
+                        const wsUrl = `${wsProtocol}//${wsHost}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?session=${encodeURIComponent(sessionId)}`;
                         
                         console.log('VNC WebSocket URL:', wsUrl);
                         
