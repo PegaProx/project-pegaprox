@@ -6645,17 +6645,29 @@
         };
 
         // Chart.js line chart component - uses canvas for interactive charts
-        const LineChart = React.memo(function LineChart({ data, timestamps, label, color, unit, formatValue, yMin, yMax }) {
+        const LineChart = React.memo(function LineChart({ data, datasets, timestamps, label, color, unit, formatValue, yMin, yMax }) {
             const canvasRef = React.useRef(null);
             const chartRef = React.useRef(null);
             const formatRef = React.useRef(formatValue);
             formatRef.current = formatValue;
             
+            // Normalize input to array of datasets
+            const chartDatasets = React.useMemo(() => {
+                if (datasets && datasets.length > 0) return datasets;
+                if (data && data.length > 0) return [{ label: label, data: data, color: color, fill: true }];
+                return [];
+            }, [data, datasets, label, color]);
+
             // Stable fingerprint of data to avoid re-creating chart on parent re-renders
             const dataFingerprint = React.useMemo(() => {
-                if (!data || data.length === 0) return '';
-                return data.length + ':' + (data[0] || 0) + ':' + (data[Math.floor(data.length/2)] || 0) + ':' + (data[data.length-1] || 0);
-            }, [data]);
+                if (chartDatasets.length === 0) return '';
+                // Simple fingerprint: length + first + middle + last values of all datasets
+                return chartDatasets.map(ds => {
+                    const d = ds.data;
+                    if (!d || d.length === 0) return '0';
+                    return d.length + ':' + (d[0] || 0) + ':' + (d[Math.floor(d.length/2)] || 0) + ':' + (d[d.length-1] || 0);
+                }).join('|');
+            }, [chartDatasets]);
             
             // Cleanup on unmount
             React.useEffect(() => {
@@ -6669,7 +6681,7 @@
             
             // Create/update chart only when data actually changes
             React.useEffect(() => {
-                if (!dataFingerprint || !canvasRef.current || !window.Chart) return;
+                if (!canvasRef.current || !window.Chart) return;
                 
                 // Destroy previous chart
                 if (chartRef.current) {
@@ -6677,38 +6689,69 @@
                     chartRef.current = null;
                 }
                 
-                // Sanitize data - RRD can have NaN/null
-                const cleanData = [];
-                for (let i = 0; i < data.length; i++) {
-                    const v = data[i];
-                    cleanData.push((v === null || v === undefined || v !== v) ? 0 : v);
-                }
+                if (chartDatasets.length === 0) return;
+
+                // Process datasets (sanitize and decimate)
+                const processedDatasets = [];
+                let finalLabels = [];
                 
-                // Build time labels
-                const labels = [];
-                if (timestamps && timestamps.length === cleanData.length) {
+                // Determine timestamps/labels from first valid dataset or timestamps prop
+                const rawLength = chartDatasets[0].data.length; // Assume all datasets have same length/alignment
+                
+                // Build raw labels first
+                const rawLabels = [];
+                if (timestamps && timestamps.length === rawLength) {
                     for (let i = 0; i < timestamps.length; i++) {
                         const d = new Date(timestamps[i] * 1000);
-                        labels.push(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+                        rawLabels.push(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
                     }
                 } else {
-                    for (let i = 0; i < cleanData.length; i++) {
-                        labels.push(String(i));
+                    for (let i = 0; i < rawLength; i++) {
+                        rawLabels.push(String(i));
                     }
                 }
-                
-                // Decimate if needed
-                let finalData = cleanData;
-                let finalLabels = labels;
-                if (cleanData.length > 200) {
-                    const step = Math.ceil(cleanData.length / 200);
-                    finalData = [];
-                    finalLabels = [];
-                    for (let i = 0; i < cleanData.length; i += step) {
-                        finalData.push(cleanData[i]);
-                        finalLabels.push(labels[i]);
+
+                // Decimation factor
+                const step = rawLength > 200 ? Math.ceil(rawLength / 200) : 1;
+
+                // Process labels
+                if (step > 1) {
+                    for (let i = 0; i < rawLength; i += step) {
+                        finalLabels.push(rawLabels[i]);
                     }
+                } else {
+                    finalLabels = rawLabels;
                 }
+
+                // Process each dataset
+                chartDatasets.forEach(ds => {
+                    const cleanData = [];
+                    for (let i = 0; i < ds.data.length; i++) {
+                        const v = ds.data[i];
+                        cleanData.push((v === null || v === undefined || v !== v) ? 0 : v);
+                    }
+                    
+                    let finalData = [];
+                    if (step > 1) {
+                        for (let i = 0; i < cleanData.length; i += step) {
+                            finalData.push(cleanData[i]);
+                        }
+                    } else {
+                        finalData = cleanData;
+                    }
+                    
+                    processedDatasets.push({
+                        label: ds.label || label,
+                        data: finalData,
+                        borderColor: ds.color || color,
+                        backgroundColor: (ds.color || color) + '33',
+                        fill: ds.fill !== undefined ? ds.fill : true,
+                        tension: 0.4,
+                        pointRadius: 0,
+                        pointHitRadius: 8,
+                        borderWidth: 2,
+                    });
+                });
                 
                 // Set canvas dimensions explicitly
                 const canvas = canvasRef.current;
@@ -6726,17 +6769,7 @@
                         type: 'line',
                         data: {
                             labels: finalLabels,
-                            datasets: [{
-                                label: label,
-                                data: finalData,
-                                borderColor: color,
-                                backgroundColor: color + '33',
-                                fill: true,
-                                tension: 0.4,
-                                pointRadius: 0,
-                                pointHitRadius: 8,
-                                borderWidth: 2,
-                            }]
+                            datasets: processedDatasets
                         },
                         options: {
                             responsive: false,
@@ -6744,13 +6777,17 @@
                             normalized: true,
                             interaction: {
                                 mode: 'nearest',
+                                axis: 'x',
                                 intersect: false,
                             },
                             plugins: {
-                                legend: { display: false },
+                                legend: { 
+                                    display: processedDatasets.length > 1,
+                                    labels: { color: '#9ca3af', usePointStyle: true, boxWidth: 6 }
+                                },
                                 tooltip: {
                                     enabled: true,
-                                    mode: 'nearest',
+                                    mode: 'index',
                                     intersect: false,
                                     backgroundColor: 'rgba(30, 30, 40, 0.95)',
                                     titleColor: '#e5e7eb',
@@ -6760,7 +6797,7 @@
                                             var val = c.parsed.y;
                                             var fn = formatRef.current;
                                             var str = fn ? fn(val) : val.toFixed(2);
-                                            return ' ' + label + ': ' + str + (unitStr.trim() ? unitStr : '');
+                                            return ' ' + c.dataset.label + ': ' + str + (unitStr.trim() ? unitStr : '');
                                         }
                                     }
                                 },
@@ -6798,9 +6835,9 @@
                 } catch(e) {
                     console.error('Chart.js error for ' + label + ':', e);
                 }
-            }, [dataFingerprint, label, color, unit, yMin, yMax]);
+            }, [dataFingerprint, unit, yMin, yMax]); // re-run if data changes
             
-            if (!data || data.length === 0) return null;
+            if (chartDatasets.length === 0) return null;
             
             return(
                 React.createElement('div', { className: 'bg-proxmox-dark rounded-lg p-4' },
@@ -6946,6 +6983,46 @@
                                             formatValue={formatBytes}
                                         />
                                     </div>
+
+                                    {data.metrics.pressurecpusome && (
+                                        <LineChart 
+                                            datasets={[
+                                                { label: 'Some', data: data.metrics.pressurecpusome, color: '#3b82f6' },
+                                                { label: 'Full', data: data.metrics.pressurecpufull, color: '#ef4444' }
+                                            ]}
+                                            timestamps={data.timestamps}
+                                            label="CPU Pressure Stall" 
+                                            unit="%" 
+                                            yMin={0}
+                                            yMax={100}
+                                        />
+                                    )}
+                                    {data.metrics.pressurememorysome && (
+                                        <LineChart 
+                                            datasets={[
+                                                { label: 'Some', data: data.metrics.pressurememorysome, color: '#22c55e' },
+                                                { label: 'Full', data: data.metrics.pressurememoryfull, color: '#ef4444' }
+                                            ]}
+                                            timestamps={data.timestamps}
+                                            label="Memory Pressure Stall" 
+                                            unit="%" 
+                                            yMin={0}
+                                            yMax={100}
+                                        />
+                                    )}
+                                    {data.metrics.pressureiosome && (
+                                        <LineChart 
+                                            datasets={[
+                                                { label: 'Some', data: data.metrics.pressureiosome, color: '#eab308' },
+                                                { label: 'Full', data: data.metrics.pressureiofull, color: '#ef4444' }
+                                            ]}
+                                            timestamps={data.timestamps}
+                                            label="IO Pressure Stall" 
+                                            unit="%" 
+                                            yMin={0}
+                                            yMax={100}
+                                        />
+                                    )}
                                     
                                     {data.timestamps && data.timestamps.length > 0 && (
                                         <div className="text-xs text-gray-500 text-center mt-4">

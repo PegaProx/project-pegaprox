@@ -11660,6 +11660,23 @@ echo "AGENT_INSTALLED_OK"
                     },
                     'timestamps': []
                 }
+
+                # Check for pressure stall data (PSI)
+                pressure_keys = [
+                    'pressurecpusome', 'pressurecpufull',
+                    'pressurememorysome', 'pressurememoryfull',
+                    'pressureiosome', 'pressureiofull'
+                ]
+                active_pressure_keys = []
+
+                # Check first valid point to determine available metrics
+                if rrd_data:
+                    first_point = next((p for p in rrd_data if p), None)
+                    if first_point:
+                        for k in pressure_keys:
+                            if k in first_point:
+                                active_pressure_keys.append(k)
+                                formatted_data['metrics'][k] = []
                 
                 for point in rrd_data:
                     if not point:
@@ -11685,6 +11702,10 @@ echo "AGENT_INSTALLED_OK"
                     # Network I/O (bytes/s)
                     formatted_data['metrics']['net_in'].append(point.get('netin', 0) or 0)
                     formatted_data['metrics']['net_out'].append(point.get('netout', 0) or 0)
+
+                    # Pressure Stall (PSI)
+                    for k in active_pressure_keys:
+                        formatted_data['metrics'][k].append(point.get(k, 0) or 0)
                 
                 return {'success': True, 'data': formatted_data}
             else:
