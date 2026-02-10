@@ -6726,8 +6726,9 @@
                 // Process each dataset
                 chartDatasets.forEach(ds => {
                     const cleanData = [];
-                    for (let i = 0; i < ds.data.length; i++) {
-                        const v = ds.data[i];
+                    const dsData = ds.data || [];
+                    for (let i = 0; i < dsData.length; i++) {
+                        const v = dsData[i];
                         cleanData.push((v === null || v === undefined || v !== v) ? 0 : v);
                     }
                     
@@ -6746,7 +6747,7 @@
                         borderColor: ds.color || color,
                         backgroundColor: (ds.color || color) + '33',
                         fill: ds.fill !== undefined ? ds.fill : true,
-                        tension: 0.4,
+                        tension: 0,
                         pointRadius: 0,
                         pointHitRadius: 8,
                         borderWidth: 2,
@@ -28881,156 +28882,107 @@
                                             {data.performance?.metrics ? (
                                                 <div className="grid grid-cols-2 gap-4">
                                                     {/* CPU Chart */}
-                                                    <div className="bg-proxmox-dark rounded-lg border border-proxmox-border p-4">
-                                                        <div className="flex items-center justify-between mb-3">
-                                                            <span className="text-sm font-medium text-white">CPU Usage</span>
-                                                            <span className="text-xs text-proxmox-orange">
-                                                                {data.performance.metrics.cpu?.length > 0 
-                                                                    ? `${data.performance.metrics.cpu[data.performance.metrics.cpu.length - 1]?.toFixed(1)}%`
-                                                                    : '--'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="h-32 flex items-end gap-0.5">
-                                                            {(data.performance.metrics.cpu || []).slice(-60).map((v, i) => (
-                                                                <div 
-                                                                    key={i} 
-                                                                    className="flex-1 bg-proxmox-orange/80 rounded-t transition-all"
-                                                                    style={{ height: `${Math.max(2, v)}%` }}
-                                                                    title={`${v?.toFixed(1)}%`}
-                                                                />
-                                                            ))}
-                                                        </div>
-                                                    </div>
+                                                    <LineChart 
+                                                        data={data.performance.metrics.cpu} 
+                                                        timestamps={data.performance.timestamps}
+                                                        label="CPU Usage" 
+                                                        color="#f97316" 
+                                                        unit="%" 
+                                                        yMin={0}
+                                                        yMax={100}
+                                                    />
                                                     
                                                     {/* Memory Chart */}
-                                                    <div className="bg-proxmox-dark rounded-lg border border-proxmox-border p-4">
-                                                        <div className="flex items-center justify-between mb-3">
-                                                            <span className="text-sm font-medium text-white">Memory Usage</span>
-                                                            <span className="text-xs text-blue-400">
-                                                                {data.performance.metrics.memory?.length > 0 
-                                                                    ? `${data.performance.metrics.memory[data.performance.metrics.memory.length - 1]?.toFixed(1)}%`
-                                                                    : '--'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="h-32 flex items-end gap-0.5">
-                                                            {(data.performance.metrics.memory || []).slice(-60).map((v, i) => (
-                                                                <div 
-                                                                    key={i} 
-                                                                    className="flex-1 bg-blue-500/80 rounded-t transition-all"
-                                                                    style={{ height: `${Math.max(2, v)}%` }}
-                                                                    title={`${v?.toFixed(1)}%`}
-                                                                />
-                                                            ))}
-                                                        </div>
-                                                    </div>
+                                                    <LineChart 
+                                                        data={data.performance.metrics.memory} 
+                                                        timestamps={data.performance.timestamps}
+                                                        label="Memory Usage" 
+                                                        color="#3b82f6" 
+                                                        unit="%" 
+                                                        yMin={0}
+                                                        yMax={100}
+                                                    />
                                                     
                                                     {/* IO Wait Chart */}
-                                                    <div className="bg-proxmox-dark rounded-lg border border-proxmox-border p-4">
-                                                        <div className="flex items-center justify-between mb-3">
-                                                            <span className="text-sm font-medium text-white">IO Wait</span>
-                                                            <span className="text-xs text-yellow-400">
-                                                                {data.performance.metrics.iowait?.length > 0 
-                                                                    ? `${data.performance.metrics.iowait[data.performance.metrics.iowait.length - 1]?.toFixed(1)}%`
-                                                                    : '--'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="h-32 flex items-end gap-0.5">
-                                                            {(data.performance.metrics.iowait || []).slice(-60).map((v, i) => (
-                                                                <div 
-                                                                    key={i} 
-                                                                    className="flex-1 bg-yellow-500/80 rounded-t transition-all"
-                                                                    style={{ height: `${Math.max(2, v)}%` }}
-                                                                    title={`${v?.toFixed(1)}%`}
-                                                                />
-                                                            ))}
-                                                        </div>
-                                                    </div>
+                                                    <LineChart 
+                                                        data={data.performance.metrics.iowait} 
+                                                        timestamps={data.performance.timestamps}
+                                                        label="IO Wait" 
+                                                        color="#eab308" 
+                                                        unit="%" 
+                                                        yMin={0}
+                                                        yMax={100}
+                                                    />
                                                     
                                                     {/* Load Average Chart */}
-                                                    <div className="bg-proxmox-dark rounded-lg border border-proxmox-border p-4">
-                                                        <div className="flex items-center justify-between mb-3">
-                                                            <span className="text-sm font-medium text-white">Load Average</span>
-                                                            <span className="text-xs text-green-400">
-                                                                {data.performance.metrics.loadavg?.length > 0 
-                                                                    ? data.performance.metrics.loadavg[data.performance.metrics.loadavg.length - 1]?.toFixed(2)
-                                                                    : '--'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="h-32 flex items-end gap-0.5">
-                                                            {(data.performance.metrics.loadavg || []).slice(-60).map((v, i) => {
-                                                                const maxLoad = Math.max(...(data.performance.metrics.loadavg || [1]));
-                                                                const pct = (v / (maxLoad || 1)) * 100;
-                                                                return (
-                                                                    <div 
-                                                                        key={i} 
-                                                                        className="flex-1 bg-green-500/80 rounded-t transition-all"
-                                                                        style={{ height: `${Math.max(2, pct)}%` }}
-                                                                        title={v?.toFixed(2)}
-                                                                    />
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    </div>
+                                                    <LineChart 
+                                                        data={data.performance.metrics.loadavg} 
+                                                        timestamps={data.performance.timestamps}
+                                                        label="Load Average" 
+                                                        color="#22c55e" 
+                                                        unit=" "
+                                                    />
                                                     
                                                     {/* Network In/Out Chart */}
-                                                    <div className="bg-proxmox-dark rounded-lg border border-proxmox-border p-4 col-span-2">
-                                                        <div className="flex items-center justify-between mb-3">
-                                                            <span className="text-sm font-medium text-white">Network I/O</span>
-                                                            <div className="flex gap-4 text-xs">
-                                                                <span className="text-cyan-400">
-                                                                    ↓ {data.performance.metrics.net_in?.length > 0 
-                                                                        ? `${data.performance.metrics.net_in[data.performance.metrics.net_in.length - 1]?.toFixed(1)} KB/s`
-                                                                        : '--'}
-                                                                </span>
-                                                                <span className="text-purple-400">
-                                                                    ↑ {data.performance.metrics.net_out?.length > 0 
-                                                                        ? `${data.performance.metrics.net_out[data.performance.metrics.net_out.length - 1]?.toFixed(1)} KB/s`
-                                                                        : '--'}
-                                                                </span>
-                                                            </div>
-                                                        </div>
-                                                        <div className="h-32 flex items-end gap-0.5 relative">
-                                                            {/* Net In */}
-                                                            {(data.performance.metrics.net_in || []).slice(-60).map((v, i) => {
-                                                                const maxNet = Math.max(
-                                                                    Math.max(...(data.performance.metrics.net_in || [1])),
-                                                                    Math.max(...(data.performance.metrics.net_out || [1]))
-                                                                );
-                                                                const pct = (v / (maxNet || 1)) * 100;
-                                                                return (
-                                                                    <div 
-                                                                        key={`in-${i}`} 
-                                                                        className="flex-1 bg-cyan-500/60 rounded-t transition-all absolute bottom-0"
-                                                                        style={{ 
-                                                                            height: `${Math.max(2, pct)}%`,
-                                                                            left: `${(i / 60) * 100}%`,
-                                                                            width: `${100/60}%`
-                                                                        }}
-                                                                    />
-                                                                );
-                                                            })}
-                                                            {/* Net Out */}
-                                                            {(data.performance.metrics.net_out || []).slice(-60).map((v, i) => {
-                                                                const maxNet = Math.max(
-                                                                    Math.max(...(data.performance.metrics.net_in || [1])),
-                                                                    Math.max(...(data.performance.metrics.net_out || [1]))
-                                                                );
-                                                                const pct = (v / (maxNet || 1)) * 100;
-                                                                return (
-                                                                    <div 
-                                                                        key={`out-${i}`} 
-                                                                        className="flex-1 bg-purple-500/60 rounded-t transition-all absolute bottom-0"
-                                                                        style={{ 
-                                                                            height: `${Math.max(2, pct)}%`,
-                                                                            left: `${(i / 60) * 100}%`,
-                                                                            width: `${100/60 * 0.4}%`,
-                                                                            marginLeft: `${100/60 * 0.5}%`
-                                                                        }}
-                                                                    />
-                                                                );
-                                                            })}
-                                                        </div>
+                                                    <div className="col-span-2">
+                                                        <LineChart 
+                                                            datasets={[
+                                                                { label: 'Net In', data: data.performance.metrics.net_in, color: '#22c55e' },
+                                                                { label: 'Net Out', data: data.performance.metrics.net_out, color: '#8b5cf6' }
+                                                            ]}
+                                                            timestamps={data.performance.timestamps}
+                                                            label="Network I/O" 
+                                                            unit="/s"
+                                                            formatValue={formatBytes}
+                                                        />
                                                     </div>
+
+                                                    {/* Pressure Stall Graphs */}
+                                                    {data.performance.metrics.pressurecpusome && (
+                                                        <LineChart 
+                                                            datasets={[
+                                                                { label: 'Some', data: data.performance.metrics.pressurecpusome, color: '#3b82f6' },
+                                                                { label: 'Full', data: data.performance.metrics.pressurecpufull, color: '#ef4444' }
+                                                            ]}
+                                                            timestamps={data.performance.timestamps}
+                                                            label="CPU Pressure Stall" 
+                                                            unit="%" 
+                                                            yMin={0} 
+                                                            yMax={100}
+                                                        />
+                                                    )}
+                                                    {data.performance.metrics.pressurememorysome && (
+                                                        <LineChart 
+                                                            datasets={[
+                                                                { label: 'Some', data: data.performance.metrics.pressurememorysome, color: '#22c55e' },
+                                                                { label: 'Full', data: data.performance.metrics.pressurememoryfull, color: '#ef4444' }
+                                                            ]}
+                                                            timestamps={data.performance.timestamps}
+                                                            label="Memory Pressure Stall" 
+                                                            unit="%" 
+                                                            yMin={0} 
+                                                            yMax={100}
+                                                        />
+                                                    )}
+                                                    {data.performance.metrics.pressureiosome && (
+                                                        <LineChart 
+                                                            datasets={[
+                                                                { label: 'Some', data: data.performance.metrics.pressureiosome, color: '#eab308' },
+                                                                { label: 'Full', data: data.performance.metrics.pressureiofull, color: '#ef4444' }
+                                                            ]}
+                                                            timestamps={data.performance.timestamps}
+                                                            label="IO Pressure Stall" 
+                                                            unit="%" 
+                                                            yMin={0} 
+                                                            yMax={100}
+                                                        />
+                                                    )}
+
+                                                    {data.performance.timestamps && data.performance.timestamps.length > 0 && (
+                                                        <div className="text-xs text-gray-500 text-center mt-4 col-span-2">
+                                                            {formatTime(data.performance.timestamps[0])} - {formatTime(data.performance.timestamps[data.performance.timestamps.length - 1])}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ) : (
                                                 <div className="text-center text-gray-500 py-12">
