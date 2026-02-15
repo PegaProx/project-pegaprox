@@ -8,6 +8,7 @@
         "pegaprox_multi_cluster.py",
         "web/index.html",
         "web/index.html.original",
+        "static/js/chart.umd.min.js",
         "requirements.txt"
     ],
     "changelog": [

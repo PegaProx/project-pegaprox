@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 PegaProx Server - Cluster Management Backend for Proxmox VE
-Version: 0.6.5 Beta
+Version: 0.6.6 Beta
 
 Copyright (C) 2025-2026 PegaProx Team
 
@@ -28,6 +28,7 @@ Dev Team:
 
 Contributors:
   Florian Paul Azim Hoberg @gyptazy
+  Alexandre Derumier @aderumier (Performance chart styling)
 
 Started as a weekend project in Sept 2025, got way out of hand lol
 Now its a proper multi-cluster thing
@@ -272,8 +273,8 @@ app = Flask(__name__)
 # =============================================================================
 # VERSION INFO
 # =============================================================================
-PEGAPROX_VERSION = "Beta 0.6.5"
-PEGAPROX_BUILD = "2026.02.08"  # Year.Month.Day of release
+PEGAPROX_VERSION = "Beta 0.6.6"
+PEGAPROX_BUILD = "2026.02.15"  # Year.Month.Day of release
 
 # ============================================
 # CORS Configuration (Security)
@@ -15282,9 +15283,19 @@ def get_ldap_settings() -> dict:
     }
     # NS: Feb 2026 - Debug log when LDAP is enabled but looks misconfigured
     if config['enabled'] and (not config['server'] or not config['base_dn']):
-        logging.warning(f"[LDAP] Settings loaded but incomplete: enabled={config['enabled']}, "
-                       f"server='{config['server']}', base_dn='{config['base_dn']}'. "
-                       f"DB keys present: {[k for k in settings if k.startswith('ldap_')]}")
+        # Dump raw DB values for the missing fields
+        try:
+            db = get_db()
+            cursor = db.conn.cursor()
+            cursor.execute("SELECT key, value FROM server_settings WHERE key IN ('ldap_server', 'ldap_base_dn')")
+            raw_rows = {row['key']: row['value'] for row in cursor.fetchall()}
+            logging.warning(f"[LDAP] Settings loaded but incomplete: enabled={config['enabled']}, "
+                           f"server='{config['server']}', base_dn='{config['base_dn']}'. "
+                           f"Raw DB values: {raw_rows}")
+        except Exception as e:
+            logging.warning(f"[LDAP] Settings loaded but incomplete: enabled={config['enabled']}, "
+                           f"server='{config['server']}', base_dn='{config['base_dn']}'. "
+                           f"DB keys present: {[k for k in settings if k.startswith('ldap_')]} (raw dump failed: {e})")
     return config
 
 
@@ -15570,7 +15581,37 @@ def ldap_provision_user(ldap_result: dict) -> dict:
 # NS: Feb 2026 - OIDC / Entra ID (Azure AD) Authentication
 # Supports Microsoft Entra ID via OAuth2 Authorization Code flow
 # Also works with any standard OIDC provider (Okta, Auth0, Keycloak, etc.)
+# Supports Microsoft 365 cloud environments:
+#   - commercial (default): login.microsoftonline.com / graph.microsoft.com
+#   - gcc: Same as commercial (GCC uses standard endpoints)
+#   - gcc_high: login.microsoftonline.us / graph.microsoft.us
+#   - dod: login.microsoftonline.us / dod-graph.microsoft.us
+# See: https://learn.microsoft.com/en-us/microsoft-365/enterprise/microsoft-365-u-s-government-gcc-high-endpoints
 # ============================================================================
+
+# NS: Feb 2026 - Microsoft cloud environment endpoint mapping
+# GCC High and DoD use separate sovereign cloud endpoints
+ENTRA_CLOUD_ENDPOINTS = {
+    'commercial': {
+        'login_base': 'login.microsoftonline.com',
+        'graph_base': 'graph.microsoft.com',
+    },
+    'gcc': {
+        # GCC uses the same commercial endpoints
+        'login_base': 'login.microsoftonline.com',
+        'graph_base': 'graph.microsoft.com',
+    },
+    'gcc_high': {
+        # US Government GCC High - sovereign cloud
+        'login_base': 'login.microsoftonline.us',
+        'graph_base': 'graph.microsoft.us',
+    },
+    'dod': {
+        # US Department of Defense - sovereign cloud
+        'login_base': 'login.microsoftonline.us',
+        'graph_base': 'dod-graph.microsoft.us',
+    },
+}
 
 def get_oidc_settings() -> dict:
     """Load OIDC/Entra ID configuration from server settings
@@ -15590,6 +15631,7 @@ def get_oidc_settings() -> dict:
     return {
         'enabled': settings.get('oidc_enabled', False),
         'provider': provider,
+        'cloud_environment': settings.get('oidc_cloud_environment', 'commercial'),  # NS: GCC High/DoD support
         'client_id': settings.get('oidc_client_id', ''),
         'client_secret': get_db()._decrypt(settings.get('oidc_client_secret', '')),  # MK: Encrypted
         'tenant_id': settings.get('oidc_tenant_id', ''),  # Entra-specific (Azure AD tenant)
@@ -15615,20 +15657,27 @@ def get_oidc_endpoints(config: dict) -> dict:
     """Build OIDC endpoint URLs based on provider
     
     NS: Entra uses tenant-specific URLs, generic OIDC uses discovery
+    Supports GCC High and DoD sovereign cloud endpoints
     """
     provider = config.get('provider', 'entra')
     tenant_id = config.get('tenant_id', 'common')
     
     if provider == 'entra' and tenant_id:
-        # Microsoft Entra ID endpoints
-        base = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0"
+        # NS: Feb 2026 - Use cloud environment to determine base URLs
+        # GCC High/DoD use .us domains instead of .com
+        cloud_env = config.get('cloud_environment', 'commercial')
+        endpoints = ENTRA_CLOUD_ENDPOINTS.get(cloud_env, ENTRA_CLOUD_ENDPOINTS['commercial'])
+        login_base = endpoints['login_base']
+        graph_base = endpoints['graph_base']
+        
+        base = f"https://{login_base}/{tenant_id}/oauth2/v2.0"
         return {
             'authorization': f"{base}/authorize",
             'token': f"{base}/token",
-            'jwks': f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys",
-            'userinfo': 'https://graph.microsoft.com/oidc/userinfo',
-            'graph_me': 'https://graph.microsoft.com/v1.0/me',
-            'graph_groups': 'https://graph.microsoft.com/v1.0/me/memberOf',
+            'jwks': f"https://{login_base}/{tenant_id}/discovery/v2.0/keys",
+            'userinfo': f"https://{graph_base}/oidc/userinfo",
+            'graph_me': f"https://{graph_base}/v1.0/me",
+            'graph_groups': f"https://{graph_base}/v1.0/me/memberOf",
         }
     else:
         # Generic OIDC provider - try .well-known discovery first, fall back to authority URL
@@ -16187,7 +16236,7 @@ def oidc_test_connection():
     config = get_oidc_settings()
     
     # Override with test data
-    for key in ['oidc_client_id', 'oidc_tenant_id', 'oidc_provider', 'oidc_authority']:
+    for key in ['oidc_client_id', 'oidc_tenant_id', 'oidc_provider', 'oidc_authority', 'oidc_cloud_environment']:
         if key in data:
             short_key = key.replace('oidc_', '')
             config[short_key] = data[key]
@@ -16196,7 +16245,9 @@ def oidc_test_connection():
     
     # Step 1: Check endpoints exist
     endpoints = get_oidc_endpoints(config)
-    results.append({'step': 'Configuration', 'status': 'ok', 'detail': f"Provider: {config['provider']}, Tenant: {config.get('tenant_id', 'N/A')}"})
+    cloud_env = config.get('cloud_environment', 'commercial')
+    env_label = {'commercial': 'Commercial', 'gcc': 'GCC', 'gcc_high': 'GCC High', 'dod': 'DoD'}.get(cloud_env, cloud_env)
+    results.append({'step': 'Configuration', 'status': 'ok', 'detail': f"Provider: {config['provider']}, Tenant: {config.get('tenant_id', 'N/A')}, Cloud: {env_label}"})
     
     # Step 2: Test authorization endpoint
     try:
@@ -21567,6 +21618,7 @@ def load_server_settings():
         # OIDC defaults
         'oidc_enabled': False,
         'oidc_provider': 'entra',
+        'oidc_cloud_environment': 'commercial',  # NS: commercial, gcc, gcc_high, dod
         'oidc_client_id': '',
         'oidc_client_secret': '',
         'oidc_tenant_id': '',
@@ -22652,9 +22704,16 @@ def update_server_settings():
                 'ldap_admin_group': lambda v: str(v or '').strip(),
                 'ldap_user_group': lambda v: str(v or '').strip(),
                 'ldap_viewer_group': lambda v: str(v or '').strip(),
-                'ldap_default_role': lambda v: str(v) if v in ['admin', 'user', 'viewer'] else 'viewer',
+                'ldap_default_role': lambda v: str(v).strip() if v else 'viewer',  # NS: Accept custom roles too
                 'ldap_auto_create_users': lambda v: bool(v),
             }
+            
+            # NS: Feb 2026 - Log incoming LDAP data for debugging save issues
+            if any(k in data for k in ldap_keys):
+                logging.info(f"[LDAP] Incoming save data: server='{data.get('ldap_server', '<missing>')}', "
+                           f"base_dn='{data.get('ldap_base_dn', '<missing>')}', "
+                           f"enabled={data.get('ldap_enabled', '<missing>')}, "
+                           f"bind_dn='{data.get('ldap_bind_dn', '<missing>')}'")
             
             for key, transform in ldap_keys.items():
                 if key in data:
@@ -22667,6 +22726,8 @@ def update_server_settings():
                     settings['ldap_bind_password'] = get_db()._encrypt(pwd)  # NS: Encrypt bind credential
             
             # LW: Custom group→role mappings (JSON array)
+            # NS: Feb 2026 - Simplified: just group_dn + role (including custom roles)
+            # tenant/tenant_role kept for backwards compat but no longer in UI
             if 'ldap_group_mappings' in data:
                 mappings = data['ldap_group_mappings']
                 if isinstance(mappings, list):
@@ -22677,11 +22738,14 @@ def update_server_settings():
                             clean_mappings.append({
                                 'group_dn': str(m.get('group_dn', '')).strip(),
                                 'role': str(m.get('role', 'viewer')).strip(),
-                                'tenant': str(m.get('tenant', '')).strip(),
-                                'tenant_role': str(m.get('tenant_role', '')).strip(),
-                                'permissions': m.get('permissions', []),
                             })
                     settings['ldap_group_mappings'] = clean_mappings
+                    # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
+                    # Prevents priority conflicts (built-in checked before custom in auth)
+                    if clean_mappings:
+                        settings['ldap_admin_group'] = ''
+                        settings['ldap_user_group'] = ''
+                        settings['ldap_viewer_group'] = ''
             
             if any(k in data for k in ldap_keys):
                 log_audit(request.session.get('user', 'admin'), 'settings.ldap', 
@@ -22692,11 +22756,24 @@ def update_server_settings():
                            f"base_dn='{settings.get('ldap_base_dn', '')}', "
                            f"bind_dn='{settings.get('ldap_bind_dn', '')}', "
                            f"password_set={bool(settings.get('ldap_bind_password'))}")
+                
+                # NS: Feb 2026 - Verify DB actually persisted the value (catches write failures)
+                try:
+                    verify = load_server_settings()
+                    v_server = verify.get('ldap_server', '')
+                    v_base = verify.get('ldap_base_dn', '')
+                    if settings.get('ldap_base_dn') and not v_base:
+                        logging.error(f"[LDAP] DB WRITE VERIFICATION FAILED! Saved base_dn='{settings.get('ldap_base_dn')}' but read back '{v_base}'")
+                    elif settings.get('ldap_server') and not v_server:
+                        logging.error(f"[LDAP] DB WRITE VERIFICATION FAILED! Saved server='{settings.get('ldap_server')}' but read back '{v_server}'")
+                except Exception as ve:
+                    logging.warning(f"[LDAP] DB verification failed: {ve}")
             
             # NS: Feb 2026 - OIDC / Entra ID settings
             oidc_keys = {
                 'oidc_enabled': lambda v: bool(v),
                 'oidc_provider': lambda v: str(v) if v in ('entra', 'okta', 'generic') else 'entra',
+                'oidc_cloud_environment': lambda v: str(v) if v in ('commercial', 'gcc', 'gcc_high', 'dod') else 'commercial',  # NS: GCC High/DoD
                 'oidc_client_id': lambda v: str(v).strip(),
                 'oidc_tenant_id': lambda v: str(v).strip(),
                 'oidc_authority': lambda v: str(v).strip(),
@@ -22705,7 +22782,7 @@ def update_server_settings():
                 'oidc_admin_group_id': lambda v: str(v).strip(),
                 'oidc_user_group_id': lambda v: str(v).strip(),
                 'oidc_viewer_group_id': lambda v: str(v).strip(),
-                'oidc_default_role': lambda v: str(v) if v in (ROLE_ADMIN, ROLE_USER, ROLE_VIEWER) else ROLE_VIEWER,
+                'oidc_default_role': lambda v: str(v).strip() if v else ROLE_VIEWER,  # NS: Accept custom roles too
                 'oidc_auto_create_users': lambda v: bool(v),
                 'oidc_button_text': lambda v: str(v).strip() or 'Sign in with Microsoft',
             }
@@ -22721,6 +22798,7 @@ def update_server_settings():
                     settings['oidc_client_secret'] = get_db()._encrypt(secret)
             
             # LW: OIDC custom group mappings
+            # NS: Feb 2026 - Simplified: just group_id + role (including custom roles)
             if 'oidc_group_mappings' in data:
                 mappings = data['oidc_group_mappings']
                 if isinstance(mappings, list):
@@ -22730,11 +22808,13 @@ def update_server_settings():
                             clean.append({
                                 'group_id': str(m.get('group_id') or m.get('group_dn', '')).strip(),
                                 'role': str(m.get('role', 'viewer')).strip(),
-                                'tenant': str(m.get('tenant', '')).strip(),
-                                'tenant_role': str(m.get('tenant_role', '')).strip(),
-                                'permissions': m.get('permissions', []),
                             })
                     settings['oidc_group_mappings'] = clean
+                    # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
+                    if clean:
+                        settings['oidc_admin_group_id'] = ''
+                        settings['oidc_user_group_id'] = ''
+                        settings['oidc_viewer_group_id'] = ''
             
             if any(k in data for k in oidc_keys):
                 log_audit(request.session.get('user', 'admin'), 'settings.oidc', 
@@ -22803,10 +22883,21 @@ def update_server_settings():
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'settings.server_updated', f"Settings updated (restart_required={restart_required})")
             
+            # NS: Feb 2026 - Warn if LDAP enabled but critical fields missing
+            warnings = []
+            if settings.get('ldap_enabled'):
+                if not settings.get('ldap_server'):
+                    warnings.append('LDAP server is empty')
+                if not settings.get('ldap_base_dn'):
+                    warnings.append('LDAP base DN is empty - LDAP login will not work')
+                if not settings.get('ldap_bind_dn'):
+                    warnings.append('LDAP bind DN is empty - user search may fail')
+            
             return jsonify({
                 'success': True,
                 'restart_required': restart_required,
-                'message': 'Settings saved'
+                'message': 'Settings saved',
+                'warnings': warnings if warnings else None
             })
         else:
             logging.error("[Settings] Failed to save settings")
