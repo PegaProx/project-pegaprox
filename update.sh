@@ -167,6 +167,19 @@ if [ "$EUID" -eq 0 ] && [ -n "$ORIGINAL_OWNER" ] && [ "$ORIGINAL_OWNER" != "root
     echo -e "${GREEN}OK${NC}"
 fi
 
+# Restore restrictive permissions on config and ssl directories.
+# These must be 0700 so that only the service user can read the encrypted
+# database and SSL private keys. An update that runs as root via sudo can
+# inadvertently leave them world-readable if umask is permissive.
+if [ -d "config" ]; then
+    chmod 700 config 2>/dev/null || true
+fi
+if [ -d "config/ssl" ]; then
+    chmod 700 config/ssl 2>/dev/null || true
+elif [ -d "ssl" ]; then
+    chmod 700 ssl 2>/dev/null || true
+fi
+
 # Install/update Python packages
 echo ""
 echo -n "Installing Python packages... "
