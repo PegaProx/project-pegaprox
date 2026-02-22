@@ -15104,12 +15104,21 @@ def require_auth(roles: list = None, perms: list = None):
     return decorator
 
 def cleanup_expired_sessions():
-    """Remove expired sessions"""
+    """Remove expired sessions.
+
+    Snapshot active_sessions before iterating so a concurrent request
+    that adds or removes a session in another thread cannot cause a
+    RuntimeError('dictionary changed size during iteration').
+    Use dict.pop() with a default so a session that was already removed
+    by another thread is silently skipped.
+    """
     current_time = time.time()
-    expired = [sid for sid, session in active_sessions.items() 
-               if current_time - session['last_activity'] > get_session_timeout()]
+    timeout = get_session_timeout()
+    snapshot = list(active_sessions.items())
+    expired = [sid for sid, session in snapshot
+               if current_time - session.get('last_activity', 0) > timeout]
     for sid in expired:
-        del active_sessions[sid]
+        active_sessions.pop(sid, None)
     if expired:
         logging.debug(f"Cleaned up {len(expired)} expired sessions")
 
