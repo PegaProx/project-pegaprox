@@ -11758,9 +11758,52 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    def get_guest_info(self, node: str, vmid: int) -> Dict[str, Any]:
+        """Fetch hostname and OS pretty-name from the QEMU guest agent.
+
+        Calls two agent endpoints:
+          - agent/get-host-name  → guest hostname
+          - agent/get-osinfo     → OS pretty-name (e.g. "Ubuntu 22.04.3 LTS")
+
+        Returns an empty dict for both fields when the agent is not running
+        or the VM is stopped, so callers can handle gracefully.
+        """
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'success': False, 'error': 'Could not connect to Proxmox'}
+
+        host = self.current_host or self.config.host
+        base = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/agent"
+
+        result = {'success': True, 'hostname': None, 'os_pretty_name': None}
+
+        try:
+            r = self._create_session().get(f"{base}/get-host-name", timeout=5)
+            if r.status_code == 200:
+                result['hostname'] = (
+                    r.json().get('data', {})
+                     .get('result', {})
+                     .get('host-name')
+                )
+        except Exception as e:
+            self.logger.debug(f"[guest-info] get-host-name failed for {vmid}: {e}")
+
+        try:
+            r = self._create_session().get(f"{base}/get-osinfo", timeout=5)
+            if r.status_code == 200:
+                result['os_pretty_name'] = (
+                    r.json().get('data', {})
+                     .get('result', {})
+                     .get('pretty-name')
+                )
+        except Exception as e:
+            self.logger.debug(f"[guest-info] get-osinfo failed for {vmid}: {e}")
+
+        return result
+
     def get_vm_rrd(self, node: str, vmid: int, vm_type: str, timeframe: str = 'day') -> Dict[str, Any]:
         """Get RRD metrics data for a VM or container
-        
+
         Proxmox stores historical data in RRD format.
         Timeframes: hour, day, week, month, year
         """
@@ -32490,6 +32533,32 @@ def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
             'lock_description': None,
             'unlock_command': None
         })
+
+
+@app.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/guest-info', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_guest_info_api(cluster_id, node, vmid):
+    """Return hostname and OS pretty-name from the QEMU guest agent.
+
+    Only supported for QEMU VMs with the guest agent running.
+    Returns null values gracefully when the agent is unavailable.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    result = mgr.get_guest_info(node, vmid)
+
+    if result.get('success'):
+        return jsonify({
+            'hostname': result.get('hostname'),
+            'os_pretty_name': result.get('os_pretty_name'),
+        })
+    else:
+        return jsonify({'error': result.get('error')}), 500
 
 
 @app.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/unlock', methods=['POST'])
