@@ -6,12 +6,16 @@
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
     "update_files": [
         "pegaprox_multi_cluster.py",
+        "web/dist/index.html",
+        "web/dist/assets/",
         "web/index.html",
-        "web/index.html.original",
-        "static/js/chart.umd.min.js",
+        "web/package.json",
+        "web/package-lock.json",
+        "web/src/",
         "requirements.txt"
     ],
     "changelog": [
+        "Changed: Frontend is now a standard Vite/React build (web/dist/); run npm run build in web/ to build",
         "Added: Network auto-reconnect after ifreload/network changes with automatic ticket refresh (90min cycle)",
         "Added: Stale connection detection - auto-recovers after 10 consecutive empty API responses",
         "Added: Node Join now auto-updates fallback hosts and HA state via background thread",

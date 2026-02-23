@@ -504,6 +504,8 @@ SSL_CERT_FILE = 'ssl/cert.pem'
 SSL_KEY_FILE = 'ssl/key.pem'
 LOG_DIR = 'logs'
 WEB_DIR = 'web'
+# Vite build output (web/dist/). If present, SPA is served from here; otherwise legacy web/index.html
+SPA_DIST = os.path.join(WEB_DIR, 'dist')
 SSL_DIR = 'ssl'
 
 # Session configuration
@@ -24071,10 +24073,16 @@ def add_cors_origin():
     })
 
 # API Routes
+def _serve_spa_index():
+    """Serve SPA index: prefer Vite build (web/dist/index.html) if present, else legacy web/index.html"""
+    if os.path.isfile(os.path.join(SPA_DIST, 'index.html')):
+        return send_from_directory(SPA_DIST, 'index.html')
+    return send_from_directory(WEB_DIR, 'index.html')
+
 @app.route('/')
 def index():
     """Serve the web interface"""
-    return send_from_directory(WEB_DIR, 'index.html')
+    return _serve_spa_index()
 
 @app.route('/oidc/callback')
 def oidc_callback_page():
@@ -24083,7 +24091,15 @@ def oidc_callback_page():
     Identity providers redirect here with ?code=xxx&state=yyy
     The frontend JS picks up the params and calls the API callback endpoint
     """
-    return send_from_directory(WEB_DIR, 'index.html')
+    return _serve_spa_index()
+
+@app.route('/assets/<path:filename>')
+def serve_spa_assets(filename):
+    """Serve Vite-built assets (JS, CSS) from web/dist/assets/ for standard React build"""
+    assets_dir = os.path.join(SPA_DIST, 'assets')
+    if not os.path.isdir(assets_dir):
+        return Response('', status=404, mimetype='application/javascript')
+    return send_from_directory(assets_dir, filename)
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
