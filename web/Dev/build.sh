@@ -2,7 +2,11 @@
 # ============================================================================
 # PegaProx Build Script - Pre-compile JSX for faster loading
 # ============================================================================
-# 
+#
+# DEPRECATED: The frontend now uses a standard Vite/React build. Run instead:
+#   cd web && npm ci && npm run build
+# Output goes to web/dist/. This script is kept for reference only.
+#
 # LW: Created 25.01.2026 with help from Claude (AI)
 # @gyptazy: Modified 26.01.2026 for path evaluation and minor fixes
 #

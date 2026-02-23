@@ -188,13 +188,27 @@ Afterwards, please proceed with the following steps:
 /opt/PegaProx/
 ├── pegaprox_multi_cluster.py   # Main application
 ├── web/
-│   └── index.html              # Frontend
+│   ├── index.html              # Frontend (dev entry or legacy)
+│   ├── src/                    # React source (Vite build)
+│   └── dist/                   # Vite build output (index.html + assets/)
 ├── config/
 │   ├── pegaprox.db             # SQLite database (credentials encrypted)
 │   └── ssl/                    # SSL certificates
 ├── logs/                       # Application logs
 └── static/                     # Offline assets (optional)
 ```
+
+### Building the frontend
+
+The UI is a standard React (Vite) app. To build:
+
+```bash
+cd web
+npm ci
+npm run build
+```
+
+Output is in `web/dist/`. The backend serves `web/dist/index.html` and `web/dist/assets/*` when present; otherwise it falls back to legacy `web/index.html`. For local development, run `npm run dev` in `web/` (dev server proxies API to the Flask backend).
 
 ## 🔒 Security Notes
 
