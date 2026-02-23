@@ -8,7 +8,9 @@
         "pegaprox_multi_cluster.py",
         "web/dist/index.html",
         "web/dist/assets/",
+        "web/index.html",
         "web/package.json",
+        "web/package-lock.json",
         "web/src/",
         "requirements.txt"
     ],
