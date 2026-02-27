@@ -1,16 +1,16 @@
 #!/bin/bash
 # ============================================================================
-# PegaProx Build Script - Pre-compile JSX for faster loading
+# PegaProx Build Script - Concat & Pre-compile JSX
 # ============================================================================
-# 
+#
 # LW: Created 25.01.2026 with help from Claude (AI)
 # @gyptazy: Modified 26.01.2026 for path evaluation and minor fixes
-#
-# Was tired of waiting 15 seconds for Babel to compile every page load also issues lol
+# NS: Feb 2026 - Updated for web/src/ split (16 feature files)
 #
 # What this does:
-#   - Extracts the JSX from index.html
-#   - Compiles it with Babel (once, not every page load)
+#   - Concatenates web/src/*.js in dependency order
+#   - Combines with HTML shell (index.html.original)
+#   - Compiles JSX with Babel (once, not every page load)
 #   - Wraps it so it waits for React to load first
 #   - Result: 2-3 seconds instead of 15+ seconds!
 #
@@ -18,10 +18,10 @@
 #
 # Usage:
 #   ./build.sh              # Build the compiled version
-#   ./build.sh --restore    # Go back to original (for development)
+#   ./build.sh --restore    # Dev mode (Babel compiles in browser)
 #
-# After editing index.html.original, run this again to rebuild.
-# The compiled index.html is what gets deployed to users.
+# After editing web/src/*.js, run this again to rebuild.
+# The compiled web/index.html is what gets deployed to users.
 # ============================================================================
 
 set -e
@@ -42,18 +42,90 @@ echo -e "${BLUE}║          PegaProx Build Script - JSX Pre-Compiler          �
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# --restore flag: go back to original for development
-if [ "$1" == "--restore" ]; then
-    if [ -f "web/index.html.original" ]; then
-        cp web/index.html.original web/index.html
-        echo -e "${GREEN}✓ Restored original index.html${NC}"
-        echo "  You can now edit web/index.html directly"
-        echo "  Run ./build.sh again when done to compile"
-    else
-        echo -e "${RED}✗ No backup found (web/index.html.original)${NC}"
-        echo "  Looks like you haven't run a build yet?"
+# Source files in dependency order
+SRC_FILES=(
+    constants.js
+    translations.js
+    contexts.js
+    auth.js
+    icons.js
+    ui.js
+    datacenter.js
+    security.js
+    storage.js
+    tables.js
+    vm_modals.js
+    vm_config.js
+    node_modals.js
+    create_modals.js
+    settings_modal.js
+    dashboard.js
+)
+
+# Verify all source files exist
+for f in "${SRC_FILES[@]}"; do
+    if [ ! -f "web/src/$f" ]; then
+        echo -e "${RED}✗ Missing source file: web/src/$f${NC}"
         exit 1
     fi
+done
+echo -e "${GREEN}✓ All ${#SRC_FILES[@]} source files found${NC}"
+
+# Check for HTML shell
+if [ ! -f "web/index.html.original" ]; then
+    echo -e "${RED}✗ web/index.html.original not found!${NC}"
+    exit 1
+fi
+
+# Verify shell has the insert marker
+if ! grep -q "PEGAPROX_JSX_INSERT" web/index.html.original; then
+    echo -e "${RED}✗ web/index.html.original missing PEGAPROX_JSX_INSERT marker!${NC}"
+    echo "  The HTML shell needs the <!-- PEGAPROX_JSX_INSERT --> comment."
+    exit 1
+fi
+echo -e "${GREEN}✓ HTML shell with JSX insert marker${NC}"
+
+# --restore flag: dev mode with in-browser Babel compilation
+if [ "$1" == "--restore" ]; then
+    echo ""
+    echo -e "${YELLOW}Building dev version (Babel compiles in browser)...${NC}"
+
+    # Concatenate source files
+    JSX_CONTENT=""
+    for f in "${SRC_FILES[@]}"; do
+        JSX_CONTENT+="$(cat "web/src/$f")"
+        JSX_CONTENT+=$'\n'
+    done
+
+    # Build HTML: shell + <script type="text/babel"> + jsx + </script></body></html>
+    # Replace everything from the marker line onwards
+    python3 -c "
+import sys
+with open('web/index.html.original', 'r') as f:
+    shell = f.read()
+
+# Read concatenated JSX from stdin
+jsx = sys.stdin.read()
+
+# Find the marker and replace from there
+marker = '    <!-- PEGAPROX_JSX_INSERT -->'
+idx = shell.find(marker)
+if idx == -1:
+    print('ERROR: PEGAPROX_JSX_INSERT marker not found', file=sys.stderr)
+    sys.exit(1)
+
+html_before = shell[:idx]
+new_html = html_before + '<script type=\"text/babel\">\n' + jsx + '\n    </script>\n\n</body>\n</html>\n'
+
+with open('web/index.html', 'w') as f:
+    f.write(new_html)
+
+print(f'  Dev build: {len(new_html):,} bytes')
+" <<< "$JSX_CONTENT"
+
+    echo -e "${GREEN}✓ Dev build complete (web/index.html)${NC}"
+    echo "  Babel will compile JSX in the browser (slower but good for development)"
+    echo "  Run ./build.sh again (without --restore) to create production build"
     exit 0
 fi
 
@@ -90,7 +162,7 @@ if [ ! -d "$BUILD_DIR/node_modules/@babel/core" ]; then
     echo ""
     echo -e "${YELLOW}First run - installing Babel (one-time setup)...${NC}"
     cd "$BUILD_DIR"
-    
+
     cat > package.json << 'EOF'
 {
   "name": "pegaprox-build",
@@ -102,122 +174,69 @@ if [ ! -d "$BUILD_DIR/node_modules/@babel/core" ]; then
   }
 }
 EOF
-    
+
     npm install --silent
-    cd "$SCRIPT_DIR"
+    cd "$PROJECT_ROOT"
     echo -e "${GREEN}✓ Babel installed${NC}"
 fi
 
-# Check for source file
-if [ ! -f "web/index.html" ]; then
-    echo -e "${RED}✗ web/index.html not found!${NC}"
-    echo "  Are you in the right directory?"
-    exit 1
-fi
-
 echo ""
-echo -e "${YELLOW}Building...${NC}"
+echo -e "${YELLOW}Building production version...${NC}"
 
-# Backup original if this is the first build
-if [ ! -f "web/index.html.original" ]; then
-    cp web/index.html web/index.html.original
-    echo -e "${GREEN}✓ Backed up original to web/index.html.original${NC}"
-fi
+# Step 1: Concatenate source files
+echo -e "${BLUE}→ Concatenating ${#SRC_FILES[@]} source files...${NC}"
 
-echo -e "${BLUE}→ Extracting and compiling JSX...${NC}"
+cat /dev/null > "$BUILD_DIR/app.jsx"
+for f in "${SRC_FILES[@]}"; do
+    cat "web/src/$f" >> "$BUILD_DIR/app.jsx"
+    echo "" >> "$BUILD_DIR/app.jsx"
+done
+
+JSX_SIZE=$(wc -c < "$BUILD_DIR/app.jsx")
+JSX_LINES=$(wc -l < "$BUILD_DIR/app.jsx")
+echo "  Concatenated: ${JSX_LINES} lines, ${JSX_SIZE} bytes"
+
+# Step 2: Compile JSX with Babel
+echo -e "${BLUE}→ Compiling JSX with Babel...${NC}"
+
+BABEL_CMD="$BUILD_DIR/node_modules/.bin/babel"
+# Run from .build/ dir so Babel finds node_modules/@babel/preset-react
+(cd "$BUILD_DIR" && "$BABEL_CMD" app.jsx -o app.js --presets=@babel/preset-react)
+
+JS_SIZE=$(wc -c < "$BUILD_DIR/app.js")
+echo "  Compiled JS: ${JS_SIZE} bytes"
+
+# Step 3: Build final HTML
+echo -e "${BLUE}→ Assembling final HTML...${NC}"
 
 export PEGAPROX_BUILD_DIR="$BUILD_DIR"
 export PEGAPROX_PROJECT_ROOT="$PROJECT_ROOT"
 
-# Python does the heavy lifting - Claude wrote most of this part
-# Tried doing it in pure bash but the escaping was a nightmare
 python3 << 'PYTHON_SCRIPT'
 import os
-import subprocess
-import sys
 
-build_dir = os.environ.get("PEGAPROX_BUILD_DIR")
-project_root = os.environ.get("PEGAPROX_PROJECT_ROOT")
-
-if not build_dir or not project_root:
-    print("ERROR: Build environment variables not set")
-    sys.exit(1)
-
+build_dir = os.environ["PEGAPROX_BUILD_DIR"]
+project_root = os.environ["PEGAPROX_PROJECT_ROOT"]
 web_dir = os.path.join(project_root, 'web')
 
-# Read the original index.html
+# Read HTML shell
 with open(os.path.join(web_dir, 'index.html.original'), 'r', encoding='utf-8') as f:
-    html_content = f.read()
+    shell = f.read()
 
-# Find the <script type="text/babel"> block
-# This is where all our React code lives
-start_tag = '<script type="text/babel">'
-babel_start = html_content.find(start_tag)
-if babel_start == -1:
-    start_tag = "<script type='text/babel'>"
-    babel_start = html_content.find(start_tag)
-
-if babel_start == -1:
-    print("ERROR: Could not find <script type=\"text/babel\"> block!")
-    print("       Is this the right index.html?")
-    sys.exit(1)
-
-content_start = babel_start + len(start_tag)
-
-# Find the closing </script> tag (it's the last one before </body>)
-end_patterns = ['</script>\n</body>', '</script>\r\n</body>', '</script></body>']
-content_end = -1
-for pattern in end_patterns:
-    pos = html_content.rfind(pattern)
-    if pos > content_start:
-        content_end = pos
-        break
-
-if content_end == -1:
-    content_end = html_content.rfind('</script>')
-
-if content_end <= content_start:
-    print("ERROR: Could not find closing </script> tag!")
-    sys.exit(1)
-
-jsx_code = html_content[content_start:content_end]
-print(f"  Found JSX: {len(jsx_code):,} characters")
-
-# Write JSX to temp file for Babel
-jsx_file = os.path.join(build_dir, 'app.jsx')
-with open(jsx_file, 'w', encoding='utf-8') as f:
-    f.write(jsx_code)
-
-# Run Babel to compile JSX -> JS
-print("  Compiling with Babel...")
-babel_cmd = os.path.join(build_dir, 'node_modules', '.bin', 'babel')
-js_file = os.path.join(build_dir, 'app.js')
-
-result = subprocess.run(
-    [babel_cmd, jsx_file, '-o', js_file, '--presets=@babel/preset-react'],
-    capture_output=True,
-    text=True,
-    cwd=build_dir
-)
-
-if result.returncode != 0:
-    print(f"ERROR: Babel compilation failed!")
-    print(result.stderr)
-    sys.exit(1)
-
-# Read the compiled JS
-with open(js_file, 'r', encoding='utf-8') as f:
+# Read compiled JS
+with open(os.path.join(build_dir, 'app.js'), 'r', encoding='utf-8') as f:
     compiled_js = f.read()
 
-print(f"  Compiled JS: {len(compiled_js):,} characters")
+# Find insert marker
+marker = '    <!-- PEGAPROX_JSX_INSERT -->'
+idx = shell.find(marker)
+if idx == -1:
+    print("ERROR: PEGAPROX_JSX_INSERT marker not found!")
+    exit(1)
 
-# Build the new HTML
-# Important: wrap the code so it waits for React to load first
-# React loads async, so without this you get "React is not defined" errors
-# Took a while to figure this one out...
-html_before = html_content[:babel_start]
-html_after = html_content[content_end + len('</script>'):]
+html_before = shell[:idx]
 
+# Wrap compiled JS in waitForReact IIFE
 wrapper_start = '''(function waitForReact() {
     if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
         setTimeout(waitForReact, 10);
@@ -229,10 +248,11 @@ wrapper_end = '''
 })();'''
 
 wrapped_js = wrapper_start + compiled_js + wrapper_end
-new_html = html_before + '<script>\n' + wrapped_js + '\n</script>' + html_after
 
-# Disable the Babel.transformScriptTags() call
-# Babel still loads but won't do anything (removing it breaks the promise chain)
+# Build final HTML
+new_html = html_before + '<script>\n' + wrapped_js + '\n    </script>\n\n</body>\n</html>\n'
+
+# Disable Babel.transformScriptTags() since JSX is pre-compiled
 babel_transform_variations = [
     "if (window.Babel) {\n                Babel.transformScriptTags();\n            }",
     "if (window.Babel) {\r\n                Babel.transformScriptTags();\r\n            }",
@@ -246,17 +266,17 @@ for variation in babel_transform_variations:
 
 # Update the loading comment
 old_comment = "// Load in sequence - using jsdelivr instead of unpkg (faster + better caching)"
-new_comment = "// Load in sequence - JSX pre-compiled, Babel loads but skips\n        // Edit web/index.html.original, then run ./build.sh"
+new_comment = "// Load in sequence - JSX pre-compiled, Babel loads but skips\n        // Edit web/src/*.js, then run web/Dev/build.sh"
 new_html = new_html.replace(old_comment, new_comment)
 
-# Write the final compiled HTML
+# Write output
 output_file = os.path.join(web_dir, 'index.html')
 with open(output_file, 'w', encoding='utf-8') as f:
     f.write(new_html)
 
-# Show what we did
-print(f"\n  Original HTML:  {len(html_content):,} bytes")
-print(f"  Compiled HTML:  {len(new_html):,} bytes")
+print(f"  Shell:    {len(shell):,} bytes")
+print(f"  JS:       {len(compiled_js):,} bytes")
+print(f"  Output:   {len(new_html):,} bytes")
 
 PYTHON_SCRIPT
 
@@ -270,8 +290,8 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║                    Build Complete! ✓                       ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  ${BLUE}Before:${NC} ~15 seconds (Babel compiles in browser every time)"
-echo -e "  ${GREEN}After:${NC}  ~2-3 seconds (pre-compiled, just runs)"
+echo -e "  ${BLUE}Source:${NC}  web/src/ (${#SRC_FILES[@]} files)"
+echo -e "  ${BLUE}Output:${NC}  web/index.html (pre-compiled)"
 echo ""
 echo -e "  For development: ${YELLOW}./build.sh --restore${NC}"
 echo -e "  After changes:   ${YELLOW}./build.sh${NC}"
