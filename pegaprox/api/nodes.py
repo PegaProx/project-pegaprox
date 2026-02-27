@@ -527,6 +527,38 @@ def update_node_subscription_api(cluster_id, node):
 # MK: this was surprisingly tricky to get right, proxmox smbios format is picky
 # =============================================================================
 
+def _ssh_write_file(ssh, path, content, mode=None):
+    """Write file via SSH - SFTP with exec_command fallback.
+    MK Feb 2026 - some Proxmox nodes don't have openssh-sftp-server or /opt/
+    """
+    import os
+    parent = os.path.dirname(path)
+
+    # Ensure parent directory exists
+    stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {parent}")
+    stdout.read()
+
+    try:
+        sftp = ssh.open_sftp()
+        with sftp.file(path, 'w') as f:
+            f.write(content)
+        if mode is not None:
+            sftp.chmod(path, mode)
+        sftp.close()
+    except (IOError, OSError) as e:
+        logging.warning(f"SFTP write to {path} failed ({e}), falling back to exec_command")
+        # Pipe content via stdin - avoids heredoc escaping issues
+        stdin, stdout, stderr = ssh.exec_command(f"cat > {path}")
+        stdin.write(content)
+        stdin.channel.shutdown_write()
+        stdout.read()
+        err = stderr.read().decode().strip()
+        if err:
+            raise RuntimeError(f"Failed to write {path}: {err}")
+        if mode is not None:
+            stdin, stdout, stderr = ssh.exec_command(f"chmod {oct(mode)[2:]} {path}")
+            stdout.read()
+
 SMBIOS_SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
 """
 SMBIOS Auto-Configurator for Proxmox VE
@@ -912,36 +944,21 @@ def deploy_smbios_autoconfig(cluster_id, node):
             family=_sanitize_smbios(settings.get('family', 'ProxmoxVE'))
         )
         
-        # Write script to node
-        sftp = ssh.open_sftp()
-        with sftp.file('/opt/pegaprox-smbios-autoconfig.py', 'w') as f:
-            f.write(script)
-        sftp.chmod('/opt/pegaprox-smbios-autoconfig.py', 0o755)
-        
-        # Write systemd service
-        with sftp.file('/etc/systemd/system/pegaprox-smbios-autoconfig.service', 'w') as f:
-            f.write(SMBIOS_SERVICE_TEMPLATE)
-        
-        sftp.close()
-        
+        # Write script and service to node (SFTP with exec_command fallback)
+        _ssh_write_file(ssh, '/opt/pegaprox-smbios-autoconfig.py', script, 0o755)
+        _ssh_write_file(ssh, '/etc/systemd/system/pegaprox-smbios-autoconfig.service', SMBIOS_SERVICE_TEMPLATE)
+
         # Enable and start service
         # NS: clear processed list so ALL vms get checked (not just new ones)
-        commands = [
-            'rm -f /var/lib/pegaprox-smbios-processed.txt',
-            'systemctl daemon-reload',
-            'systemctl enable pegaprox-smbios-autoconfig',
-            'systemctl restart pegaprox-smbios-autoconfig'
-        ]
-        
-        for cmd in commands:
+        for cmd in ['rm -f /var/lib/pegaprox-smbios-processed.txt', 'systemctl daemon-reload', 'systemctl enable pegaprox-smbios-autoconfig', 'systemctl restart pegaprox-smbios-autoconfig']:
             stdin, stdout, stderr = ssh.exec_command(cmd)
-            stdout.read()  # Wait for completion
-        
+            stdout.read()
+
         ssh.close()
-        
+
         usr = getattr(request, 'session', {}).get('user', 'system')
         log_audit(usr, 'smbios_autoconfig.deployed', f"SMBIOS auto-config deployed to {node}", cluster=mgr.config.name)
-        
+
         return jsonify({'success': True, 'message': f'SMBIOS Auto-Config deployed to {node}'})
         
     except Exception as e:
@@ -1201,17 +1218,10 @@ def deploy_smbios_autoconfig_all(cluster_id):
                 results.append({'node': node, 'success': False, 'error': 'SSH connection failed'})
                 continue
             
-            # Write script
-            sftp = ssh.open_sftp()
-            with sftp.file('/opt/pegaprox-smbios-autoconfig.py', 'w') as f:
-                f.write(script)
-            sftp.chmod('/opt/pegaprox-smbios-autoconfig.py', 0o755)
-            
-            # Write systemd service
-            with sftp.file('/etc/systemd/system/pegaprox-smbios-autoconfig.service', 'w') as f:
-                f.write(SMBIOS_SERVICE_TEMPLATE)
-            sftp.close()
-            
+            # Write script and service (SFTP with exec_command fallback)
+            _ssh_write_file(ssh, '/opt/pegaprox-smbios-autoconfig.py', script, 0o755)
+            _ssh_write_file(ssh, '/etc/systemd/system/pegaprox-smbios-autoconfig.service', SMBIOS_SERVICE_TEMPLATE)
+
             # Enable and start service
             # NS: clear processed list so ALL vms get checked
             for cmd in ['rm -f /var/lib/pegaprox-smbios-processed.txt', 'systemctl daemon-reload', 'systemctl enable pegaprox-smbios-autoconfig', 'systemctl restart pegaprox-smbios-autoconfig']:

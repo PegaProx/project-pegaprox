@@ -303,13 +303,15 @@ async def main():
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
     
-    # Issue #71: Try IPv6 bind, fall back to IPv4
+    # Issue #71/#95: empty host = all interfaces (dual-stack IPv4+IPv6)
+    ws_host = None if not BIND_HOST else BIND_HOST
+    display_host = BIND_HOST or '0.0.0.0'
     try:
-        async with websockets.serve(ssh_handler, BIND_HOST, PORT, ssl=ssl_context, ping_interval=30, ping_timeout=10):
-            print(f"SSH WebSocket server ready on {BIND_HOST}:{PORT}")
+        async with websockets.serve(ssh_handler, ws_host, PORT, ssl=ssl_context, ping_interval=30, ping_timeout=10):
+            print(f"SSH WebSocket server ready on {display_host}:{PORT}")
             await asyncio.Future()
     except OSError as e:
-        if ':' in BIND_HOST:
+        if ':' in str(display_host):
             print(f"SSH WebSocket: IPv6 bind failed ({e}), falling back to 0.0.0.0")
             async with websockets.serve(ssh_handler, '0.0.0.0', PORT, ssl=ssl_context, ping_interval=30, ping_timeout=10):
                 print(f"SSH WebSocket server ready on 0.0.0.0:{PORT}")

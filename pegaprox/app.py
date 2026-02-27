@@ -682,24 +682,33 @@ def main(debug_mode=False):
 
 
 def _start_console_servers(bind_host, port, ssl_context):
-    """Start VNC and SSH WebSocket servers."""
-    # These are large functions extracted from the monolith
-    # They will be imported from the original file on first run
+    """Start VNC and SSH WebSocket servers on port+1 and port+2."""
     vnc_ws_port = port + 1
     ssh_ws_port = port + 2
 
     try:
-        # Import the websocket server starters from the monolith
-        # These are standalone async functions that run in their own threads
         from pegaprox.api.vms import start_vnc_websocket_server, start_ssh_websocket_server
-        if ssl_context:
-            start_vnc_websocket_server(vnc_ws_port, ssl_cert=ssl_context[0], ssl_key=ssl_context[1], host=bind_host)
-            start_ssh_websocket_server(ssh_ws_port, ssl_cert=ssl_context[0], ssl_key=ssl_context[1], host=bind_host)
-        else:
-            start_vnc_websocket_server(vnc_ws_port, host=bind_host)
-            start_ssh_websocket_server(ssh_ws_port, host=bind_host)
-    except ImportError:
-        print("WARNING: Console WebSocket servers not available")
+    except ImportError as e:
+        print(f"WARNING: Console WebSocket servers not available: {e}")
+        return
+
+    # NS Feb 2026 - asyncio/websockets creates IPv6-only socket for '::' (#95)
+    # Use '' so asyncio binds to ALL interfaces (creates both IPv4 + IPv6 listeners)
+    console_host = '' if bind_host == '::' else bind_host
+
+    # MK Feb 2026 - start each server independently so one failure doesn't block the other
+    for name, start_fn, ws_port in [
+        ("VNC", start_vnc_websocket_server, vnc_ws_port),
+        ("SSH", start_ssh_websocket_server, ssh_ws_port),
+    ]:
+        try:
+            if ssl_context:
+                start_fn(ws_port, ssl_cert=ssl_context[0], ssl_key=ssl_context[1], host=console_host)
+            else:
+                start_fn(ws_port, host=console_host)
+        except Exception as e:
+            print(f"ERROR: {name} WebSocket server (port {ws_port}) failed to start: {e}")
+            logging.error(f"{name} WebSocket server startup failed: {e}", exc_info=True)
 
 
 def _test_ipv6_available():
@@ -819,8 +828,8 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
     """Start production server with Gevent."""
     from gevent.pywsgi import WSGIServer
 
-    print(f"Starting PegaProx with Gevent WSGIServer ({workers} greenlets)")
-    print("Mode: Production (async I/O optimized)")
+    print(f"Starting PegaProx with Gevent WSGIServer ({workers} greenlets)", flush=True)
+    print("Mode: Production (async I/O optimized)", flush=True)
 
     # NS: Suppress noisy errors from bots/scanners/disconnects
     import logging as log_module
@@ -1067,7 +1076,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
     is_ipv6_bind = ':' in bind_host
 
     if ssl_context:
-        print(f"HTTPS on https://{bind_host}:{port}")
+        print(f"HTTPS on https://{bind_host}:{port}", flush=True)
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_ctx.load_cert_chain(ssl_context[0], ssl_context[1])
@@ -1078,8 +1087,8 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
             **server_kwargs
         )
     else:
-        print(f"HTTP on http://{bind_host}:{port}")
-        print("WARNING: Running without HTTPS - noVNC console may not work!")
+        print(f"HTTP on http://{bind_host}:{port}", flush=True)
+        print("WARNING: Running without HTTPS - noVNC console may not work!", flush=True)
         http_server = QuietWSGIServer(_create_listener(bind_host, port), app, **server_kwargs)
 
     # Start VNC/SSH WebSocket servers

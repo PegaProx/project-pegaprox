@@ -860,7 +860,16 @@ class PegaProxDB:
                     logging.info("Added excluded_nodes column to clusters table")
                 except Exception as e:
                     logging.error(f"Failed to add excluded_nodes column: {e}")
-                    
+
+            # MK Feb 2026: Add smbios_autoconfig for per-cluster SMBIOS settings
+            if 'smbios_autoconfig' not in cluster_columns:
+                logging.info("Adding smbios_autoconfig column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN smbios_autoconfig TEXT DEFAULT '{}'")
+                    logging.info("Added smbios_autoconfig column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add smbios_autoconfig column: {e}")
+
         except Exception as e:
             logging.error(f"Error checking clusters schema: {e}")
         
@@ -1947,10 +1956,11 @@ class PegaProxDB:
                 'ssh_port': row['ssh_port'] or 22,
                 'ha_settings': json.loads(row['ha_settings'] or '{}'),
                 'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
+                'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
             }
-        
+
         return clusters
-    
+
     def get_cluster(self, cluster_id: str) -> dict:
         """Get single cluster"""
         cursor = self.conn.cursor()
@@ -2014,21 +2024,23 @@ class PegaProxDB:
             'ssh_port': row['ssh_port'] or 22,
             'ha_settings': json.loads(row['ha_settings'] or '{}'),
             'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
+            'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
         }
-    
+
     def save_cluster(self, cluster_id: str, data: dict):
         """Save or update cluster"""
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
         
         cursor.execute('''
-            INSERT OR REPLACE INTO clusters 
-            (id, name, host, user, pass_encrypted, ssl_verification, 
-             migration_threshold, check_interval, auto_migrate, 
-             balance_containers, balance_local_disks, dry_run, enabled, 
-             ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted, 
-             ssh_port, ha_settings, excluded_nodes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+            INSERT OR REPLACE INTO clusters
+            (id, name, host, user, pass_encrypted, ssl_verification,
+             migration_threshold, check_interval, auto_migrate,
+             balance_containers, balance_local_disks, dry_run, enabled,
+             ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted,
+             ssh_port, ha_settings, excluded_nodes, smbios_autoconfig,
+             created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM clusters WHERE id = ?), ?), ?)
         ''', (
             cluster_id,
@@ -2051,10 +2063,27 @@ class PegaProxDB:
             data.get('ssh_port', 22),
             json.dumps(data.get('ha_settings', {})),
             json.dumps(data.get('excluded_nodes', [])),
+            json.dumps(data.get('smbios_autoconfig', {})),
             cluster_id, now, now
         ))
         self.conn.commit()
     
+    def update_cluster(self, cluster_id: str, fields: dict):
+        """Partial update of cluster fields - MK Feb 2026"""
+        if not fields:
+            return
+        cursor = self.conn.cursor()
+        sets = []
+        vals = []
+        for key, value in fields.items():
+            sets.append(f"{key} = ?")
+            vals.append(value)
+        sets.append("updated_at = ?")
+        vals.append(datetime.now().isoformat())
+        vals.append(cluster_id)
+        cursor.execute(f"UPDATE clusters SET {', '.join(sets)} WHERE id = ?", vals)
+        self.conn.commit()
+
     def delete_cluster(self, cluster_id: str):
         """Delete cluster"""
         cursor = self.conn.cursor()

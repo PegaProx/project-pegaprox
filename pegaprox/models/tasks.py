@@ -101,3 +101,4 @@ class PegaProxConfig:
         self.ssh_port = cluster_data.get('ssh_port', 22)
         self.ha_settings = cluster_data.get('ha_settings', {})
         self.excluded_nodes = cluster_data.get('excluded_nodes', [])
+        self.smbios_autoconfig = cluster_data.get('smbios_autoconfig', {})

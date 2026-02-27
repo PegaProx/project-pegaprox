@@ -51,11 +51,11 @@ def get_datacenter_status(cluster_id):
         
         # get cluster status
         status_url = f"https://{host}:8006/api2/json/cluster/status"
-        status_resp = manager._create_session().get(status_url, timeout=5)
-        
+        status_resp = manager._create_session().get(status_url, timeout=10)
+
         # get resources
         resources_url = f"https://{host}:8006/api2/json/cluster/resources"
-        resources_resp = manager._create_session().get(resources_url, timeout=5)
+        resources_resp = manager._create_session().get(resources_url, timeout=10)
         
         status_data = status_resp.json().get('data', []) if status_resp.status_code == 200 else []
         resources_data = resources_resp.json().get('data', []) if resources_resp.status_code == 200 else []
@@ -5142,14 +5142,35 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
     import asyncio
     import re
     import threading
-    
+    import subprocess
+
     try:
         import websockets
     except ImportError:
         print("WARNING: 'websockets' library not installed. VNC console will not work.")
         print("Install with: pip install websockets")
         return
-    
+
+    # MK Feb 2026 - kill stale processes on port before binding (same as SSH server)
+    try:
+        result = subprocess.run(['fuser', '-k', f'{port}/tcp'], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            print(f"Killed existing process on VNC port {port}")
+            time.sleep(0.5)
+    except Exception:
+        try:
+            result = subprocess.run(['lsof', '-t', f'-i:{port}'], capture_output=True, text=True, timeout=5)
+            if result.stdout.strip():
+                for pid in result.stdout.strip().split('\n'):
+                    try:
+                        os.kill(int(pid), signal.SIGTERM)
+                        print(f"Killed existing VNC process {pid} on port {port}")
+                    except (ProcessLookupError, ValueError):
+                        pass
+                time.sleep(0.5)
+        except Exception:
+            pass
+
     # Event to signal server is ready
     server_ready = threading.Event()
     
@@ -5391,40 +5412,59 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         ws_logging.getLogger('websockets').setLevel(ws_logging.CRITICAL)
         
         # NS: added ping keepalive like ssh server has, was causing random disconnects (#92)
+        # LW Feb 2026: host='' means all interfaces (asyncio creates IPv4+IPv6 listeners)
+        ws_host = host if host else None
+        display_host = host or '0.0.0.0'
         try:
-            async with websockets.serve(vnc_handler, host, port, ssl=ssl_context, ping_interval=20, ping_timeout=10):
-                print(f"VNC WebSocket Server ready on {proto}://{host}:{port}")
+            async with websockets.serve(vnc_handler, ws_host, port, ssl=ssl_context, ping_interval=20, ping_timeout=10):
+                print(f"VNC WebSocket Server ready on {proto}://{display_host}:{port}", flush=True)
                 server_ready.set()
                 await asyncio.Future()  # Run forever
         except OSError as bind_err:
             # Issue #71: IPv6 bind failed, fall back to 0.0.0.0
             if ':' in str(host):
-                print(f"VNC WebSocket: IPv6 bind failed ({bind_err}), falling back to 0.0.0.0")
+                print(f"VNC WebSocket: IPv6 bind failed ({bind_err}), falling back to 0.0.0.0", flush=True)
                 async with websockets.serve(vnc_handler, '0.0.0.0', port, ssl=ssl_context, ping_interval=20, ping_timeout=10):
-                    print(f"VNC WebSocket Server ready on {proto}://0.0.0.0:{port}")
+                    print(f"VNC WebSocket Server ready on {proto}://0.0.0.0:{port}", flush=True)
                     server_ready.set()
                     await asyncio.Future()
             else:
                 raise
     
-    # Run in a separate thread
+    # LW Feb 2026 - run in thread, with proper fallback for gevent environments
     def run_server():
         try:
+            # Try asyncio.run() first (clean Python, no gevent)
             asyncio.run(main())
-        except (KeyboardInterrupt, SystemExit):
-            pass  # Clean shutdown, no traceback
         except RuntimeError as e:
-            if "cannot be called from a running event loop" not in str(e):
-                raise  # Re-raise if it's a different RuntimeError
-    
+            if "cannot be called from a running event loop" in str(e):
+                # NS: gevent monkey-patches asyncio, need explicit event loop
+                print("VNC WebSocket: gevent detected, using new event loop", flush=True)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(main())
+                finally:
+                    loop.close()
+            else:
+                print(f"ERROR: VNC WebSocket Server RuntimeError: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        except Exception as e:
+            print(f"ERROR: VNC WebSocket Server crashed: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+
     ws_thread = threading.Thread(target=run_server, daemon=True)
     ws_thread.start()
-    
+
     # Wait for server to be ready (max 5 seconds)
     if server_ready.wait(timeout=5):
-        print(f"VNC WebSocket Server started successfully")
+        print(f"VNC WebSocket Server started successfully", flush=True)
     else:
-        print(f"WARNING: VNC WebSocket Server may not be ready yet")
+        print(f"WARNING: VNC WebSocket Server may not be ready yet (check logs above for errors)", flush=True)
 
 
 # Keep flask-sock version as backup (renamed)
@@ -5942,13 +5982,15 @@ async def main():
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
     
-    # Issue #71: Try IPv6 bind, fall back to IPv4
+    # Issue #71/#95: empty host = all interfaces (dual-stack IPv4+IPv6)
+    ws_host = None if not BIND_HOST else BIND_HOST
+    display_host = BIND_HOST or '0.0.0.0'
     try:
-        async with websockets.serve(ssh_handler, BIND_HOST, PORT, ssl=ssl_context, ping_interval=30, ping_timeout=10):
-            print(f"SSH WebSocket server ready on {BIND_HOST}:{PORT}")
+        async with websockets.serve(ssh_handler, ws_host, PORT, ssl=ssl_context, ping_interval=30, ping_timeout=10):
+            print(f"SSH WebSocket server ready on {display_host}:{PORT}")
             await asyncio.Future()
     except OSError as e:
-        if ':' in BIND_HOST:
+        if ':' in str(display_host):
             print(f"SSH WebSocket: IPv6 bind failed ({e}), falling back to 0.0.0.0")
             async with websockets.serve(ssh_handler, '0.0.0.0', PORT, ssl=ssl_context, ping_interval=30, ping_timeout=10):
                 print(f"SSH WebSocket server ready on 0.0.0.0:{PORT}")
@@ -6032,10 +6074,10 @@ if __name__ == '__main__':
         output_thread = threading.Thread(target=read_output, daemon=True)
         output_thread.start()
         
-        print(f"SSH WebSocket server subprocess started (PID: {proc.pid})")
-        
+        print(f"SSH WebSocket server subprocess started (PID: {proc.pid})", flush=True)
+
     except Exception as e:
-        print(f"Failed to start SSH WebSocket server: {e}")
+        print(f"Failed to start SSH WebSocket server: {e}", flush=True)
 
 
 # Terminal/Shell WebSocket proxy (legacy - flask-sock version, kept for non-gevent setups)

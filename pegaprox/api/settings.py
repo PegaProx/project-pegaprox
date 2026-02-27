@@ -1933,9 +1933,12 @@ def check_ip_allowed(client_ip: str) -> tuple:
     """check if client IP is allowed, returns (allowed, reason)"""
     if not _ip_whitelist_enabled:
         return True, 'Whitelist disabled'
-    
+
     if not client_ip:
         return False, 'No IP detected'
+
+    # LW Feb 2026 - normalize here too so log messages show clean IPv4
+    client_ip = _normalize_ip(client_ip)
     
     # Check blacklist first (always blocks)
     # NS: blacklist is checked before whitelist, security first
@@ -1955,28 +1958,41 @@ def check_ip_allowed(client_ip: str) -> tuple:
     
     return False, 'IP not in whitelist'
 
+def _normalize_ip(ip_str: str) -> str:
+    """Strip IPv6-mapped prefix so ::ffff:192.168.1.1 becomes 192.168.1.1
+
+    MK Feb 2026 - dual-stack sockets report IPv4 clients as ::ffff:x.x.x.x
+    Fixes #95: IP whitelist didn't match after IPv6 bind change
+    """
+    if ip_str and ip_str.startswith('::ffff:'):
+        return ip_str[7:]
+    return ip_str
+
 def _ip_matches(client_ip: str, pattern: str) -> bool:
     """Check if IP matches pattern (supports CIDR and wildcards)
-    
+
     NS: supports 192.168.1.100, 192.168.1.0/24, 192.168.1.*
     MK: chatgpt helped with the ipaddress module stuff
     """
     try:
+        # NS Feb 2026 - normalize IPv6-mapped addresses for comparison
+        client_ip = _normalize_ip(client_ip)
+
         # Exact match
         if client_ip == pattern:
             return True
-        
+
         # Wildcard match (e.g., 192.168.1.*)
         if '*' in pattern:
             import fnmatch
             return fnmatch.fnmatch(client_ip, pattern)
-        
+
         # CIDR match (e.g., 192.168.1.0/24)
         if '/' in pattern:
             import ipaddress
             network = ipaddress.ip_network(pattern, strict=False)
             return ipaddress.ip_address(client_ip) in network
-        
+
         return False
     except Exception:
         return False

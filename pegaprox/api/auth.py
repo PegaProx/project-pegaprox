@@ -5,6 +5,7 @@ import time
 import logging
 import secrets
 import base64
+import ipaddress
 from datetime import datetime
 from flask import Blueprint, jsonify, request, make_response
 
@@ -312,9 +313,16 @@ def auth_login():
     lockout_time = login_settings['lockout_time']
     attempt_window = login_settings['attempt_window']
     
-    # NS Feb 2026 - only trust X-Forwarded-For from loopback (reverse proxy)
-    client_ip = request.remote_addr
-    if client_ip in ('127.0.0.1', '::1') and request.headers.get('X-Forwarded-For'):
+    # NS Feb 2026 - normalize IPv6-mapped IPv4 + only trust X-Forwarded-For from loopback
+    remote_ip = request.remote_addr or ""
+    try:
+        ip_obj = ipaddress.ip_address(remote_ip)
+        if ip_obj.version == 6 and ip_obj.ipv4_mapped:
+            remote_ip = str(ip_obj.ipv4_mapped)
+    except ValueError:
+        pass
+    client_ip = remote_ip
+    if remote_ip in ('127.0.0.1', '::1') and request.headers.get('X-Forwarded-For'):
         client_ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
     
     current_time = time.time()
@@ -545,18 +553,6 @@ def auth_login():
     logging.info(f"User '{username}' logged in successfully")
     log_audit(username, 'user.login', f"User logged in" + (" (with 2FA)" if user.get('totp_enabled') else ""))
 
-    # LW Feb 2026 - enforce force_password_change before granting full session
-    if user.get('force_password_change'):
-        logging.info(f"User '{username}' must change password before proceeding")
-        response = jsonify({
-            'requires_password_change': True,
-            'session_id': session_id
-        })
-        is_secure = request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https'
-        response.set_cookie('session_id', session_id, httponly=True, samesite='Strict',
-                          secure=is_secure, max_age=get_session_timeout())
-        return response, 200
-
     # Auto-allow this origin for CORS (Open Source convenience)
     # Only authenticated users from valid origins get added
     origin = request.headers.get('Origin')
@@ -601,7 +597,8 @@ def auth_login():
         'default_theme': default_theme,  # NS: Include for frontend fallback
         'requires_2fa_setup': requires_2fa_setup,  # NS: Feb 2026 - Force 2FA
         # NS: Security warning if using default password
-        'security_warning': 'DEFAULT_PASSWORD' if (user['role'] == ROLE_ADMIN and password == 'admin') else None
+        'security_warning': 'DEFAULT_PASSWORD' if (user['role'] == ROLE_ADMIN and password == 'admin') else None,
+        'requires_password_change': bool(user.get('force_password_change'))
     })
     
     # Set session cookie with security flags
@@ -737,7 +734,7 @@ def auth_check():
     
     return jsonify({
         'authenticated': True,
-        # NS Feb 2026 - session_id removed from auth_check (frontend already has it from login)
+        'session_id': session_id,
         'user': {
             'username': session['user'],
             'role': fresh_role,

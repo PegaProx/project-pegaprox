@@ -1,5 +1,5 @@
 {
-    "version": "0.9.0.1",
+    "version": "0.9.0.2",
     "build": "2026.02.27",
     "release_date": "2026-02-27",
     "min_python": "3.8",
@@ -153,21 +153,16 @@
         "web/src/vm_modals.js"
     ],
     "changelog": [
-        "Changed: Code split from monolith into pegaprox/ package",
-        "Changed: Update mechanism uses GitHub source archive (no manual release needed)",
-        "Added: Affinity/Anti-Affinity rules now work for containers (LXC) too",
-        "Added: Affinity enforce flag - block migrations that violate rules",
-        "Added: Affinity enforcement in auto-balancing and manual migration",
-        "Fixed: Affinity enforce field was not persisted to database",
-        "Fixed: Affinity check was reading empty vm_ids due to field name mismatch",
-        "Added: Network auto-reconnect after ifreload/network changes with automatic ticket refresh (90min cycle)",
-        "Added: Stale connection detection - auto-recovers after 10 consecutive empty API responses",
-        "Added: Node Join now auto-updates fallback hosts and HA state via background thread",
-        "Added: Node Remove uses pre-resolved IP for cleanup, updates HA state and fallback hosts",
-        "Added: LDAP and OIDC Support",
-        "Added: Microsoft 365 GCC High and DoD sovereign endpoint support for Entra ID OIDC",
-        "Added: Option to force 2FA for users",
-        "Changed: Load balancing logic now with multiple nodes and vms"
+        "Fixed: VNC/SSH WebSocket servers not starting after update (port cleanup, error handling)",
+        "Fixed: IPv6 dual-stack binding broke VNC/SSH connections (websockets library)",
+        "Fixed: IP whitelist not matching IPv4 clients on dual-stack sockets (::ffff: prefix)",
+        "Fixed: SMBIOS autoconfig deploy failing (missing /opt dir, SFTP fallback)",
+        "Fixed: SMBIOS autoconfig settings not persisted to database",
+        "Fixed: Login blocked by force_password_change on default admin account",
+        "Fixed: Session lost after page refresh (session_id missing from auth_check)",
+        "Fixed: X-Forwarded-For not trusted from IPv6-mapped loopback addresses",
+        "Fixed: IPv6-mapped address normalization using ipaddress module",
+        "Fixed: Datacenter status timeout increased from 5s to 10s for remote clusters"
     ],
     "breaking_changes": []
 }

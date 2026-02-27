@@ -128,7 +128,11 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
     logging.info(f"Audit: {user} - {action}{cluster_info} - {details}")
 
 def _is_loopback(addr):
-    """Check if address is loopback (trusted proxy)"""
+    """Check if address is loopback (trusted proxy)
+    MK Feb 2026 - dual-stack sockets report IPv4 loopback as ::ffff:127.0.0.1
+    """
+    if addr and addr.startswith('::ffff:'):
+        addr = addr[7:]
     return addr in ('127.0.0.1', '::1', '127.0.0.0')
 
 def get_client_ip():
