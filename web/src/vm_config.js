@@ -1345,7 +1345,7 @@
                         </div>
 
                         {/* Tabs */}
-                        <div className="flex items-center gap-1 px-6 py-3 border-b border-proxmox-border bg-proxmox-dark/50 overflow-x-auto">
+                        <div className="flex flex-wrap items-center gap-1 px-6 py-3 border-b border-proxmox-border bg-proxmox-dark/50">
                             {tabs.map(tab => (
                                 <button
                                     key={tab.id}
