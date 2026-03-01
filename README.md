@@ -206,7 +206,7 @@ This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE)
 
 ## 🤖 Development Tools
 
-Like most modern dev teams, we use AI-assisted tooling (code completion, docs generation, review automation, security audits). All architecture decisions, implementation, and testing are handled by our three-person team.
+Like most modern dev teams, we use AI-assisted tooling (code completion, docs generation, review automation, security audits). All architecture decisions, implementation, and testing are handled by our three-person team. — see [IBM](https://www.ibm.com/solutions/ai-coding) , [IBM Case Studies](https://www.ibm.com/case-studies/ibm-software-team)
 
 AI-driven security auditing is an industry-standard practice — see [Hacker News](https://thehackernews.com/2026/02/claude-opus-46-finds-500-high-severity.html), [IBM Research](https://www.ibm.com/think/insights/chatgpt-4-exploits-87-percent-one-day-vulnerabilities).
 
