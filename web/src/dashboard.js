@@ -4585,7 +4585,6 @@
                                             })()}
                                         </div>
                                     )}
-                                </div>
 
                                 {/* LW: Feb 2026 - Proxmox Backup Servers */}
                                 {pbsServers.length > 0 && (
@@ -4819,6 +4818,7 @@
                                         </button>
                                     </div>
                                 )}
+                                </div>
                             </div>
                             {/* LW: sidebar resize handle */}
                             {isCorporate && (
