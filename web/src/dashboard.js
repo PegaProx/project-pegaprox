@@ -3678,7 +3678,7 @@
                 // LW: Feb 2026 - track task for corporate panel
                 const taskId = addRecentTask(`${action} VM`, resource.name || `VM ${resource.vmid}`, 'running');
                 try {
-                    const response = await fetch(
+                    const response = await authFetch(
                         `${API_URL}/clusters/${cId}/vms/${resource.node}/${resource.type}/${resource.vmid}/${action}`,
                         { method: 'POST' }
                     );
@@ -3687,12 +3687,14 @@
                         addToast(`${action} ${t('successful') || 'successful'}: ${resource.name || resource.vmid}`);
                         updateRecentTask(taskId, 'completed');
                         // NS: SSE push_immediate_update will send real status within 500ms
-                        // No need for backup fetch anymore - SSE is reliable
-                    } else {
+                    } else if (response) {
                         const err = await response.json();
                         addToast(err.error || `${action} ${t('actionFailed')}`, 'error');
                         updateRecentTask(taskId, 'failed');
-                        // Revert optimistic update on error
+                        fetchClusterResources(selectedCluster.id);
+                    } else {
+                        addToast(t('connectionError'), 'error');
+                        updateRecentTask(taskId, 'failed');
                         fetchClusterResources(selectedCluster.id);
                     }
                 } catch (error) {
@@ -3710,7 +3712,7 @@
                 const taskId = addRecentTask('Migrate VM', `${vm.name || vm.vmid} → ${targetNode}`, 'running');
                 try {
                     addToast(t('startingMigration') + ` ${vm.name || vm.vmid}...`);
-                    const response = await fetch(
+                    const response = await authFetch(
                         `${API_URL}/clusters/${cId}/vms/${vm.node}/${vm.type}/${vm.vmid}/migrate`,
                         {
                             method: 'POST',
@@ -3728,10 +3730,12 @@
                     if (response && response.ok) {
                         addToast(t('migrationStarted') + ` ${vm.name || vm.vmid} ↑ ${targetNode}`);
                         updateRecentTask(taskId, 'completed');
-                        // NS: SSE push_immediate_update will send real status within 500ms
-                    } else {
+                    } else if (response) {
                         const err = await response.json();
                         addToast(err.error || t('migrationFailed'), 'error');
+                        updateRecentTask(taskId, 'failed');
+                    } else {
+                        addToast(t('connectionError'), 'error');
                         updateRecentTask(taskId, 'failed');
                     }
                 } catch (error) {
@@ -3745,7 +3749,7 @@
                 
                 try {
                     addToast(`${t('startingBulkMigration')} ${vms.length} VMs...`);
-                    const response = await fetch(
+                    const response = await authFetch(
                         `${API_URL}/clusters/${selectedCluster.id}/vms/bulk-migrate`,
                         {
                             method: 'POST',
@@ -3758,9 +3762,11 @@
                         const result = await response.json();
                         addToast(`${result.successful}/${result.total} ${t('migrationsStarted') || 'migrations started'}`);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 3000);
-                    } else {
+                    } else if (response) {
                         const err = await response.json();
                         addToast(err.error || t('bulkMigrationFailed'), 'error');
+                    } else {
+                        addToast(t('connectionError'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -3772,7 +3778,7 @@
                 
                 try {
                     const endpoint = vmType === 'qemu' ? 'qemu' : 'lxc';
-                    const response = await fetch(
+                    const response = await authFetch(
                         `${API_URL}/clusters/${selectedCluster.id}/nodes/${node}/${endpoint}`,
                         {
                             method: 'POST',
@@ -3786,9 +3792,11 @@
                         addToast(`${vmType === 'qemu' ? 'VM' : 'Container'} ${result.vmid} ${t('created') || 'created'}`);
                         setShowCreateVm(null);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 2000);
-                    } else {
+                    } else if (response) {
                         const err = await response.json();
                         addToast(err.error || t('creationFailed'), 'error');
+                    } else {
+                        addToast(t('connectionError'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -3800,7 +3808,7 @@
                 if (!cId) return;
 
                 try {
-                    const response = await fetch(
+                    const response = await authFetch(
                         `${API_URL}/clusters/${cId}/vms/${vm.node}/${vm.type}/${vm.vmid}`,
                         {
                             method: 'DELETE',
@@ -3813,9 +3821,11 @@
                         const result = await response.json();
                         addToast(result.message || `${vm.type === 'qemu' ? 'VM' : 'Container'} ${vm.vmid} deleted`);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 2000);
-                    } else {
+                    } else if (response) {
                         const err = await response.json();
                         addToast(err.error || 'Delete failed', 'error');
+                    } else {
+                        addToast(t('connectionError'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -3827,7 +3837,7 @@
                 if (!cId) return;
 
                 try {
-                    const response = await fetch(
+                    const response = await authFetch(
                         `${API_URL}/clusters/${cId}/vms/${vm.node}/${vm.type}/${vm.vmid}/clone`,
                         {
                             method: 'POST',
@@ -3847,9 +3857,11 @@
                         addToast(result.message || `${t('cloneStarted') || 'Clone started'}: ${vm.vmid} ↑ ${cloneConfig.newid}`);
                         setShowCloneModal(null);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 3000);
-                    } else {
+                    } else if (response) {
                         const err = await response.json();
                         addToast(err.error || t('cloneFailed'), 'error');
+                    } else {
+                        addToast(t('connectionError'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');

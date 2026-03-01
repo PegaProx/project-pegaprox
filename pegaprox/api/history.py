@@ -326,7 +326,7 @@ def check_affinity_violation(cluster_id: str, vmid: int, target_node: str) -> di
         return {'violation': False}
     
     manager = cluster_managers[cluster_id]
-    resources = manager.get_resources()
+    resources = manager.get_vm_resources()
     
     # Build map of VM -> current node
     vm_nodes = {}

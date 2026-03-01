@@ -2884,26 +2884,30 @@ def vm_action_api(cluster_id, node, vm_type, vmid, action):
     
     logging.info(f"[VM-ACTION] Executing {action} with force={force}")
     manager = cluster_managers[cluster_id]
-    result = manager.vm_action(node, vmid, vm_type, action, force=force)
-    
+    try:
+        result = manager.vm_action(node, vmid, vm_type, action, force=force)
+    except Exception as e:
+        logging.error(f"[VM-ACTION] Unhandled error: {action} on {vm_type}/{vmid}: {e}", exc_info=True)
+        return jsonify({'error': f'{action} failed: {str(e)}'}), 500
+
     if result['success']:
         # Audit log
         usr = getattr(request, 'session', {}).get('user', 'system')
-        action_map = {'start': 'vm.started', 'stop': 'vm.stopped', 'shutdown': 'vm.stopped', 
+        action_map = {'start': 'vm.started', 'stop': 'vm.stopped', 'shutdown': 'vm.stopped',
                       'reboot': 'vm.restarted', 'reset': 'vm.restarted', 'suspend': 'vm.suspended', 'resume': 'vm.resumed'}
         log_audit(usr, action_map.get(action, f'vm.{action}'), f"{vm_type.upper()} {vmid} on {node} - {action}" + (" (force)" if force else ""), cluster=manager.config.name)
-        
+
         # Broadcast action to all clients for real-time updates
         broadcast_action(action, vm_type, str(vmid), {'node': node, 'force': force}, cluster_id, usr)
-        
+
         # NS: Push immediate resource update for faster UI feedback
         push_immediate_update(cluster_id, delay=0.5)
-        
+
         # NS: Register which PegaProx user initiated this task
         upid = result.get('data')
         if upid:
             register_task_user(upid, usr, cluster_id)
-        
+
         return jsonify({'message': f'{action} successful for VM {vmid}', 'data': result.get('data')})
     else:
         # Return 400 for client errors (like LXC reset), 500 for server errors
@@ -6346,69 +6350,74 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
         return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     # MK: Check pool permission for vm.migrate
     users = load_users()
     user = users.get(request.session['user'], {})
     user['username'] = request.session['user']
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.migrate', vm_type):
         return jsonify({'error': 'Permission denied: vm.migrate'}), 403
-    
-    manager = cluster_managers[cluster_id]
-    data = request.json or {}
-    target_node = data.get('target')
-    online = data.get('online', True)
-    target_storage = data.get('targetstorage')
-    with_local_disks = data.get('with-local-disks', False)
-    force = data.get('force', False)  # For conntrack state in containers
-    
-    if not target_node:
-        return jsonify({'error': 'Target node is required'}), 400
 
-    # NS: Feb 2026 - Affinity rule enforcement (Issue #73)
-    from pegaprox.api.history import check_affinity_violation
-    aff = check_affinity_violation(cluster_id, vmid, target_node)
-    if aff.get('violation'):
-        if aff.get('enforce'):
-            return jsonify({
-                'error': f"Migration blocked by affinity rule '{aff['rule']}': {aff['message']}",
-                'affinity_violation': True, 'rule': aff['rule']
-            }), 409
+    try:
+        manager = cluster_managers[cluster_id]
+        data = request.json or {}
+        target_node = data.get('target')
+        online = data.get('online', True)
+        target_storage = data.get('targetstorage')
+        with_local_disks = data.get('with-local-disks', False)
+        force = data.get('force', False)  # For conntrack state in containers
+
+        if not target_node:
+            return jsonify({'error': 'Target node is required'}), 400
+
+        # NS: Feb 2026 - Affinity rule enforcement (Issue #73)
+        from pegaprox.api.history import check_affinity_violation
+        aff = check_affinity_violation(cluster_id, vmid, target_node)
+        if aff.get('violation'):
+            if aff.get('enforce'):
+                return jsonify({
+                    'error': f"Migration blocked by affinity rule '{aff['rule']}': {aff['message']}",
+                    'affinity_violation': True, 'rule': aff['rule']
+                }), 409
+            else:
+                # MK: just warn, don't block
+                logging.warning(f"Affinity warning for VMID {vmid} -> {target_node}: {aff['message']} (not enforced)")
+
+        # Build migration options
+        migrate_options = {
+            'online': online,
+            'targetstorage': target_storage,
+            'with_local_disks': with_local_disks,
+            'force': force
+        }
+
+        result = manager.migrate_vm_manual(node, vmid, vm_type, target_node, online, migrate_options)
+
+        if result.get('success'):
+            # Audit log
+            user = getattr(request, 'session', {}).get('user', 'system')
+            details = f"{vm_type.upper()} {vmid} migrated from {node} to {target_node}"
+            if online:
+                details += " (online)"
+            if target_storage:
+                details += f" to storage {target_storage}"
+            log_audit(user, 'vm.migrated', details, cluster=manager.config.name)
+
+            # NS: Register PegaProx user for this task
+            upid = result.get('upid') or result.get('data')
+            if upid:
+                register_task_user(upid, user, cluster_id)
+
+            # NS: Push immediate update for live UI
+            push_immediate_update(cluster_id, delay=0.5)
+
+            return jsonify(result)
         else:
-            # MK: just warn, don't block
-            logging.warning(f"Affinity warning for VMID {vmid} -> {target_node}: {aff['message']} (not enforced)")
-
-    # Build migration options
-    migrate_options = {
-        'online': online,
-        'targetstorage': target_storage,
-        'with_local_disks': with_local_disks,
-        'force': force
-    }
-
-    result = manager.migrate_vm_manual(node, vmid, vm_type, target_node, online, migrate_options)
-    
-    if result.get('success'):
-        # Audit log
-        user = getattr(request, 'session', {}).get('user', 'system')
-        details = f"{vm_type.upper()} {vmid} migrated from {node} to {target_node}"
-        if online:
-            details += " (online)"
-        if target_storage:
-            details += f" to storage {target_storage}"
-        log_audit(user, 'vm.migrated', details, cluster=manager.config.name)
-        
-        # NS: Register PegaProx user for this task
-        upid = result.get('upid') or result.get('data')
-        if upid:
-            register_task_user(upid, user, cluster_id)
-        
-        # NS: Push immediate update for live UI
-        push_immediate_update(cluster_id, delay=0.5)
-        
-        return jsonify(result)
-    else:
-        return jsonify(result), 400
+            return jsonify(result), 400
+    except Exception as e:
+        # NS: Mar 2026 - catch-all so frontend gets JSON, not HTML 500
+        logging.error(f"[MIGRATE] Unhandled error migrating {vm_type}/{vmid}: {e}", exc_info=True)
+        return jsonify({'error': f'Migration failed: {str(e)}'}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>', methods=['DELETE'])
