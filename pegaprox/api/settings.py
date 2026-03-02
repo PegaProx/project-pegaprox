@@ -20,10 +20,11 @@ from pegaprox.core.db import get_db, ENCRYPTION_AVAILABLE
 
 import requests
 from pegaprox.utils.auth import require_auth, load_users, save_users, validate_session, TOTP_AVAILABLE, ARGON2_AVAILABLE, _check_default_password_in_use, verify_password, needs_password_rehash
+from pegaprox.utils.sanitization import sanitize_identifier
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
-from pegaprox.api.helpers import load_server_settings, save_server_settings, check_cluster_access, get_login_settings, get_session_timeout
+from pegaprox.api.helpers import load_server_settings, save_server_settings, check_cluster_access, get_login_settings, get_session_timeout, safe_error
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
 
@@ -284,7 +285,7 @@ def check_pegaprox_update():
     except Exception as e:
         logging.error(f"Error checking updates: {e}")
         return jsonify({
-            'error': str(e),
+            'error': safe_error(e, 'Update check failed'),
             'current_version': PEGAPROX_VERSION,
             'current_build': PEGAPROX_BUILD,
             'update_available': False,
@@ -671,7 +672,7 @@ def perform_pegaprox_update():
 
     except Exception as e:
         logging.error(f"Update error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Update failed')}), 500
 
 @bp.route('/api/pegaprox/update/rollback', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -683,7 +684,10 @@ def rollback_pegaprox_update():
     try:
         data = request.json or {}
         backup_name = data.get('backup')
-        
+        # MK Mar 2026 - sanitize to prevent path traversal (../../../etc/passwd)
+        if backup_name:
+            backup_name = sanitize_identifier(backup_name, max_length=128)
+
         backup_dir = os.path.join(CONFIG_DIR, 'backups')
         
         if not backup_name:
@@ -782,7 +786,7 @@ def rollback_pegaprox_update():
         
     except Exception as e:
         logging.error(f"Rollback error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Rollback failed')}), 500
 
 
 @bp.route('/api/pegaprox/changelog', methods=['GET'])
@@ -804,7 +808,7 @@ def get_pegaprox_changelog():
                 continue
         return jsonify({'error': 'Failed to fetch changelog'}), 500
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Changelog fetch failed')}), 500
 
 
 # Serve static files (JS, CSS, fonts for offline mode)
@@ -1075,6 +1079,7 @@ def update_server_settings():
                 'ldap_viewer_group': lambda v: str(v or '').strip(),
                 'ldap_default_role': lambda v: str(v).strip() if v else 'viewer',  # NS: Accept custom roles too
                 'ldap_auto_create_users': lambda v: bool(v),
+                'ldap_verify_tls': lambda v: bool(v),  # NS: Mar 2026 - persist TLS cert verification toggle (#108)
             }
             
             # NS: Feb 2026 - Log incoming LDAP data for debugging save issues
@@ -1274,7 +1279,7 @@ def update_server_settings():
             
     except Exception as e:
         logging.error(f"Error updating server settings: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Settings update failed')}), 500
 
 @bp.route('/api/settings/server/restart', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -1326,7 +1331,7 @@ def restart_server():
         
     except Exception as e:
         logging.error(f"Error restarting server: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Server restart failed')}), 500
 
 # ============================================
 # Config Backup/Restore API Routes
@@ -1508,7 +1513,7 @@ def backup_config():
         logging.error(f"Config backup failed: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Backup creation failed')}), 500
 
 def _encrypt_backup(data: str, password: str) -> bytes:
     """Encrypt backup data with password using AES-256-GCM
@@ -1697,7 +1702,7 @@ def restore_config():
             data = json.loads(decrypted_json)
         except ValueError as e:
             log_audit(username, 'config.restore_failed', f'Decryption failed: {str(e)}')
-            return jsonify({'error': str(e)}), 400
+            return jsonify({'error': safe_error(e, 'Backup decryption failed')}), 400
         except json.JSONDecodeError:
             return jsonify({'error': 'Invalid backup file format'}), 400
         
@@ -1897,7 +1902,7 @@ def restore_config():
         logging.error(f"Config restore failed: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Config restore failed')}), 500
 
 # ============================================
 # IP Whitelisting API Routes
@@ -2044,7 +2049,7 @@ def get_ip_whitelist():
         })
     except Exception as e:
         logging.error(f"Error getting IP whitelist: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'IP whitelist load failed')}), 500
 
 @bp.route('/api/security/ip-whitelist', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -2120,7 +2125,7 @@ def update_ip_whitelist():
         
     except Exception as e:
         logging.error(f"IP whitelist update failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'IP whitelist update failed')}), 500
 
 @bp.route('/api/security/ip-whitelist/test', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -2144,7 +2149,7 @@ def test_ip_whitelist():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'IP whitelist test failed')}), 500
 
 # ============================================
 # Audit Log API Route
@@ -2396,7 +2401,7 @@ def get_compliance_status():
         logging.error(f"Error getting compliance status: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'Compliance check failed')}), 500
 
 @bp.route('/api/security/cors', methods=['GET'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -3285,7 +3290,7 @@ def start_rolling_update(cluster_id):
                     
                 except Exception as e:
                     logging.error(f"[RollingUpdate] Error updating {node_name}: {e}")
-                    mgr._rolling_update['failed_nodes'].append({'node': node_name, 'error': str(e)})
+                    mgr._rolling_update['failed_nodes'].append({'node': node_name, 'error': safe_error(e, 'Node update failed')})
                     mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✗ ERROR on {node_name}: {e}")
                     # Try to exit maintenance mode even if update failed
                     try:
@@ -3811,15 +3816,16 @@ def test_ldap():
         'username_attribute': data.get('ldap_username_attribute', saved.get('ldap_username_attribute', 'sAMAccountName')),
         'email_attribute': data.get('ldap_email_attribute', saved.get('ldap_email_attribute', 'mail')),
         'display_name_attribute': data.get('ldap_display_name_attribute', saved.get('ldap_display_name_attribute', 'displayName')),
+        'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', False)),
     }
-    
+
     # Use saved password if masked
     if not config['bind_password'] or config['bind_password'] == '********':
         config['bind_password'] = get_db()._decrypt(saved.get('ldap_bind_password', ''))  # MK: Decrypt stored credential
-    
+
     if not config['server']:
         return jsonify({'error': 'LDAP server is required'}), 400
-    
+
     try:
         import ldap3
         from ldap3 import Server, Connection, ALL, SUBTREE, Tls
@@ -3827,14 +3833,16 @@ def test_ldap():
         import ssl as ssl_module
     except ImportError:
         return jsonify({'error': 'ldap3 module not installed. Run: pip install ldap3'}), 500
-    
+
     results = {'steps': []}
-    
+
     try:
         # Step 1: Connect to server
+        # MK: Mar 2026 - use verify_tls from config instead of hardcoded CERT_NONE (#108)
         tls_config = None
         if config['use_ssl'] or config['use_starttls']:
-            tls_config = Tls(validate=ssl_module.CERT_NONE)
+            validate = ssl_module.CERT_REQUIRED if config['verify_tls'] else ssl_module.CERT_NONE
+            tls_config = Tls(validate=validate)
         
         server = Server(config['server'], port=config['port'], 
                        use_ssl=config['use_ssl'], tls=tls_config, 

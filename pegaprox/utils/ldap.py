@@ -38,7 +38,7 @@ def get_ldap_settings() -> dict:
         'viewer_group': settings.get('ldap_viewer_group', ''),
         'default_role': settings.get('ldap_default_role', ROLE_VIEWER),
         'auto_create_users': settings.get('ldap_auto_create_users', True),
-        'verify_tls': settings.get('ldap_verify_tls', True),  # MK Feb 2026 - TLS cert verification (default on, set ldap_verify_tls=false to disable)
+        'verify_tls': settings.get('ldap_verify_tls', False),  # NS: Mar 2026 - default off, most AD envs use internal CAs not in system trust store (#108)
         # MK: Feb 2026 - Custom group→role mappings for custom roles & tenants
         # Format: [{"group_dn": "CN=...", "role": "custom_role_name", "tenant": "tenant_id", "permissions": [...]}]
         'group_mappings': settings.get('ldap_group_mappings', []),
@@ -273,6 +273,15 @@ def ldap_authenticate(username: str, password: str) -> dict:
         }
         
     except Exception as e:
+        import ssl as _ssl
+        # NS: Mar 2026 - catch TLS errors specifically so the user gets a useful hint (#108)
+        try:
+            from ldap3.core.exceptions import LDAPSocketOpenError
+        except ImportError:
+            LDAPSocketOpenError = None
+        if isinstance(e, _ssl.SSLError) or (LDAPSocketOpenError and isinstance(e, LDAPSocketOpenError)):
+            logging.error(f"[LDAP] TLS/certificate error: {e}")
+            return {'error': 'LDAP connection failed - TLS/certificate error. Disable "Verify TLS Certificate" for self-signed/internal CA certificates.'}
         logging.error(f"[LDAP] Authentication error: {e}")
         return {'error': 'LDAP authentication failed'}  # MK: Don't leak internal error details
 

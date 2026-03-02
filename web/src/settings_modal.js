@@ -47,6 +47,7 @@
                 ldap_admin_group: '', ldap_user_group: '', ldap_viewer_group: '',
                 ldap_default_role: 'viewer',
                 ldap_auto_create_users: true,
+                ldap_verify_tls: false,
                 ldap_group_mappings: [],  // LW: [{group_dn, role, tenant, tenant_role, permissions}]
             });
             const [ldapTesting, setLdapTesting] = useState(false);
@@ -918,6 +919,7 @@
                             ldap_viewer_group: data.ldap_viewer_group || '',
                             ldap_default_role: data.ldap_default_role || 'viewer',
                             ldap_auto_create_users: data.ldap_auto_create_users !== false,
+                            ldap_verify_tls: data.ldap_verify_tls || false,
                             ldap_group_mappings: data.ldap_group_mappings || [],
                         }));
                         
@@ -3771,6 +3773,12 @@
                                                 <input type="checkbox" checked={ldapConfig.ldap_use_starttls} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_starttls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
                                                 <span className="text-sm text-gray-300">STARTTLS</span>
                                             </label>
+                                            {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && (
+                                                <label className="flex items-center gap-2 cursor-pointer">
+                                                    <input type="checkbox" checked={ldapConfig.ldap_verify_tls} onChange={e => setLdapConfig(prev => ({...prev, ldap_verify_tls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
+                                                    <span className="text-sm text-gray-300">Verify TLS Certificate</span>
+                                                </label>
+                                            )}
                                         </div>
                                     </div>
                                     

@@ -12,6 +12,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.api.helpers import safe_error
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -201,13 +202,23 @@ def get_pbs_status(pbs_id):
     status = mgr.get_server_status()
     version = mgr.get_version()
     datastores = mgr.get_datastore_usage()
-    
+
+    # NS: Mar 2026 - propagate errors so frontend can show what went wrong (#107)
+    errors = []
+    if 'error' in status:
+        errors.append(f"Status: {status['error']}")
+        logging.warning(f"[PBS:{mgr.name}] get_server_status failed: {status['error']}")
+    if 'error' in datastores:
+        errors.append(f"Datastores: {datastores['error']}")
+        logging.warning(f"[PBS:{mgr.name}] get_datastore_usage failed: {datastores['error']}")
+
     return jsonify({
         'server': status.get('data', {}),
         'version': version.get('data', {}),
         'datastores': datastores.get('data', []),
         'connected': mgr.connected,
         'name': mgr.name,
+        'errors': errors if errors else None,
     })
 
 
@@ -675,7 +686,7 @@ def download_pbs_file(pbs_id, store):
         )
     except Exception as e:
         logging.error(f"[PBS:{pbs_id}] File download error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e, 'PBS operation failed')}), 500
 
 
 # ── PBS Datastore CRUD ── NS: Feb 2026 ──

@@ -88,10 +88,18 @@ def oidc_callback():
     LW: Called by frontend after redirect back from IdP
     Frontend sends: {code, state} from URL query params
     """
-    # NS: SECURITY - Basic rate limiting on callback (prevent brute-force code replay)
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    if client_ip:
-        client_ip = client_ip.split(',')[0].strip()
+    # NS Mar 2026 - same loopback-aware IP resolution as login rate limiter
+    remote_ip = request.remote_addr or ""
+    try:
+        ip_obj = ipaddress.ip_address(remote_ip)
+        if ip_obj.version == 6 and ip_obj.ipv4_mapped:
+            remote_ip = str(ip_obj.ipv4_mapped)
+    except ValueError:
+        pass
+    if remote_ip in ('127.0.0.1', '::1') and request.headers.get('X-Forwarded-For'):
+        client_ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    else:
+        client_ip = remote_ip
     oidc_cb_key = f'oidc_cb_{client_ip}'
     if oidc_cb_key in login_attempts_by_ip:
         attempts = login_attempts_by_ip[oidc_cb_key].get('attempts', [])
@@ -144,7 +152,7 @@ def oidc_callback():
     # Step 2: Decode ID token for claims (with nonce + exp validation - MK Feb 2026)
     id_claims = {}
     if id_token_raw:
-        id_claims = oidc_decode_id_token(id_token_raw, expected_nonce=stored_nonce)
+        id_claims = oidc_decode_id_token(id_token_raw, expected_nonce=stored_nonce, config=config)
         if 'error' in id_claims:
             logging.warning(f"[OIDC] ID token validation failed: {id_claims['error']}")
             return jsonify({'error': id_claims['error']}), 401
@@ -451,7 +459,13 @@ def auth_login():
             # Else: user exists locally too, fall through to local auth
         else:
             # LDAP server error - log but fall through to local auth
-            logging.warning(f"[LDAP] Server error during auth: {ldap_result.get('error')}")
+            ldap_err = ldap_result.get('error', '')
+            logging.warning(f"[LDAP] Server error during auth: {ldap_err}")
+            # NS: Mar 2026 - TLS errors should be surfaced for LDAP-only users (#108)
+            # but still fall through for local users so they aren't locked out
+            if 'TLS' in ldap_err or 'certificate' in ldap_err.lower():
+                if username in users_db and users_db[username].get('auth_source') == 'ldap':
+                    return jsonify({'error': ldap_err}), 401
     
     # =================================================================
     # Local Authentication (skipped if LDAP already authenticated)

@@ -1095,14 +1095,31 @@
             }, []);
             
             // LW: jump to VM in the right cluster when clicking a search result
+            // LW: Mar 2026 - navigate directly to VM detail instead of just selecting cluster
             const navigateToResult = (result) => {
                 const cluster = clusters.find(c => c.id === result.cluster_id);
                 if (cluster) {
                     setSelectedCluster(cluster);
                     if (result.type === 'vm' || result.type === 'ct' || result.type === 'qemu' || result.type === 'lxc') {
+                        setActiveTab('resources');
+                        setResourcesSubTab('management');
+                        // need short delay for cluster resources to load
                         setTimeout(() => {
+                            setSelectedSidebarVm({
+                                vmid: result.vmid, node: result.node,
+                                type: result.type === 'ct' ? 'lxc' : result.type === 'vm' ? 'qemu' : result.type,
+                                name: result.name, status: result.status,
+                                _clusterId: result.cluster_id
+                            });
+                            setSelectedSidebarNode(null);
                             setHighlightedVm({ vmid: result.vmid, node: result.node });
                             setTimeout(() => setHighlightedVm(null), 3000);
+                        }, 300);
+                    } else if (result.type === 'node') {
+                        setActiveTab('overview');
+                        setTimeout(() => {
+                            setSelectedSidebarNode({ name: result.name || result.node, clusterId: result.cluster_id });
+                            setSelectedSidebarVm(null);
                         }, 300);
                     }
                 }
@@ -1904,9 +1921,9 @@
                     if (sseToken) {
                         sseUrl = `${API_URL}/sse/updates?token=${encodeURIComponent(sseToken)}`;
                     } else {
-                        // Fallback to session (legacy, less secure)
-                        console.warn('SSE: Using session ID (token unavailable)');
-                        sseUrl = `${API_URL}/sse/updates?session=${encodeURIComponent(sessionId)}`;
+                        // LW Mar 2026 - don't expose session ID in URL, just skip SSE
+                        console.warn('SSE: Token unavailable, skipping SSE connection');
+                        return;
                     }
                     
                     eventSource = new EventSource(sseUrl, { withCredentials: true });
@@ -3992,7 +4009,8 @@
                     {!isCorporate && <div className="fixed inset-0 gradient-mesh pointer-events-none" />}
                     
                     {/* LW: Feb 2026 - header, compact in corporate */}
-                    <header className={`sticky top-0 z-30 border-b border-proxmox-border ${isCorporate ? 'bg-proxmox-darker' : 'bg-proxmox-dark/80 backdrop-blur-xl'}`}>
+                    {/* LW: Mar 2026 - z-50 so search dropdown renders above content area (#corp-search-overlap) */}
+                    <header className={`sticky top-0 z-50 border-b border-proxmox-border ${isCorporate ? 'bg-proxmox-darker' : 'bg-proxmox-dark/80 backdrop-blur-xl'}`}>
                         <div className={`${isCorporate ? 'max-w-full px-3 py-1.5' : 'max-w-[1600px] mx-auto px-6 py-4'}`}>
                             <div className="flex items-center justify-between">
                                 {/* MK: Click logo to return to All Clusters Overview */}
@@ -4050,9 +4068,9 @@
                                     </div>
                                 )}
                                 </div>
-                                <div className={`flex items-center ${isCorporate ? 'gap-2 flex-1 justify-end' : 'gap-3'}`}>
-                                    {/* NS: Global Search - now with tag search + ctrl+k, LW: wider in corporate */}
-                                    <div className={`relative ${isCorporate ? 'flex-1' : ''}`}>
+                                <div className={`flex items-center ${isCorporate ? 'gap-2 justify-end' : 'gap-3'}`}>
+                                    {/* NS: Global Search - now with tag search + ctrl+k, LW: fixed width in corporate */}
+                                    <div className="relative">
                                         <div className={`flex items-center ${isCorporate ? 'bg-[#17242b]' : 'bg-proxmox-dark'} border border-proxmox-border rounded-lg overflow-hidden focus-within:border-proxmox-orange/50 transition-colors`}>
                                             <Icons.Search className="w-4 h-4 ml-3 text-gray-500 flex-shrink-0" />
                                             <input
@@ -6291,6 +6309,12 @@
                                         {/* Dashboard Tab */}
                                         {pbsActiveTab === 'dashboard' && pbsStatus && (
                                             <div className="space-y-6">
+                                                {pbsStatus.errors && pbsStatus.errors.length > 0 && (
+                                                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-sm text-yellow-300">
+                                                        <span className="font-medium">Could not load all data:</span> {pbsStatus.errors.join('; ')}
+                                                        <div className="text-xs text-yellow-400/70 mt-1">Check that the API token has Sys.Audit and Datastore.Audit privileges on the PBS server.</div>
+                                                    </div>
+                                                )}
                                                 {/* Resource Gauges */}
                                                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                                                     {(() => {
