@@ -2031,7 +2031,11 @@ class PegaProxDB:
         """Save or update cluster"""
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
-        
+
+        # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
+        cursor.execute('SELECT group_id, display_name, sort_order, created_at FROM clusters WHERE id = ?', (cluster_id,))
+        existing = cursor.fetchone()
+
         cursor.execute('''
             INSERT OR REPLACE INTO clusters
             (id, name, host, user, pass_encrypted, ssl_verification,
@@ -2039,9 +2043,10 @@ class PegaProxDB:
              balance_containers, balance_local_disks, dry_run, enabled,
              ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted,
              ssh_port, ha_settings, excluded_nodes, smbios_autoconfig,
+             group_id, display_name, sort_order,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    COALESCE((SELECT created_at FROM clusters WHERE id = ?), ?), ?)
+                    ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -2064,7 +2069,11 @@ class PegaProxDB:
             json.dumps(data.get('ha_settings', {})),
             json.dumps(data.get('excluded_nodes', [])),
             json.dumps(data.get('smbios_autoconfig', {})),
-            cluster_id, now, now
+            data.get('group_id', existing['group_id'] if existing else None),
+            data.get('display_name', existing['display_name'] if existing else None),
+            data.get('sort_order', existing['sort_order'] if existing else None),
+            existing['created_at'] if existing else now,
+            now
         ))
         self.conn.commit()
     
