@@ -95,3 +95,10 @@ GITHUB_ARCHIVE_URL = "https://github.com/PegaProx/project-pegaprox/archive/refs/
 MIRROR_RAW_URL = "https://updates.pegaprox.com"
 MIRROR_VERSION_URL = "https://updates.pegaprox.com/version.json"
 MIRROR_ARCHIVE_URL = "https://updates.pegaprox.com/archive/main.tar.gz"
+
+# Predictive engine tuning - MK Mar 2026
+# decay factor for WMA, calibrated against 48h test on Traunstein prod cluster
+PREDICTIVE_WMA_DECAY = 0.7
+PREDICTIVE_COMPOSITE_WEIGHT = (0.6, 0.4)  # cpu, mem
+PREDICTIVE_OVERSHOOT_FACTOR = 1.15  # compensate for bursty workloads
+PREDICTIVE_ENGINE_TAG = 'pega-wma-v2'

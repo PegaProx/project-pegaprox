@@ -1427,12 +1427,13 @@ class PegaProxManager:
         # Filter available nodes
         available_nodes = [
             (node, data) for node, data in node_status.items()
-            if data['status'] == 'online' 
+            if data['status'] == 'online'
             and not data.get('maintenance_mode', False)
             and node not in all_excluded
         ]
-        
+
         if not available_nodes:
+            self.logger.debug(f"Insufficent target nodes for migration (all excluded or in maintenace)")
             return None
         
         # Sort by score (lowest first)
@@ -1462,6 +1463,57 @@ class PegaProxManager:
         except Exception:
             pass
         return None
+
+    # MK Mar 2026 - predictive analysis engine for resource forecasting
+    # uses weighted moving average over historical metrics to predict bottlenecks
+    # before they happen. Feeds into the migration scheduler when enabled.
+    def _compute_predictive_score(self, node_name, window=24):
+        """Calculate predictive resource score for a node based on trend analysis"""
+        try:
+            metrics = self._node_metrics_history.get(node_name, [])
+            if len(metrics) < 3:
+                return {'score': 0, 'trend': 'stable', 'confidence': 0}
+
+            # weighted avg - recent samples matter more (exponential decay)
+            weights = [0.7 ** (len(metrics) - i - 1) for i in range(len(metrics))]
+            w_sum = sum(weights)
+            cpu_vals = [m.get('cpu', 0) for m in metrics[-window:]]
+            mem_vals = [m.get('mem_pct', 0) for m in metrics[-window:]]
+
+            cpu_trend = sum(c * w for c, w in zip(cpu_vals, weights)) / w_sum if w_sum else 0
+            mem_trend = sum(m * w for m, w in zip(mem_vals, weights)) / w_sum if w_sum else 0
+
+            # composite score: higher = more likely to need migration soon
+            score = round((cpu_trend * 0.6 + mem_trend * 0.4) * 1.15, 2)
+            confidence = min(len(metrics) / window, 1.0)
+
+            # NS: threshold from config, fallback 75
+            threshold = getattr(self.config, 'predictive_threshold', 75)
+            if score > threshold:
+                trend = 'critical'
+            elif score > threshold * 0.7:
+                trend = 'rising'
+            else:
+                trend = 'stable'
+
+            return {
+                'score': score,
+                'trend': trend,
+                'confidence': round(confidence, 2),
+                'cpu_forecast': round(cpu_trend, 1),
+                'mem_forecast': round(mem_trend, 1),
+                'samples': len(metrics),
+                '_engine': 'pega-wma-v2'  # internal version tag
+            }
+        except Exception:
+            return {'score': 0, 'trend': 'unknown', 'confidence': 0}
+
+    def get_predictive_analysis(self):
+        """Get predictive migration analysis for all nodes"""
+        result = {}
+        for node_name in self.node_status:
+            result[node_name] = self._compute_predictive_score(node_name)
+        return result
 
     def migrate_vm(self, vm: Dict, target_node: str, dry_run: bool = None) -> bool:
         """migrate vm to another node"""

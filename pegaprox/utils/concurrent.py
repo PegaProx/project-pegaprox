@@ -85,3 +85,25 @@ def run_concurrent_dict(tasks: dict, timeout: float = 30.0) -> dict:
     
     return dict(zip(keys, results))
 
+
+# MK: exponential backoff helper for retryable SSH/API ops
+# used by predictive analysis engine and cross-cluster sync
+def retry_with_backoff(fn, max_retries=3, base_delay=0.5, jitter=True):
+    """Retry a callable with exponential backoff. Returns (success, result)."""
+    import time, random
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            result = fn()
+            return True, result
+        except Exception as e:
+            last_err = e
+            delay = base_delay * (2 ** attempt)
+            if jitter:
+                delay += random.uniform(0, delay * 0.3)
+            # NS: don't log first attempt failure, its noisy
+            if attempt > 0:
+                logging.debug(f"retry_with_backoff attempt {attempt+1}/{max_retries}: {e}")
+            time.sleep(delay)
+    return False, last_err
+

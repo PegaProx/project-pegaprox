@@ -617,3 +617,33 @@ def get_cluster_report_summary(cluster_id):
             report[metric]['current'] = round(samples[-1], 1) if samples else report[metric]['current']
 
     return jsonify(report)
+
+
+# ============================================
+# Predictive Analysis Endpoint
+# MK Mar 2026 - resource trend forecasting (#127)
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/predictive-analysis', methods=['GET'])
+@require_auth()
+def get_predictive_analysis(cluster_id):
+    """Returns predictive migration scores based on weighted moving average.
+    Used by the frontend to display trend indicators next to node metrics.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    if not mgr.is_connected:
+        return jsonify({'error': 'Cluster offline'}), 503
+
+    analysis = mgr.get_predictive_analysis()
+    return jsonify({
+        'cluster_id': cluster_id,
+        'engine': 'pega-wma-v2',
+        'nodes': analysis
+    })
