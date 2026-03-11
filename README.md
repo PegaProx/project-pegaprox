@@ -97,9 +97,10 @@ PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng 
 - Proxmox VE 8.0+ or 9.0+ and/or XCP-ng 8.2+
 - Modern web browser (Chrome, Firefox, Edge, Safari)
 
-## ⚡ Quick Start
+## ⚡ Quick Start / Installation
 
-### Option 1: Automated Installation
+### Automated Installation
+This installation method pulls the deployment script directly from the current HEAD of the main branch. This means you will always receive the latest available version, including the most recent features and improvements. However, because it is not tied to a specific release, it may also contain unreleased changes or bugs that have not yet been fully tested. If you prefer a stable and tested version, consider installing PegaProx from a tagged release instead.
 
 ```bash
 curl -O https://raw.githubusercontent.com/PegaProx/project-pegaprox/refs/heads/main/deploy.sh
@@ -107,8 +108,25 @@ chmod +x deploy.sh
 sudo ./deploy.sh
 ```
 
-### Option 2: Manual Installation
+### Debian Repository
+This installation method uses the official APT repository provided by gyptazy. The repository and its associated build and packaging pipeline are fully hosted and maintained by <a href="https://github.com/gyptazy">gyptazy</a>, where PegaProx releases are automatically built and published as Debian packages. Unlike the automated installation script, which pulls the latest code directly from the repository branch, the APT repository distributes packaged and versioned releases. This generally provides a more stable and predictable installation, making it the recommended approach for production environments.
+```bash
+curl https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key -o /etc/apt/keyrings/gyptazy.asc
+echo "deb [signed-by=/etc/apt/keyrings/gyptazy.asc] https://packages.gyptazy.com/api/packages/gyptazy/debian trixie main" | sudo tee -a /etc/apt/sources.list.d/gyptazy.list
+apt-get update
 
+apt-get -y install pegaprox
+```
+
+## Installation from Source
+This installation methods run PegaProx directly from the source code repository. It is primarily intended for development, testing, or advanced users who want full control over the codebase or want to modify and extend the project.
+
+By default, cloning the repository will pull the latest state of the main branch, which contains the most recent changes and features. While this ensures you always have the newest code available, it may also include in-progress changes that are not part of an official release yet.
+If you prefer a more stable version, you can optionally checkout a specific release tag from the repository before installing dependencies and starting the application. This allows you to run the exact code corresponding to an official release while still using the source-based installation method.
+
+Running PegaProx from source can be useful for debugging, contributing to the project, or integrating custom functionality, since you have direct access to the entire codebase and can easily update it using standard Git workflows.
+
+### Manual Installation
 ```bash
 git clone https://github.com/PegaProx/project-pegaprox.git
 cd project-pegaprox
@@ -116,8 +134,7 @@ pip install -r requirements.txt
 python3 pegaprox_multi_cluster.py
 ```
 
-### Option 3: Docker
-
+### Docker Image
 ```bash
 git clone https://github.com/PegaProx/project-pegaprox.git
 cd project-pegaprox
@@ -133,6 +150,15 @@ docker run -d --name pegaprox \
 
 # Development
 docker run -p 5000:5000 pegaprox --debug
+```
+
+### Debian Package (.deb build)
+```bash
+git clone https://github.com/PegaProx/project-pegaprox.git
+cd project-pegaprox
+
+dpkg-buildpackage -us -uc
+sudo dpkg -i ../pegaprox_*.deb
 ```
 
 ## 🔄 Updating
