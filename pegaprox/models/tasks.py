@@ -85,11 +85,11 @@ class PegaProxConfig:
         self.name = cluster_data['name']
         self.host = cluster_data['host']
         self.user = cluster_data['user']
-        self.pass_ = cluster_data.get('pass', '')
+        self.pass_ = cluster_data['pass']
         self.ssl_verification = cluster_data.get('ssl_verification', False)
         self.migration_threshold = cluster_data.get('migration_threshold', 20)
         self.check_interval = cluster_data.get('check_interval', 300)
-        self.auto_migrate = cluster_data.get('auto_migrate', False)
+        self.auto_migrate = cluster_data.get('auto_migrate', True)
         self.balance_containers = cluster_data.get('balance_containers', False)
         self.balance_local_disks = cluster_data.get('balance_local_disks', False)
         self.dry_run = cluster_data.get('dry_run', False)

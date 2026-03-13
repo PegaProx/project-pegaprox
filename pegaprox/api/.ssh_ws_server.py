@@ -37,13 +37,12 @@ async def ssh_handler(websocket):
     from urllib.parse import urlparse, parse_qs, unquote
     parsed = urlparse(path)
     query = parse_qs(parsed.query)
-    ws_token = query.get('token', [None])[0]
-    session_id = query.get('session', [None])[0]  # LW: backwards compat
+    session_id = query.get('session', [None])[0]
     prefetched_ip = query.get('ip', [None])[0]  # IP pre-fetched by frontend
     if prefetched_ip:
         prefetched_ip = unquote(prefetched_ip)
         print(f"Frontend provided IP: {prefetched_ip}")
-
+    
     # Match both /shell and /shellws
     match = re.match(r'/api/clusters/([^/]+)/nodes/([^/]+)/shell(?:ws)?', parsed.path)
     if not match:
@@ -51,37 +50,34 @@ async def ssh_handler(websocket):
         await websocket.send('{"status":"error","message":"Invalid path"}')
         await websocket.close(1008, "Invalid path")
         return
-
+    
     cluster_id, node = match.groups()
     print(f"Cluster: {cluster_id}, Node: {node}")
-
-    # NS: Mar 2026 - prefer WS token auth (single-use, doesn't leak session)
-    auth_token = ws_token or session_id
-    if not auth_token:
-        print("No token or session provided")
-        await websocket.send('{"status":"error","message":"No auth token provided"}')
-        await websocket.close(1008, "No auth")
+    
+    # Validate session (just to ensure user is logged in to PegaProx)
+    if not session_id:
+        print("No session provided")
+        await websocket.send('{"status":"error","message":"No session provided"}')
+        await websocket.close(1008, "No session")
         return
-
-    # Validate via main server
+    
+    print(f"Session ID received: {session_id[:20]}..." if len(session_id) > 20 else f"Session ID: {session_id}")
+    
     try:
-        if ws_token:
-            validate_url = f"{PEGAPROX_URL}/api/ws/token/validate?token={ws_token}"
-            print("Validating WS token...")
-        else:
-            validate_url = f"{PEGAPROX_URL}/api/auth/validate"
-            print("Validating session (legacy)...")
-
-        headers = {'X-Session-ID': session_id} if session_id else {}
-        cookies = {'session': session_id} if session_id else {}
-        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=5, verify=False)
-
+        print(f"Validating session with: {PEGAPROX_URL}/api/auth/validate")
+        # Try both cookie and header-based auth
+        headers = {'X-Session-ID': session_id}
+        r = requests.get(f"{PEGAPROX_URL}/api/auth/validate", 
+                        cookies={'session': session_id}, 
+                        headers=headers,
+                        timeout=5, verify=False)
+        print(f"Session validation response: {r.status_code}")
         if r.status_code != 200:
-            print(f"Auth failed: {r.status_code}")
+            print(f"Session validation failed: {r.status_code} - {r.text[:100] if r.text else 'no body'}")
             await websocket.send('{"status":"error","message":"Session ungültig - bitte neu einloggen"}')
-            await websocket.close(1008, "Invalid auth")
+            await websocket.close(1008, "Invalid session")
             return
-        print("Auth successful")
+        print("Session validation successful")
     except requests.exceptions.ConnectionError as e:
         print(f"Connection error to main server: {e}")
         # NS Feb 2026 - never skip auth, even if main server is unreachable

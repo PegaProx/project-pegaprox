@@ -9,7 +9,7 @@ import threading
 
 # NS: all the global state was scattered across 51k lines before, at least now its in one place
 
-# Global cluster managers: cluster_id -> PegaProxManager or XcpngManager
+# Global cluster managers: cluster_id -> PegaProxManager
 cluster_managers = {}
 
 # PBS managers: pbs_id -> PBSManager
@@ -68,10 +68,6 @@ ws_clients_lock = threading.Lock()
 # SSE tokens and clients
 sse_tokens = {}
 sse_tokens_lock = threading.Lock()
-
-# NS: Mar 2026 - WebSocket tokens (single-use, short-lived, replaces session in URL)
-ws_tokens = {}
-ws_tokens_lock = threading.Lock()
 sse_clients = {}
 sse_clients_lock = threading.Lock()
 

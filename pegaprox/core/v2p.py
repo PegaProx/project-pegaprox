@@ -346,16 +346,9 @@ def _run_v2p_migration(task):
         detected_nic = hw.get('nic_type_pve', 'e1000')
         net_driver = task.net_driver if task.net_driver in ('e1000', 'e1000e', 'virtio', 'vmxnet3') else detected_nic
         
-        # PVE requires DNS-valid names - ESXi allows spaces/special chars (#129)
-        raw_name = vm_data.get('name', f'v2p-{task.proxmox_vmid}')
-        pve_name = re.sub(r'[^a-zA-Z0-9\-]', '-', raw_name)
-        pve_name = re.sub(r'-{2,}', '-', pve_name).strip('-')[:63]
-        if not pve_name or not pve_name[0].isalpha():
-            pve_name = f'vm-{pve_name}'[:63]
-
         pve_config = {
             'vmid': task.proxmox_vmid,
-            'name': pve_name,
+            'name': vm_data.get('name', f'v2p-{task.proxmox_vmid}'),
             'memory': vm_data.get('memory_mb', 2048),
             'cores': vm_data.get('cpu_count', 1),
             'sockets': 1,
@@ -368,8 +361,6 @@ def _run_v2p_migration(task):
         if bios == 'ovmf':
             pve_config['efidisk0'] = f'{task.target_storage}:1,efitype=4m,pre-enrolled-keys=0'
         
-        if pve_name != raw_name:
-            task.log(f"VM name sanitized: '{raw_name}' -> '{pve_name}' (PVE requires DNS-valid names)")
         # Log detected VMware hardware
         task.log(f"VMware hardware: firmware={firmware}, scsi={hw.get('scsi_controller', '?')}, "
                  f"nic={hw.get('nic_type', '?')}, bus={detected_bus}")
@@ -1253,7 +1244,7 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes):
     except Exception as e:
         logging.debug(f"[V2P] API alloc failed: {e}")
     
-    logging.error(f"[V2P] All allocation methods failed for disk {disk_index} on {storage}. Last: {last_error}")
+    logging.error(f"[V2P] All allocation methods failed for disk {disk_index}. Last: {last_error}")
     return None, None
 
 
@@ -1691,13 +1682,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         
         task.log(f"  Target: {vol_id} → {dev_path}")
         if not vol_id or not dev_path:
-            # NS Mar 2026 - #132: surface the actual pvesm error so user can debug
-            rc_dbg, out_dbg, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"pvesm alloc {task.target_storage} {task.proxmox_vmid} vm-{task.proxmox_vmid}-disk-{di} 1G 2>&1",
-                timeout=10)
             task.log(f"  Disk allocation failed for disk {di}")
-            task.log(f"  Storage: {task.target_storage}, VMID: {task.proxmox_vmid}")
-            task.log(f"  pvesm error: {str(out_dbg or '').strip()[:200]}")
             _cleanup_copy_isolation(pve_mgr, task.target_node, iso)
             return False
         
@@ -3415,32 +3400,14 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     task.log(f"COMPLETED: {task.vm_name} -> VMID {task.proxmox_vmid} (offline copy)")
 
 
-def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop_evt):
-    """Poll destination file size during dd transfer for live progress updates.
-
-    NS Mar 2026 - #132: without this, migration sits at 0% until entire disk finishes
-    """
-    while not stop_evt.is_set():
-        try:
-            rc, out, _ = _pve_node_exec(pve_mgr, node,
-                f"stat -c '%s' '{vol_path}' 2>/dev/null || echo 0", timeout=8)
-            if rc == 0 and str(out or '').strip().isdigit():
-                written = int(out.strip())
-                if written > 0 and disk_size > 0:
-                    task.update_progress(disk_key, min(written, disk_size), disk_size)
-        except:
-            pass  # SSH hiccup, no big deal
-        stop_evt.wait(5)
-
-
 def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore, vm_dir, desc_file, disk_index):
     """Transfer a flat VMDK from ESXi to Proxmox storage.
-
+    
     Strategy (in order):
     1. HTTPS /folder endpoint with cookie-session auth (works for running VMs)
     2. SSH dd pipe (works for stopped VMs or after snapshot)
     3. SSHFS dd (FUSE, last resort)
-
+    
     Returns (vol_id, vol_path) on success or (None, None) on failure.
     """
     import re, base64, urllib.parse
@@ -3497,11 +3464,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     vol_id, vol_path = _pvesm_alloc_disk(pve_mgr, task.target_node,
         task.target_storage, task.proxmox_vmid, disk_index, flat_size)
     if not vol_id or not vol_path:
-        # surface pvesm error for debugging (#132)
-        rc_dbg, out_dbg, _ = _pve_node_exec(pve_mgr, task.target_node,
-            f"pvesm status --storage {task.target_storage} 2>&1", timeout=10)
         task.log(f"  Disk allocation failed for disk {disk_index}")
-        task.log(f"  Storage: {task.target_storage} | pvesm: {str(out_dbg or '').strip()[:200]}")
         return None, None
     task.log(f"  Allocated: {vol_id}")
     task.log(f"  Target: {vol_path}")
@@ -3574,115 +3537,104 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     
     downloaded = 0
     dl_success = False
-
-    # Live progress monitoring (#132) - polls vol_path size every 5s
-    dk = f'disk{disk_index}'
-    _stop_mon = threading.Event()
-    _mon_t = threading.Thread(target=_monitor_disk_write, daemon=True,
-        args=(pve_mgr, task.target_node, vol_path, flat_size, task, dk, _stop_mon))
-    _mon_t.start()
-
-    try:
-        # ================================================================
-        # METHOD 1: HTTPS full download (if test download got data)
-        # ================================================================
-        if test_bytes > 0:
-            task.log(f"  HTTPS test OK ({test_bytes}B) - full download {flat_size_gb:.1f} GB...")
-            dd_log = f"/tmp/v2p-{task.id}-dl-{disk_index}.log"
-
-            dl_cmd = (
-                f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) "
-                f"--connect-timeout 30 --max-time 86400 "
-                f"'{url}' 2>/dev/null "
-                f"| dd of='{vol_path}' bs=4M 2>{dd_log}; "
-                f"echo RC=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
-                f"cat {dd_log}; rm -f {dd_log}"
-            )
-            rc_dl, out_dl, _ = _pve_node_exec(pve_mgr, task.target_node, dl_cmd, timeout=86400)
-            dl_out = str(out_dl or '').strip()
-            task.log(f"  HTTPS: {dl_out[-250:]}")
-
-            bytes_m = re.search(r'(\d+) bytes', dl_out)
-            if bytes_m:
-                downloaded = int(bytes_m.group(1))
-            if downloaded >= flat_size * 0.9:
-                dl_success = True
-                task.log(f"  HTTPS OK: {downloaded/(1024**3):.2f} GB")
-            else:
-                task.log(f"  HTTPS incomplete: {downloaded/(1024**3):.2f} GB")
+    
+    # ================================================================
+    # METHOD 1: HTTPS full download (if test download got data)
+    # ================================================================
+    if test_bytes > 0:
+        task.log(f"  HTTPS test OK ({test_bytes}B) - full download {flat_size_gb:.1f} GB...")
+        dd_log = f"/tmp/v2p-{task.id}-dl-{disk_index}.log"
+        
+        dl_cmd = (
+            f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) "
+            f"--connect-timeout 30 --max-time 86400 "
+            f"'{url}' 2>/dev/null "
+            f"| dd of='{vol_path}' bs=4M 2>{dd_log}; "
+            f"echo RC=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
+            f"cat {dd_log}; rm -f {dd_log}"
+        )
+        rc_dl, out_dl, _ = _pve_node_exec(pve_mgr, task.target_node, dl_cmd, timeout=86400)
+        dl_out = str(out_dl or '').strip()
+        task.log(f"  HTTPS: {dl_out[-250:]}")
+        
+        bytes_m = re.search(r'(\d+) bytes', dl_out)
+        if bytes_m:
+            downloaded = int(bytes_m.group(1))
+        if downloaded >= flat_size * 0.9:
+            dl_success = True
+            task.log(f"  HTTPS OK: {downloaded/(1024**3):.2f} GB")
         else:
-            task.log(f"  HTTPS test 0 bytes - skipping HTTPS full download")
+            task.log(f"  HTTPS incomplete: {downloaded/(1024**3):.2f} GB")
+    else:
+        task.log(f"  HTTPS test 0 bytes - skipping HTTPS full download")
+    
+    # ================================================================
+    # METHOD 2: SSH dd pipe (direct, no FUSE, no HTTP)
+    # ================================================================
+    if not dl_success:
+        task.log(f"  SSH dd pipe ({flat_size_gb:.1f} GB)...")
+        _pve_node_exec(pve_mgr, task.target_node,
+            "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1", timeout=30)
+        
+        safe_p = shlex.quote(esxi_pass)
+        dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"
 
-        # ================================================================
-        # METHOD 2: SSH dd pipe (direct, no FUSE, no HTTP)
-        # ================================================================
-        if not dl_success:
-            task.log(f"  SSH dd pipe ({flat_size_gb:.1f} GB)...")
-            _pve_node_exec(pve_mgr, task.target_node,
-                "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1", timeout=30)
-
-            safe_p = shlex.quote(esxi_pass)
-            dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"
-
-            ssh_cmd = (
-                f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking=no "  # NS Feb 2026 - env var instead of -p
-                f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "
-                f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
-                f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
-                f"{esxi_user}@{esxi_host} "
-                f"\"dd if={shlex.quote(esxi_flat_path)} bs=4M\" 2>/dev/null "
-                f"| dd of='{vol_path}' bs=4M 2>{dd_log2}; "
-                f"echo PIPE=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
-                f"cat {dd_log2}; rm -f {dd_log2}"
-            )
-            rc_s, out_s, _ = _pve_node_exec(pve_mgr, task.target_node, ssh_cmd, timeout=86400)
-            ssh_out = str(out_s or '').strip()
-            task.log(f"  SSH: {ssh_out[-250:]}")
-
-            bytes_m2 = re.search(r'(\d+) bytes', ssh_out)
-            if bytes_m2:
-                downloaded = int(bytes_m2.group(1))
+        ssh_cmd = (
+            f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking=no "  # NS Feb 2026 - env var instead of -p
+            f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "
+            f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
+            f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
+            f"{esxi_user}@{esxi_host} "
+            f"\"dd if={shlex.quote(esxi_flat_path)} bs=4M\" 2>/dev/null "
+            f"| dd of='{vol_path}' bs=4M 2>{dd_log2}; "
+            f"echo PIPE=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
+            f"cat {dd_log2}; rm -f {dd_log2}"
+        )
+        rc_s, out_s, _ = _pve_node_exec(pve_mgr, task.target_node, ssh_cmd, timeout=86400)
+        ssh_out = str(out_s or '').strip()
+        task.log(f"  SSH: {ssh_out[-250:]}")
+        
+        bytes_m2 = re.search(r'(\d+) bytes', ssh_out)
+        if bytes_m2:
+            downloaded = int(bytes_m2.group(1))
+        if downloaded >= flat_size * 0.9:
+            dl_success = True
+            task.log(f"  SSH OK: {downloaded/(1024**3):.2f} GB")
+        else:
+            task.log(f"  SSH: only {downloaded/(1024**3):.2f} GB (VMDK locked?)")
+    
+    # ================================================================
+    # METHOD 3: SSHFS dd (FUSE mount)
+    # ================================================================
+    if not dl_success:
+        sshfs_src = f"/tmp/v2p-{task.id}/{vm_dir}/{flat_file}"
+        task.log(f"  SSHFS dd from {sshfs_src}...")
+        rc_chk, out_chk, _ = _pve_node_exec(pve_mgr, task.target_node,
+            f"ls -la '{sshfs_src}' 2>&1", timeout=10)
+        if rc_chk == 0:
+            dd_log3 = f"/tmp/v2p-{task.id}-dd3-{disk_index}.log"
+            rc_dd, out_dd, _ = _pve_node_exec(pve_mgr, task.target_node,
+                f"dd if='{sshfs_src}' of='{vol_path}' bs=4M 2>{dd_log3}; "
+                f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
+            dd_out = str(out_dd or '').strip()
+            task.log(f"  SSHFS: {dd_out[-200:]}")
+            bytes_m3 = re.search(r'(\d+) bytes', dd_out)
+            downloaded = int(bytes_m3.group(1)) if bytes_m3 else 0
             if downloaded >= flat_size * 0.9:
                 dl_success = True
-                task.log(f"  SSH OK: {downloaded/(1024**3):.2f} GB")
-            else:
-                task.log(f"  SSH: only {downloaded/(1024**3):.2f} GB (VMDK locked?)")
-
-        # ================================================================
-        # METHOD 3: SSHFS dd (FUSE mount)
-        # ================================================================
-        if not dl_success:
-            sshfs_src = f"/tmp/v2p-{task.id}/{vm_dir}/{flat_file}"
-            task.log(f"  SSHFS dd from {sshfs_src}...")
-            rc_chk, out_chk, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"ls -la '{sshfs_src}' 2>&1", timeout=10)
-            if rc_chk == 0:
-                dd_log3 = f"/tmp/v2p-{task.id}-dd3-{disk_index}.log"
-                rc_dd, out_dd, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M 2>{dd_log3}; "
-                    f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
-                dd_out = str(out_dd or '').strip()
-                task.log(f"  SSHFS: {dd_out[-200:]}")
-                bytes_m3 = re.search(r'(\d+) bytes', dd_out)
-                downloaded = int(bytes_m3.group(1)) if bytes_m3 else 0
-                if downloaded >= flat_size * 0.9:
-                    dl_success = True
-            else:
-                task.log(f"  SSHFS not accessible: {str(out_chk or '')[:100]}")
-    finally:
-        _stop_mon.set()
-        _mon_t.join(timeout=3)
-
+        else:
+            task.log(f"  SSHFS not accessible: {str(out_chk or '')[:100]}")
+    
     # Cleanup
     _pve_node_exec(pve_mgr, task.target_node, f"rm -f {auth_file} {cookie_jar}", timeout=5)
-
+    
     if not dl_success:
         task.log(f"  ALL methods failed ({downloaded} of {flat_size} bytes)")
         task.log(f"  Hint: VMDK locked by running VM. The ESXi HTTPS /folder endpoint should")
         task.log(f"  serve files even while locked - check verbose curl output above for details.")
         _pve_node_exec(pve_mgr, task.target_node, f"pvesm free '{vol_id}' 2>/dev/null", timeout=30)
         return None, None
-
+    
     return vol_id, vol_path
 
 

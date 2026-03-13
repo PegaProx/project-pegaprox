@@ -22,7 +22,6 @@ from pegaprox.utils.rbac import (
 from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immediate_update
 from pegaprox.core.config import load_config, save_config
 from pegaprox.core.manager import PegaProxManager
-from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
 from pegaprox.api.helpers import load_server_settings, get_connected_manager, check_cluster_access, safe_error
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
@@ -86,7 +85,6 @@ def get_clusters():
             'current_host': getattr(mgr, 'current_host', None),
             'last_run': mgr.last_run.isoformat() if mgr.last_run else None,
             'api_token_active': bool(getattr(mgr, '_using_api_token', False)),
-            'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
         })
     
     # MK: Sort clusters by sort_order first, then by name for consistent ordering
@@ -100,53 +98,35 @@ def get_clusters():
 def add_cluster():
     """Add a new cluster"""
     data = request.json
-
+    
     # Validate required fields
-    required = ['name', 'host', 'user']
+    required = ['name', 'host', 'user', 'pass']
     for field in required:
         if field not in data:
             return jsonify({'error': f'Missing required field: {field}'}), 400
-
-    # password or ssh key - need at least one
-    if not data.get('pass') and not data.get('ssh_key'):
-        return jsonify({'error': 'Password or SSH key is required'}), 400
-    if 'pass' not in data:
-        data['pass'] = ''
-
+    
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
-    cluster_type = data.get('cluster_type', 'proxmox')
-
+    
     # Create config
     config = PegaProxConfig(data)
-
-    # MK Mar 2026: dispatch to correct manager based on cluster type
-    if cluster_type == 'xcpng':
-        if not XENAPI_AVAILABLE:
-            return jsonify({'error': 'XenAPI library not installed. Run: pip install XenAPI'}), 400
-        manager = XcpngManager(cluster_id, config)
-        if not manager.connect():
-            error_detail = manager.connection_error or 'Failed to connect to XCP-ng pool'
-            return jsonify({'error': f'Failed to connect: {error_detail}'}), 400
-    else:
-        manager = PegaProxManager(cluster_id, config)
-        # Test connection - MK: return actual error instead of generic message (#88)
-        if not manager.connect_to_proxmox():
-            error_detail = manager.connection_error or 'Failed to connect to Proxmox cluster'
-            return jsonify({'error': f'Failed to connect: {error_detail}'}), 400
-
+    
+    # Create and start manager
+    manager = PegaProxManager(cluster_id, config)
+    
+    # Test connection - MK: return actual error instead of generic message (#88)
+    if not manager.connect_to_proxmox():
+        error_detail = manager.connection_error or 'Failed to connect to Proxmox cluster'
+        return jsonify({'error': f'Failed to connect: {error_detail}'}), 400
+    
     manager.start()
     cluster_managers[cluster_id] = manager
 
-    # Save configuration - also store cluster_type in db
+    # Save configuration
     save_config()
-    if cluster_type != 'proxmox':
-        db = get_db()
-        db.update_cluster(cluster_id, {'cluster_type': cluster_type})
 
     # Audit log
-    type_label = 'XCP-ng' if cluster_type == 'xcpng' else 'Proxmox'
-    log_audit(request.session['user'], 'cluster.added', f"Added {type_label} cluster: {data.get('name')} ({data.get('host')})")
+    log_audit(request.session['user'], 'cluster.added', f"Added cluster: {data.get('name')} ({data.get('host')})")
 
     result = {'id': cluster_id, 'message': 'Cluster added successfully'}
     # NS: let frontend know if we auto-created an API token (#110)
@@ -169,22 +149,13 @@ def get_cluster_nodes(cluster_id):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-
-    # MK: XCP-ng clusters use their own get_nodes()
-    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
-        try:
-            nodes = manager.get_nodes()
-            return jsonify(nodes)
-        except Exception as e:
-            logging.debug(f"XCP-ng get_nodes failed for {cluster_id}: {e}")
-            return jsonify({'error': 'Connection temporarily unavailable', 'nodes': [], 'offline': True}), 503
-
+    
     # Try to get live data
     try:
         host = manager.current_host or manager.config.host
         url = f"https://{host}:8006/api2/json/nodes"
         r = manager._create_session().get(url, timeout=10)
-
+        
         if r.status_code == 200:
             nodes = r.json().get('data', [])
             # Cache the nodes data
@@ -192,7 +163,7 @@ def get_cluster_nodes(cluster_id):
             return jsonify(nodes)
     except Exception as e:
         logging.debug(f"Failed to get nodes for {cluster_id}: {e}")
-
+    
     # If live data failed, return cached data with offline status
     if hasattr(manager, '_cached_nodes') and manager._cached_nodes:
         cached = manager._cached_nodes
@@ -201,7 +172,7 @@ def get_cluster_nodes(cluster_id):
             if 'connection_status' not in node:
                 node['connection_status'] = 'stale'
         return jsonify(cached)
-
+    
     # If HA is tracking nodes, return those
     if manager.ha_node_status:
         nodes = []
@@ -703,7 +674,7 @@ def get_excluded_vms(cluster_id):
         
         # Get VM names for display
         vms = mgr.get_vm_resources() if mgr.is_connected else []
-        vm_names = {vm['vmid']: vm.get('name', f"VM {vm['vmid']}") for vm in vms if vm.get('vmid')}
+        vm_names = {vm['vmid']: vm.get('name', f"VM {vm['vmid']}") for vm in vms}
         
         for ex in excluded:
             ex['name'] = vm_names.get(ex['vmid'], f"VM {ex['vmid']}")

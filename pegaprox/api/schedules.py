@@ -570,8 +570,8 @@ def update_schedule(schedule_id):
     ok, err = check_cluster_access(schedule.get('cluster_id', ''))
     if not ok: return err
 
-    # Update fields (vmid/vm_type added Mar 2026 - #133)
-    updatable = ['name', 'vmid', 'vm_type', 'action', 'schedule_type', 'time', 'date', 'days', 'enabled']
+    # Update fields
+    updatable = ['name', 'action', 'schedule_type', 'time', 'date', 'days', 'enabled']
     for field in updatable:
         if field in data:
             schedule[field] = data[field]
@@ -586,15 +586,12 @@ def update_schedule(schedule_id):
 def delete_schedule(schedule_id):
     """Delete a scheduled action"""
     schedules = load_schedules()
-
-    # verify tenant access before deleting
-    schedule = next((s for s in schedules.get('actions', []) if s.get('id') == schedule_id), None)
-    if not schedule:
-        return jsonify({'error': 'Schedule not found'}), 404
-    ok, err = check_cluster_access(schedule.get('cluster_id', ''))
-    if not ok: return err
-
+    
+    original_len = len(schedules.get('actions', []))
     schedules['actions'] = [s for s in schedules.get('actions', []) if s.get('id') != schedule_id]
+    
+    if len(schedules['actions']) == original_len:
+        return jsonify({'error': 'Schedule not found'}), 404
     
     save_schedules(schedules)
     

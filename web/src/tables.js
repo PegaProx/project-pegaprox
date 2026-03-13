@@ -1128,7 +1128,7 @@
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
         // FIXME: rerenders too often, useMemo wuold help probably
-        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed }) {
+        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, onOpenTags, highlightedVm, addToast }) {
             const { t } = useTranslation();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - corporate defaults to table view
             const [search, setSearch] = useState('');
@@ -1143,17 +1143,6 @@
             const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
             const [showCloneModal, setShowCloneModal] = useState(null);
             const [selectedDetailVm, setSelectedDetailVm] = useState(null); // For detail view
-
-            // NS: Mar 2026 - consume pending action from context menu
-            useEffect(() => {
-                if (!pendingVmAction) return;
-                const { vm, action } = pendingVmAction;
-                if (action === 'migrate') setShowMigrateModal(vm);
-                else if (action === 'clone') setShowCloneModal(vm);
-                else if (action === 'delete') setShowDeleteConfirm(vm);
-                else if (action === 'crossCluster') setShowCrossClusterMigrate(vm);
-                onPendingActionConsumed?.();
-            }, [pendingVmAction]);
             const highlightedRowRef = useRef(null);
             
             // Pagination states - MK Jan 2026
@@ -1341,40 +1330,7 @@
             }, [filteredResources]);
 
             return(
-                <div className={isCorporate ? 'space-y-0' : 'space-y-4'}>
-                    {/* LW: Mar 2026 - corporate flat toolbar vs modern rounded pills */}
-                    {isCorporate ? (
-                        <div className="corp-vm-toolbar">
-                            <div className="relative">
-                                <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2" style={{color: '#728b9a'}} />
-                                <input
-                                    type="text"
-                                    placeholder={t('searchByNameOrId')}
-                                    value={search}
-                                    onChange={(e) => setSearch(e.target.value)}
-                                    className="pl-7 pr-3 py-1 text-[13px] bg-transparent border text-white placeholder-gray-600 focus:outline-none w-56"
-                                    style={{borderColor: '#485764', borderRadius: '2px'}}
-                                />
-                            </div>
-                            <span className="corp-toolbar-divider" />
-                            {['all', 'running', 'stopped', 'vm', 'lxc'].map(f => (
-                                <button key={f} onClick={() => setFilter(f)}
-                                    className={`corp-toolbar-filter ${filter === f ? 'active' : ''}`}>
-                                    {filterLabels[f]}
-                                </button>
-                            ))}
-                            <span className="corp-toolbar-divider" />
-                            <span className="text-[11px]" style={{color: '#728b9a'}}>
-                                {filteredResources.length} {t('items') || 'items'}
-                            </span>
-                            <div style={{flex: 1}} />
-                            {selectedVms.length > 0 && (
-                                <span className="text-[11px]" style={{color: '#49afd9'}}>
-                                    {selectedVms.length} {t('selectedItems') || 'selected'}
-                                </span>
-                            )}
-                        </div>
-                    ) : (
+                <div className="space-y-4">
                     <div className="flex flex-wrap items-center gap-3">
                         <div className="relative flex-1 min-w-[200px]">
                             <Icons.Search />
@@ -1395,8 +1351,8 @@
                                     key={f}
                                     onClick={() => setFilter(f)}
                                     className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all ${
-                                        filter === f
-                                            ? 'bg-proxmox-orange text-white'
+                                        filter === f 
+                                            ? 'bg-proxmox-orange text-white' 
                                             : 'bg-proxmox-dark text-gray-400 hover:text-white border border-proxmox-border'
                                     }`}
                                 >
@@ -1428,10 +1384,9 @@
                             </button>
                         </div>
                     </div>
-                    )}
 
-                    {/* Bulk Actions Bar (hidden in corporate - integrated in toolbar) */}
-                    {!isCorporate && selectedVms.length > 0 && (
+                    {/* Bulk Actions Bar */}
+                    {selectedVms.length > 0 && (
                         <div className="flex items-center gap-3 p-3 bg-proxmox-orange/10 border border-proxmox-orange/30 rounded-lg">
                             <span className="text-sm text-proxmox-orange font-medium">
                                 {selectedVms.length} {t('selectedItems')}
@@ -1723,7 +1678,6 @@
                                             { key: 'name', label: t('name') },
                                             { key: 'type', label: t('type') },
                                             { key: 'node', label: 'Node' },
-                                            { key: 'cpu_percent', label: 'CPU' },
                                             { key: 'mem', label: 'RAM' },
                                             { key: 'status', label: 'Status' },
                                             { key: 'actions', label: t('actions') },
@@ -1750,7 +1704,7 @@
                                 <tbody className={isCorporate ? '' : 'divide-y divide-proxmox-border'}>
                                     {paginatedResources.length === 0 ? (
                                         <tr>
-                                            <td colSpan={9} className={isCorporate ? 'px-2 py-4 text-center text-gray-500' : 'px-4 py-8 text-center text-gray-500'}>
+                                            <td colSpan={8} className={isCorporate ? 'px-2 py-4 text-center text-gray-500' : 'px-4 py-8 text-center text-gray-500'}>
                                                 {t('noResults')}
                                             </td>
                                         </tr>
@@ -1810,24 +1764,9 @@
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <div className="flex items-center gap-2">
-                                                        <div className="flex-1 max-w-[60px]">
+                                                        <div className="flex-1 max-w-[100px]">
                                                             <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
-                                                                <div className="h-full rounded-full transition-all"
-                                                                    style={{
-                                                                        width: `${Math.min(resource.cpu_percent || 0, 100)}%`,
-                                                                        background: (resource.cpu_percent || 0) < 50 ? '#3b82f6' : (resource.cpu_percent || 0) < 80 ? '#eab308' : '#ef4444'
-                                                                    }}
-                                                                />
-                                                            </div>
-                                                        </div>
-                                                        <span className="text-xs text-gray-400 font-mono">{(resource.cpu_percent || 0).toFixed(0)}%</span>
-                                                    </div>
-                                                </td>
-                                                <td className="px-4 py-3">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className="flex-1 max-w-[60px]">
-                                                            <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
-                                                                <div
+                                                                <div 
                                                                     className="h-full rounded-full transition-all"
                                                                     style={{
                                                                         width: `${resource.mem_percent || 0}%`,

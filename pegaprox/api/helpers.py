@@ -27,10 +27,6 @@ def load_server_settings():
         'domain': '',
         'port': 5000,  # Web server port
         'ssl_enabled': False,
-        # MK: Mar 2026 - ACME / Let's Encrypt auto-certs (#96)
-        'acme_enabled': False,
-        'acme_email': '',
-        'acme_staging': False,  # use LE staging for testing
         'logo_url': '',
         'app_name': 'PegaProx',
         # HTTP redirect port - NS Jan 2026
@@ -95,9 +91,6 @@ def load_server_settings():
         'ldap_default_role': 'viewer',
         'ldap_auto_create_users': True,
         'ldap_group_mappings': [],
-        # NS: Mar 2026 - reverse proxy support (nginx/haproxy)
-        'reverse_proxy_enabled': False,
-        'trusted_proxies': '',  # comma-separated IPs/CIDRs, empty = loopback only
         # OIDC defaults
         'oidc_enabled': False,
         'oidc_provider': 'entra',

@@ -17,7 +17,6 @@ from pegaprox.globals import (
     cluster_managers, ws_clients, ws_clients_lock,
     sse_tokens, sse_tokens_lock,
     sse_clients, sse_clients_lock,
-    ws_tokens, ws_tokens_lock,
 )
 
 
@@ -145,47 +144,6 @@ def validate_sse_token(token: str) -> dict:
 
         if token_data['expires'] < time.time():
             del sse_tokens[token]
-            return None
-
-        return token_data
-
-
-# MK: Mar 2026 - WS tokens for VNC/SSH, avoids putting session_id in WebSocket URLs
-# These are single-use and expire after 60s
-WS_TOKEN_TTL = 60
-
-def create_ws_token(username: str, role: str) -> str:
-    """Create a short-lived single-use WebSocket auth token"""
-    token = base64.urlsafe_b64encode(os.urandom(24)).decode('utf-8')
-    expires = time.time() + WS_TOKEN_TTL
-
-    with ws_tokens_lock:
-        # cleanup old ones
-        now = time.time()
-        expired = [t for t, d in ws_tokens.items() if d['expires'] < now]
-        for t in expired:
-            del ws_tokens[t]
-
-        ws_tokens[token] = {
-            'user': username,
-            'role': role,
-            'expires': expires,
-        }
-
-    return token
-
-
-def validate_ws_token(token: str) -> dict:
-    """Validate and consume a WS token (single-use). Returns user info or None."""
-    if not token:
-        return None
-
-    with ws_tokens_lock:
-        token_data = ws_tokens.pop(token, None)
-        if not token_data:
-            return None
-
-        if token_data['expires'] < time.time():
             return None
 
         return token_data

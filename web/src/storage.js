@@ -3,7 +3,7 @@
         // DatastoreTab with storage cluster balancing
         // ═══════════════════════════════════════════════
         // Datastore Tab Component - with Storage Clusters for balancing
-        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode }) {
+        function DatastoreTab({ clusterId, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin } = useAuth();
             const [loading, setLoading] = useState(true);
@@ -184,33 +184,7 @@
                 fetchDatastores();
                 fetchStorageClusters();
             }, [clusterId]);
-
-            // LW: Mar 2026 - auto-select storage from sidebar click
-            // initialNode disambiguates when multiple nodes have same storage name (e.g. "local")
-            useEffect(() => {
-                if (!initialStorage || !initialLoadDone.current) return;
-                // if node is specified, go directly to that node's storage
-                if (initialNode) {
-                    const nodeStores = datastores.local?.[initialNode];
-                    if (nodeStores?.some(s => s.storage === initialStorage)) {
-                        loadStorageContent(initialStorage, initialNode);
-                        return;
-                    }
-                }
-                // fallback: check shared first, then scan local
-                const found = datastores.shared?.find(s => s.storage === initialStorage);
-                if (found) {
-                    loadStorageContent(initialStorage, null);
-                } else {
-                    for (const [node, stores] of Object.entries(datastores.local || {})) {
-                        if (stores.some(s => s.storage === initialStorage)) {
-                            loadStorageContent(initialStorage, node);
-                            return;
-                        }
-                    }
-                }
-            }, [initialStorage, initialNode, datastores]);
-
+            
             const fetchDatastores = async () => {
                 // prevent concurrent fetches
                 if (fetchingRef.current) return;
@@ -506,11 +480,9 @@
                 const formData = new FormData();
                 formData.append('file', uploadFile);
                 // MK: Mar 2026 - detect disk images vs ISOs for correct PVE content type (#115)
-                // LW: Mar 2026 - added vztmpl for container templates (#119)
                 const fname = uploadFile.name.toLowerCase();
                 const isDiskImage = fname.endsWith('.vmdk') || fname.endsWith('.qcow2') || fname.endsWith('.img') || fname.endsWith('.raw');
-                const isTemplate = fname.endsWith('.tar.gz') || fname.endsWith('.tar.xz') || fname.endsWith('.tar.zst');
-                formData.append('content', isDiskImage ? 'import' : isTemplate ? 'vztmpl' : 'iso');
+                formData.append('content', isDiskImage ? 'import' : 'iso');
                 if (selectedStorage.node) {
                     formData.append('node', selectedStorage.node);
                 }
@@ -573,11 +545,7 @@
                 });
                 
                 xhr.open('POST', `${API_URL}/clusters/${clusterId}/datastores/${selectedStorage.name}/upload`);
-                xhr.withCredentials = true;
-
-                // LW: Mar 2026 - CSRF protection: custom header triggers CORS preflight
-                xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-
+                
                 // auth headers
                 const headers = getAuthHeaders();
                 for (const [key, value] of Object.entries(headers)) {
@@ -1760,7 +1728,7 @@
                                         <label className="block text-sm text-gray-400 mb-2">{t('selectFile') || 'Select File'}</label>
                                         <input
                                             type="file"
-                                            accept=".iso,.img,.qcow2,.vmdk,.raw,.tar.gz,.tar.xz,.tar.zst"
+                                            accept=".iso,.img,.qcow2,.vmdk,.raw"
                                             onChange={(e) => setUploadFile(e.target.files[0])}
                                             disabled={uploading}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white disabled:opacity-50"

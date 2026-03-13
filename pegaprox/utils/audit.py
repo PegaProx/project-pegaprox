@@ -135,64 +135,19 @@ def _is_loopback(addr):
         addr = addr[7:]
     return addr in ('127.0.0.1', '::1', '127.0.0.0')
 
-# NS Mar 2026 - trusted proxy list for non-loopback reverse proxies (nginx on different host)
-# loaded once at startup from DB, updated via settings API
-_trusted_proxies = set()  # IPs and/or CIDR networks
-
-def load_trusted_proxies(proxy_str=''):
-    """Parse comma-separated IPs/CIDRs into the trusted set."""
-    global _trusted_proxies
-    import ipaddress
-    result = set()
-    if not proxy_str:
-        _trusted_proxies = result
-        return
-    for entry in proxy_str.split(','):
-        entry = entry.strip()
-        if not entry: continue
-        try:
-            if '/' in entry:
-                result.add(ipaddress.ip_network(entry, strict=False))
-            else:
-                result.add(ipaddress.ip_address(entry))
-        except ValueError:
-            logging.warning(f"[Proxy] invalid trusted proxy entry: {entry}")
-    _trusted_proxies = result
-
-def _is_trusted_proxy(addr):
-    """MK: check if addr is loopback or in trusted_proxies list"""
-    if _is_loopback(addr):
-        return True
-    if not _trusted_proxies:
-        return False
-    import ipaddress
-    try:
-        # strip ::ffff: prefix for comparison
-        clean = addr[7:] if addr and addr.startswith('::ffff:') else addr
-        ip = ipaddress.ip_address(clean)
-        for trusted in _trusted_proxies:
-            if isinstance(trusted, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
-                if ip in trusted: return True
-            elif ip == trusted:
-                return True
-    except ValueError:
-        pass
-    return False
-
 def get_client_ip():
     """Get client IP address from request
-    NS Feb 2026 - only trust X-Forwarded-For from trusted sources
+    NS Feb 2026 - only trust X-Forwarded-For from loopback (reverse proxy)
     """
+    # NS Feb 2026 - background threads (scheduler, metrics) have no Flask context
     if not has_request_context():
         return 'system'
-    # trust proxy headers from loopback + configured trusted proxies
-    if _is_trusted_proxy(request.remote_addr):
-        xff = request.headers.get('X-Forwarded-For')
-        if xff:
-            return xff.split(',')[0].strip()
-        xri = request.headers.get('X-Real-IP')
-        if xri:
-            return xri
+    # Only trust proxy headers when request comes from loopback
+    if _is_loopback(request.remote_addr):
+        if request.headers.get('X-Forwarded-For'):
+            return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+        elif request.headers.get('X-Real-IP'):
+            return request.headers.get('X-Real-IP')
     return request.remote_addr
 
 # Global users store (loaded at startup)

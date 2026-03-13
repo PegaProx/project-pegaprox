@@ -69,7 +69,7 @@ def _xcrepl_loop():
     _xcrepl_running = True
 
     # NS: lazy import to avoid circular dependency at module load time
-    from pegaprox.api.vms import _execute_replication, _execute_local_replication
+    from pegaprox.api.vms import _execute_replication
 
     while _xcrepl_running:
         try:
@@ -94,14 +94,11 @@ def _xcrepl_loop():
                         elapsed = interval + 1  # never ran before -> run now
 
                     if elapsed >= interval:
-                        # NS: same-cluster uses local replication (no remote-migrate)
-                        is_local = job.get('source_cluster') == job.get('target_cluster')
-                        handler = _execute_local_replication if is_local else _execute_replication
-                        logger.info(f"[XCREPL] Scheduling {'local' if is_local else 'cross-cluster'} job {job['id']} (VM {job['vmid']})")
+                        logger.info(f"[XCREPL] Scheduling job {job['id']} (VM {job['vmid']})")
                         try:
                             # run in own thread so one slow job doesn't block others
                             threading.Thread(
-                                target=handler,
+                                target=_execute_replication,
                                 args=(job,),
                                 daemon=True
                             ).start()

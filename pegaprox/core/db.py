@@ -879,14 +879,6 @@ class PegaProxDB:
                 except Exception as e:
                     logging.error(f"Failed to add api_token columns: {e}")
 
-            # MK Mar 2026: cluster_type for XCP-ng support
-            if 'cluster_type' not in cluster_columns:
-                try:
-                    cursor.execute("ALTER TABLE clusters ADD COLUMN cluster_type TEXT DEFAULT 'proxmox'")
-                    logging.info("Added cluster_type column to clusters table")
-                except Exception as e:
-                    logging.error(f"Failed to add cluster_type column: {e}")
-
         except Exception as e:
             logging.error(f"Error checking clusters schema: {e}")
         
@@ -1009,7 +1001,6 @@ class PegaProxDB:
                     retention INTEGER DEFAULT 3,
                     target_storage TEXT DEFAULT '',
                     target_bridge TEXT DEFAULT 'vmbr0',
-                    target_node TEXT DEFAULT '',
                     enabled INTEGER DEFAULT 1,
                     last_run TEXT,
                     last_status TEXT DEFAULT '',
@@ -1022,15 +1013,6 @@ class PegaProxDB:
             logging.info("Ensured cross_cluster_replications table exists")
         except Exception as e:
             logging.error(f"Error creating cross_cluster_replications table: {e}")
-
-        # NS: Mar 2026 - add target_node col for same-cluster snapshot replication (#103)
-        try:
-            cols = [row[1] for row in cursor.execute("PRAGMA table_info(cross_cluster_replications)").fetchall()]
-            if 'target_node' not in cols:
-                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN target_node TEXT DEFAULT ''")
-                logging.info("Added target_node column to cross_cluster_replications")
-        except Exception:
-            pass
 
         # NS: Feb 2026 - Space-efficient LVM COW snapshots managed by PegaProx
         try:
@@ -1059,44 +1041,6 @@ class PegaProxDB:
             logging.info("Ensured efficient_snapshots table exists")
         except Exception as e:
             logging.error(f"Error creating efficient_snapshots table: {e}")
-
-        # MK: Mar 2026 - XCP-ng synthetic VMID mapping
-        # XCP-ng uses UUIDs but our frontend expects integer VMIDs
-        try:
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS xcpng_vmid_map (
-                    cluster_id TEXT NOT NULL,
-                    uuid TEXT NOT NULL,
-                    vmid INTEGER NOT NULL,
-                    PRIMARY KEY (cluster_id, uuid)
-                )
-            ''')
-            cursor.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_xcpng_vmid ON xcpng_vmid_map(cluster_id, vmid)
-            ''')
-        except Exception as e:
-            logging.error(f"Error creating xcpng_vmid_map table: {e}")
-
-        # LW Mar 2026 - resource pools for XCP-ng (DB-backed, XAPI has no equivalent)
-        try:
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS xcpng_pools (
-                    cluster_id TEXT NOT NULL,
-                    poolid TEXT NOT NULL,
-                    comment TEXT DEFAULT '',
-                    PRIMARY KEY (cluster_id, poolid)
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS xcpng_pool_members (
-                    cluster_id TEXT NOT NULL,
-                    poolid TEXT NOT NULL,
-                    vmid INTEGER NOT NULL,
-                    PRIMARY KEY (cluster_id, poolid, vmid)
-                )
-            ''')
-        except Exception as e:
-            logging.error(f"Error creating xcpng_pools tables: {e}")
 
         conn.commit()
         logging.info("DB schema initialized")
@@ -2024,7 +1968,6 @@ class PegaProxDB:
                 'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
                 'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
                 'api_token_secret': self._decrypt(row['api_token_secret_encrypted']) if 'api_token_secret_encrypted' in row.keys() and row['api_token_secret_encrypted'] else '',
-                'cluster_type': row['cluster_type'] if 'cluster_type' in row.keys() else 'proxmox',
             }
 
         return clusters
@@ -2095,7 +2038,6 @@ class PegaProxDB:
             'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
             'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
             'api_token_secret': self._decrypt(row['api_token_secret_encrypted']) if 'api_token_secret_encrypted' in row.keys() and row['api_token_secret_encrypted'] else '',
-            'cluster_type': row['cluster_type'] if 'cluster_type' in row.keys() else 'proxmox',
         }
 
     def save_cluster(self, cluster_id: str, data: dict):
@@ -2116,10 +2058,9 @@ class PegaProxDB:
              ssh_port, ha_settings, excluded_nodes, smbios_autoconfig,
              api_token_user, api_token_secret_encrypted,
              group_id, display_name, sort_order,
-             cluster_type,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -2147,7 +2088,6 @@ class PegaProxDB:
             data.get('group_id', existing['group_id'] if existing else None),
             data.get('display_name', existing['display_name'] if existing else None),
             data.get('sort_order', existing['sort_order'] if existing else None),
-            data.get('cluster_type', 'proxmox'),
             existing['created_at'] if existing else now,
             now
         ))
@@ -2173,35 +2113,8 @@ class PegaProxDB:
         """Delete cluster"""
         cursor = self.conn.cursor()
         cursor.execute('DELETE FROM clusters WHERE id = ?', (cluster_id,))
-        cursor.execute('DELETE FROM xcpng_vmid_map WHERE cluster_id = ?', (cluster_id,))
         self.conn.commit()
-
-    # XCP-ng VMID mapping helpers - MK Mar 2026
-    def xcpng_get_vmid(self, cluster_id, vm_uuid):
-        """Get or create synthetic VMID for XCP-ng VM UUID"""
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT vmid FROM xcpng_vmid_map WHERE cluster_id = ? AND uuid = ?',
-                       (cluster_id, vm_uuid))
-        row = cursor.fetchone()
-        if row:
-            return row['vmid']
-        # allocate next vmid starting at 100
-        cursor.execute('SELECT MAX(vmid) FROM xcpng_vmid_map WHERE cluster_id = ?', (cluster_id,))
-        max_row = cursor.fetchone()
-        next_id = (max_row[0] or 99) + 1
-        cursor.execute('INSERT INTO xcpng_vmid_map (cluster_id, uuid, vmid) VALUES (?, ?, ?)',
-                       (cluster_id, vm_uuid, next_id))
-        self.conn.commit()
-        return next_id
-
-    def xcpng_resolve_vmid(self, cluster_id, vmid):
-        """Resolve synthetic VMID back to XCP-ng UUID"""
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT uuid FROM xcpng_vmid_map WHERE cluster_id = ? AND vmid = ?',
-                       (cluster_id, int(vmid)))
-        row = cursor.fetchone()
-        return row['uuid'] if row else None
-
+    
     # ========================================
     # USER OPERATIONS
     # ========================================

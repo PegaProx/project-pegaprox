@@ -12,23 +12,8 @@
         // const API_URL = 'https://pegaprox.internal/api' // old staging
         
         // NS: Central version constant - keep in sync with backend PEGAPROX_VERSION
-        const PEGAPROX_VERSION = "Beta 0.9.1.3";
+        const PEGAPROX_VERSION = "Beta 0.9.0.3";
         const DEBUG = false; // set true for verbose logging
-
-        // NS: timezone list for node time config (matches backend get_timezones)
-        const TIMEZONES = [
-            'UTC', 'Europe/Berlin', 'Europe/Vienna', 'Europe/Zurich', 'Europe/London',
-            'Europe/Paris', 'Europe/Amsterdam', 'Europe/Brussels', 'Europe/Rome',
-            'Europe/Madrid', 'Europe/Warsaw', 'Europe/Prague', 'Europe/Budapest',
-            'Europe/Stockholm', 'Europe/Helsinki', 'Europe/Athens', 'Europe/Moscow',
-            'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-            'America/Toronto', 'America/Vancouver', 'America/Sao_Paulo', 'America/Mexico_City',
-            'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Singapore', 'Asia/Seoul',
-            'Asia/Dubai', 'Asia/Kolkata', 'Asia/Bangkok', 'Asia/Jakarta',
-            'Australia/Sydney', 'Australia/Melbourne', 'Australia/Perth',
-            'Pacific/Auckland', 'Pacific/Fiji',
-            'Africa/Cairo', 'Africa/Johannesburg', 'Africa/Lagos',
-        ];
 
         // =====================================================
         // TRANSLATION SYSTEM

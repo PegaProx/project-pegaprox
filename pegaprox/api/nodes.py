@@ -237,18 +237,6 @@ def revert_node_network_api(cluster_id, node):
     return jsonify({'error': result['error']}), 500
 
 
-@bp.route('/api/clusters/<cluster_id>/networks', methods=['GET'])
-@require_auth(perms=['node.view'])
-def get_cluster_networks_api(cluster_id):
-    """NS: Mar 2026 - Cluster-wide network overview with VM assignments"""
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    return jsonify(mgr.get_cluster_networks())
-
-
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_node_dns_api(cluster_id, node):
@@ -1740,119 +1728,8 @@ def restore_deleted_script(cluster_id, script_id):
         cluster_name = cluster_id
     
     log_audit(usr, 'script.restored', f"Restored deleted script '{script['name']}' (ID: {script_id})", cluster=cluster_name)
-
+    
     return jsonify({'success': True, 'message': f"Script '{script['name']}' restored"})
 
 
-# ──────────────────────────────────────────
-# XCP-ng specific: PIFs, bonds, guest metrics, pool HA
-# ──────────────────────────────────────────
-
-@bp.route('/api/clusters/<cluster_id>/nodes/<node>/pifs', methods=['GET'])
-@require_auth(perms=['node.view'])
-def get_node_pifs_api(cluster_id, node):
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    if not hasattr(mgr, 'get_host_pifs'):
-        return jsonify([])
-    return jsonify(mgr.get_host_pifs(node))
-
-
-@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bonds', methods=['GET'])
-@require_auth(perms=['node.view'])
-def get_node_bonds_api(cluster_id, node):
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    if not hasattr(mgr, 'get_bonds'):
-        return jsonify([])
-    return jsonify(mgr.get_bonds(node))
-
-
-@bp.route('/api/clusters/<cluster_id>/ha', methods=['GET'])
-@require_auth(perms=['cluster.view'])
-def get_pool_ha_api(cluster_id):
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    if not hasattr(mgr, 'get_ha_status'):
-        return jsonify({'enabled': False})
-    return jsonify(mgr.get_ha_status())
-
-
-@bp.route('/api/clusters/<cluster_id>/ha/enable', methods=['POST'])
-@require_auth(perms=['cluster.manage'])
-def enable_pool_ha_api(cluster_id):
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng':
-        return jsonify({'error': 'Only supported for XCP-ng pools'}), 400
-    data = request.get_json(silent=True) or {}
-    result = mgr.enable_pool_ha(
-        heartbeat_srs=data.get('heartbeat_srs'),
-        host_failures_to_tolerate=int(data.get('host_failures_to_tolerate', 1))
-    )
-    if result.get('success'):
-        return jsonify(result)
-    return jsonify(result), 500
-
-
-@bp.route('/api/clusters/<cluster_id>/ha/disable', methods=['POST'])
-@require_auth(perms=['cluster.manage'])
-def disable_pool_ha_api(cluster_id):
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng':
-        return jsonify({'error': 'Only supported for XCP-ng pools'}), 400
-    result = mgr.disable_pool_ha()
-    if result.get('success'):
-        return jsonify(result)
-    return jsonify(result), 500
-
-
-@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/ha-priority', methods=['PUT'])
-@require_auth(perms=['vm.config'])
-def set_vm_ha_priority_api(cluster_id, vmid):
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    if not hasattr(mgr, 'set_vm_ha_restart_priority'):
-        return jsonify({'error': 'Not supported for this cluster type'}), 400
-    data = request.get_json(silent=True) or {}
-    priority = data.get('priority', '')
-    if priority not in ('restart', 'best-effort', ''):
-        return jsonify({'error': 'Invalid priority. Use: restart, best-effort, or empty string'}), 400
-    result = mgr.set_vm_ha_restart_priority(vmid, priority)
-    if result.get('success'):
-        return jsonify(result)
-    return jsonify(result), 500
-
-
-# guest metrics (works for XCP-ng, Proxmox uses qemu-guest-agent differently)
-@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/guest-metrics', methods=['GET'])
-@require_auth(perms=['vm.view'])
-def get_vm_guest_metrics_api(cluster_id, vmid):
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    if cluster_id not in cluster_managers:
-        return jsonify({'error': 'Cluster not found'}), 404
-    mgr = cluster_managers[cluster_id]
-    if not hasattr(mgr, 'get_guest_metrics'):
-        return jsonify({})
-    return jsonify(mgr.get_guest_metrics(None, vmid))
 
