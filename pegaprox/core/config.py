@@ -124,32 +124,32 @@ def save_config():
     if not cluster_managers:
         logging.warning("save_config called with no clusters - skipping")
         return False
-
+    
     try:
         db = get_db()
-
+        
         for cluster_id, manager in cluster_managers.items():
             try:
                 # Sanitize fallback_hosts
-                fallback_hosts = getattr(manager.config, 'fallback_hosts', []) or []
+                fallback_hosts = manager.config.fallback_hosts or []
                 if not isinstance(fallback_hosts, list):
                     fallback_hosts = []
                 fallback_hosts = [str(h) for h in fallback_hosts if h]
-
+                
                 cluster_data = {
                     'name': manager.config.name,
                     'host': manager.config.host,
                     'user': manager.config.user,
                     'pass': manager.config.pass_,
-                    'ssl_verification': getattr(manager.config, 'ssl_verification', False),
-                    'migration_threshold': getattr(manager.config, 'migration_threshold', 30),
-                    'check_interval': getattr(manager.config, 'check_interval', 300),
-                    'auto_migrate': getattr(manager.config, 'auto_migrate', False),
+                    'ssl_verification': manager.config.ssl_verification,
+                    'migration_threshold': manager.config.migration_threshold,
+                    'check_interval': manager.config.check_interval,
+                    'auto_migrate': manager.config.auto_migrate,
                     'balance_containers': getattr(manager.config, 'balance_containers', False),
                     'balance_local_disks': getattr(manager.config, 'balance_local_disks', False),
-                    'dry_run': getattr(manager.config, 'dry_run', False),
-                    'enabled': getattr(manager.config, 'enabled', True),
-                    'ha_enabled': getattr(manager.config, 'ha_enabled', False),
+                    'dry_run': manager.config.dry_run,
+                    'enabled': manager.config.enabled,
+                    'ha_enabled': manager.config.ha_enabled,
                     'fallback_hosts': fallback_hosts,
                     'ssh_user': getattr(manager.config, 'ssh_user', ''),
                     'ssh_key': getattr(manager.config, 'ssh_key', ''),
@@ -158,9 +158,8 @@ def save_config():
                     'excluded_nodes': getattr(manager.config, 'excluded_nodes', []),
                     'api_token_user': getattr(manager.config, 'api_token_user', ''),
                     'api_token_secret': getattr(manager.config, 'api_token_secret', ''),
-                    'cluster_type': getattr(manager, 'cluster_type', 'proxmox'),
                 }
-
+                
                 db.save_cluster(cluster_id, cluster_data)
             except Exception as e:
                 logging.error(f"Error saving cluster {cluster_id}: {e}")

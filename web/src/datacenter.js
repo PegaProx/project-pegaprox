@@ -37,14 +37,7 @@
             }, [clusterId]);
             const [newStorage, setNewStorage] = useState({ type: 'dir', storage: '', path: '', content: 'images,rootdir' });
             const [backupJobs, setBackupJobs] = useState([]);
-            const [replicationJobs, setReplicationJobs] = useState([]);
-            const [snapshotReplJobs, setSnapshotReplJobs] = useState([]);  // snapshot-based repl
-            // NS: Mar 2026 - replication CRUD (Issue #103)
-            const [showAddReplication, setShowAddReplication] = useState(false);
-            const [replVms, setReplVms] = useState([]);  // available VMs for replication
-            const [replType, setReplType] = useState('snapshot');  // 'zfs' or 'snapshot'
-            const [newReplication, setNewReplication] = useState({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
-            const [replLoading, setReplLoading] = useState(false);
+            const [replicationJobs, setReplicationJobs] = useState([]);  // TODO: actually use this
             const [firewallOptions, setFirewallOptions] = useState({});
             const [firewallRules, setFirewallRules] = useState([]);
             const [showAddRuleModal, setShowAddRuleModal] = useState(false);
@@ -112,14 +105,6 @@
             const [showCreateMon, setShowCreateMon] = useState(false);
             const [showCreateMds, setShowCreateMds] = useState(false);
             const [cephSubTab, setCephSubTab] = useState('status');
-
-            // MK: RBD Mirroring state
-            const [mirrorData, setMirrorData] = useState(null);
-            const [mirrorLoading, setMirrorLoading] = useState(false);
-            const [mirrorPoolDetail, setMirrorPoolDetail] = useState(null); // pool name when viewing images
-            const [mirrorImages, setMirrorImages] = useState([]);
-            const [showMirrorModal, setShowMirrorModal] = useState(null); // 'enable' | 'peer' | 'schedule' | 'promote'
-            const [mirrorForm, setMirrorForm] = useState({ mode: 'image', client: 'client.admin', site_name: '', mon_host: '', interval: '1h', image: '', force: false });
 
             /*
              * MK: CPU generation detection for recommended CPU type
@@ -494,12 +479,10 @@
                         authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`),
                         authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/groups`),
                         // LW: SDN Data - Feb 2026
-                        authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn`),
-                        // NS: snapshot-based replication jobs (Issue #103)
-                        authFetch(`${API_URL}/clusters/${clusterId}/snapshot-replications`)
+                        authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn`)
                     ]);
                     
-                    const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14] = results;
+                    const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13] = results;
 
                     if (r1?.ok) setDcStatus(await r1.json());
                     if (r2?.ok) {
@@ -585,8 +568,6 @@
                     } else {
                         console.log('SDN API failed:', r13?.status, r13?.statusText);
                     }
-                    // NS: snapshot replication jobs
-                    if (r14?.ok) setSnapshotReplJobs(await r14.json());
                 } catch(error) {
                     console.error('fetching datacenter data:', error);
                 } finally {
@@ -618,39 +599,6 @@
                     console.error('Failed to load Ceph data:', e);
                 }
                 setCephLoading(false);
-            };
-
-            // MK: fetch mirror overview data via SSH-based endpoints
-            const fetchMirrorData = async () => {
-                setMirrorLoading(true);
-                try {
-                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/overview`);
-                    if (res?.ok) {
-                        const d = await res.json();
-                        setMirrorData(d);
-                    } else {
-                        setMirrorData({ pools: [], error: 'Failed to load mirror data' });
-                    }
-                } catch (e) {
-                    console.error('Mirror data fetch failed:', e);
-                    setMirrorData({ pools: [], error: e.message });
-                }
-                setMirrorLoading(false);
-            };
-
-            // NS: load images for a specific pool's mirror detail view
-            const fetchMirrorImages = async (pool) => {
-                setMirrorLoading(true);
-                try {
-                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool}/images`);
-                    if (res?.ok) {
-                        const d = await res.json();
-                        setMirrorImages(d.images || []);
-                    }
-                } catch (e) {
-                    console.error('Mirror images fetch failed:', e);
-                }
-                setMirrorLoading(false);
             };
 
             // NS: added PB for large storages, using toFixed(2) for more precision
@@ -1045,148 +993,6 @@
                 } catch(e) {
                     console.error(e);
                 }
-            };
-
-            // NS: ZFS Replication CRUD - Issue #103
-            // NS: unified replication CRUD - handles both ZFS native and snapshot-based
-            const createReplicationJob = async () => {
-                if (!newReplication.vmid || !newReplication.target) return;
-                setReplLoading(true);
-                try {
-                    if (replType === 'zfs') {
-                        // ZFS native via Proxmox API
-                        const payload = {
-                            vmid: parseInt(newReplication.vmid),
-                            target: newReplication.target,
-                            schedule: newReplication.schedule || '*/15',
-                        };
-                        if (newReplication.rate) payload.rate = parseInt(newReplication.rate);
-                        if (newReplication.comment) payload.comment = newReplication.comment;
-
-                        const res = await fetch(`${API_URL}/clusters/${clusterId}/replication`, {
-                            method: 'POST', credentials: 'include',
-                            headers: { ...authHeaders, 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload)
-                        });
-                        if (res.ok) {
-                            setShowAddReplication(false);
-                            setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
-                            addToast(t('replicationJobCreated'), 'success');
-                            refreshReplication();
-                        } else {
-                            const err = await res.json().catch(() => ({}));
-                            addToast(err.error || 'Failed to create replication job', 'error');
-                        }
-                    } else {
-                        // snapshot-based via PegaProx DB
-                        const selectedVm = replVms.find(v => String(v.vmid) === String(newReplication.vmid));
-                        const payload = {
-                            source_cluster: clusterId,
-                            target_cluster: clusterId,  // same cluster
-                            vmid: parseInt(newReplication.vmid),
-                            vm_type: selectedVm?.type || 'qemu',
-                            target_node: newReplication.target,
-                            target_storage: newReplication.target_storage || '',
-                            schedule: newReplication.schedule || '*/15',
-                            retention: 1,  // keep one replica
-                        };
-                        const res = await fetch(`${API_URL}/cross-cluster-replications`, {
-                            method: 'POST', credentials: 'include',
-                            headers: { ...authHeaders, 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload)
-                        });
-                        if (res.ok) {
-                            setShowAddReplication(false);
-                            setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
-                            addToast(t('replicationJobCreated'), 'success');
-                            refreshReplication();
-                        } else {
-                            const err = await res.json().catch(() => ({}));
-                            addToast(err.error || 'Failed', 'error');
-                        }
-                    }
-                } catch(e) {
-                    console.error('replication create err:', e);
-                    addToast('Connection error', 'error');
-                }
-                setReplLoading(false);
-            };
-
-            // delete ZFS native job
-            const deleteReplicationJob = async (jobId) => {
-                if (!confirm(t('confirmDeleteReplication') || `Delete replication job ${jobId}?`)) return;
-                try {
-                    const res = await fetch(`${API_URL}/clusters/${clusterId}/replication/${jobId}`, {
-                        method: 'DELETE', credentials: 'include',
-                        headers: { ...authHeaders, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ keep: false })
-                    });
-                    if (res.ok) {
-                        addToast(t('replicationDeleted'), 'success');
-                        setReplicationJobs(prev => prev.filter(j => j.id !== jobId));
-                    } else {
-                        const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Delete failed', 'error');
-                    }
-                } catch(e) { console.error(e); }
-            };
-
-            // delete snapshot-based job
-            const deleteSnapshotReplJob = async (jobId) => {
-                if (!confirm(t('confirmDeleteReplication') || `Delete replication job ${jobId}?`)) return;
-                try {
-                    const res = await fetch(`${API_URL}/cross-cluster-replications/${jobId}`, {
-                        method: 'DELETE', credentials: 'include',
-                        headers: authHeaders
-                    });
-                    if (res.ok) {
-                        addToast(t('replicationDeleted'), 'success');
-                        setSnapshotReplJobs(prev => prev.filter(j => j.id !== jobId));
-                    } else {
-                        const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Delete failed', 'error');
-                    }
-                } catch(e) { console.error(e); }
-            };
-
-            const runReplicationNow = async (jobId) => {
-                try {
-                    const res = await fetch(`${API_URL}/clusters/${clusterId}/replication/${jobId}/run`, {
-                        method: 'POST', credentials: 'include',
-                        headers: authHeaders
-                    });
-                    if (res.ok) {
-                        addToast(t('replicationStarted'), 'success');
-                    } else {
-                        const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Failed', 'error');
-                    }
-                } catch(e) { console.error(e); }
-            };
-
-            // run snapshot repl now
-            const runSnapshotReplNow = async (jobId) => {
-                try {
-                    const res = await fetch(`${API_URL}/cross-cluster-replications/${jobId}/run`, {
-                        method: 'POST', credentials: 'include',
-                        headers: authHeaders
-                    });
-                    if (res.ok) {
-                        addToast(t('replicationStarted'), 'success');
-                    } else {
-                        const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Failed', 'error');
-                    }
-                } catch(e) { console.error(e); }
-            };
-
-            const refreshReplication = async () => {
-                const [r1, r2] = await Promise.all([
-                    authFetch(`${API_URL}/clusters/${clusterId}/datacenter/replication`),
-                    authFetch(`${API_URL}/clusters/${clusterId}/snapshot-replications`)
-                ]);
-                if (r1?.ok) setReplicationJobs(await r1.json());
-                if (r2?.ok) setSnapshotReplJobs(await r2.json());
             };
 
             const deleteFirewallRule = async (pos) => {
@@ -4473,372 +4279,36 @@
                             </div>
                         )}
 
-                        {/* Replication - NS: Mar 2026 expanded for Issue #103 */}
+                        {/* Replication */}
                         {activeSection === 'replication' && (
-                            <div className="space-y-4">
-                                {/* Info banner */}
-                                <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
-                                    <div className="flex items-start gap-3">
-                                        <Icons.Info className="w-5 h-5 text-blue-400 mt-0.5 flex-shrink-0" />
-                                        <div>
-                                            <h4 className="text-blue-400 font-medium mb-1">{t('replicationInfoTitle') || 'VM Replication'}</h4>
-                                            <p className="text-sm text-gray-300">
-                                                {t('replicationInfoDesc') || 'Keep VM data synchronized between nodes for failover and disaster recovery. Two modes available:'}
-                                            </p>
-                                            <ul className="text-sm text-gray-400 mt-2 space-y-1">
-                                                <li><span className="text-purple-400 font-medium">ZFS Native</span> — {t('zfsNativeDesc') || 'Incremental ZFS send/recv. Fast and efficient, requires ZFS on both nodes.'}</li>
-                                                <li><span className="text-blue-400 font-medium">Snapshot</span> — {t('snapshotDesc') || 'Clone + migrate approach. Works with any storage (LVM, dir, etc).'}</li>
-                                            </ul>
-                                        </div>
-                                    </div>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                <div className="p-4 border-b border-proxmox-border">
+                                    <h3 className="font-semibold">Replication Jobs</h3>
                                 </div>
-
-                                {/* ZFS Native Replication */}
-                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
-                                    <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                        <h3 className="font-semibold flex items-center gap-2">
-                                            <Icons.RefreshCw className="w-4 h-4 text-purple-400" />
-                                            <span>ZFS {t('replication') || 'Replication'}</span>
-                                            <span className="text-xs text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">native</span>
-                                        </h3>
-                                        <div className="flex items-center gap-2">
-                                            <button onClick={refreshReplication} className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-proxmox-dark transition-colors" title={t('refresh')}>
-                                                <Icons.RefreshCw className="w-4 h-4" />
-                                            </button>
-                                            <button onClick={async () => {
-                                                try {
-                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/resources`);
-                                                    if (res?.ok) {
-                                                        const all = await res.json();
-                                                        setReplVms(all.filter(r => r.type === 'qemu' || r.type === 'lxc'));
-                                                    }
-                                                } catch(e) { console.error('Failed to load VMs:', e); }
-                                                setReplType('zfs');
-                                                setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
-                                                setShowAddReplication(true);
-                                            }} className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm transition-colors">
-                                                <Icons.Plus className="w-4 h-4" />
-                                                {t('addReplication') || 'Add'}
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full">
-                                            <thead className="bg-proxmox-dark">
-                                                <tr>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">VM/CT</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Job ID</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('source') || 'Source'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('target') || 'Target'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule') || 'Schedule'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('lastSync') || 'Last Sync'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('duration') || 'Duration'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {replicationJobs.length === 0 ? (
-                                                    <tr><td colSpan="9" className="p-6 text-center text-gray-500 text-sm">
-                                                        {t('noReplicationJobs') || 'No Replication Jobs'}
-                                                        {clusterNodes.length < 2 && <span className="block text-xs text-yellow-600 mt-1">{t('replicationNeedsTwoNodes')}</span>}
-                                                    </td></tr>
-                                                ) : replicationJobs.map((job, idx) => {
-                                                    const hasError = job.fail_count > 0 || job.error;
-                                                    const lastSync = job.last_sync ? new Date(job.last_sync * 1000).toLocaleString() : '-';
-                                                    const dur = job.duration != null ? `${job.duration.toFixed(1)}s` : '-';
-                                                    return (
-                                                        <tr key={job.id || idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
-                                                            <td className="p-3">
-                                                                {job.disable ? (
-                                                                    <span className="text-gray-500 text-xs px-1.5 py-0.5 bg-gray-700/50 rounded">{t('disabled')}</span>
-                                                                ) : hasError ? (
-                                                                    <span className="text-red-400 text-xs px-1.5 py-0.5 bg-red-500/10 rounded flex items-center gap-1 w-fit" title={job.error || ''}>
-                                                                        <Icons.AlertTriangle className="w-3 h-3" /> {t('error')}
-                                                                    </span>
-                                                                ) : (
-                                                                    <span className="text-green-400 text-xs px-1.5 py-0.5 bg-green-500/10 rounded">OK</span>
-                                                                )}
-                                                            </td>
-                                                            <td className="p-3 font-mono">{job.guest}</td>
-                                                            <td className="p-3 text-sm text-gray-400">{job.id}</td>
-                                                            <td className="p-3">{job.source || '-'}</td>
-                                                            <td className="p-3">{job.target}</td>
-                                                            <td className="p-3 font-mono text-sm">{job.schedule}</td>
-                                                            <td className="p-3 text-sm">{lastSync}</td>
-                                                            <td className="p-3 text-sm font-mono">{dur}</td>
-                                                            <td className="p-3">
-                                                                <div className="flex items-center gap-1">
-                                                                    <button onClick={() => runReplicationNow(job.id)} className="p-1 text-gray-400 hover:text-blue-400 transition-colors" title={t('runNow') || 'Run Now'}>
-                                                                        <Icons.Play className="w-4 h-4" />
-                                                                    </button>
-                                                                    <button onClick={() => deleteReplicationJob(job.id)} className="p-1 text-gray-400 hover:text-red-400 transition-colors" title={t('delete')}>
-                                                                        <Icons.Trash2 className="w-4 h-4" />
-                                                                    </button>
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    );
-                                                })}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-
-                                {/* Snapshot-based Replication - works with any storage */}
-                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
-                                    <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                        <h3 className="font-semibold flex items-center gap-2">
-                                            <Icons.Copy className="w-4 h-4 text-blue-400" />
-                                            <span>Snapshot {t('replication') || 'Replication'}</span>
-                                            <span className="text-xs text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">{t('anyStorage') || 'any storage'}</span>
-                                            <span className="text-xs text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded">+ Cross-Cluster</span>
-                                        </h3>
-                                        <div className="flex items-center gap-2">
-                                            <button onClick={refreshReplication} className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-proxmox-dark transition-colors" title={t('refresh')}>
-                                                <Icons.RefreshCw className="w-4 h-4" />
-                                            </button>
-                                            <button onClick={async () => {
-                                                try {
-                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/resources`);
-                                                    if (res?.ok) {
-                                                        const all = await res.json();
-                                                        setReplVms(all.filter(r => r.type === 'qemu' || r.type === 'lxc'));
-                                                    }
-                                                } catch(e) { console.error('Failed to load VMs:', e); }
-                                                setReplType('snapshot');
-                                                setNewReplication({ vmid: '', target: '', schedule: '0 */6 * * *', rate: '', comment: '', target_storage: '' });
-                                                setShowAddReplication(true);
-                                            }} className="flex items-center gap-1.5 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm transition-colors">
-                                                <Icons.Plus className="w-4 h-4" />
-                                                {t('addReplication') || 'Add'}
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full">
-                                            <thead className="bg-proxmox-dark">
-                                                <tr>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">VM/CT</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('target') || 'Target'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('storage') || 'Storage'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule') || 'Schedule'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('lastSync') || 'Last Run'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {snapshotReplJobs.length === 0 ? (
-                                                    <tr><td colSpan="8" className="p-6 text-center text-gray-500 text-sm">
-                                                        {t('noSnapshotReplJobs') || 'No snapshot replication jobs'}
-                                                    </td></tr>
-                                                ) : snapshotReplJobs.map((job) => {
-                                                    const st = job.last_status;
-                                                    const isCrossCluster = job.source_cluster !== job.target_cluster;
-                                                    return (
-                                                        <tr key={job.id} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
-                                                            <td className="p-3">
-                                                                {!job.enabled ? (
-                                                                    <span className="text-gray-500 text-xs px-1.5 py-0.5 bg-gray-700/50 rounded">{t('disabled')}</span>
-                                                                ) : st === 'error' ? (
-                                                                    <span className="text-red-400 text-xs px-1.5 py-0.5 bg-red-500/10 rounded flex items-center gap-1 w-fit" title={job.last_error || ''}>
-                                                                        <Icons.AlertTriangle className="w-3 h-3" /> {t('error')}
-                                                                    </span>
-                                                                ) : st === 'ok' ? (
-                                                                    <span className="text-green-400 text-xs px-1.5 py-0.5 bg-green-500/10 rounded">OK</span>
-                                                                ) : (
-                                                                    <span className="text-gray-400 text-xs px-1.5 py-0.5 bg-gray-700/50 rounded">{t('pending') || 'Pending'}</span>
-                                                                )}
-                                                            </td>
-                                                            <td className="p-3">
-                                                                {isCrossCluster ? (
-                                                                    <span className="text-xs px-1.5 py-0.5 bg-orange-500/10 text-orange-400 rounded">Cross-Cluster</span>
-                                                                ) : (
-                                                                    <span className="text-xs px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">{t('local') || 'Local'}</span>
-                                                                )}
-                                                            </td>
-                                                            <td className="p-3 font-mono">{job.vmid}</td>
-                                                            <td className="p-3">
-                                                                {isCrossCluster ? (
-                                                                    <span className="flex items-center gap-1">
-                                                                        <Icons.Globe className="w-3 h-3 text-orange-400" />
-                                                                        {job.target_cluster}
-                                                                    </span>
-                                                                ) : (
-                                                                    <span>{job.target_node || '-'}</span>
-                                                                )}
-                                                            </td>
-                                                            <td className="p-3 text-sm text-gray-400">{job.target_storage || 'local-lvm'}</td>
-                                                            <td className="p-3 font-mono text-sm">{job.schedule}</td>
-                                                            <td className="p-3 text-sm">{job.last_run ? new Date(job.last_run).toLocaleString() : '-'}</td>
-                                                            <td className="p-3">
-                                                                <div className="flex items-center gap-1">
-                                                                    <button onClick={() => runSnapshotReplNow(job.id)} className="p-1 text-gray-400 hover:text-blue-400 transition-colors" title={t('runNow') || 'Run Now'}>
-                                                                        <Icons.Play className="w-4 h-4" />
-                                                                    </button>
-                                                                    <button onClick={() => deleteSnapshotReplJob(job.id)} className="p-1 text-gray-400 hover:text-red-400 transition-colors" title={t('delete')}>
-                                                                        <Icons.Trash2 className="w-4 h-4" />
-                                                                    </button>
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    );
-                                                })}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-
-                                {/* Create Replication Modal */}
-                                {showAddReplication && (
-                                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={e => e.target === e.currentTarget && setShowAddReplication(false)}>
-                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-md shadow-xl">
-                                            <div className="p-4 border-b border-proxmox-border">
-                                                <h3 className="font-semibold flex items-center gap-2">
-                                                    <Icons.RefreshCw className="w-4 h-4" />
-                                                    {t('createReplicationJob') || 'Create Replication Job'}
-                                                    <span className={`text-xs px-1.5 py-0.5 rounded ${replType === 'zfs' ? 'text-purple-400 bg-purple-500/10' : 'text-blue-400 bg-blue-500/10'}`}>
-                                                        {replType === 'zfs' ? 'ZFS Native' : 'Snapshot'}
-                                                    </span>
-                                                </h3>
-                                            </div>
-                                            <div className="p-4 space-y-4">
-                                                {/* VM select */}
-                                                <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">VM / CT</label>
-                                                    <select
-                                                        value={newReplication.vmid}
-                                                        onChange={e => setNewReplication({...newReplication, vmid: e.target.value})}
-                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
-                                                    >
-                                                        <option value="">{t('selectVm') || '-- Select VM --'}</option>
-                                                        {replVms.map(vm => (
-                                                            <option key={vm.vmid} value={vm.vmid}>
-                                                                {vm.vmid} - {vm.name || 'unnamed'} ({vm.type === 'qemu' ? 'VM' : 'CT'}) [{vm.node}]
-                                                            </option>
-                                                        ))}
-                                                    </select>
-                                                </div>
-                                                {/* Target node */}
-                                                <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetNode') || 'Target Node'}</label>
-                                                    <select
-                                                        value={newReplication.target}
-                                                        onChange={e => setNewReplication({...newReplication, target: e.target.value})}
-                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
-                                                    >
-                                                        <option value="">{t('selectNode') || '-- Select Node --'}</option>
-                                                        {clusterNodes.filter(n => {
-                                                            const selectedVm = replVms.find(v => String(v.vmid) === String(newReplication.vmid));
-                                                            return selectedVm ? n.name !== selectedVm.node : true;
-                                                        }).map(n => (
-                                                            <option key={n.name} value={n.name}>{n.name}</option>
-                                                        ))}
-                                                    </select>
-                                                </div>
-                                                {/* Target storage - only for snapshot mode */}
-                                                {replType === 'snapshot' && (
-                                                    <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('targetStorage') || 'Target Storage'}</label>
-                                                        <select
-                                                            value={newReplication.target_storage}
-                                                            onChange={e => setNewReplication({...newReplication, target_storage: e.target.value})}
-                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
-                                                        >
-                                                            <option value="">local-lvm ({t('default')})</option>
-                                                            {storage.map(s => (
-                                                                <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
-                                                            ))}
-                                                        </select>
-                                                    </div>
-                                                )}
-                                                {/* Schedule */}
-                                                <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('replicationSchedule') || 'Schedule'}</label>
-                                                    <select
-                                                        value={replType === 'zfs'
-                                                            ? (['*/1', '*/5', '*/15', '*/30', '0 */1 * * *', '0 */6 * * *', '0 0 * * *'].includes(newReplication.schedule) ? newReplication.schedule : 'custom')
-                                                            : (['*/15', '*/30', '0 */1 * * *', '0 */6 * * *', '0 0 * * *'].includes(newReplication.schedule) ? newReplication.schedule : 'custom')
-                                                        }
-                                                        onChange={e => {
-                                                            if (e.target.value === 'custom') return;
-                                                            setNewReplication({...newReplication, schedule: e.target.value});
-                                                        }}
-                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
-                                                    >
-                                                        {replType === 'zfs' && <option value="*/1">{t('everyMinute') || 'Every minute'}</option>}
-                                                        {replType === 'zfs' && <option value="*/5">{t('every5Min') || 'Every 5 minutes'}</option>}
-                                                        <option value="*/15">{t('every15Min') || 'Every 15 minutes'}{replType === 'zfs' ? ` (${t('default')})` : ''}</option>
-                                                        <option value="*/30">{t('every30Min') || 'Every 30 minutes'}</option>
-                                                        <option value="0 */1 * * *">{t('everyHour') || 'Every hour'}</option>
-                                                        <option value="0 */6 * * *">{t('every6Hours') || 'Every 6 hours'}{replType === 'snapshot' ? ` (${t('default')})` : ''}</option>
-                                                        <option value="0 0 * * *">{t('daily') || 'Daily'}</option>
-                                                        <option value="custom">{t('custom') || 'Custom'}</option>
-                                                    </select>
-                                                    {!['*/1', '*/5', '*/15', '*/30', '0 */1 * * *', '0 */6 * * *', '0 0 * * *'].includes(newReplication.schedule) && (
-                                                        <input
-                                                            type="text"
-                                                            value={newReplication.schedule}
-                                                            onChange={e => setNewReplication({...newReplication, schedule: e.target.value})}
-                                                            placeholder="*/15"
-                                                            className="w-full mt-2 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm font-mono"
-                                                        />
-                                                    )}
-                                                </div>
-                                                {/* Rate limit - ZFS only */}
-                                                {replType === 'zfs' && (
-                                                    <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('rateLimit') || 'Rate Limit (MB/s)'}</label>
-                                                        <input
-                                                            type="number"
-                                                            value={newReplication.rate}
-                                                            onChange={e => setNewReplication({...newReplication, rate: e.target.value})}
-                                                            placeholder={t('unlimited') || 'Unlimited'}
-                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
-                                                            min="1"
-                                                        />
-                                                    </div>
-                                                )}
-                                                {/* Comment - ZFS only */}
-                                                {replType === 'zfs' && (
-                                                    <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('comment') || 'Comment'}</label>
-                                                        <input
-                                                            type="text"
-                                                            value={newReplication.comment}
-                                                            onChange={e => setNewReplication({...newReplication, comment: e.target.value})}
-                                                            placeholder={t('commentPlaceholder') || 'e.g. DR replication'}
-                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
-                                                        />
-                                                    </div>
-                                                )}
-                                                {/* Info note per type */}
-                                                <div className={`p-3 rounded-lg text-xs ${replType === 'zfs' ? 'bg-purple-500/10 border border-purple-500/20 text-purple-300' : 'bg-blue-500/10 border border-blue-500/20 text-blue-300'}`}>
-                                                    <Icons.Info className="w-3 h-3 inline mr-1" />
-                                                    {replType === 'zfs'
-                                                        ? (t('zfsRequired') || 'Both source and target node must use ZFS storage for the replicated VM disk.')
-                                                        : (t('snapshotReplNote') || 'Creates a full clone of the VM and migrates it to the target node. The previous replica is replaced on each run.')
-                                                    }
-                                                </div>
-                                            </div>
-                                            <div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-end gap-3">
-                                                <button onClick={() => setShowAddReplication(false)} className="px-4 py-2 text-gray-400 hover:text-white">
-                                                    {t('cancel')}
-                                                </button>
-                                                <button
-                                                    onClick={createReplicationJob}
-                                                    disabled={!newReplication.vmid || !newReplication.target || replLoading}
-                                                    className={`px-4 py-2 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${replType === 'zfs' ? 'bg-purple-600 hover:bg-purple-700' : 'bg-proxmox-orange hover:bg-orange-600'}`}
-                                                >
-                                                    {replLoading && <Icons.RefreshCw className="w-4 h-4 animate-spin" />}
-                                                    {t('create')}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
+                                <table className="w-full">
+                                    <thead className="bg-proxmox-dark">
+                                        <tr>
+                                            <th className="text-left p-3 text-sm text-gray-400">Enabled</th>
+                                            <th className="text-left p-3 text-sm text-gray-400">Guest</th>
+                                            <th className="text-left p-3 text-sm text-gray-400">Job</th>
+                                            <th className="text-left p-3 text-sm text-gray-400">Target</th>
+                                            <th className="text-left p-3 text-sm text-gray-400">Schedule</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {replicationJobs.length === 0 ? (
+                                            <tr><td colSpan="5" className="p-8 text-center text-gray-500">{t('noReplicationJobs') || 'No Replication Jobs'}</td></tr>
+                                        ) : replicationJobs.map((job, idx) => (
+                                            <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                <td className="p-3">{job.disable ? <span className="text-gray-500">✗</span> : <span className="text-green-400">✓</span>}</td>
+                                                <td className="p-3">{job.guest}</td>
+                                                <td className="p-3">{job.jobnum}</td>
+                                                <td className="p-3">{job.target}</td>
+                                                <td className="p-3 font-mono text-sm">{job.schedule}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
                             </div>
                         )}
 
@@ -5810,13 +5280,10 @@
                                     <>
                                         {/* Ceph Sub-tabs */}
                                         <div className="flex gap-1 border-b border-proxmox-border pb-2">
-                                            {['status', 'osds', 'monitors', 'pools', 'fs', 'mirroring'].map(st => (
+                                            {['status', 'osds', 'monitors', 'pools', 'fs'].map(st => (
                                                 <button
                                                     key={st}
-                                                    onClick={() => {
-                                                        setCephSubTab(st);
-                                                        if (st === 'mirroring' && !mirrorData) fetchMirrorData();
-                                                    }}
+                                                    onClick={() => setCephSubTab(st)}
                                                     className={`px-4 py-2 rounded-lg text-sm transition-colors ${
                                                         cephSubTab === st
                                                             ? 'bg-proxmox-orange text-white'
@@ -5827,8 +5294,7 @@
                                                      st === 'osds' ? 'OSDs' :
                                                      st === 'monitors' ? t('cephMons') || 'Monitors' :
                                                      st === 'pools' ? t('cephPools') || 'Pools' :
-                                                     st === 'fs' ? 'CephFS' :
-                                                     t('cephMirroring') || 'Mirroring'}
+                                                     'CephFS'}
                                                 </button>
                                             ))}
                                         </div>
@@ -6188,421 +5654,6 @@
                                                             {(!cephData.mds?.data || cephData.mds.data.length === 0) && (
                                                                 <div className="p-4 text-center text-gray-500 text-sm">No MDS daemons</div>
                                                             )}
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
-
-                                        {/* LW: Mirroring Tab - Mar 2026 */}
-                                        {cephSubTab === 'mirroring' && (
-                                            <div className="space-y-4">
-                                                {mirrorLoading ? (
-                                                    <div className="flex items-center justify-center py-12">
-                                                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-proxmox-orange"></div>
-                                                    </div>
-                                                ) : mirrorPoolDetail ? (
-                                                    /* Image detail view for a specific pool */
-                                                    <div className="space-y-4">
-                                                        <div className="flex items-center gap-3">
-                                                            <button onClick={() => { setMirrorPoolDetail(null); setMirrorImages([]); }} className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors flex items-center gap-1">
-                                                                <Icons.ChevronLeft className="w-4 h-4" /> {t('cephMirrorBackToOverview') || 'Back'}
-                                                            </button>
-                                                            <h3 className="font-semibold">{t('cephMirrorImages') || 'Images'}: {mirrorPoolDetail}</h3>
-                                                            <button onClick={() => fetchMirrorImages(mirrorPoolDetail)} className="ml-auto px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
-                                                                <Icons.RefreshCw className="w-4 h-4" />
-                                                            </button>
-                                                        </div>
-
-                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
-                                                            {mirrorImages.length === 0 ? (
-                                                                <div className="p-8 text-center text-gray-500">No images in this pool</div>
-                                                            ) : (
-                                                                <table className="w-full text-sm">
-                                                                    <thead>
-                                                                        <tr className="border-b border-proxmox-border text-left text-gray-400">
-                                                                            <th className="p-3">Image</th>
-                                                                            <th className="p-3">{t('status')}</th>
-                                                                            <th className="p-3">{t('cephMirrorMode') || 'Mode'}</th>
-                                                                            <th className="p-3">{t('cephMirrorSyncStatus') || 'Sync'}</th>
-                                                                            <th className="p-3">{t('actions')}</th>
-                                                                        </tr>
-                                                                    </thead>
-                                                                    <tbody>
-                                                                        {mirrorImages.map((img, idx) => {
-                                                                            const m = img.mirroring || {};
-                                                                            const state = m.state || 'unknown';
-                                                                            const isPrimary = state.includes('primary');
-                                                                            const desc = m.description || '';
-                                                                            // NS: color code sync status
-                                                                            const syncColor = desc.includes('replaying') ? 'text-green-400' :
-                                                                                desc.includes('syncing') ? 'text-blue-400' :
-                                                                                desc.includes('stopped') ? 'text-yellow-400' :
-                                                                                desc.includes('error') ? 'text-red-400' : 'text-gray-400';
-                                                                            return (
-                                                                                <tr key={idx} className="border-b border-proxmox-border hover:bg-proxmox-dark/50">
-                                                                                    <td className="p-3 font-medium">{img.name}</td>
-                                                                                    <td className="p-3">
-                                                                                        <span className={`px-2 py-0.5 rounded text-xs ${isPrimary ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-600/20 text-gray-400'}`}>
-                                                                                            {isPrimary ? 'primary' : state}
-                                                                                        </span>
-                                                                                    </td>
-                                                                                    <td className="p-3 text-gray-400">{m.mode || '-'}</td>
-                                                                                    <td className={`p-3 ${syncColor}`}>{desc || '-'}</td>
-                                                                                    <td className="p-3">
-                                                                                        <div className="flex gap-1">
-                                                                                            {!m.state ? (
-                                                                                                <button
-                                                                                                    onClick={async () => {
-                                                                                                        try {
-                                                                                                            await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/enable`, {
-                                                                                                                method: 'POST', headers: {'Content-Type':'application/json'},
-                                                                                                                body: JSON.stringify({ mode: 'snapshot' })
-                                                                                                            });
-                                                                                                            fetchMirrorImages(mirrorPoolDetail);
-                                                                                                        } catch(e) {}
-                                                                                                    }}
-                                                                                                    className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
-                                                                                                >{t('enable')}</button>
-                                                                                            ) : (
-                                                                                                <>
-                                                                                                    <button
-                                                                                                        onClick={() => { setMirrorForm(f => ({...f, image: img.name, force: false})); setShowMirrorModal('promote'); }}
-                                                                                                        className="px-2 py-1 text-xs bg-blue-500/20 hover:bg-blue-500/30 rounded text-blue-400 transition-colors"
-                                                                                                        title={t('cephMirrorPromote')}
-                                                                                                    >{t('cephMirrorPromote') || 'Promote'}</button>
-                                                                                                    <button
-                                                                                                        onClick={async () => {
-                                                                                                            if (!confirm(`Demote ${img.name}?`)) return;
-                                                                                                            try {
-                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/demote`, { method: 'POST' });
-                                                                                                                fetchMirrorImages(mirrorPoolDetail);
-                                                                                                            } catch(e) {}
-                                                                                                        }}
-                                                                                                        className="px-2 py-1 text-xs bg-yellow-500/20 hover:bg-yellow-500/30 rounded text-yellow-400 transition-colors"
-                                                                                                    >{t('cephMirrorDemote') || 'Demote'}</button>
-                                                                                                    <button
-                                                                                                        onClick={async () => {
-                                                                                                            if (!confirm(`Resync ${img.name}? This will re-mirror from remote.`)) return;
-                                                                                                            try {
-                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/resync`, { method: 'POST' });
-                                                                                                                fetchMirrorImages(mirrorPoolDetail);
-                                                                                                            } catch(e) {}
-                                                                                                        }}
-                                                                                                        className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
-                                                                                                    >{t('cephMirrorResync') || 'Resync'}</button>
-                                                                                                    <button
-                                                                                                        onClick={async () => {
-                                                                                                            if (!confirm(`Disable mirroring for ${img.name}?`)) return;
-                                                                                                            try {
-                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/disable`, { method: 'POST' });
-                                                                                                                fetchMirrorImages(mirrorPoolDetail);
-                                                                                                            } catch(e) {}
-                                                                                                        }}
-                                                                                                        className="px-2 py-1 text-xs hover:bg-red-500/20 rounded text-red-400 transition-colors"
-                                                                                                    >{t('disable')}</button>
-                                                                                                </>
-                                                                                            )}
-                                                                                        </div>
-                                                                                    </td>
-                                                                                </tr>
-                                                                            );
-                                                                        })}
-                                                                    </tbody>
-                                                                </table>
-                                                            )}
-                                                        </div>
-
-                                                        {/* NS: Schedules section for this pool */}
-                                                        {(() => {
-                                                            const poolInfo = (mirrorData?.pools || []).find(p => p.name === mirrorPoolDetail);
-                                                            if (!poolInfo || poolInfo.mode === 'disabled') return null;
-                                                            return (
-                                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
-                                                                    <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                                        <h4 className="font-semibold text-sm">{t('cephMirrorSchedules') || 'Snapshot Schedules'}</h4>
-                                                                        <button onClick={() => { setMirrorForm(f => ({...f, interval: '1h'})); setShowMirrorModal('schedule'); }}
-                                                                            className="flex items-center gap-1 px-3 py-1.5 bg-proxmox-orange text-white rounded-lg text-xs hover:bg-orange-600 transition-colors">
-                                                                            <Icons.Plus className="w-3 h-3" /> {t('cephMirrorAddSchedule') || 'Add'}
-                                                                        </button>
-                                                                    </div>
-                                                                    <div className="p-4 text-sm text-gray-400">
-                                                                        Schedules are managed per pool. Use the button above to add a snapshot schedule.
-                                                                    </div>
-                                                                </div>
-                                                            );
-                                                        })()}
-                                                    </div>
-                                                ) : (
-                                                    /* Overview: all pools with mirroring status */
-                                                    <div className="space-y-4">
-                                                        <div className="flex justify-between items-center">
-                                                            <h3 className="font-semibold">{t('cephMirroring') || 'RBD Mirroring'}</h3>
-                                                            <button onClick={fetchMirrorData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
-                                                                <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
-                                                            </button>
-                                                        </div>
-
-                                                        {mirrorData?.error && (
-                                                            <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-red-400 text-sm">
-                                                                {mirrorData.error}
-                                                            </div>
-                                                        )}
-
-                                                        {/* NS: hint about SSH requirement */}
-                                                        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-blue-300 text-xs">
-                                                            {t('cephMirrorSshRequired') || 'RBD Mirroring requires SSH access to the cluster'}
-                                                        </div>
-
-                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
-                                                            {(!mirrorData?.pools || mirrorData.pools.length === 0) ? (
-                                                                <div className="p-8 text-center text-gray-500">{t('cephMirrorNoPoolsEnabled') || 'No pools found'}</div>
-                                                            ) : (
-                                                                <table className="w-full text-sm">
-                                                                    <thead>
-                                                                        <tr className="border-b border-proxmox-border text-left text-gray-400">
-                                                                            <th className="p-3">{t('name')}</th>
-                                                                            <th className="p-3">{t('cephMirrorMode') || 'Mode'}</th>
-                                                                            <th className="p-3">{t('cephMirrorPeers') || 'Peers'}</th>
-                                                                            <th className="p-3">{t('cephMirrorHealth') || 'Health'}</th>
-                                                                            <th className="p-3">{t('actions')}</th>
-                                                                        </tr>
-                                                                    </thead>
-                                                                    <tbody>
-                                                                        {mirrorData.pools.map((pool, idx) => (
-                                                                            <tr key={idx} className="border-b border-proxmox-border hover:bg-proxmox-dark/50">
-                                                                                <td className="p-3 font-medium">{pool.name}</td>
-                                                                                <td className="p-3">
-                                                                                    <span className={`px-2 py-0.5 rounded text-xs ${
-                                                                                        pool.mode === 'pool' ? 'bg-blue-500/20 text-blue-400' :
-                                                                                        pool.mode === 'image' ? 'bg-purple-500/20 text-purple-400' :
-                                                                                        'bg-gray-600/20 text-gray-400'
-                                                                                    }`}>{pool.mode}</span>
-                                                                                </td>
-                                                                                <td className="p-3 text-gray-400">
-                                                                                    {(pool.peers || []).length > 0 ? (
-                                                                                        <div className="space-y-1">
-                                                                                            {pool.peers.map((peer, pi) => (
-                                                                                                <div key={pi} className="flex items-center gap-2">
-                                                                                                    <span className="text-xs">{peer.site_name || peer.uuid?.slice(0,8) || '?'}</span>
-                                                                                                    {pool.mode !== 'disabled' && (
-                                                                                                        <button onClick={async () => {
-                                                                                                            if (!confirm(`Remove peer ${peer.site_name || peer.uuid}?`)) return;
-                                                                                                            try {
-                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool.name}/peer/${peer.uuid}`, { method: 'DELETE' });
-                                                                                                                fetchMirrorData();
-                                                                                                            } catch(e) {}
-                                                                                                        }} className="text-red-400 hover:text-red-300" title={t('cephMirrorRemovePeer')}>
-                                                                                                            <Icons.X className="w-3 h-3" />
-                                                                                                        </button>
-                                                                                                    )}
-                                                                                                </div>
-                                                                                            ))}
-                                                                                        </div>
-                                                                                    ) : <span className="text-gray-600">-</span>}
-                                                                                </td>
-                                                                                <td className="p-3">
-                                                                                    {pool.health ? (
-                                                                                        <span className={`px-2 py-0.5 rounded text-xs ${
-                                                                                            pool.health === 'OK' ? 'bg-green-500/20 text-green-400' :
-                                                                                            pool.health === 'WARNING' ? 'bg-yellow-500/20 text-yellow-400' :
-                                                                                            pool.health === 'ERROR' ? 'bg-red-500/20 text-red-400' :
-                                                                                            'bg-gray-600/20 text-gray-400'
-                                                                                        }`}>{pool.health}</span>
-                                                                                    ) : <span className="text-gray-600">-</span>}
-                                                                                </td>
-                                                                                <td className="p-3">
-                                                                                    <div className="flex gap-1 flex-wrap">
-                                                                                        {pool.mode === 'disabled' ? (
-                                                                                            <button onClick={() => { setMirrorForm(f => ({...f, mode: 'image', _pool: pool.name})); setShowMirrorModal('enable'); }}
-                                                                                                className="px-2 py-1 text-xs bg-proxmox-orange/20 hover:bg-proxmox-orange/30 rounded text-orange-400 transition-colors">
-                                                                                                {t('cephMirrorEnable') || 'Enable'}
-                                                                                            </button>
-                                                                                        ) : (
-                                                                                            <>
-                                                                                                <button onClick={() => { setMirrorPoolDetail(pool.name); fetchMirrorImages(pool.name); }}
-                                                                                                    className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors">
-                                                                                                    {t('cephMirrorImages') || 'Images'}
-                                                                                                </button>
-                                                                                                <button onClick={() => { setMirrorForm(f => ({...f, _pool: pool.name, client: 'client.admin', site_name: '', mon_host: ''})); setShowMirrorModal('peer'); }}
-                                                                                                    className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors">
-                                                                                                    {t('cephMirrorAddPeer') || 'Add Peer'}
-                                                                                                </button>
-                                                                                                <button onClick={async () => {
-                                                                                                    if (!confirm(`Disable mirroring on pool "${pool.name}"?`)) return;
-                                                                                                    try {
-                                                                                                        await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool.name}/disable`, { method: 'POST' });
-                                                                                                        fetchMirrorData();
-                                                                                                    } catch(e) {}
-                                                                                                }} className="px-2 py-1 text-xs hover:bg-red-500/20 rounded text-red-400 transition-colors">
-                                                                                                    {t('cephMirrorDisable') || 'Disable'}
-                                                                                                </button>
-                                                                                            </>
-                                                                                        )}
-                                                                                    </div>
-                                                                                </td>
-                                                                            </tr>
-                                                                        ))}
-                                                                    </tbody>
-                                                                </table>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Enable Mirroring Modal */}
-                                                {showMirrorModal === 'enable' && (
-                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
-                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
-                                                            <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorEnable') || 'Enable Mirroring'}: {mirrorForm._pool}</h3>
-                                                            </div>
-                                                            <div className="p-4 space-y-4">
-                                                                <div>
-                                                                    <label className="text-sm text-gray-400 mb-2 block">{t('cephMirrorMode') || 'Mode'}</label>
-                                                                    <div className="space-y-2">
-                                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                                            <input type="radio" name="mirrorMode" value="image" checked={mirrorForm.mode === 'image'} onChange={() => setMirrorForm(f => ({...f, mode: 'image'}))} className="text-proxmox-orange" />
-                                                                            <span className="text-sm">{t('cephMirrorModeImage') || 'Image (individual)'}</span>
-                                                                        </label>
-                                                                        <label className="flex items-center gap-2 cursor-pointer">
-                                                                            <input type="radio" name="mirrorMode" value="pool" checked={mirrorForm.mode === 'pool'} onChange={() => setMirrorForm(f => ({...f, mode: 'pool'}))} className="text-proxmox-orange" />
-                                                                            <span className="text-sm">{t('cephMirrorModePool') || 'Pool (all images)'}</span>
-                                                                        </label>
-                                                                    </div>
-                                                                    <p className="text-xs text-gray-500 mt-2">
-                                                                        {mirrorForm.mode === 'pool' ? 'All images in the pool will be mirrored automatically.' : 'You can enable mirroring per image after enabling pool-level image mode.'}
-                                                                    </p>
-                                                                </div>
-                                                            </div>
-                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
-                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
-                                                                <button onClick={async () => {
-                                                                    try {
-                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorForm._pool}/enable`, {
-                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
-                                                                            body: JSON.stringify({ mode: mirrorForm.mode })
-                                                                        });
-                                                                        if (res?.ok) { setShowMirrorModal(null); fetchMirrorData(); }
-                                                                    } catch(e) {}
-                                                                }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors">
-                                                                    {t('enable')}
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Add Peer Modal */}
-                                                {showMirrorModal === 'peer' && (
-                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
-                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
-                                                            <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorAddPeer') || 'Add Peer'}: {mirrorForm._pool}</h3>
-                                                            </div>
-                                                            <div className="p-4 space-y-4">
-                                                                <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">Client</label>
-                                                                    <input type="text" value={mirrorForm.client} onChange={e => setMirrorForm(f => ({...f, client: e.target.value}))}
-                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="client.admin" />
-                                                                </div>
-                                                                <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorSiteName') || 'Site Name'}</label>
-                                                                    <input type="text" value={mirrorForm.site_name} onChange={e => setMirrorForm(f => ({...f, site_name: e.target.value}))}
-                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="remote-site" />
-                                                                </div>
-                                                                <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">Monitor Hosts</label>
-                                                                    <input type="text" value={mirrorForm.mon_host} onChange={e => setMirrorForm(f => ({...f, mon_host: e.target.value}))}
-                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="10.0.0.1,10.0.0.2 (optional)" />
-                                                                    <p className="text-xs text-gray-500 mt-1">Comma-separated list of monitor addresses</p>
-                                                                </div>
-                                                            </div>
-                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
-                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
-                                                                <button onClick={async () => {
-                                                                    if (!mirrorForm.site_name) return;
-                                                                    try {
-                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorForm._pool}/peer`, {
-                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
-                                                                            body: JSON.stringify({ client: mirrorForm.client, site_name: mirrorForm.site_name, mon_host: mirrorForm.mon_host })
-                                                                        });
-                                                                        if (res?.ok) { setShowMirrorModal(null); fetchMirrorData(); }
-                                                                    } catch(e) {}
-                                                                }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors" disabled={!mirrorForm.site_name}>
-                                                                    {t('add')}
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Add Schedule Modal */}
-                                                {showMirrorModal === 'schedule' && (
-                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
-                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
-                                                            <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorAddSchedule') || 'Add Schedule'}: {mirrorPoolDetail}</h3>
-                                                            </div>
-                                                            <div className="p-4 space-y-4">
-                                                                <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorInterval') || 'Interval'}</label>
-                                                                    <select value={mirrorForm.interval} onChange={e => setMirrorForm(f => ({...f, interval: e.target.value}))}
-                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm">
-                                                                        <option value="5m">5 minutes</option>
-                                                                        <option value="15m">15 minutes</option>
-                                                                        <option value="1h">1 hour</option>
-                                                                        <option value="4h">4 hours</option>
-                                                                        <option value="1d">1 day</option>
-                                                                    </select>
-                                                                </div>
-                                                            </div>
-                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
-                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
-                                                                <button onClick={async () => {
-                                                                    try {
-                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/schedule`, {
-                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
-                                                                            body: JSON.stringify({ interval: mirrorForm.interval })
-                                                                        });
-                                                                        if (res?.ok) { setShowMirrorModal(null); }
-                                                                    } catch(e) {}
-                                                                }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors">
-                                                                    {t('add')}
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Promote Image Modal */}
-                                                {showMirrorModal === 'promote' && (
-                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
-                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
-                                                            <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorPromote') || 'Promote'}: {mirrorForm.image}</h3>
-                                                            </div>
-                                                            <div className="p-4 space-y-4">
-                                                                <p className="text-sm text-yellow-400">Promoting makes this the primary copy. The remote will need to be demoted first (or use force).</p>
-                                                                <label className="flex items-center gap-2 cursor-pointer">
-                                                                    <input type="checkbox" checked={mirrorForm.force} onChange={e => setMirrorForm(f => ({...f, force: e.target.checked}))} className="rounded" />
-                                                                    <span className="text-sm text-red-400">{t('cephMirrorForcePromote') || 'Force promote (may cause data loss!)'}</span>
-                                                                </label>
-                                                            </div>
-                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
-                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
-                                                                <button onClick={async () => {
-                                                                    try {
-                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${mirrorForm.image}/promote`, {
-                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
-                                                                            body: JSON.stringify({ force: mirrorForm.force })
-                                                                        });
-                                                                        if (res?.ok) { setShowMirrorModal(null); fetchMirrorImages(mirrorPoolDetail); }
-                                                                    } catch(e) {}
-                                                                }} className={`px-4 py-2 rounded-lg text-white transition-colors ${mirrorForm.force ? 'bg-red-600 hover:bg-red-700' : 'bg-proxmox-orange hover:bg-orange-600'}`}>
-                                                                    {t('cephMirrorPromote') || 'Promote'}
-                                                                </button>
-                                                            </div>
                                                         </div>
                                                     </div>
                                                 )}

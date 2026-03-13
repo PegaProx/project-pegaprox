@@ -133,24 +133,6 @@ PERMISSIONS = {
     'vmware.host.view': 'View ESXi host details',
     'vmware.datastore.view': 'View VMware datastores',
     'vmware.network.view': 'View VMware networks',
-
-    # XCP-ng / XAPI permissions - NS Mar 2026
-    'xapi.view': 'View XCP-ng pools and status',
-    'xapi.config': 'Add/edit/remove XCP-ng pool connections',
-    'xapi.vm.view': 'View XCP-ng VMs',
-    'xapi.vm.power': 'Start/stop/restart XCP-ng VMs',
-    'xapi.vm.create': 'Create VMs from XCP-ng templates',
-    'xapi.vm.config': 'Modify XCP-ng VM configuration',
-    'xapi.vm.delete': 'Delete XCP-ng VMs',
-    'xapi.vm.clone': 'Clone XCP-ng VMs',
-    'xapi.vm.migrate': 'Live migrate VMs within XCP-ng pool',
-    'xapi.vm.snapshot': 'Create/delete XCP-ng VM snapshots',
-    'xapi.host.view': 'View XCP-ng host details',
-    'xapi.storage.view': 'View XCP-ng storage repositories',
-    'xapi.network.view': 'View XCP-ng networks',
-    'xapi.pool.manage': 'Manage XCP-ng pool operations (join/leave)',
-    'xapi.template.view': 'View XCP-ng VM templates',
-    'xapi.template.manage': 'Create/delete XCP-ng VM templates',
 }
 
 # Default permissions per role
@@ -173,9 +155,6 @@ ROLE_PERMISSIONS = {
         'pbs.notifications.view', 'pbs.traffic.view', 'pbs.disks.view', 'pbs.subscription.view',
         'vmware.view', 'vmware.vm.view', 'vmware.vm.power', 'vmware.vm.snapshot',
         'vmware.vm.migrate', 'vmware.host.view', 'vmware.datastore.view', 'vmware.network.view',
-        'xapi.view', 'xapi.vm.view', 'xapi.vm.power', 'xapi.vm.snapshot',
-        'xapi.vm.clone', 'xapi.vm.config', 'xapi.vm.migrate',
-        'xapi.host.view', 'xapi.storage.view', 'xapi.network.view', 'xapi.template.view',
     ],
     ROLE_VIEWER: [
         'vm.view', 'vm.console',
@@ -190,7 +169,5 @@ ROLE_PERMISSIONS = {
         'pbs.view', 'pbs.datastore.view', 'pbs.jobs.view', 'pbs.tasks.view',
         'pbs.notifications.view', 'pbs.traffic.view', 'pbs.disks.view', 'pbs.subscription.view',
         'vmware.view', 'vmware.vm.view', 'vmware.host.view', 'vmware.datastore.view', 'vmware.network.view',
-        'xapi.view', 'xapi.vm.view', 'xapi.host.view', 'xapi.storage.view', 'xapi.network.view',
-        'xapi.template.view',
     ],
 }

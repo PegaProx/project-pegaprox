@@ -2294,8 +2294,7 @@
             const [targetNodes, setTargetNodes] = useState([]);
             const [targetStorages, setTargetStorages] = useState([]);
             const [targetBridges, setTargetBridges] = useState([]);
-            const [loadingNodes, setLoadingNodes] = useState(false);
-            const [loadingResources, setLoadingResources] = useState(false);
+            const [loadingTarget, setLoadingTarget] = useState(false);
             const [hasCdDvd, setHasCdDvd] = useState(false);
             const [detectedIsos, setDetectedIsos] = useState([]);
             const [bootOrderIssues, setBootOrderIssues] = useState([]);
@@ -2426,7 +2425,7 @@
             }, [targetNode]);
 
             const loadTargetNodes = async () => {
-                setLoadingNodes(true);
+                setLoadingTarget(true);
                 try {
                     const nodesRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes`);
                     if(nodesRes && nodesRes.ok) {
@@ -2441,18 +2440,18 @@
                 } catch (error) {
                     console.error('to load target nodes:', error);
                 }
-                setLoadingNodes(false);
+                setLoadingTarget(false);
             };
 
             const loadTargetResources = async () => {
-                setLoadingResources(true);
+                setLoadingTarget(true);
                 try {
                     // Get storage list for selected node
                     const storageRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes/${targetNode}/storage`);
                     if(storageRes && storageRes.ok) {
                         setTargetStorages(await storageRes.json());
                     }
-
+                    
                     // Get network list for selected node (including SDN VNets)
                     const networkRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes/${targetNode}/networks`);
                     if(networkRes && networkRes.ok) {
@@ -2463,7 +2462,7 @@
                 } catch (error) {
                     console.error('to load target resources:', error);
                 }
-                setLoadingResources(false);
+                setLoadingTarget(false);
             };
 
             const handleMigrate = async () => {
@@ -2586,7 +2585,7 @@
 
                             {targetCluster && (
                                 <>
-                                    {loadingNodes && targetNodes.length === 0 ? (
+                                    {loadingTarget && targetNodes.length === 0 ? (
                                         <div className="flex items-center justify-center py-4 text-gray-400">
                                             <Icons.RotateCw />
                                             <span className="ml-2">{t('loadingNodes')}</span>
@@ -2612,7 +2611,7 @@
 
                                             {targetNode && (
                                                 <>
-                                                    {loadingResources ? (
+                                                    {loadingTarget ? (
                                                         <div className="flex items-center justify-center py-4 text-gray-400">
                                                             <Icons.RotateCw />
                                                             <span className="ml-2">{t('loadingStorageNetwork')}</span>
@@ -3217,24 +3216,24 @@
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
+                                                    <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
                                                     </span>
                                                 </div>
                                             </td>
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
+                                                    <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
                                                     </span>
                                                 </div>
                                             </td>
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
+                                                    <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
                                                     </span>
                                                 </div>
                                             </td>
@@ -3909,19 +3908,17 @@
                 const corpBarColor = (val) => val > 80 ? '#f54f47' : val > 60 ? '#efc006' : '#60b515';
                 return (
                     <div className="space-y-3">
-                        {/* LW: Mar 2026 - content header strip */}
-                        <div className="corp-content-header">
+                        {/* header */}
+                        <div className="flex items-center justify-between pb-2" style={{borderBottom: '1px solid #485764'}}>
                             <div className="flex items-center gap-2">
                                 <Icons.Grid className="w-4 h-4" style={{color: '#49afd9'}} />
-                                <span className="corp-header-title">{t('inventoryOverview') || t('allClustersOverview') || 'Inventory Overview'}</span>
+                                <h2 className="text-[15px] font-semibold" style={{color: '#e9ecef'}}>{t('allClustersOverview') || 'All Clusters Overview'}</h2>
                             </div>
-                            <div className="flex items-center gap-3">
-                                {totals.totalAlerts > 0 && (
-                                    <span className="text-[12px] flex items-center gap-1" style={{color: '#f54f47'}}>
-                                        <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts') || 'alerts'}
-                                    </span>
-                                )}
-                            </div>
+                            {totals.totalAlerts > 0 && (
+                                <span className="text-[12px] flex items-center gap-1" style={{color: '#f54f47'}}>
+                                    <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts') || 'alerts'}
+                                </span>
+                            )}
                         </div>
 
                         {/* stats bar */}
@@ -3933,23 +3930,23 @@
                             <span style={{color: '#adbbc4'}}>VMs: <b style={{color: '#60b515'}}>{totals.runningVms}</b> {t('running')?.toLowerCase()}, <b style={{color: '#728b9a'}}>{totals.totalVms - totals.runningVms}</b> {t('stopped')?.toLowerCase()}</span>
                             <span style={{color: '#485764', margin: '0 8px'}}>|</span>
                             <span style={{color: '#adbbc4'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
-                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
-                                <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgCpu, 100)}%`, background: corpBarColor(totals.avgCpu)}} />
+                            <span className="inline-block mx-1" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
+                                <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(totals.avgCpu, 100)}%`, background: corpBarColor(totals.avgCpu)}} />
                             </span>
                             <span style={{color: '#485764', margin: '0 8px'}}>|</span>
                             <span style={{color: '#adbbc4'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
-                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
-                                <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgMem, 100)}%`, background: corpBarColor(totals.avgMem)}} />
+                            <span className="inline-block mx-1" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
+                                <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(totals.avgMem, 100)}%`, background: corpBarColor(totals.avgMem)}} />
                             </span>
                             <span style={{color: '#485764', margin: '0 8px'}}>|</span>
                             <span style={{color: '#adbbc4'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
-                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
-                                <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgStorage, 100)}%`, background: corpBarColor(totals.avgStorage)}} />
+                            <span className="inline-block mx-1" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
+                                <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(totals.avgStorage, 100)}%`, background: corpBarColor(totals.avgStorage)}} />
                             </span>
                         </div>
 
                         {/* cluster table */}
-                        <table className="corp-datagrid corp-datagrid-striped">
+                        <table className="corp-datagrid">
                             <thead>
                                 <tr>
                                     {[
@@ -3992,24 +3989,24 @@
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
+                                                    <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
                                                     </span>
                                                 </div>
                                             </td>
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
+                                                    <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
                                                     </span>
                                                 </div>
                                             </td>
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
+                                                    <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
                                                     </span>
                                                 </div>
                                             </td>
@@ -4028,7 +4025,7 @@
                                     <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources') || 'Top Resources'}</span>
                                     <span className="text-[11px]" style={{color: '#728b9a'}}>Top 10</span>
                                 </div>
-                                <table className="corp-datagrid corp-datagrid-striped">
+                                <table className="corp-datagrid">
                                     <thead>
                                         <tr>
                                             <th style={{width: '24px'}}></th>
@@ -4367,9 +4364,6 @@
             const [xReplTargetBridges, setXReplTargetBridges] = useState([]);
             const [xReplLoadingResources, setXReplLoadingResources] = useState(false);
 
-            // NS: Mar 2026 - native Proxmox replication per cluster (#103)
-            const [nativeReplByCluster, setNativeReplByCluster] = useState({});
-
             // form state - init from group data
             // NS: field names must match DB column names exactly (cross_cluster_*)
             const [form, setForm] = useState({
@@ -4547,21 +4541,6 @@
             useEffect(() => {
                 if (activeTab !== 'replication' || !authFetch) return;
                 fetchXReplJobs();
-                // NS: also fetch native Proxmox replication for each cluster in group
-                const fetchNative = async () => {
-                    const result = {};
-                    await Promise.all(groupClusters.map(async (c) => {
-                        try {
-                            const res = await authFetch(`${API_URL}/clusters/${c.id}/datacenter/replication`);
-                            if (res?.ok) {
-                                const jobs = await res.json();
-                                if (jobs.length > 0) result[c.id] = jobs;
-                            }
-                        } catch(e) {}
-                    }));
-                    setNativeReplByCluster(result);
-                };
-                fetchNative();
             }, [activeTab]);
 
             // NS: Fetch VMs when source cluster changes
@@ -5304,48 +5283,6 @@
                                                 >
                                                     {t('cancel') || 'Cancel'}
                                                 </button>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* NS: Mar 2026 - native Proxmox replication per cluster (#103) */}
-                                    {Object.keys(nativeReplByCluster).length > 0 && (
-                                        <div className="mt-6">
-                                            <div className="flex items-center gap-2 mb-3">
-                                                <Icons.RefreshCw className="w-4 h-4 text-purple-400" />
-                                                <h4 className="text-sm font-medium text-white">{t('nativeProxmoxReplication') || 'Native Proxmox Replication (ZFS)'}</h4>
-                                            </div>
-                                            <div className="space-y-3">
-                                                {Object.entries(nativeReplByCluster).map(([cid, jobs]) => {
-                                                    const cluster = groupClusters.find(c => c.id === cid);
-                                                    return (
-                                                        <div key={cid} className="bg-proxmox-dark rounded-lg border border-proxmox-border overflow-hidden">
-                                                            <div className="px-3 py-2 border-b border-proxmox-border bg-purple-500/5">
-                                                                <span className="text-xs font-medium text-purple-300">{cluster?.name || cid}</span>
-                                                            </div>
-                                                            {jobs.map((job, idx) => {
-                                                                const hasErr = job.fail_count > 0 || job.error;
-                                                                const lastSync = job.last_sync ? new Date(job.last_sync * 1000).toLocaleString() : '-';
-                                                                return (
-                                                                    <div key={job.id || idx} className="px-3 py-2 flex items-center justify-between border-b border-proxmox-border/50 last:border-0">
-                                                                        <div className="flex items-center gap-2 flex-wrap min-w-0">
-                                                                            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${job.disable ? 'bg-gray-500' : hasErr ? 'bg-red-500' : 'bg-green-500'}`} />
-                                                                            <span className="text-xs bg-proxmox-dark px-1.5 py-0.5 rounded text-gray-400 border border-proxmox-border">VM {job.guest}</span>
-                                                                            <span className="text-xs text-gray-500">{job.source || '?'}</span>
-                                                                            <Icons.ArrowRight className="w-3 h-3 text-gray-600 flex-shrink-0" />
-                                                                            <span className="text-xs text-gray-500">{job.target}</span>
-                                                                            <span className="text-xs text-gray-600 font-mono">{job.schedule}</span>
-                                                                        </div>
-                                                                        <div className="flex items-center gap-2 flex-shrink-0 ml-2">
-                                                                            <span className="text-xs text-gray-600">{lastSync}</span>
-                                                                            {job.duration != null && <span className="text-xs text-gray-600 font-mono">{job.duration.toFixed(1)}s</span>}
-                                                                        </div>
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    );
-                                                })}
                                             </div>
                                         </div>
                                     )}

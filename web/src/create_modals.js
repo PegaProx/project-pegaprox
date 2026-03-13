@@ -1499,25 +1499,18 @@
             const [config, setConfig] = useState({
                 name: '', host: '', user: 'root@pam', pass: '',
                 ssl_verification: false, migration_threshold: 20, check_interval: 300,
-                auto_migrate: false, balance_containers: false, balance_local_disks: false,
+                auto_migrate: true, balance_containers: false, balance_local_disks: false,
                 dry_run: false, ssh_key: '',
             });
             const [showSshSettings, setShowSshSettings] = useState(false);
-
-            // XCP-ng config
-            const [xcpConfig, setXcpConfig] = useState({
-                name: '', host: '', user: 'root', pass: '',
-                ssl_verification: false, migration_threshold: 20, check_interval: 300,
-                auto_migrate: false, dry_run: false, cluster_type: 'xcpng',
-            });
-
+            
             // PBS config
             const [pbsConfig, setPbsConfig] = useState({
                 name: '', host: '', port: 8007, user: 'root@pam', password: '',
                 api_token_id: '', api_token_secret: '', fingerprint: '',
                 ssl_verify: false, linked_clusters: [], notes: '',
             });
-
+            
             // VMware config
             const [vmwConfig, setVmwConfig] = useState({
                 name: '', host: '', port: 443, username: 'root', password: '',
@@ -1529,7 +1522,6 @@
             const handleSubmit = (e) => {
                 e.preventDefault();
                 if (connectionType === 'proxmox') onSubmit(config);
-                else if (connectionType === 'xcpng') onSubmit({...xcpConfig, cluster_type: 'xcpng'});
                 else if (connectionType === 'pbs') onAddPBS(pbsConfig);
                 else if (connectionType === 'vmware') onAddVMware(vmwConfig);
             };
@@ -1545,7 +1537,6 @@
                             <div className="flex gap-2 mt-3">
                                 {[
                                     { id: 'proxmox', label: 'Proxmox VE', icon: Icons.Server, active: 'bg-orange-500/20 text-orange-400 border-orange-500/40', inactive: 'bg-proxmox-dark text-gray-500 border-transparent hover:text-gray-300 hover:border-proxmox-border' },
-                                    { id: 'xcpng', label: 'XCP-ng (TP)', icon: Icons.Cpu, active: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40', inactive: 'bg-proxmox-dark text-gray-500 border-transparent hover:text-gray-300 hover:border-proxmox-border' },
                                     { id: 'pbs', label: 'PBS', icon: Icons.Shield, active: 'bg-blue-500/20 text-blue-400 border-blue-500/40', inactive: 'bg-proxmox-dark text-gray-500 border-transparent hover:text-gray-300 hover:border-proxmox-border' },
                                     { id: 'vmware', label: 'ESXi / vCenter', icon: Icons.Cloud, active: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40', inactive: 'bg-proxmox-dark text-gray-500 border-transparent hover:text-gray-300 hover:border-proxmox-border' },
                                 ].map(tab => (
@@ -1596,7 +1587,7 @@
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('passwordOrToken') || t('password')}</label>
-                                    <input type="password" value={config.pass} onChange={e => setConfig({...config, pass: e.target.value})}
+                                    <input type="password" value={config.pass} onChange={e => setConfig({...config, pass: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
                                         placeholder={config.user.includes('!') ? 'Token Secret' : 'Password'} />
                                 </div>
@@ -1651,58 +1642,6 @@
                                     <Toggle checked={config.balance_local_disks} onChange={v => setConfig({...config, balance_local_disks: v})} label={t('balanceLocalDisks')} />
                                 </div>
                                 <div className="text-xs text-gray-500 mt-1">{t('balanceLocalDisksDesc')}</div>
-                            </div>
-                            </>)}
-
-                            {/* ===== XCP-ng FORM ===== */}
-                            {connectionType === 'xcpng' && (<>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('clusterName')}</label>
-                                    <input type="text" value={xcpConfig.name} onChange={e => setXcpConfig({...xcpConfig, name: e.target.value})} required
-                                        className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder="XCP-ng Pool 1" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
-                                    <input type="text" value={xcpConfig.host} onChange={e => setXcpConfig({...xcpConfig, host: e.target.value})} required
-                                        className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder="xcpng-master.example.com" />
-                                </div>
-                            </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('username')}</label>
-                                    <input type="text" value={xcpConfig.user} onChange={e => setXcpConfig({...xcpConfig, user: e.target.value})} required
-                                        className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder="root" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
-                                    <input type="password" value={xcpConfig.pass} onChange={e => setXcpConfig({...xcpConfig, pass: e.target.value})} required
-                                        className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder="Password" />
-                                </div>
-                            </div>
-
-                            <div className="p-3 bg-cyan-500/10 border border-cyan-500/20 rounded-lg">
-                                <p className="text-xs text-cyan-300/70">
-                                    {t('xcpngConnectHint') || 'Connect to the pool master host. XAPI port 443 is used by default.'}
-                                </p>
-                                <p className="text-xs text-amber-400/80 mt-1.5 font-medium">Tech Preview - {t('xcpngTechPreviewNote') || 'Some features may be limited or subject to change.'}</p>
-                            </div>
-
-                            <div className="space-y-4 pt-4 border-t border-proxmox-border">
-                                <Slider label={t('migrationThreshold')} description={t('migrationThresholdDesc')} value={xcpConfig.migration_threshold}
-                                    onChange={v => setXcpConfig({...xcpConfig, migration_threshold: v})} min={5} max={100} />
-                                <Slider label={t('checkInterval')} description={t('checkIntervalDesc')} value={xcpConfig.check_interval}
-                                    onChange={v => setXcpConfig({...xcpConfig, check_interval: v})} min={60} max={3600} step={60} unit="s" />
-                            </div>
-
-                            <div className="flex flex-wrap gap-4 pt-4 border-t border-proxmox-border">
-                                <Toggle checked={xcpConfig.ssl_verification} onChange={v => setXcpConfig({...xcpConfig, ssl_verification: v})} label={t('sslVerification')} />
-                                <Toggle checked={xcpConfig.auto_migrate} onChange={v => setXcpConfig({...xcpConfig, auto_migrate: v})} label={t('autoMigrate')} />
-                                <Toggle checked={xcpConfig.dry_run} onChange={v => setXcpConfig({...xcpConfig, dry_run: v})} label={t('dryRunShort')} />
                             </div>
                             </>)}
 
@@ -1808,14 +1747,12 @@
                                 </button>
                                 <button type="submit" disabled={loading}
                                     className={`flex-1 px-4 py-2.5 rounded-lg text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                                        connectionType === 'pbs' ? 'bg-blue-500 hover:bg-blue-600'
+                                        connectionType === 'pbs' ? 'bg-blue-500 hover:bg-blue-600' 
                                         : connectionType === 'vmware' ? 'bg-emerald-500 hover:bg-emerald-600'
-                                        : connectionType === 'xcpng' ? 'bg-cyan-500 hover:bg-cyan-600'
                                         : 'bg-proxmox-orange hover:bg-orange-600'
                                     }`}>
-                                    {loading ? t('connecting') : connectionType === 'pbs' ? (t('addPbsServer') || 'Add Backup Server')
-                                        : connectionType === 'vmware' ? (t('addVmwareServer') || 'Add VMware')
-                                        : connectionType === 'xcpng' ? (t('addXcpngPool') || 'Add XCP-ng Pool')
+                                    {loading ? t('connecting') : connectionType === 'pbs' ? (t('addPbsServer') || 'Add Backup Server') 
+                                        : connectionType === 'vmware' ? (t('addVmwareServer') || 'Add VMware') 
                                         : t('addCluster')}
                                 </button>
                             </div>

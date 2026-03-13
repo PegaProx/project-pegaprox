@@ -24,7 +24,6 @@ from pegaprox.utils.rbac import get_user_clusters
 from pegaprox.utils.realtime import (
     broadcast_update, broadcast_sse, broadcast_action,
     create_sse_token, validate_sse_token,
-    create_ws_token, validate_ws_token,
     push_immediate_update,
 )
 from pegaprox.utils.email import send_email
@@ -126,34 +125,6 @@ def get_sse_token():
         'expires_in': SSE_TOKEN_TTL,
         'hint': 'Use this token in /api/sse/updates?token=...'
     })
-
-
-# NS: Mar 2026 - WebSocket auth tokens (single-use, 60s TTL)
-# VNC/SSH WebSocket servers call /api/ws/token/validate instead of trusting session in URL
-@bp.route('/api/ws/token', methods=['POST'])
-@require_auth()
-def get_ws_token():
-    """Get a single-use WebSocket auth token - avoids session_id in URLs"""
-    user = request.session.get('user', 'unknown')
-    role = request.session.get('role', 'viewer')
-    token = create_ws_token(user, role)
-    return jsonify({'token': token, 'expires_in': 60})
-
-
-@bp.route('/api/ws/token/validate')
-def validate_ws_token_api():
-    """Validate a WS token - called by standalone VNC/SSH servers
-    MK: internal endpoint, consumes the token (single-use)
-    """
-    token = request.args.get('token')
-    if not token:
-        return jsonify({'error': 'Token required'}), 401
-
-    data = validate_ws_token(token)
-    if not data:
-        return jsonify({'error': 'Invalid or expired token'}), 401
-
-    return jsonify({'valid': True, 'user': data['user'], 'role': data['role']})
 
 
 @bp.route('/api/sse/updates')

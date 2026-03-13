@@ -122,12 +122,6 @@
                 ssl_key: '',
                 ssl_cert_file: null,
                 ssl_key_file: null,
-                acme_enabled: false,
-                acme_email: '',
-                acme_staging: false,
-                cert_info: null,
-                reverse_proxy_enabled: false,
-                trusted_proxies: '',
                 logo_url: '',
                 app_name: 'PegaProx',
                 default_theme: 'proxmoxDark',  // NS: Default theme for new users - Jan 2026
@@ -148,9 +142,6 @@
             const [showRestartConfirm, setShowRestartConfirm] = useState(false);
             const [restartLoading, setRestartLoading] = useState(false);
             const [testEmailLoading, setTestEmailLoading] = useState(false);
-            // MK: Mar 2026 - ACME state (#96)
-            const [acmeLoading, setAcmeLoading] = useState(false);
-            const [acmeResult, setAcmeResult] = useState(null);
             const [testEmailAddress, setTestEmailAddress] = useState('');
             
             // Password policy state - NS Jan 2026
@@ -870,13 +861,7 @@
                             ssl_enabled: data.ssl_enabled || false,
                             ssl_cert: data.ssl_cert_exists ? '(Zertifikat vorhanden)' : '',
                             ssl_key: data.ssl_key_exists ? '(Schlüssel vorhanden)' : '',
-                            acme_enabled: data.acme_enabled || false,
-                            acme_email: data.acme_email || '',
-                            acme_staging: data.acme_staging || false,
-                            cert_info: data.cert_info || null,
                             http_redirect_port: data.http_redirect_port || 0,
-                            reverse_proxy_enabled: data.reverse_proxy_enabled || false,
-                            trusted_proxies: data.trusted_proxies || '',
                             default_theme: data.default_theme || 'proxmoxDark',
                             // SMTP settings
                             smtp_enabled: data.smtp_enabled || false,
@@ -1058,15 +1043,8 @@
                     formData.append('port', serverSettings.port);
                     formData.append('http_redirect_port', serverSettings.http_redirect_port || 0);
                     formData.append('ssl_enabled', serverSettings.ssl_enabled);
-                    formData.append('reverse_proxy_enabled', serverSettings.reverse_proxy_enabled);
-                    formData.append('trusted_proxies', serverSettings.trusted_proxies || '');
                     formData.append('default_theme', serverSettings.default_theme || 'proxmoxDark');
-                    // NS: alert recipients live in the same tab - must send them too (#131)
-                    formData.append('alert_email_recipients', JSON.stringify(serverSettings.alert_email_recipients || []));
-                    if (serverSettings.alert_cooldown) {
-                        formData.append('alert_cooldown', serverSettings.alert_cooldown);
-                    }
-
+                    
                     if (serverSettings.ssl_cert_file) {
                         formData.append('ssl_cert', serverSettings.ssl_cert_file);
                     }
@@ -1108,42 +1086,6 @@
                 }
             };
             
-            // MK: Mar 2026 - ACME cert request handler (#96)
-            const handleAcmeRequest = async () => {
-                if (!serverSettings.domain) {
-                    addToast(t('domain') + ' required', 'error');
-                    return;
-                }
-                if (!serverSettings.acme_email) {
-                    addToast(t('acmeEmail') + ' required', 'error');
-                    return;
-                }
-                setAcmeLoading(true);
-                setAcmeResult(null);
-                try {
-                    const resp = await fetch(`${API_URL}/settings/acme/request`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                        body: JSON.stringify({
-                            domain: serverSettings.domain,
-                            email: serverSettings.acme_email,
-                            staging: serverSettings.acme_staging,
-                        })
-                    });
-                    const data = await resp.json();
-                    setAcmeResult(data);
-                    if (data.success) {
-                        addToast(t('acmeSuccess'), 'success');
-                        fetchServerSettings();
-                    } else {
-                        addToast(data.message || data.error || 'ACME failed', 'error');
-                    }
-                } catch (err) {
-                    addToast('ACME request failed: ' + err.message, 'error');
-                }
-                setAcmeLoading(false);
-            };
-
             // Save SMTP Settings - NS Jan 2026
             const [smtpLoading, setSmtpLoading] = useState(false);
             
@@ -4314,47 +4256,6 @@
                                         </div>
                                     </div>
                                     
-                                    {/* Reverse Proxy */}
-                                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
-                                        <div className="flex items-center justify-between">
-                                            <h4 className="font-medium text-white flex items-center gap-2">
-                                                <Icons.Shield />
-                                                {t('reverseProxy')}
-                                            </h4>
-                                            <label className="flex items-center gap-2 cursor-pointer">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={serverSettings.reverse_proxy_enabled}
-                                                    onChange={e => setServerSettings({...serverSettings, reverse_proxy_enabled: e.target.checked})}
-                                                    className="rounded border-proxmox-border bg-proxmox-darker"
-                                                />
-                                                <span className="text-sm text-gray-300">{t('reverseProxyEnabled')}</span>
-                                            </label>
-                                        </div>
-
-                                        {serverSettings.reverse_proxy_enabled && (
-                                            <div className="space-y-3 pt-1">
-                                                <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-                                                    <p className="text-sm text-blue-400">{t('reverseProxyHint')}</p>
-                                                </div>
-                                                <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('trustedProxies')}</label>
-                                                    <input
-                                                        type="text"
-                                                        value={serverSettings.trusted_proxies}
-                                                        onChange={e => setServerSettings({...serverSettings, trusted_proxies: e.target.value})}
-                                                        placeholder="10.0.0.1, 172.16.0.0/12"
-                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
-                                                    />
-                                                    <p className="text-xs text-gray-500 mt-1">{t('trustedProxiesHint')}</p>
-                                                </div>
-                                                <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-                                                    <p className="text-sm text-yellow-400">{t('reverseProxyWarning')}</p>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-
                                     {/* SSL/TLS Settings */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
                                         <div className="flex items-center justify-between">
@@ -4432,85 +4333,8 @@
                                                 </div>
                                             </div>
                                         )}
-
-                                        {/* MK: Mar 2026 - ACME / Let's Encrypt section (#96) */}
-                                        <div className="mt-4 pt-4 border-t border-proxmox-border">
-                                            <h4 className="font-medium text-white flex items-center gap-2 mb-3">
-                                                🔒 {t('acmeTitle')}
-                                            </h4>
-
-                                            {/* cert status */}
-                                            {serverSettings.cert_info && (
-                                                <div className={`p-3 rounded-lg mb-3 ${serverSettings.cert_info.is_self_signed ? 'bg-yellow-500/10 border border-yellow-500/30' : serverSettings.cert_info.days_left > 30 ? 'bg-emerald-500/10 border border-emerald-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
-                                                    <div className="text-sm space-y-1">
-                                                        <div className="flex justify-between">
-                                                            <span className="text-gray-400">{t('acmeIssuer')}:</span>
-                                                            <span className={serverSettings.cert_info.is_self_signed ? 'text-yellow-400' : 'text-white'}>{serverSettings.cert_info.is_self_signed ? t('acmeSelfSigned') : serverSettings.cert_info.issuer}</span>
-                                                        </div>
-                                                        {!serverSettings.cert_info.is_self_signed && (
-                                                            <>
-                                                                <div className="flex justify-between">
-                                                                    <span className="text-gray-400">{t('acmeExpires')}:</span>
-                                                                    <span className="text-white">{new Date(serverSettings.cert_info.expires).toLocaleDateString()}</span>
-                                                                </div>
-                                                                <div className="flex justify-between">
-                                                                    <span className="text-gray-400">{t('acmeDaysLeft')}:</span>
-                                                                    <span className={serverSettings.cert_info.days_left > 30 ? 'text-emerald-400' : 'text-red-400'}>{serverSettings.cert_info.days_left}</span>
-                                                                </div>
-                                                            </>
-                                                        )}
-                                                        {serverSettings.cert_info.is_letsencrypt && serverSettings.acme_enabled && (
-                                                            <div className="text-emerald-400 text-xs mt-1">✓ {t('acmeAutoRenew')}</div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            <div className="space-y-3">
-                                                <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('acmeEmail')}</label>
-                                                    <input
-                                                        type="email"
-                                                        value={serverSettings.acme_email}
-                                                        onChange={e => setServerSettings({...serverSettings, acme_email: e.target.value})}
-                                                        placeholder="admin@example.com"
-                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
-                                                    />
-                                                    <p className="text-xs text-gray-500 mt-1">{t('acmeEmailHint')}</p>
-                                                </div>
-
-                                                <label className="flex items-center gap-2 cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={serverSettings.acme_staging}
-                                                        onChange={e => setServerSettings({...serverSettings, acme_staging: e.target.checked})}
-                                                        className="rounded border-proxmox-border bg-proxmox-darker"
-                                                    />
-                                                    <span className="text-sm text-gray-300">{t('acmeStaging')}</span>
-                                                    <span className="text-xs text-gray-500">({t('acmeStagingHint')})</span>
-                                                </label>
-
-                                                <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-                                                    <p className="text-xs text-blue-400">{t('acmePort80')}</p>
-                                                </div>
-
-                                                {acmeResult && !acmeResult.success && (
-                                                    <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-                                                        <p className="text-sm text-red-400">{acmeResult.message}</p>
-                                                    </div>
-                                                )}
-
-                                                <button
-                                                    onClick={handleAcmeRequest}
-                                                    disabled={acmeLoading || !serverSettings.domain || !serverSettings.acme_email}
-                                                    className="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
-                                                >
-                                                    {acmeLoading ? t('acmeRequesting') : t('acmeRequest')}
-                                                </button>
-                                            </div>
-                                        </div>
                                     </div>
-
+                                    
                                     {/* NS: SMTP Settings - Dec 2025 */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
                                         <div className="flex items-center justify-between">

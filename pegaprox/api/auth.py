@@ -24,7 +24,7 @@ from pegaprox.utils.auth import (
     generate_session_id, mark_admin_initialized, ensure_api_tokens_table,
     ARGON2_AVAILABLE, TOTP_AVAILABLE,
 )
-from pegaprox.utils.audit import log_audit, get_client_ip
+from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ldap import get_ldap_settings, ldap_authenticate, ldap_provision_user
 from pegaprox.utils.oidc import (
     get_oidc_settings, get_oidc_endpoints, oidc_build_auth_url,
@@ -35,7 +35,7 @@ from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID
 from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error
 from pegaprox.utils.sanitization import sanitize_identifier
 from pegaprox.utils.ssh import check_auth_action_rate_limit
-# NS: Mar 2026 - removed add_allowed_origin import (no longer auto-adding on login)
+from pegaprox.app import add_allowed_origin
 import requests
 
 try:
@@ -75,8 +75,7 @@ def oidc_authorize():
 
     response = make_response(jsonify({'auth_url': auth_url}))  # NS: Don't return state in body - it's in the cookie
     # LW: Store state in secure cookie for callback verification
-    from pegaprox.utils.audit import _is_trusted_proxy
-    is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
+    is_secure = request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https'
     # MK Feb 2026 - store nonce alongside state for ID token validation
     response.set_cookie('oidc_state', f"{state}:{nonce}", httponly=True, secure=is_secure, samesite='Lax', max_age=600)
     return response
@@ -89,8 +88,18 @@ def oidc_callback():
     LW: Called by frontend after redirect back from IdP
     Frontend sends: {code, state} from URL query params
     """
-    # MK: Mar 2026 - use centralized IP resolution (respects trusted_proxies)
-    client_ip = get_client_ip()
+    # NS Mar 2026 - same loopback-aware IP resolution as login rate limiter
+    remote_ip = request.remote_addr or ""
+    try:
+        ip_obj = ipaddress.ip_address(remote_ip)
+        if ip_obj.version == 6 and ip_obj.ipv4_mapped:
+            remote_ip = str(ip_obj.ipv4_mapped)
+    except ValueError:
+        pass
+    if remote_ip in ('127.0.0.1', '::1') and request.headers.get('X-Forwarded-For'):
+        client_ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    else:
+        client_ip = remote_ip
     oidc_cb_key = f'oidc_cb_{client_ip}'
     if oidc_cb_key in login_attempts_by_ip:
         attempts = login_attempts_by_ip[oidc_cb_key].get('attempts', [])
@@ -197,7 +206,7 @@ def oidc_callback():
     # MK: create_session() handles max 3 sessions per user, session rotation, save_sessions()
     session_token = create_session(username, user.get('role', ROLE_VIEWER))
     
-    log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {client_ip}")
+    log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {request.remote_addr}")
     
     response = make_response(jsonify({
         'success': True,
@@ -209,8 +218,7 @@ def oidc_callback():
     }))
     
     # Set session cookie (same pattern as regular login)
-    from pegaprox.utils.audit import _is_trusted_proxy
-    is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
+    is_secure = request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https'
     response.set_cookie(
         'session_id',
         session_token,
@@ -313,8 +321,17 @@ def auth_login():
     lockout_time = login_settings['lockout_time']
     attempt_window = login_settings['attempt_window']
     
-    # MK: Mar 2026 - centralized IP resolution, handles trusted proxies + IPv6 normalization
-    client_ip = get_client_ip()
+    # NS Feb 2026 - normalize IPv6-mapped IPv4 + only trust X-Forwarded-For from loopback
+    remote_ip = request.remote_addr or ""
+    try:
+        ip_obj = ipaddress.ip_address(remote_ip)
+        if ip_obj.version == 6 and ip_obj.ipv4_mapped:
+            remote_ip = str(ip_obj.ipv4_mapped)
+    except ValueError:
+        pass
+    client_ip = remote_ip
+    if remote_ip in ('127.0.0.1', '::1') and request.headers.get('X-Forwarded-For'):
+        client_ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
     
     current_time = time.time()
     
@@ -366,22 +383,18 @@ def auth_login():
                                           if current_time - t < attempt_window]
     
     # Helper function to record failed attempt (both IP and username)
-    # MK: Mar 2026 - also logs to audit trail now (was missing, security audit finding)
     def record_failed_attempt(target_username=None):
         locked = False
-        log_audit(target_username or 'unknown', 'auth.login_failed',
-                  f"Failed login from {client_ip}" + (f" for user '{target_username}'" if target_username else ""))
-
+        
         # Track by IP
         if client_ip not in login_attempts_by_ip:
             login_attempts_by_ip[client_ip] = {'attempts': [], 'locked_until': 0}
         login_attempts_by_ip[client_ip]['attempts'].append(current_time)
-        recent_ip = [t for t in login_attempts_by_ip[client_ip]['attempts']
+        recent_ip = [t for t in login_attempts_by_ip[client_ip]['attempts'] 
                      if current_time - t < attempt_window]
         if len(recent_ip) >= max_attempts:
             login_attempts_by_ip[client_ip]['locked_until'] = current_time + lockout_time
             logging.warning(f"IP {client_ip} locked out after {len(recent_ip)} failed attempts")
-            log_audit(target_username or 'unknown', 'auth.ip_locked', f"IP {client_ip} locked for {lockout_time}s")
             locked = True
         
         # Track by username (if provided and valid)
@@ -554,8 +567,11 @@ def auth_login():
     logging.info(f"User '{username}' logged in successfully")
     log_audit(username, 'user.login', f"User logged in" + (" (with 2FA)" if user.get('totp_enabled') else ""))
 
-    # NS: Mar 2026 - removed auto-allow CORS origin on login (security audit)
-    # Was allowing any authenticated origin permanently. Use PEGAPROX_ALLOWED_ORIGINS env var instead.
+    # Auto-allow this origin for CORS (Open Source convenience)
+    # Only authenticated users from valid origins get added
+    origin = request.headers.get('Origin')
+    if origin:
+        add_allowed_origin(origin)
 
     # NS: Get default theme for response
     settings = load_server_settings()
@@ -601,8 +617,7 @@ def auth_login():
     
     # Set session cookie with security flags
     # NS: Secure flag only when using HTTPS (important for production!)
-    from pegaprox.utils.audit import _is_trusted_proxy
-    is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
+    is_secure = request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https'
     response.set_cookie(
         'session_id', 
         session_id, 

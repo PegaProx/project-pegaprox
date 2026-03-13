@@ -21,22 +21,10 @@
             const changeLanguage = useCallback((lang) => {
                 setLanguage(lang);
                 localStorage.setItem('pegaprox-language', lang);
-                // persist to server so other devices pick it up
-                fetch(`${API_URL}/user/preferences`, {
-                    method: 'PUT', credentials: 'include',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ language: lang })
-                }).catch(() => {}); // fire and forget
             });
 
-            // applyLanguage just sets state+localStorage without API call (used on login/session restore)
-            const applyLanguage = useCallback((lang) => {
-                setLanguage(lang);
-                localStorage.setItem('pegaprox-language', lang);
-            }, []);
-
             return(
-                <LanguageContext.Provider value={{ language, t, changeLanguage, applyLanguage }}>
+                <LanguageContext.Provider value={{ language, t, changeLanguage }}>
                     {children}
                 </LanguageContext.Provider>
             );
@@ -49,28 +37,25 @@
         // Language Switcher Component
         function LanguageSwitcher() {
             const { language, changeLanguage } = useTranslation();
-            const langs = [
-                { code: 'de', flag: '🇦🇹', label: 'DE', title: 'Deutsch' },
-                { code: 'en', flag: '🇬🇧', label: 'EN', title: 'English' },
-                { code: 'fr', flag: '🇫🇷', label: 'FR', title: 'Français — Coming Soon', soon: true },
-                { code: 'es', flag: '🇪🇸', label: 'ES', title: 'Español — Coming Soon', soon: true },
-                { code: 'pt', flag: '🇧🇷', label: 'PT', title: 'Português' },
-            ];
-
+            
             return(
                 <div className="flex items-center gap-1 bg-proxmox-dark rounded-lg p-1 border border-proxmox-border">
-                    {langs.map(l => (
-                        <button
-                            key={l.code}
-                            onClick={() => !l.soon && changeLanguage(l.code)}
-                            className={`flex items-center gap-1 px-1.5 py-1 rounded text-sm transition-all ${language === l.code ? 'bg-proxmox-orange text-white' : l.soon ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white'}`}
-                            title={l.title}
-                            disabled={l.soon}
-                        >
-                            <span className={`text-base ${l.soon ? 'opacity-50' : ''}`}>{l.flag}</span>
-                            <span className="hidden sm:inline text-xs">{l.label}</span>
-                        </button>
-                    ))}
+                    <button
+                        onClick={() => changeLanguage('de')}
+                        className={`flex items-center gap-1.5 px-2 py-1 rounded text-sm transition-all ${language === 'de' ? 'bg-proxmox-orange text-white' : 'text-gray-400 hover:text-white'}`}
+                        title="Deutsch (Österreich)"
+                    >
+                        <span className="text-base">🇦🇹</span>
+                        <span className="hidden sm:inline">DE</span>
+                    </button>
+                    <button
+                        onClick={() => changeLanguage('en')}
+                        className={`flex items-center gap-1.5 px-2 py-1 rounded text-sm transition-all ${language === 'en' ? 'bg-proxmox-orange text-white' : 'text-gray-400 hover:text-white'}`}
+                        title="English"
+                    >
+                        <span className="text-base">🇬🇧</span>
+                        <span className="hidden sm:inline">EN</span>
+                    </button>
                 </div>
             );
         }
@@ -84,7 +69,6 @@
         const AuthContext = createContext();
         
         function AuthProvider({ children }) {
-            const { applyLanguage } = useTranslation();
             const [user, setUser] = useState(null);
             // NS: Security fix - session cookie is HttpOnly (can't be stolen by XSS)
             // But we also keep sessionId in memory for WebSocket auth (not in localStorage!)
@@ -117,7 +101,7 @@
                     
                     if (r && r.ok) {
                         const d = await r.json();
-                        // NS: removed session response log (leaked session_id to console)
+                        console.log('Session check response:', d);
                         if (d.authenticated) {
                             setUser(d.user);
                             setIsAuthenticated(true);
@@ -134,10 +118,6 @@
                                 setRequires2FASetup(true);
                             } else {
                                 setRequires2FASetup(false);
-                            }
-                            // NS: Mar 2026 - apply user's saved language (server overrides local)
-                            if (d.user?.language && translations[d.user.language]) {
-                                applyLanguage(d.user.language);
                             }
                             // NS: Apply user's theme or default
                             const userTheme = d.user?.theme || d.default_theme || 'proxmoxDark';
@@ -158,7 +138,8 @@
                         logout();
                     }
                 } catch (err) {
-                    console.error('Session check failed');
+                    console.error('Session check failed:', err);
+                    console.log('err obj:', err);
                     logout();
                 }
                 setLoading(false);
@@ -168,7 +149,7 @@
             // TODO: add "remember me" checkbox somtime
             const login = async (username, password, totpCode = '') => {
                 setError(null);
-                // NS: Mar 2026 - removed login attempt log (username in console = bad)
+                console.log('login attempt:', username);  // tmp debug
                 try {
                     const resp = await fetch(`${API_URL}/auth/login`, {
                         method: 'POST',
@@ -201,10 +182,6 @@
                         if (data.requires_2fa_setup) {
                             setRequires2FASetup(true);
                         }
-                        // NS: Mar 2026 - apply user's saved language on login
-                        if (data.user?.language && translations[data.user.language]) {
-                            applyLanguage(data.user.language);
-                        }
                         // NS: Apply user's theme (with fallback to default)
                         const userTheme = data.user?.theme || data.default_theme || 'proxmoxDark';
                         console.log('[Theme] Login - Server theme:', data.user?.theme, 'Default:', data.default_theme, 'Using:', userTheme);
@@ -232,7 +209,7 @@
             // LW: Update user preferences (theme, language, ui_layout)
             const updatePreferences = async (prefs) => {
                 try {
-                    if (DEBUG) console.log('updatePreferences:', Object.keys(prefs));
+                    console.log('updatePreferences: Sending request with prefs:', prefs);
                     const r = await fetch(`${API_URL}/user/preferences`, {
                         method: 'PUT',
                         credentials: 'include',
@@ -241,11 +218,11 @@
                         },
                         body: JSON.stringify(prefs)
                     });
-                    if (DEBUG) console.log('updatePreferences status:', r.status);
+                    console.log('updatePreferences: Response status:', r.status);
                     
                     if (r.ok) {
                         const data = await r.json();
-                        if (DEBUG) console.log('updatePreferences: ok');
+                        console.log('updatePreferences: Response data:', data);
                         
                         // Update user in state
                         setUser(currentUser => {
@@ -256,7 +233,7 @@
                                 ui_layout: data.ui_layout,
                                 taskbar_auto_expand: data.taskbar_auto_expand
                             };
-                            // LW: state updated, no log needed
+                            console.log('updatePreferences: Updated user state:', updated);
                             return updated;
                         });
                         

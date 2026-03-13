@@ -35,6 +35,3 @@ PyJWT[crypto]>=2.8.0
 
 # === ESXi Migration (Optional) ===
 pyvmomi>=8.0.0
-
-# === XCP-ng Integration (Optional) ===
-XenAPI>=23.14.0

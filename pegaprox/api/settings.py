@@ -889,17 +889,6 @@ def get_server_settings():
     # Add info about existing cert/key files
     settings['ssl_cert_exists'] = os.path.exists(SSL_CERT_FILE)
     settings['ssl_key_exists'] = os.path.exists(SSL_KEY_FILE)
-    # MK: Mar 2026 - include cert info for ACME status (#96)
-    try:
-        from pegaprox.core.acme import get_cert_info
-        from pathlib import Path
-        if Path("/usr/lib/pegaprox").exists():
-            _ssl_dir = str(Path("/var/lib/pegaprox/ssl"))
-        else:
-            _ssl_dir = str(Path(__file__).resolve().parent.parent.parent / 'ssl')
-        settings['cert_info'] = get_cert_info(_ssl_dir)
-    except Exception:
-        settings['cert_info'] = None
     # Don't return actual cert/key content or sensitive passwords
     # Mask SMTP password if set
     if settings.get('smtp_password'):
@@ -966,13 +955,6 @@ def update_server_settings():
                 if settings.get('ssl_enabled') != new_ssl:
                     restart_required = True
                 settings['ssl_enabled'] = new_ssl
-            # MK: Mar 2026 - ACME settings (#96)
-            if 'acme_enabled' in data:
-                settings['acme_enabled'] = bool(data['acme_enabled'])
-            if 'acme_email' in data:
-                settings['acme_email'] = str(data['acme_email']).strip()
-            if 'acme_staging' in data:
-                settings['acme_staging'] = bool(data['acme_staging'])
             
             # security/bruteforce settings
             if 'login_max_attempts' in data:
@@ -1014,21 +996,6 @@ def update_server_settings():
                     log_audit(request.session.get('user', 'admin'), 'settings.password_expiry', 
                               f"Admin password expiry {'enabled' if settings['password_expiry_include_admins'] else 'disabled'}")
             
-            # NS Mar 2026 - reverse proxy / nginx settings
-            if 'reverse_proxy_enabled' in data:
-                new_rp = bool(data['reverse_proxy_enabled'])
-                if settings.get('reverse_proxy_enabled') != new_rp:
-                    restart_required = True
-                    log_audit(request.session.get('user', 'admin'), 'settings.reverse_proxy',
-                              f"Reverse proxy {'enabled' if new_rp else 'disabled'}")
-                settings['reverse_proxy_enabled'] = new_rp
-            if 'trusted_proxies' in data:
-                tp = str(data['trusted_proxies'] or '').strip()
-                settings['trusted_proxies'] = tp
-                # hot-reload the trusted proxy list so it takes effect immediately
-                from pegaprox.utils.audit import load_trusted_proxies
-                load_trusted_proxies(tp)
-
             # NS: Feb 2026 - Force 2FA for all users
             if 'force_2fa' in data:
                 old_val = settings.get('force_2fa')
@@ -1234,27 +1201,18 @@ def update_server_settings():
             http_redirect_port = request.form.get('http_redirect_port', '0')
             ssl_enabled = request.form.get('ssl_enabled', 'false').lower() == 'true'
             default_theme = request.form.get('default_theme', 'proxmoxDark')
-            reverse_proxy = request.form.get('reverse_proxy_enabled', 'false').lower() == 'true'
-            trusted_proxies = request.form.get('trusted_proxies', '').strip()
-
+            
             if settings.get('port') != int(port):
                 restart_required = True
             if settings.get('http_redirect_port') != int(http_redirect_port):
                 restart_required = True
             if settings.get('ssl_enabled') != ssl_enabled:
                 restart_required = True
-            if settings.get('reverse_proxy_enabled') != reverse_proxy:
-                restart_required = True
-
+            
             settings['domain'] = domain
             settings['port'] = int(port)
             settings['http_redirect_port'] = int(http_redirect_port)
             settings['ssl_enabled'] = ssl_enabled
-            settings['reverse_proxy_enabled'] = reverse_proxy
-            settings['trusted_proxies'] = trusted_proxies
-            # hot-reload trusted proxies
-            from pegaprox.utils.audit import load_trusted_proxies
-            load_trusted_proxies(trusted_proxies)
             
             # NS: Default theme for new users - Jan 2026
             allowed_themes = [
@@ -1266,17 +1224,6 @@ def update_server_settings():
             if default_theme in allowed_themes:
                 settings['default_theme'] = default_theme
             
-            # alert recipients from form-data (#131)
-            if 'alert_email_recipients' in request.form:
-                try:
-                    recipients = json.loads(request.form['alert_email_recipients'])
-                    if isinstance(recipients, list):
-                        settings['alert_email_recipients'] = [r.strip() for r in recipients if r.strip()]
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            if 'alert_cooldown' in request.form:
-                settings['alert_cooldown'] = max(60, min(86400, int(request.form['alert_cooldown'])))
-
             # Handle certificate upload
             if 'ssl_cert' in request.files:
                 cert_file = request.files['ssl_cert']
@@ -1385,84 +1332,6 @@ def restart_server():
     except Exception as e:
         logging.error(f"Error restarting server: {e}")
         return jsonify({'error': safe_error(e, 'Server restart failed')}), 500
-
-# MK: Mar 2026 - ACME / Let's Encrypt endpoints (#96)
-@bp.route('/api/settings/acme/status', methods=['GET'])
-@require_auth(roles=[ROLE_ADMIN])
-def get_acme_status():
-    """Get ACME certificate status and settings"""
-    try:
-        from pegaprox.core.acme import get_cert_info
-        from pathlib import Path
-
-        if Path("/usr/lib/pegaprox").exists():
-            ssl_dir = str(Path("/var/lib/pegaprox/ssl"))
-        else:
-            ssl_dir = str(Path(__file__).resolve().parent.parent.parent / 'ssl')
-
-        settings = load_server_settings()
-        cert_info = get_cert_info(ssl_dir)
-
-        return jsonify({
-            'acme_enabled': settings.get('acme_enabled', False),
-            'acme_email': settings.get('acme_email', ''),
-            'acme_staging': settings.get('acme_staging', False),
-            'domain': settings.get('domain', ''),
-            'cert': cert_info,
-        })
-    except Exception as e:
-        return jsonify({'error': safe_error(e, 'Failed to get ACME status')}), 500
-
-
-@bp.route('/api/settings/acme/request', methods=['POST'])
-@require_auth(roles=[ROLE_ADMIN])
-def request_acme_certificate():
-    """Request a new Let's Encrypt certificate (admin only)"""
-    try:
-        from pegaprox.core.acme import request_certificate
-        from pathlib import Path
-
-        if Path("/usr/lib/pegaprox").exists():
-            ssl_dir = str(Path("/var/lib/pegaprox/ssl"))
-        else:
-            ssl_dir = str(Path(__file__).resolve().parent.parent.parent / 'ssl')
-
-        settings = load_server_settings()
-        data = request.get_json() or {}
-
-        domain = data.get('domain') or settings.get('domain', '')
-        email = data.get('email') or settings.get('acme_email', '')
-        staging = data.get('staging', settings.get('acme_staging', False))
-
-        if not domain:
-            return jsonify({'error': 'Domain is required'}), 400
-        if not email:
-            return jsonify({'error': 'Email is required for Let\'s Encrypt'}), 400
-
-        # persist ACME settings
-        settings['acme_enabled'] = True
-        settings['acme_email'] = email
-        settings['acme_staging'] = bool(staging)
-        settings['domain'] = domain
-        save_server_settings(settings)
-
-        usr = getattr(request, 'session', {}).get('user', 'admin')
-        log_audit(usr, 'settings.acme_request', f"ACME certificate requested for {domain} ({'staging' if staging else 'production'})")
-
-        result = request_certificate(domain, email, ssl_dir, staging=staging)
-
-        if result['success']:
-            # enable SSL automatically
-            settings['ssl_enabled'] = True
-            save_server_settings(settings)
-            log_audit(usr, 'settings.acme_issued', f"Certificate issued for {domain}, expires {result.get('expires', '?')}")
-
-        return jsonify(result)
-
-    except Exception as e:
-        logging.error(f"ACME request error: {e}")
-        return jsonify({'error': safe_error(e, 'Certificate request failed')}), 500
-
 
 # ============================================
 # Config Backup/Restore API Routes
@@ -2145,10 +2014,7 @@ def check_ip_whitelist():
     # Skip for static files
     if request.path.startswith('/static'):
         return None
-    # MK: Mar 2026 - LE validation servers need access to challenge endpoint (#96)
-    if request.path.startswith('/.well-known/'):
-        return None
-
+    
     # Skip if whitelist not enabled
     if not _ip_whitelist_enabled:
         return None
@@ -2945,16 +2811,14 @@ def check_cluster_updates(cluster_id):
     results = {}
     
     try:
-        # NS: XCP-ng has get_nodes(), Proxmox uses REST API directly
-        if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
-            nodes_data = mgr.get_nodes()
-        else:
-            host = mgr.current_host or mgr.config.host
-            url = f"https://{host}:8006/api2/json/nodes"
-            r = mgr._create_session().get(url, timeout=10)
-            if r.status_code != 200:
-                return jsonify({'error': 'Failed: nodes from cluster'}), 500
-            nodes_data = r.json().get('data', [])
+        host = mgr.current_host or mgr.config.host
+        url = f"https://{host}:8006/api2/json/nodes"
+        r = mgr._create_session().get(url, timeout=10)
+        
+        if r.status_code != 200:
+            return jsonify({'error': 'Failed: nodes from cluster'}), 500
+        
+        nodes_data = r.json().get('data', [])
         node_names = [n.get('node') for n in nodes_data if n.get('node') and n.get('status') == 'online']
     except Exception as e:
         return jsonify({'error': f'Failed to connect to cluster: {str(e)}'}), 500
@@ -3189,42 +3053,33 @@ def start_rolling_update(cluster_id):
                 
                 try:
                     # MK: Step 0 - Check if node has updates available (GitHub Issue fix)
-                    is_xcpng = getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng'
                     if skip_up_to_date and not force_all:
                         mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Checking for available updates on {node_name}...")
-
-                        # First refresh apt/yum cache
+                        
+                        # First refresh apt cache
                         try:
                             mgr.refresh_node_apt(node_name)
-                            # NS: yum makecache takes way longer than apt update
-                            time.sleep(10 if is_xcpng else 3)
+                            time.sleep(3)  # Wait for refresh
                         except:
                             pass
-
-                        check_failed = False
+                        
                         try:
                             available_updates = mgr.get_node_apt_updates(node_name)
                         except Exception as e:
                             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ Failed to check updates on {node_name}: {e}")
                             logging.warning(f"[RollingUpdate] Update check failed for {node_name}: {e}")
                             available_updates = []
-                            check_failed = True
                         update_count = len(available_updates) if available_updates else 0
-
-                        if update_count == 0 and not check_failed:
+                        
+                        if update_count == 0:
                             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⏭ {node_name} is already up-to-date - SKIPPING")
                             mgr._rolling_update['skipped_nodes'].append(node_name)
                             logging.info(f"[RollingUpdate] Node {node_name} is up-to-date, skipping")
                             continue
-                        elif check_failed:
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Check failed, proceeding with update anyway")
                         else:
                             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Found {update_count} updates available on {node_name}")
                             logging.info(f"[RollingUpdate] Node {node_name} has {update_count} updates available")
                     
-                    # NS: force-refresh maintenance state from PVE before each node (#141)
-                    mgr.refresh_maintenance_status()
-
                     # Step 1: Enable maintenance mode (evacuate VMs unless skip_evacuation is set)
                     mgr._rolling_update['current_step'] = 'maintenance'
                     if skip_evacuation:
@@ -3437,16 +3292,11 @@ def start_rolling_update(cluster_id):
                     logging.error(f"[RollingUpdate] Error updating {node_name}: {e}")
                     mgr._rolling_update['failed_nodes'].append({'node': node_name, 'error': safe_error(e, 'Node update failed')})
                     mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✗ ERROR on {node_name}: {e}")
-                    # always try to exit maintenance + clear ceph flags on failure (#141)
+                    # Try to exit maintenance mode even if update failed
                     try:
-                        exited = mgr.exit_maintenance_mode(node_name)
-                        if exited:
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Maintenance mode disabled for {node_name} after failure")
-                        else:
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ Could not disable maintenance for {node_name} - check manually")
-                    except Exception as maint_err:
-                        logging.error(f"[RollingUpdate] Failed to exit maintenance on {node_name}: {maint_err}")
-                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ Failed to exit maintenance on {node_name}: {maint_err}")
+                        mgr.exit_maintenance_mode(node_name)
+                    except:
+                        pass
             
             # Final summary
             completed = len(mgr._rolling_update['completed_nodes'])
@@ -3628,14 +3478,10 @@ def get_node_repos(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-
-    # XCP-ng uses yum, not apt - repo management not supported via this endpoint
-    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
-        return jsonify({'error': 'Repository management not available for XCP-ng clusters'}), 400
-
+    
     try:
         host = mgr.current_host or mgr.config.host
-
+        
         # Get all repos via Proxmox API
         file_url = f"https://{host}:8006/api2/json/nodes/{node}/apt/repositories"
         r = mgr._create_session().get(file_url, timeout=10)
@@ -3785,13 +3631,9 @@ def update_node_repo(cluster_id, node, repo_id):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-
-    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
-        return jsonify({'error': 'Repository management not available for XCP-ng clusters'}), 400
-
     data = request.get_json() or {}
     enabled = data.get('enabled', True)
-
+    
     # Check if this is a known repo or an "other" repo
     if repo_id.startswith('other-'):
         # For "other" repos, we need the file path and index from the request
@@ -3907,19 +3749,11 @@ def refresh_node_repos(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-
-    # XCP-ng uses yum - use refresh_node_apt which handles both
-    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
-        try:
-            mgr.refresh_node_apt(node)
-            return jsonify({'success': True, 'message': 'Package list refresh started'})
-        except Exception as e:
-            return jsonify({'error': f'Failed to refresh: {str(e)}'}), 500
-
+    
     try:
         host = mgr.current_host or mgr.config.host
         url = f"https://{host}:8006/api2/json/nodes/{node}/apt/update"
-
+        
         r = mgr._create_session().post(url, timeout=30)
         
         if r.status_code == 200:

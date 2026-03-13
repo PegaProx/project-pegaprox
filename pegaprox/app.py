@@ -96,39 +96,30 @@ def create_app():
     app.config['MAX_CONTENT_LENGTH'] = _upload_max  # set high, we check per-route below
 
     # Request validation & rate limiting
-    # LW: Mar 2026 - ACME HTTP-01 challenge route, must be unauthenticated (#96)
-    @app.route('/.well-known/acme-challenge/<token>')
-    def acme_challenge(token):
-        from pegaprox.core.acme import get_challenge_response
-        response = get_challenge_response(token)
-        if response:
-            return response, 200, {'Content-Type': 'text/plain'}
-        return '', 404
-
     @app.before_request
     def validate_request():
         if request.path.startswith('/static/') or request.path.startswith('/images/'):
             return None
         if request.path.startswith('/ws'):
             return None
-        # MK: Mar 2026 - ACME challenges must bypass all security checks (#96)
-        if request.path.startswith('/.well-known/'):
-            return None
 
         # NS: Feb 2026 - per-route size limits: uploads get the big limit, everything else 10MB
-        # MK: Mar 2026 - removed global config mutation, was causing 413s on subsequent uploads (#119)
         is_upload = request.path.endswith('/upload')
-        max_size = _upload_max if is_upload else _default_max
-        if request.content_length and request.content_length > max_size:
-            return jsonify({'error': f'Request too large. Max {max_size // (1024*1024)} MB'}), 413
+        if request.content_length:
+            max_size = _upload_max if is_upload else _default_max
+            if request.content_length > max_size:
+                return jsonify({'error': f'Request too large. Max {max_size // (1024*1024)} MB'}), 413
+        elif request.method in ('POST', 'PUT', 'PATCH') and not is_upload:
+            # NS: Feb 2026 - enforce default limit for requests without Content-Length (e.g. chunked transfer)
+            app.config['MAX_CONTENT_LENGTH'] = _default_max
 
         if request.path.startswith('/api/'):
             skip_paths = ['/api/auth/login', '/api/auth/check', '/api/events', '/api/health', '/api/sse',
                           '/api/vmware/migrations']
             if not any(request.path.startswith(p) for p in skip_paths):
-                # NS: Mar 2026 - use centralized get_client_ip, respects trusted_proxies
-                from pegaprox.utils.audit import get_client_ip
-                client_ip = get_client_ip()
+                client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+                if client_ip:
+                    client_ip = client_ip.split(',')[0].strip()
 
                 if not _check_api_rate_limit(client_ip):
                     logging.warning(f"Rate limit exceeded for {client_ip}")
@@ -144,20 +135,6 @@ def create_app():
                 if request.content_length > 0:
                     return jsonify({'error': 'Invalid Content-Type'}), 415
 
-        # NS: Mar 2026 - CSRF check for multipart uploads (JSON reqs already need Content-Type: application/json which triggers preflight)
-        if request.method in ['POST', 'PUT', 'DELETE'] and request.path.startswith('/api/'):
-            content_type = request.content_type or ''
-            if 'multipart/form-data' in content_type:
-                # form uploads must have X-Requested-With or matching Origin
-                has_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
-                origin = request.headers.get('Origin', '')
-                has_valid_origin = origin and (
-                    origin.startswith(f"{request.scheme}://{request.host}") or
-                    not origin  # same-origin requests may omit Origin
-                )
-                if not has_xhr and not has_valid_origin:
-                    return jsonify({'error': 'CSRF validation failed'}), 403
-
         return None
 
     # Security headers
@@ -169,11 +146,11 @@ def create_app():
         response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
 
-        # MK: Mar 2026 - tightened CSP, removed dead tailwindcss CDN ref (#118)
         csp = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
-                "https://cdn.jsdelivr.net; "
+                "https://cdn.jsdelivr.net https://cdn.tailwindcss.com "
+                "https://cdnjs.cloudflare.com; "
             "style-src 'self' 'unsafe-inline' "
                 "https://fonts.googleapis.com https://cdn.jsdelivr.net; "
             "font-src 'self' data: https://fonts.gstatic.com https://fonts.googleapis.com; "
@@ -185,10 +162,7 @@ def create_app():
         )
         response.headers['Content-Security-Policy'] = csp
 
-        # LW: Mar 2026 - only trust X-Forwarded-Proto from trusted proxies
-        from pegaprox.utils.audit import _is_trusted_proxy
-        is_https = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
-        if is_https:
+        if request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https':
             response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
 
         return response
@@ -276,78 +250,58 @@ def download_static_files():
                 print(f"FAILED: {e}")
                 failed += 1
 
-    # MK: Mar 2026 - tailwind.min.css is now a full CLI build, don't overwrite it (#118)
-    if os.path.exists('static/css/tailwind.min.css'):
-        sz = os.path.getsize('static/css/tailwind.min.css')
-        print(f"\n  tailwind.min.css already exists ({sz:,} bytes), skipping")
-        print("  (rebuild with: npx tailwindcss -i input.css -o static/css/tailwind.min.css --minify)")
-    else:
-        print("\n  WARNING: static/css/tailwind.min.css missing!")
-        print("  Run: npx tailwindcss -i input.css -o static/css/tailwind.min.css --minify")
-        failed += 1
-
-    # LW: Mar 2026 - download Google Fonts for offline (#118)
-    print("\nDownloading Google Fonts for offline use...")
-    os.makedirs('static/fonts', exist_ok=True)
-
-    _gfonts = {
-        'plus-jakarta-sans': {
-            'family': 'Plus Jakarta Sans',
-            'weights': {
-                '400': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_KU7NShXUEKi4Rw.woff2',
-                '500': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_AU7NShXUEKi4Rw.woff2',
-                '600': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_zUnNShXUEKi4Rw.woff2',
-                '700': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_9EnNShXUEKi4Rw.woff2',
-                '800': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_KUnNShXUEKi4Rw.woff2',
-            }
-        },
-        'jetbrains-mono': {
-            'family': 'JetBrains Mono',
-            'weights': {
-                '400': 'https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPVmUsaaDhw.woff2',
-                '500': 'https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-axjPVmUsaaDhw.woff2',
-                '600': 'https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8FapjPVmUsaaDhw.woff2',
-                '700': 'https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8LapjPVmUsaaDhw.woff2',
-            }
-        }
-    }
-
-    font_css = "/* LW: Mar 2026 - local Google Fonts for offline mode (#118) */\n"
-    for font_id, font_info in _gfonts.items():
-        for weight, url in font_info['weights'].items():
-            fname = f"{font_id}-{weight}.woff2"
-            dest = f"static/fonts/{fname}"
-            print(f"  {fname}...", end=' ')
-            try:
-                req = urllib.request.Request(url, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                })
-                with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
-                    data = response.read()
-                with open(dest, 'wb') as f:
-                    f.write(data)
-                print(f"OK ({len(data):,} bytes)")
-                success += 1
-            except Exception as e:
-                print(f"FAILED: {e}")
-                failed += 1
-
-            font_css += f"""@font-face {{
-  font-family: '{font_info['family']}';
-  font-style: normal;
-  font-weight: {weight};
-  font-display: swap;
-  src: url('/static/fonts/{fname}') format('woff2');
-}}
-"""
-
+    # Tailwind CSS subset for offline
+    print("\nCreating Tailwind CSS subset...")
+    tailwind_css = '''/* PegaProx Tailwind Offline CSS */
+*, ::before, ::after { box-sizing: border-box; border-width: 0; border-style: solid; }
+html { line-height: 1.5; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+body { margin: 0; }
+.flex { display: flex; } .grid { display: grid; } .hidden { display: none; } .block { display: block; }
+.inline-flex { display: inline-flex; } .flex-col { flex-direction: column; } .flex-1 { flex: 1 1 0%; }
+.items-center { align-items: center; } .items-start { align-items: flex-start; }
+.justify-center { justify-content: center; } .justify-between { justify-content: space-between; }
+.gap-1 { gap: 0.25rem; } .gap-2 { gap: 0.5rem; } .gap-3 { gap: 0.75rem; } .gap-4 { gap: 1rem; } .gap-6 { gap: 1.5rem; }
+.p-1 { padding: 0.25rem; } .p-2 { padding: 0.5rem; } .p-3 { padding: 0.75rem; } .p-4 { padding: 1rem; } .p-5 { padding: 1.25rem; } .p-6 { padding: 1.5rem; }
+.px-2 { padding-left: 0.5rem; padding-right: 0.5rem; } .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; } .px-4 { padding-left: 1rem; padding-right: 1rem; }
+.py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; } .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; } .py-3 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+.m-0 { margin: 0; } .mx-auto { margin-left: auto; margin-right: auto; }
+.mt-1 { margin-top: 0.25rem; } .mt-2 { margin-top: 0.5rem; } .mt-4 { margin-top: 1rem; }
+.mb-1 { margin-bottom: 0.25rem; } .mb-2 { margin-bottom: 0.5rem; } .mb-4 { margin-bottom: 1rem; }
+.w-full { width: 100%; } .w-auto { width: auto; } .w-4 { width: 1rem; } .w-5 { width: 1.25rem; } .w-6 { width: 1.5rem; } .w-8 { width: 2rem; }
+.h-full { height: 100%; } .h-4 { height: 1rem; } .h-5 { height: 1.25rem; } .h-6 { height: 1.5rem; } .h-8 { height: 2rem; }
+.min-h-screen { min-height: 100vh; }
+.text-xs { font-size: 0.75rem; } .text-sm { font-size: 0.875rem; } .text-lg { font-size: 1.125rem; } .text-xl { font-size: 1.25rem; } .text-2xl { font-size: 1.5rem; }
+.font-medium { font-weight: 500; } .font-semibold { font-weight: 600; } .font-bold { font-weight: 700; }
+.font-mono { font-family: ui-monospace, monospace; }
+.text-center { text-align: center; } .text-right { text-align: right; }
+.uppercase { text-transform: uppercase; } .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rounded { border-radius: 0.25rem; } .rounded-lg { border-radius: 0.5rem; } .rounded-xl { border-radius: 0.75rem; } .rounded-full { border-radius: 9999px; }
+.border { border-width: 1px; } .border-2 { border-width: 2px; } .border-t { border-top-width: 1px; } .border-b { border-bottom-width: 1px; }
+.opacity-50 { opacity: 0.5; } .opacity-75 { opacity: 0.75; }
+.shadow { box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1); } .shadow-lg { box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); }
+.overflow-hidden { overflow: hidden; } .overflow-auto { overflow: auto; } .overflow-y-auto { overflow-y: auto; }
+.relative { position: relative; } .absolute { position: absolute; } .fixed { position: fixed; }
+.inset-0 { top: 0; right: 0; bottom: 0; left: 0; } .top-0 { top: 0; } .right-0 { right: 0; } .bottom-0 { bottom: 0; } .left-0 { left: 0; }
+.z-10 { z-index: 10; } .z-50 { z-index: 50; }
+.cursor-pointer { cursor: pointer; }
+.transition { transition-property: all; transition-duration: 150ms; } .transition-all { transition-property: all; transition-duration: 150ms; }
+.animate-spin { animation: spin 1s linear infinite; } .animate-pulse { animation: pulse 2s ease-in-out infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); } .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.col-span-2 { grid-column: span 2 / span 2; } .col-span-3 { grid-column: span 3 / span 3; }
+.space-y-2 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5rem; } .space-y-4 > :not([hidden]) ~ :not([hidden]) { margin-top: 1rem; }
+.divide-y > :not([hidden]) ~ :not([hidden]) { border-top-width: 1px; }
+@media (min-width: 768px) { .md\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { .xl\\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .xl\\:col-span-2 { grid-column: span 2 / span 2; } }
+'''
     try:
-        with open('static/css/fonts.css', 'w') as f:
-            f.write(font_css)
-        print("  fonts.css... OK")
+        with open('static/css/tailwind.min.css', 'w') as f:
+            f.write(tailwind_css)
+        print("  tailwind.min.css... OK")
         success += 1
     except Exception as e:
-        print(f"  fonts.css... FAILED: {e}")
+        print(f"  tailwind.min.css... FAILED: {e}")
         failed += 1
 
     # Download noVNC for offline VNC console
@@ -470,7 +424,6 @@ def main(debug_mode=False):
     from pegaprox.background.password_expiry import start_password_expiry_thread
     from pegaprox.background.cross_cluster_lb import start_cross_cluster_lb_thread
     from pegaprox.background.cross_cluster_replication import start_cross_cluster_replication_thread
-    from pegaprox.api.schedules import start_scheduler as start_actions_scheduler
     from pegaprox.api.helpers import load_server_settings
     from pegaprox.utils.rbac import get_pool_membership_cache
     from pegaprox.constants import AUDIT_RETENTION_DAYS
@@ -529,12 +482,6 @@ def main(debug_mode=False):
     except ImportError:
         print("  ⚠ argon2-cffi - using PBKDF2 fallback")
 
-    try:
-        import XenAPI
-        print("  ✓ XenAPI (XCP-ng integration)")
-    except ImportError:
-        print("  ✗ XenAPI - XCP-ng clusters disabled (pip install XenAPI)")
-
     if missing_libs:
         print(f"\n  Install missing: pip install {' '.join(missing_libs)}")
     print()
@@ -572,18 +519,10 @@ def main(debug_mode=False):
     # Start managers for existing clusters
     for cluster_id, cluster_data in config.items():
         config_obj = PegaProxConfig(cluster_data)
-        ctype = cluster_data.get('cluster_type', 'proxmox')
-        if ctype == 'xcpng':
-            from pegaprox.core.xcpng import XcpngManager
-            manager = XcpngManager(cluster_id, config_obj)
-            manager.start()
-            g.cluster_managers[cluster_id] = manager
-            print(f"Started XCP-ng manager for pool: {cluster_data['name']}")
-        else:
-            manager = PegaProxManager(cluster_id, config_obj)
-            manager.start()
-            g.cluster_managers[cluster_id] = manager
-            print(f"Started PegaProx manager for cluster: {cluster_data['name']}")
+        manager = PegaProxManager(cluster_id, config_obj)
+        manager.start()
+        g.cluster_managers[cluster_id] = manager
+        print(f"Started PegaProx manager for cluster: {cluster_data['name']}")
 
     # Start background threads
     start_broadcast_thread()
@@ -604,11 +543,6 @@ def main(debug_mode=False):
 
     start_scheduler_thread()
     print("Started task scheduler thread")
-
-    # NS: Mar 2026 - the scheduled_actions scheduler (UI-created schedules, #134)
-    # background/scheduler.py only handles the old scheduled_tasks table
-    start_actions_scheduler()
-    print("Started scheduled actions thread")
 
     start_password_expiry_thread()
     print("Started password expiry check thread")
@@ -632,53 +566,13 @@ def main(debug_mode=False):
     threading.Thread(target=warmup_pool_cache, daemon=True).start()
     print("Started pool cache warmup thread")
 
-    # MK: Mar 2026 - ACME auto-renewal thread (#96)
-    def acme_renewal_loop():
-        time.sleep(30)  # wait for server to fully start
-        while True:
-            try:
-                _settings = load_server_settings()
-                if _settings.get('acme_enabled') and _settings.get('domain'):
-                    from pegaprox.core.acme import check_and_renew
-                    if Path("/usr/lib/pegaprox").exists():
-                        _ssl = str(Path("/var/lib/pegaprox/ssl"))
-                    else:
-                        _ssl = str(Path(__file__).resolve().parent.parent / 'ssl')
-                    renewed = check_and_renew(
-                        _settings['domain'], _settings.get('acme_email', ''),
-                        _ssl, staging=_settings.get('acme_staging', False)
-                    )
-                    if renewed:
-                        logging.info("[ACME] Certificate renewed, restart required for new cert")
-            except Exception as e:
-                logging.debug(f"[ACME] Renewal check error: {e}")
-            time.sleep(86400)  # check once per day
-
-    threading.Thread(target=acme_renewal_loop, daemon=True).start()
-    print("Started ACME auto-renewal thread")
-
     # Load server settings
     server_settings = load_server_settings()
     port = server_settings.get('port', 5000)
     bind_host = os.environ.get('PEGAPROX_HOST')
 
-    # NS Mar 2026 - reverse proxy mode: skip SSL, bind localhost, trust proxy headers
-    reverse_proxy = server_settings.get('reverse_proxy_enabled', False)
-    if os.environ.get('PEGAPROX_BEHIND_PROXY', '').lower() in ('1', 'true', 'yes'):
-        reverse_proxy = True
-
-    # load trusted proxy IPs for X-Forwarded-For (loopback always trusted)
-    from pegaprox.utils.audit import load_trusted_proxies
-    trusted = os.environ.get('PEGAPROX_TRUSTED_PROXIES', '') or server_settings.get('trusted_proxies', '')
-    load_trusted_proxies(trusted)
-    if trusted:
-        print(f"Trusted proxies: {trusted}")
-
     if not bind_host:
-        if reverse_proxy:
-            bind_host = '127.0.0.1'
-            print("Reverse proxy mode — binding to 127.0.0.1 only")
-        elif _test_ipv6_available():
+        if _test_ipv6_available():
             bind_host = '::'
             print("IPv6 available — binding dual-stack (::)")
         else:
@@ -690,18 +584,13 @@ def main(debug_mode=False):
             print("Falling back to 0.0.0.0")
             bind_host = '0.0.0.0'
 
-    # MK: when behind proxy, SSL is handled by nginx/haproxy - we run plain HTTP
-    ssl_enabled = server_settings.get('ssl_enabled', False) and not reverse_proxy
+    ssl_enabled = server_settings.get('ssl_enabled', False)
     domain = server_settings.get('domain', '')
     app_name = server_settings.get('app_name', 'PegaProx')
-    if reverse_proxy:
-        print("SSL disabled (handled by reverse proxy)")
 
-    # Check for SSL certificates (skip entirely behind reverse proxy)
+    # Check for SSL certificates
     ssl_context = None
-    if reverse_proxy:
-        pass  # nginx handles SSL
-    elif ssl_enabled and os.path.exists(SSL_CERT_FILE) and os.path.exists(SSL_KEY_FILE):
+    if ssl_enabled and os.path.exists(SSL_CERT_FILE) and os.path.exists(SSL_KEY_FILE):
         ssl_context = (SSL_CERT_FILE, SSL_KEY_FILE)
         print("Custom SSL certificates found - starting with HTTPS")
     else:
@@ -753,13 +642,13 @@ def main(debug_mode=False):
                 print(f"WARNING: Could not generate SSL certificate: {e}")
                 print("Starting without HTTPS (noVNC may not work)")
 
-    # Start HTTP redirect server if SSL is enabled (not needed behind reverse proxy)
-    http_redirect_port = server_settings.get('http_redirect_port', 0)
+    # Start HTTP redirect server if SSL is enabled
+    http_redirect_port = server_settings.get('http_redirect_port', 0)  # 0 = auto, -1 = disabled
     if http_redirect_port == 0:
         http_redirect_port = 80 if os.geteuid() == 0 else -1
     http_redirect_port = int(os.environ.get('PEGAPROX_HTTP_PORT', http_redirect_port))
 
-    if ssl_context and http_redirect_port > 0 and not reverse_proxy:
+    if ssl_context and http_redirect_port > 0:
         redirect_thread = threading.Thread(
             target=_start_http_redirect,
             args=(bind_host, http_redirect_port, port, domain),
@@ -781,7 +670,7 @@ def main(debug_mode=False):
 
     if use_gevent == 'gevent' or (use_gevent == 'auto' and GEVENT_AVAILABLE):
         if GEVENT_AVAILABLE:
-            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port)
+            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers)
             return
 
     # Fallback to Flask development server
@@ -873,24 +762,6 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
                         if len(parts) >= 2:
                             path = parts[1].replace('\r', '').replace('\n', '')
 
-                    # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting (#96)
-                    if path.startswith('/.well-known/acme-challenge/'):
-                        acme_token = path.split('/')[-1]
-                        from pegaprox.core.acme import get_challenge_response
-                        challenge_resp = get_challenge_response(acme_token)
-                        if challenge_resp:
-                            http_resp = (
-                                f"HTTP/1.1 200 OK\r\n"
-                                f"Content-Type: text/plain\r\n"
-                                f"Content-Length: {len(challenge_resp)}\r\n"
-                                f"Connection: close\r\n"
-                                f"\r\n"
-                                f"{challenge_resp}"
-                            )
-                            client.sendall(http_resp.encode())
-                            client.close()
-                            continue
-
                     host_header = ''
                     for line in request.split('\r\n'):
                         if line.lower().startswith('host:'):
@@ -964,7 +835,7 @@ def _create_listener(bind_host, port_num):
         return (bind_host, port_num)
 
 
-def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port=-1):
+def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
     """Start production server with Gevent."""
     from gevent.pywsgi import WSGIServer
 
@@ -1220,21 +1091,12 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_ctx.load_cert_chain(ssl_context[0], ssl_context[1])
-        # NS: http_redirect_port == -1 disables ALL http→https redirect (#125)
-        # including the dual-protocol detection on the main port
-        if http_redirect_port < 0:
-            http_server = QuietWSGIServer(
-                _create_listener(bind_host, port), app,
-                ssl_context=ssl_ctx,
-                **server_kwargs
-            )
-        else:
-            http_server = DualProtocolWSGIServer(
-                _create_listener(bind_host, port), app,
-                ssl_context=ssl_ctx,
-                redirect_domain=domain,
-                **server_kwargs
-            )
+        http_server = DualProtocolWSGIServer(
+            _create_listener(bind_host, port), app,
+            ssl_context=ssl_ctx,
+            redirect_domain=domain,
+            **server_kwargs
+        )
     else:
         print(f"HTTP on http://{bind_host}:{port}", flush=True)
         print("WARNING: Running without HTTPS - noVNC console may not work!", flush=True)
