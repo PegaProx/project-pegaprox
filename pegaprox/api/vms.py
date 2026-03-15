@@ -3281,9 +3281,17 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
                 result['agent_running'] = True
         except Exception:
             pass
+
+        try:
+            ips = mgr._fetch_qemu_ips(node, vmid)
+            result['ip_addresses'] = ips
+            if ips:
+                result['agent_running'] = True
+        except Exception:
+            pass
     except Exception as e:
         result['error'] = str(e)
-    
+
     return jsonify(result)
 
 

@@ -183,7 +183,13 @@ class PegaProxManager:
         # and we need the 2s buffer on top so the ui never shows the vm on the old node
         self._nodes_cache_ttl = 8
         self.maintenance_lock = threading.Lock()
-        
+
+        # NS: IP address cache: (node, vmid) -> list of IPs (IPv4 first)
+        # Populated by _ip_refresh_loop every 30s, injected into get_vm_resources() output
+        self._ip_cache = {}
+        self._ip_cache_lock = threading.Lock()
+        self._ip_refresh_thread = None
+
         # update tracking
         self.nodes_updating = {}
         self.update_lock = threading.Lock()
@@ -497,6 +503,9 @@ class PegaProxManager:
     def connect_to_proxmox(self) -> bool:
         # connect with fallback
         with self._connect_lock:
+            # NS: clear stale IPs so reconnect doesn't serve old data
+            with self._ip_cache_lock:
+                self._ip_cache.clear()
             # Build list of hosts to try: primary first, then fallbacks
             hosts_to_try = [self.config.host] + (self.config.fallback_hosts or [])
             
@@ -975,7 +984,18 @@ class PegaProxManager:
                 maxmem = r.get('maxmem', 0)
                 r['mem_percent'] = round((r.get('mem', 0) / maxmem) * 100, 1) if maxmem > 0 else 0
                 r['cpu_percent'] = round(r.get('cpu', 0) * 100, 1)
-            
+
+            # inject cached IP addresses (only for running VMs)
+            if self._ip_cache:
+                with self._ip_cache_lock:
+                    for r in resources:
+                        if r.get('status') != 'running':
+                            continue
+                        ips = self._ip_cache.get((r.get('node', ''), r.get('vmid')))
+                        if ips:
+                            r['ip'] = ips[0]           # primary IP for card display
+                            r['ip_addresses'] = ips    # full list for detail modal
+
             return resources
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             # LW: don't immediately mark disconnected, use failure counter
@@ -993,6 +1013,110 @@ class PegaProxManager:
         except:
             return []
     
+    def _fetch_qemu_ips(self, node: str, vmid: int) -> list:
+        """Fetch IP addresses from QEMU guest agent for a running VM.
+        Returns IPv4 addresses first, then IPv6 (so ips[0] is primary IPv4 when available).
+        Returns [] if agent not running, VM unreachable, or any error."""
+        try:
+            url = f"https://{self.host}:8006/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces"
+            resp = self._create_session().get(url, timeout=8)
+            if resp.status_code != 200:
+                return []
+            interfaces = resp.json().get('data', {}).get('result', [])
+            ipv4s, ipv6s = [], []
+            for iface in interfaces:
+                if iface.get('name') == 'lo':
+                    continue
+                for addr in iface.get('ip-addresses', []):
+                    ip = addr.get('ip-address', '')
+                    if not ip:
+                        continue
+                    if ip.startswith('127.') or ip == '::1':
+                        continue
+                    if ip.lower().startswith('fe80:'):
+                        continue
+                    if addr.get('ip-address-type') == 'ipv4':
+                        ipv4s.append(ip)
+                    else:
+                        ipv6s.append(ip)
+            return ipv4s + ipv6s
+        except Exception:
+            return []
+
+    def _fetch_lxc_ips(self, node: str, vmid: int) -> list:
+        """Fetch IP addresses for a running LXC container via /interfaces endpoint.
+        Returns IPv4 addresses first, then IPv6. Returns [] on any error."""
+        try:
+            url = f"https://{self.host}:8006/api2/json/nodes/{node}/lxc/{vmid}/interfaces"
+            resp = self._create_session().get(url, timeout=8)
+            if resp.status_code != 200:
+                return []
+            interfaces = resp.json().get('data', [])
+            ipv4s, ipv6s = [], []
+            for iface in interfaces:
+                if iface.get('name') == 'lo':
+                    continue
+                inet = iface.get('inet', '')
+                if inet:
+                    ip = inet.split('/')[0]
+                    if not ip.startswith('127.'):
+                        ipv4s.append(ip)
+                inet6 = iface.get('inet6', '')
+                if inet6:
+                    ip = inet6.split('/')[0]
+                    if ip != '::1' and not ip.lower().startswith('fe80:'):
+                        ipv6s.append(ip)
+            return ipv4s + ipv6s
+        except Exception:
+            return []
+
+    def refresh_ip_cache(self) -> None:
+        """Fetch IPs for all currently running VMs and containers, update cache.
+        Called from the background IP refresh loop every 30 seconds."""
+        if not self.is_connected or not self.session:
+            return
+        try:
+            resources = self.get_vm_resources()
+            running = [r for r in resources if r.get('status') == 'running']
+            if not running:
+                return
+
+            def fetch_one(r):
+                node = r.get('node', '')
+                vmid = r.get('vmid')
+                if not node or not vmid:
+                    return None
+                if r.get('type') == 'lxc':
+                    ips = self._fetch_lxc_ips(node, vmid)
+                else:
+                    ips = self._fetch_qemu_ips(node, vmid)
+                return (node, vmid, ips)
+
+            tasks = [lambda r=r: fetch_one(r) for r in running]
+            results = run_concurrent(tasks, timeout=15.0)
+
+            with self._ip_cache_lock:
+                for result in results:
+                    if result is None:
+                        continue
+                    node, vmid, ips = result
+                    self._ip_cache[(node, vmid)] = ips
+        except Exception as e:
+            self.logger.debug(f"[IP cache] refresh failed: {e}")
+
+    def _ip_refresh_loop(self) -> None:
+        """Background loop that refreshes the IP cache every 30 seconds.
+        Uses stop_event so it exits cleanly when the manager stops."""
+        if self.stop_event.wait(15):  # 15s initial delay; returns True if stopping
+            return
+        while not self.stop_event.is_set():
+            try:
+                if self.is_connected:
+                    self.refresh_ip_cache()
+            except Exception as e:
+                self.logger.debug(f"[IP refresh loop] error: {e}")
+            self.stop_event.wait(30)  # wait 30s or until stop requested
+
     def _format_bytes(self, bytes_value: int) -> str:
         # NS: quick helper, nothing fancy
         gb = bytes_value / (1024 ** 3)
@@ -11670,7 +11794,11 @@ echo DONE""",
         # Start HA monitor if enabled
         if self.config.ha_enabled:
             self.start_ha_monitor()
-    
+
+        # Start background IP refresh thread
+        self._ip_refresh_thread = threading.Thread(target=self._ip_refresh_loop, daemon=True)
+        self._ip_refresh_thread.start()
+
     def stop(self):
         """Stop the PegaProx daemon"""
         if not self.running:

@@ -1513,6 +1513,13 @@
                                                     {resource.status === 'running' ? t('running') : t('stopped')}
                                                 </span>
                                             </div>
+                                            {/* IP Address - shown for running VMs with guest agent */}
+                                            {resource.status === 'running' && resource.ip && (
+                                                <div className="flex items-center justify-between text-sm">
+                                                    <span className="text-gray-500">IP</span>
+                                                    <span className="text-gray-300 font-mono text-xs">{resource.ip}</span>
+                                                </div>
+                                            )}
                                             {/* VM Tags */}
                                             {resource.tags && (
                                                 <div className="flex flex-wrap gap-1">
