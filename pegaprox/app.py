@@ -151,9 +151,10 @@ def create_app():
                 # form uploads must have X-Requested-With or matching Origin
                 has_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
                 origin = request.headers.get('Origin', '')
+                allowed_origins = get_allowed_origins() or []
                 has_valid_origin = origin and (
-                    origin.startswith(f"{request.scheme}://{request.host}") or
-                    not origin  # same-origin requests may omit Origin
+                    origin in allowed_origins or
+                    origin.startswith(f"{request.scheme}://{request.host}")
                 )
                 if not has_xhr and not has_valid_origin:
                     return jsonify({'error': 'CSRF validation failed'}), 403
