@@ -212,7 +212,7 @@
             // Fetch password policy - NS Jan 2026
             const fetchPasswordPolicy = async () => {
                 try {
-                    const r = await fetch(`${API_URL}/password-policy`, { credentials: 'include' });
+                    const r = await fetch(`${API_URL}/password-policy`, { credentials: 'include', headers: getAuthHeaders() });
                     if (r.ok) {
                         const data = await r.json();
                         setPasswordPolicy(data);
@@ -1112,6 +1112,7 @@
                     const response = await fetch(`${API_URL}/settings/server`, {
                         method: 'POST',
                         credentials: 'include',
+                        headers: getAuthHeaders(),
                         body: formData
                     });
                     
@@ -4419,7 +4420,7 @@
                                                 <button
                                                     onClick={async () => {
                                                         try {
-                                                            const r = await fetch(`${API_URL}/settings/login-background`, { method: 'DELETE', credentials: 'include' });
+                                                            const r = await fetch(`${API_URL}/settings/login-background`, { method: 'DELETE', credentials: 'include', headers: getAuthHeaders() });
                                                             if (r.ok) {
                                                                 addToast(t('loginBackgroundDeleted'), 'success');
                                                                 setServerSettings(prev => ({...prev, login_background: ''}));

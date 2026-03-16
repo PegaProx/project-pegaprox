@@ -2037,7 +2037,7 @@
             // Fetch password policy
             const fetchPasswordPolicy = async () => {
                 try {
-                    const r = await fetch(`${API_URL}/password-policy`, { credentials: 'include' });
+                    const r = await fetch(`${API_URL}/password-policy`, { credentials: 'include', headers: getAuthHeaders() });
                     if (r.ok) {
                         const data = await r.json();
                         setPasswordPolicy(data);

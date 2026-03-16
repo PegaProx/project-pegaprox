@@ -152,7 +152,7 @@
                         // NS: Mar 2026 - get short-lived WS token instead of exposing session in URL
                         let wsToken = '';
                         try {
-                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include' });
+                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include', headers: { 'X-Session-ID': sessionId } });
                             if (tokenResp.ok) {
                                 const tokenData = await tokenResp.json();
                                 wsToken = tokenData.token;
@@ -1386,7 +1386,7 @@
                                                 <button 
                                                     onClick={async () => {
                                                         try {
-                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT', credentials: 'include' });
+                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT', credentials: 'include', headers: authHeaders });
                                                             if (res.ok) { addToast(t('networkChangesApplied') || 'Network changes applied'); loadTabData('network'); }
                                                             else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
                                                         } catch (e) { addToast(t('error') || 'Error', 'error'); }
@@ -1399,7 +1399,7 @@
                                                     onClick={async () => {
                                                         if (!confirm(t('discardUnappliedChanges'))) return;
                                                         try {
-                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE', credentials: 'include' });
+                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE', credentials: 'include', headers: authHeaders });
                                                             if (res.ok) { addToast(t('changesReverted') || 'Changes reverted'); loadTabData('network'); }
                                                             else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
                                                         } catch (e) { addToast(t('error') || 'Error', 'error'); }
@@ -1433,7 +1433,7 @@
                                                                     onClick={async () => {
                                                                         if (!confirm(`${iface.iface}: ${t('deleteInterfaceConfirm')}`)) return;
                                                                         try {
-                                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE', credentials: 'include' });
+                                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE', credentials: 'include', headers: authHeaders });
                                                                             if (res.ok) { addToast(`${iface.iface} ${t('deleted')}`); loadTabData('network'); }
                                                                             else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
                                                                         } catch (e) { addToast(t('error') || 'Error', 'error'); }
@@ -1935,7 +1935,7 @@
                                                                                 onClick={async () => {
                                                                                     try {
                                                                                         const diskPath = (d.devpath || '').replace('/dev/', '');
-                                                                                        const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/${encodeURIComponent(diskPath)}/smart`, { credentials: 'include' });
+                                                                                        const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/${encodeURIComponent(diskPath)}/smart`, { credentials: 'include', headers: authHeaders });
                                                                                         if (res.ok) {
                                                                                             const smart = await res.json();
                                                                                             alert(`SMART Data for ${d.devpath}:\n\n${JSON.stringify(smart, null, 2)}`);
@@ -2818,7 +2818,7 @@
                         // MK: Mar 2026 - fetch single-use WS token instead of passing session in URL
                         let vncWsToken = '';
                         try {
-                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include' });
+                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
                             if (tokenResp.ok) {
                                 const td = await tokenResp.json();
                                 vncWsToken = td.token;
