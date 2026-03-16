@@ -572,7 +572,7 @@
                                         </span>
                                         <span className="text-gray-300 font-mono">
                                             {Array.isArray(metrics.loadavg) ? 
-                                                metrics.loadavg.map(l => l.toFixed(2)).join(' / ') :
+                                                metrics.loadavg.map(l => typeof l === 'number' ? l.toFixed(2) : l).join(' / ') :
                                                 typeof metrics.loadavg === 'number' ? metrics.loadavg.toFixed(2) : '-'
                                             }
                                         </span>

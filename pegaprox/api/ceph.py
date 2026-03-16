@@ -316,7 +316,7 @@ def get_ceph_osds(cluster_id, node):
     try:
         r = manager._create_session().get(_ceph_url(manager, node, '/osd'), timeout=10)
         if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
+            return jsonify(_flatten_osd_tree(r.json().get('data', [])))
         return jsonify([])
     except:
         return jsonify([])
