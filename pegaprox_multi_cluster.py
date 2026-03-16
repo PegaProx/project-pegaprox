@@ -114,11 +114,31 @@ def download_static_files():
     return _download()
 
 
+def check_startup_integrity():
+    """Run startup preflight checks without starting the server."""
+    from pegaprox.api import validate_blueprint_modules
+
+    missing_modules = validate_blueprint_modules()
+    if missing_modules:
+        missing_text = ", ".join(missing_modules)
+        print("Startup check: FAILED")
+        print(f"Missing API module(s): {missing_text}")
+        print("This usually means an incomplete/mixed update.")
+        print("Re-run: ./update.sh --force")
+        return False
+
+    print("Startup check: OK")
+    return True
+
+
 if __name__ == '__main__':
     if '--requirements' in sys.argv:
         print_system_requirements()
     elif '--download-static' in sys.argv:
         download_static_files()
+    elif '--check-startup' in sys.argv:
+        if not check_startup_integrity():
+            sys.exit(1)
     elif '--help' in sys.argv or '-h' in sys.argv:
         print("""
 PegaProx Server
@@ -130,6 +150,7 @@ Options:
   --debug           verbose logging
   --requirements    show requirements
   --download-static download js libs for offline mode
+  --check-startup   run startup integrity preflight and exit
   --help, -h        this message
 
 Env vars:
