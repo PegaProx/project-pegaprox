@@ -47,6 +47,7 @@ DONE: Archive-based update mechanism - NS feb 2026
 # CRITICAL: Gevent MUST be first!! dont move this!! - NS
 import os
 import sys
+import importlib.util
 
 USE_GEVENT = os.environ.get('PEGAPROX_NO_GEVENT', '').lower() not in ('1', 'true', 'yes')
 
@@ -119,12 +120,32 @@ def check_startup_integrity():
     from pegaprox.api import validate_blueprint_modules
 
     missing_modules = validate_blueprint_modules()
+    required_runtime_modules = [
+        "requests",
+        "urllib3",
+        "certifi",
+        "charset_normalizer",
+    ]
+    missing_runtime = [
+        module_name
+        for module_name in required_runtime_modules
+        if importlib.util.find_spec(module_name) is None
+    ]
+
     if missing_modules:
         missing_text = ", ".join(missing_modules)
         print("Startup check: FAILED")
         print(f"Missing API module(s): {missing_text}")
         print("This usually means an incomplete/mixed update.")
         print("Re-run: ./update.sh --force")
+        return False
+
+    if missing_runtime:
+        missing_text = ", ".join(missing_runtime)
+        print("Startup check: FAILED")
+        print(f"Missing runtime dependency module(s): {missing_text}")
+        print("Fix with:")
+        print("  ./venv/bin/python -m pip install -r requirements.txt")
         return False
 
     print("Startup check: OK")
