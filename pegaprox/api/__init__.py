@@ -2,10 +2,53 @@
 """
 PegaProx API Blueprint Registration
 """
+import importlib.util
+
+
+_REQUIRED_BLUEPRINT_MODULES = [
+    "pegaprox.api.auth",
+    "pegaprox.api.users",
+    "pegaprox.api.clusters",
+    "pegaprox.api.vms",
+    "pegaprox.api.nodes",
+    "pegaprox.api.pbs",
+    "pegaprox.api.storage",
+    "pegaprox.api.datacenter",
+    "pegaprox.api.vmware",
+    "pegaprox.api.schedules",
+    "pegaprox.api.reports",
+    "pegaprox.api.settings",
+    "pegaprox.api.alerts",
+    "pegaprox.api.realtime",
+    "pegaprox.api.search",
+    "pegaprox.api.static_files",
+    "pegaprox.api.history",
+    "pegaprox.api.groups",
+    "pegaprox.api.ceph",
+]
+
+
+def validate_blueprint_modules(spec_resolver=None):
+    """Return list of missing required API blueprint modules."""
+    resolver = spec_resolver or importlib.util.find_spec
+    missing = []
+    for module_name in _REQUIRED_BLUEPRINT_MODULES:
+        if resolver(module_name) is None:
+            missing.append(module_name)
+    return missing
 
 
 def register_blueprints(app):
     """Register all API blueprints with the Flask app."""
+    missing_modules = validate_blueprint_modules()
+    if missing_modules:
+        missing_text = ", ".join(missing_modules)
+        raise RuntimeError(
+            "Startup integrity check failed: missing API module(s): "
+            f"{missing_text}. This usually means an incomplete/mixed update. "
+            "Re-run ./update.sh --force and restart pegaprox."
+        )
+
     from pegaprox.api.auth import bp as auth_bp
     from pegaprox.api.users import bp as users_bp
     from pegaprox.api.clusters import bp as clusters_bp

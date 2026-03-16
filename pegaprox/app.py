@@ -540,7 +540,14 @@ def main(debug_mode=False):
     print()
 
     # Create Flask app
-    app = create_app()
+    try:
+        app = create_app()
+    except RuntimeError as e:
+        # Keep startup failures actionable for systemd/journal users.
+        if "Startup integrity check failed:" in str(e):
+            print(f"\nERROR: {e}\n")
+            sys.exit(1)
+        raise
 
     # Init user system
     print("Initializing user system...")
