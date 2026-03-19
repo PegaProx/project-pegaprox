@@ -156,6 +156,7 @@
             const [acmeResult, setAcmeResult] = useState(null);
             const [testEmailAddress, setTestEmailAddress] = useState('');
             const [loginBgFile, setLoginBgFile] = useState(null);
+            const [loginBgError, setLoginBgError] = useState(null);
             
             // Password policy state - NS Jan 2026
             const [passwordPolicy, setPasswordPolicy] = useState({
@@ -4437,9 +4438,22 @@
                                         <input
                                             type="file"
                                             accept=".png,.jpg,.jpeg,.webp,.svg"
-                                            onChange={e => setLoginBgFile(e.target.files[0] || null)}
+                                            onChange={e => {
+                                                const file = e.target.files[0];
+                                                if (file && file.size > 2 * 1024 * 1024) {
+                                                    setLoginBgError(t('loginBackgroundTooLarge'));
+                                                    e.target.value = '';
+                                                    setLoginBgFile(null);
+                                                } else {
+                                                    setLoginBgError(null);
+                                                    setLoginBgFile(file || null);
+                                                }
+                                            }}
                                             className="block w-full text-sm text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:bg-proxmox-orange/20 file:text-proxmox-orange hover:file:bg-proxmox-orange/30 file:cursor-pointer"
                                         />
+                                        {loginBgError && (
+                                            <p className="text-xs text-red-400">{loginBgError}</p>
+                                        )}
                                         {loginBgFile && (
                                             <p className="text-xs text-green-400">{loginBgFile.name} ({(loginBgFile.size / 1024).toFixed(0)} KB)</p>
                                         )}
