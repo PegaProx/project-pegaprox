@@ -612,6 +612,18 @@
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
 
+            // NS: Snapshot props on mount — topology layout stays frozen until component re-mounts
+            // Prevents SSE metric updates from causing constant re-layout/jumping
+            const snapshotNodes = useRef(null);
+            const snapshotResources = useRef(null);
+            const snapshotPbs = useRef(null);
+            if (!snapshotNodes.current && nodes) snapshotNodes.current = nodes;
+            if (!snapshotResources.current && resources) snapshotResources.current = resources;
+            if (!snapshotPbs.current && pbsServers) snapshotPbs.current = pbsServers;
+            const frozenNodes = snapshotNodes.current || nodes || [];
+            const frozenResources = snapshotResources.current || resources || [];
+            const frozenPbs = snapshotPbs.current || pbsServers || [];
+
             // NS: view mode toggle - default to diagram, cards as fallback
             const [viewMode, setViewMode] = useState('diagram');
 
@@ -635,16 +647,16 @@
             const [tooltip, setTooltip] = useState(null);
             const [networkData, setNetworkData] = useState(null);
 
-            // ── common data ──
+            // ── common data from frozen snapshot ──
             const nodeGroups = {};
-            (resources || []).forEach(r => {
+            frozenResources.forEach(r => {
                 if (r.type !== 'qemu' && r.type !== 'lxc') return;
                 if (!nodeGroups[r.node]) nodeGroups[r.node] = [];
                 nodeGroups[r.node].push(r);
             });
 
             const backedUpVmIds = new Set();
-            (pbsServers || []).forEach(pbs => {
+            frozenPbs.forEach(pbs => {
                 if (pbs.cached_groups) {
                     pbs.cached_groups.forEach(g => {
                         if (g['backup-id']) backedUpVmIds.add(String(g['backup-id']));
@@ -652,12 +664,12 @@
                 }
             });
 
-            const activeNodes = (nodes || []).filter(n => n.status === 'online' || n.cpu !== undefined || n.cpu_percent !== undefined);
-            const offlineNodes = (nodes || []).filter(n => n.status === 'offline' || (n.cpu === undefined && n.cpu_percent === undefined && n.status !== 'online'));
+            const activeNodes = frozenNodes.filter(n => n.status === 'online' || n.cpu !== undefined || n.cpu_percent !== undefined);
+            const offlineNodes = frozenNodes.filter(n => n.status === 'offline' || (n.cpu === undefined && n.cpu_percent === undefined && n.status !== 'online'));
             const allNodes = [...activeNodes, ...offlineNodes];
 
-            const connectedPbs = (pbsServers || []).filter(p => p.status !== 'disconnected');
-            const totalGuests = (resources || []).filter(r => r.type === 'qemu' || r.type === 'lxc').length;
+            const connectedPbs = frozenPbs.filter(p => p.status !== 'disconnected');
+            const totalGuests = frozenResources.filter(r => r.type === 'qemu' || r.type === 'lxc').length;
 
             // ── card view helpers ──
             const toggleNode = (name) => setCollapsedNodes(prev => {
@@ -756,9 +768,9 @@
             // ── diagram layout calculation ──
             const ICON = 40;
             const TIER_Y = { cluster: 85, nodes: 240, vmsStart: 395 };
-            const VM_ROW_H = 52;
+            const VM_ROW_H = 58;
             const VM_COLS = 3;
-            const VM_COL_W = 70;
+            const VM_COL_W = 110;
             // show all VMs — no truncation
 
             const nodeCount = allNodes.length;
@@ -1251,7 +1263,7 @@
                                                                         fill={vm.status === 'running' ? '#60b515' : '#728b9a'} />
                                                                     <text y={22} textAnchor="middle" fill="#e9ecef" fontSize="10">
                                                                         <title>{vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}</title>
-                                                                        {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 20)}{(vm.name || '').length > 20 ? '…' : ''}
+                                                                        {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 16)}{(vm.name || '').length > 16 ? '…' : ''}
                                                                     </text>
                                                                     <text y={33} textAnchor="middle" fill="#728b9a" fontSize="9">{vm.vmid}</text>
                                                                 </g>
@@ -1386,7 +1398,7 @@
                                             fill={vm.status === 'running' ? '#60b515' : '#728b9a'} />
                                         <text y={22} textAnchor="middle" fill="#e9ecef" fontSize="10">
                                             <title>{vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}</title>
-                                            {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 20)}{(vm.name || '').length > 20 ? '…' : ''}
+                                            {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 16)}{(vm.name || '').length > 16 ? '…' : ''}
                                         </text>
                                         <text y={33} textAnchor="middle" fill="#728b9a" fontSize="9">{vm.vmid}</text>
                                     </g>

@@ -5646,6 +5646,11 @@
                                                                 <Icons.Github className="w-3 h-3" />
                                                                 <strong>ColombianJoker</strong> — Spanish (Latin America)
                                                             </a>
+                                                            <a href="https://github.com/IMNotMax" target="_blank" rel="noopener noreferrer"
+                                                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-proxmox-dark text-gray-300 hover:text-white transition-colors">
+                                                                <Icons.Github className="w-3 h-3" />
+                                                                <strong>IMNotMax</strong> — French
+                                                            </a>
                                                         </div>
                                                     </div>
                                                 </div>

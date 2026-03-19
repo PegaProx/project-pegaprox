@@ -4721,7 +4721,7 @@ def _execute_local_replication(job):
             'name': f'repl-{vmid}-{target_node}',
         }
         if target_storage:
-            clone_data['target'] = target_storage
+            clone_data['storage'] = target_storage
 
         clone_resp = mgr._api_post(clone_url, data=clone_data)
         if clone_resp.status_code != 200:
@@ -4822,6 +4822,7 @@ def _execute_replication(job):
     target_cid = job['target_cluster']
     target_storage = job.get('target_storage', '') or 'local-lvm'
     target_bridge = job.get('target_bridge', 'vmbr0') or 'vmbr0'
+    target_node = job.get('target_node', '')
 
     source_mgr = cluster_managers.get(source_cid)
     target_mgr = cluster_managers.get(target_cid)
@@ -4833,6 +4834,23 @@ def _execute_replication(job):
     if not source_mgr.is_connected or not target_mgr.is_connected:
         _update_repl_status(db, job_id, 'error', 'Cluster not connected')
         return
+
+    # NS: auto-detect target node if not configured
+    if not target_node:
+        try:
+            nodes_resp = target_mgr._api_get(
+                f"https://{target_mgr.host}:8006/api2/json/nodes"
+            )
+            if nodes_resp.status_code == 200:
+                for n in nodes_resp.json().get('data', []):
+                    if n.get('status') == 'online':
+                        target_node = n['node']
+                        break
+        except Exception:
+            pass
+        if not target_node:
+            _update_repl_status(db, job_id, 'error', 'No online node found on target cluster')
+            return
 
     snap_name = f"xcrepl-{job_id}-{int(time.time())}"
     clone_vmid = None
@@ -4854,7 +4872,7 @@ def _execute_replication(job):
             _update_repl_status(db, job_id, 'error', f'VM {vmid} not found on source cluster')
             return
 
-        logging.info(f"[XCREPL] Job {job_id}: starting replication of {vm_type}/{vmid} on {source_node}")
+        logging.info(f"[XCREPL] Job {job_id}: replicating {vm_type}/{vmid} from {source_node} -> {target_node} ({target_cid})")
 
         # 2. create snapshot
         snap_url = (
@@ -4900,7 +4918,7 @@ def _execute_replication(job):
             'name': f'xcrepl-{vmid}-tmp',
         }
         if target_storage:
-            clone_data['target'] = target_storage
+            clone_data['storage'] = target_storage
 
         clone_resp = source_mgr._api_post(clone_url, data=clone_data)
         if clone_resp.status_code != 200:

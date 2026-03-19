@@ -298,43 +298,15 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600):
             node_host = cached_ip
     
     if not node_host:
-        # Try to get node IP from Proxmox network config
+        # NS: use manager's _get_node_ip which does proper interface scoring
+        # (same mgmt interface, same VLAN, same subnet, reachability probe)
+        # Old code just grabbed first active non-lo interface which broke
+        # on multi-homed nodes with dedicated storage NICs (#132)
         try:
-            net_resp = pve_mgr._api_get(
-                f"https://{pve_mgr.host}:8006/api2/json/nodes/{node}/network")
-            if net_resp.status_code == 200:
-                for iface in net_resp.json().get('data', []):
-                    addr = iface.get('address', iface.get('cidr', ''))
-                    if addr and iface.get('active') and iface.get('iface', '') != 'lo':
-                        ip = addr.split('/')[0]
-                        if ip and not ip.startswith('127.'):
-                            node_host = ip
-                            break
-        except:
+            node_host = pve_mgr._get_node_ip(node)
+        except Exception:
             pass
-    
-    if not node_host:
-        # Try DNS resolution of node hostname
-        try:
-            import socket
-            node_host = socket.gethostbyname(node)
-        except:
-            pass
-    
-    if not node_host:
-        # Try corosync config for node IP
-        try:
-            corosync_resp = pve_mgr._api_get(
-                f"https://{pve_mgr.host}:8006/api2/json/cluster/config/nodes")
-            if corosync_resp.status_code == 200:
-                for n in corosync_resp.json().get('data', []):
-                    if n.get('name') == node or n.get('node') == node:
-                        node_host = n.get('ip', n.get('ring0_addr', ''))
-                        break
-        except:
-            pass
-    
-    # Last resort: cluster host
+
     if not node_host:
         node_host = pve_mgr.host
     
