@@ -65,7 +65,7 @@
             
             const [metricServers, setMetricServers] = useState([]);
             const [showAddBackupJob, setShowAddBackupJob] = useState(false);
-            // const [editBackupJob, setEditBackupJob] = useState(null);  // later
+            const [editBackupJob, setEditBackupJob] = useState(null);
             const [newBackupJob, setNewBackupJob] = useState({
                 enabled: 1,
                 schedule: 'daily',
@@ -1058,6 +1058,38 @@
                 } catch(e) {
                     console.error(e);
                 }
+            };
+
+            // #207: update existing backup job
+            const updateBackupJob = async () => {
+                if (!editBackupJob?.id) return;
+                try {
+                    const jobData = { ...editBackupJob };
+                    const jobId = jobData.id;
+                    delete jobData.id; delete jobData.type;
+                    // handle vmid
+                    if (!jobData.vmid || jobData.vmid === '' || jobData.vmid === 'all') {
+                        jobData.all = 1;
+                        delete jobData.vmid;
+                    }
+                    Object.keys(jobData).forEach(key => {
+                        if (key !== 'all' && (jobData[key] === '' || jobData[key] === null || jobData[key] === undefined)) delete jobData[key];
+                    });
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/backup/${jobId}`, {
+                        method: 'PUT', credentials: 'include',
+                        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+                        body: JSON.stringify(jobData)
+                    });
+                    if (res.ok) {
+                        setEditBackupJob(null);
+                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/backup`);
+                        if (r && r.ok) setBackupJobs(await r.json());
+                        addToast(t('backupJobUpdated') || 'Backup job updated', 'success');
+                    } else {
+                        const err = await res.json().catch(() => ({}));
+                        addToast(err.error || 'Failed to update', 'error');
+                    }
+                } catch (e) { addToast('Error: ' + e.message, 'error'); }
             };
 
             // NS: ZFS Replication CRUD - Issue #103
@@ -4376,13 +4408,19 @@
                                                     </td>
                                                     <td className="p-3 text-sm">{job.vmid || t('all')}</td>
                                                     <td className="p-3">
-                                                        <button onClick={() => deleteBackupJob(job.id)} className="p-1 hover:bg-red-500/20 rounded text-red-400"><Icons.Trash /></button>
+                                                        <div className="flex gap-1">
+                                                            <button onClick={() => setEditBackupJob({...job})} className="p-1 hover:bg-blue-500/20 rounded text-blue-400" title="Edit"><Icons.Edit className="w-4 h-4" /></button>
+                                                            <button onClick={() => deleteBackupJob(job.id)} className="p-1 hover:bg-red-500/20 rounded text-red-400" title="Delete"><Icons.Trash /></button>
+                                                        </div>
                                                     </td>
                                                 </tr>
                                             ))}
                                         </tbody>
                                     </table>
                                 </div>
+
+                                {/* Edit Backup Job Modal - #207 */}
+                                {editBackupJob && (<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={() => setEditBackupJob(null)}><div className="w-full max-w-2xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}><div className="p-4 border-b border-proxmox-border bg-proxmox-dark"><h3 className="font-semibold text-white flex items-center gap-2"><Icons.Edit className="w-4 h-4" />{t('editBackupJob') || 'Edit Backup Job'}</h3></div><div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">Storage *</label><select value={editBackupJob.storage || ''} onChange={e => setEditBackupJob({...editBackupJob, storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('selectStorage') || 'Select Storage'}</option>{(storage || []).filter(s => s.content?.includes('backup')).map(s => (<option key={s.storage} value={s.storage}>{s.storage}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('schedule')}</label><input type="text" value={editBackupJob.schedule || ''} onChange={e => setEditBackupJob({...editBackupJob, schedule: e.target.value})} placeholder="e.g. 02:00, sat 03:00" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">Node</label><select value={editBackupJob.node || ''} onChange={e => setEditBackupJob({...editBackupJob, node: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('allNodes') || 'All Nodes'}</option>{(clusterNodes || []).map(n => (<option key={n.node} value={n.node}>{n.node}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">Mode</label><select value={editBackupJob.mode || 'snapshot'} onChange={e => setEditBackupJob({...editBackupJob, mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="snapshot">Snapshot</option><option value="suspend">Suspend</option><option value="stop">Stop</option></select></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('compression') || 'Compression'}</label><select value={editBackupJob.compress || 'zstd'} onChange={e => setEditBackupJob({...editBackupJob, compress: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="0">None</option><option value="gzip">GZIP</option><option value="lzo">LZO</option><option value="zstd">ZSTD</option></select></div><div><label className="block text-sm text-gray-400 mb-1">VM IDs ({t('optional')})</label><input type="text" value={editBackupJob.vmid || ''} onChange={e => setEditBackupJob({...editBackupJob, vmid: e.target.value})} placeholder="100,101,102 or empty for all" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('notification') || 'Notification'}</label><select value={editBackupJob.mailnotification || 'always'} onChange={e => setEditBackupJob({...editBackupJob, mailnotification: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="always">{t('always') || 'Always'}</option><option value="failure">{t('onFailure') || 'On Failure'}</option><option value="never">{t('never') || 'Never'}</option></select></div><div><label className="block text-sm text-gray-400 mb-1">Email ({t('optional')})</label><input type="email" value={editBackupJob.mailto || ''} onChange={e => setEditBackupJob({...editBackupJob, mailto: e.target.value})} placeholder="admin@example.com" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="flex items-center gap-2"><input type="checkbox" checked={editBackupJob.enabled !== 0} onChange={e => setEditBackupJob({...editBackupJob, enabled: e.target.checked ? 1 : 0})} className="rounded" /><label className="text-sm text-gray-300">{t('enabled')}</label></div></div><div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-end gap-3"><button onClick={() => setEditBackupJob(null)} className="px-4 py-2 text-gray-400 hover:text-white">{t('cancel')}</button><button onClick={updateBackupJob} disabled={!editBackupJob.storage} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50">{t('save') || 'Save'}</button></div></div></div>)}
 
                                 {/* Add Backup Job Modal */}
                                 {showAddBackupJob && (

@@ -3118,13 +3118,13 @@
                                     <div className="text-center max-w-md p-6">
                                         <div className="text-red-400 text-xl mb-4">⚠️ {t('connectionError')}</div>
                                         
-                                        {window.location.protocol === 'https:' && (
+                                        {window.location.protocol === 'https:' && !reverseProxyEnabled && (
                                             <div className="text-gray-400 text-sm mb-4 p-4 bg-proxmox-dark rounded-lg text-left">
                                                 <p className="mb-3 font-medium text-white">{t('certInstructions')}</p>
                                                 <p className="mb-2">{t('certStep1')}</p>
-                                                <a 
+                                                <a
                                                     href={`https://${window.location.hostname}:${vncPort || ((parseInt(window.location.port) || 443) + 1)}/`}
-                                                    target="_blank" 
+                                                    target="_blank"
                                                     rel="noopener noreferrer"
                                                     className="block text-proxmox-orange hover:underline mb-3 break-all"
                                                 >
@@ -3136,15 +3136,17 @@
                                         )}
                                         
                                         <div className="flex gap-3 justify-center">
-                                            <button
-                                                onClick={() => {
-                                                    const port = vncPort || ((parseInt(window.location.port) || 443) + 1);
-                                                    window.open(`https://${window.location.hostname}:${port}/`, '_blank');
-                                                }}
-                                                className="px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors text-sm"
-                                            >
-                                                {t('acceptCert')}
-                                            </button>
+                                            {!reverseProxyEnabled && (
+                                                <button
+                                                    onClick={() => {
+                                                        const port = vncPort || ((parseInt(window.location.port) || 443) + 1);
+                                                        window.open(`https://${window.location.hostname}:${port}/`, '_blank');
+                                                    }}
+                                                    className="px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors text-sm"
+                                                >
+                                                    {t('acceptCert')}
+                                                </button>
+                                            )}
                                             <button
                                                 onClick={openInProxmox}
                                                 className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors text-sm"

@@ -171,11 +171,18 @@ def oidc_build_auth_url(config: dict, state: str) -> tuple:
     """Build the OIDC authorization URL for redirect
 
     MK: state parameter prevents CSRF - stored in session before redirect
-    Returns (url, nonce) tuple so caller can store nonce for later validation
+    Returns (url, nonce, code_verifier) tuple
     """
     endpoints = get_oidc_endpoints(config)
 
     nonce = secrets.token_urlsafe(32)
+
+    # #188: PKCE (Proof Key for Code Exchange) - required by Authentik, optional for others
+    code_verifier = secrets.token_urlsafe(96)  # 128 chars
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode('ascii')).digest()
+    ).rstrip(b'=').decode('ascii')
+
     params = {
         'client_id': config['client_id'],
         'response_type': 'code',
@@ -184,27 +191,27 @@ def oidc_build_auth_url(config: dict, state: str) -> tuple:
         'state': state,
         'response_mode': 'query',
         'nonce': nonce,
+        'code_challenge': code_challenge,
+        'code_challenge_method': 'S256',
     }
 
     # Entra-specific: request group claims
     if config.get('provider') == 'entra':
-        # Request groups in ID token (up to 200 groups)
         params['scope'] = config['scopes']
         if 'GroupMember.Read.All' not in params['scope']:
-            # We'll use graph API for groups instead
             pass
 
     query = '&'.join(f"{k}={requests.utils.quote(str(v))}" for k, v in params.items())
-    return f"{endpoints['authorization']}?{query}", nonce
+    return f"{endpoints['authorization']}?{query}", nonce, code_verifier
 
 
-def oidc_exchange_code(config: dict, code: str) -> dict:
+def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> dict:
     """Exchange authorization code for tokens
-    
+
     LW: Returns access_token, id_token, and optionally refresh_token
     """
     endpoints = get_oidc_endpoints(config)
-    
+
     data = {
         'client_id': config['client_id'],
         'client_secret': config['client_secret'],
@@ -212,9 +219,13 @@ def oidc_exchange_code(config: dict, code: str) -> dict:
         'redirect_uri': config['redirect_uri'],
         'grant_type': 'authorization_code',
     }
-    
+
     # NS: scope required by most providers (Authentik, Keycloak, Entra)
     data['scope'] = config.get('scopes', 'openid profile email')
+
+    # #188: PKCE code_verifier — required by Authentik, optional for others
+    if code_verifier:
+        data['code_verifier'] = code_verifier
     
     try:
         resp = requests.post(endpoints['token'], data=data, timeout=15)

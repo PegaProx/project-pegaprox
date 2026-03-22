@@ -50,10 +50,11 @@ def load_custom_roles() -> dict:
         tenant_roles = {}
         
         for row in cursor.fetchall():
+            # #167: name column = role ID (dict key), description = display name
             role_data = {
-                'name': row['name'],
+                'name': row['description'] or row['name'],
                 'permissions': json.loads(row['permissions'] or '[]'),
-                'description': row['description'] or ''
+                'description': ''
             }
             
             # Check if role has tenant_id (might not exist in old schema)
@@ -109,7 +110,7 @@ def save_custom_roles(roles: dict):
             ''', (
                 role_id,
                 json.dumps(role_data.get('permissions', [])),
-                role_data.get('description', ''),
+                role_data.get('name', role_id),
                 '',  # Empty string for global roles
                 now
             ))
@@ -123,7 +124,7 @@ def save_custom_roles(roles: dict):
                 ''', (
                     role_id,
                     json.dumps(role_data.get('permissions', [])),
-                    role_data.get('description', ''),
+                    role_data.get('name', role_id),
                     tenant_id,
                     now
                 ))

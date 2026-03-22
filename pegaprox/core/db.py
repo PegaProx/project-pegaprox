@@ -196,6 +196,7 @@ class PegaProxDB:
                 pass_encrypted TEXT NOT NULL,
                 ssl_verification INTEGER DEFAULT 1,
                 migration_threshold INTEGER DEFAULT 30,
+                migration_tolerance INTEGER DEFAULT 10,
                 check_interval INTEGER DEFAULT 300,
                 auto_migrate INTEGER DEFAULT 0,
                 balance_containers INTEGER DEFAULT 0,
@@ -895,6 +896,12 @@ class PegaProxDB:
                 except Exception as e:
                     logging.error(f"Failed to add cluster_type column: {e}")
 
+            if 'migration_tolerance' not in cluster_columns:
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN migration_tolerance INTEGER DEFAULT 10")
+                except Exception:
+                    pass
+
         except Exception as e:
             logging.error(f"Error checking clusters schema: {e}")
         
@@ -945,6 +952,22 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating balancing_excluded_vms table: {e}")
         
+        # NS: Pool exclusion from auto-balancing
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS balancing_excluded_pools (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    pool_name TEXT NOT NULL,
+                    reason TEXT,
+                    created_by TEXT,
+                    created_at TEXT,
+                    UNIQUE(cluster_id, pool_name)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating balancing_excluded_pools table: {e}")
+
         # MK: Migration - create update_schedules table if not exists
         try:
             cursor.execute('''
@@ -1184,6 +1207,20 @@ class PegaProxDB:
             logging.info("Ensured cve_history table exists")
         except Exception as e:
             logging.error(f"Error creating cve_history table: {e}")
+
+        # Plugin state tracking
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS plugin_state (
+                    plugin_id TEXT PRIMARY KEY,
+                    enabled INTEGER DEFAULT 0,
+                    loaded_at TEXT,
+                    error TEXT DEFAULT ''
+                )
+            ''')
+            logging.info("Ensured plugin_state table exists")
+        except Exception as e:
+            logging.error(f"Error creating plugin_state table: {e}")
 
         conn.commit()
         logging.info("DB schema initialized")

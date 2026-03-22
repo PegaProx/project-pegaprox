@@ -75,14 +75,13 @@ def oidc_authorize():
     state = secrets.token_urlsafe(32)
 
     # Store state in a temporary way (cookie-based since no session yet)
-    auth_url, nonce = oidc_build_auth_url(config, state)
+    auth_url, nonce, code_verifier = oidc_build_auth_url(config, state)
 
-    response = make_response(jsonify({'auth_url': auth_url}))  # NS: Don't return state in body - it's in the cookie
-    # LW: Store state in secure cookie for callback verification
+    response = make_response(jsonify({'auth_url': auth_url}))
     from pegaprox.utils.audit import _is_trusted_proxy
     is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
-    # MK Feb 2026 - store nonce alongside state for ID token validation
-    response.set_cookie('oidc_state', f"{state}:{nonce}", httponly=True, secure=is_secure, samesite='Lax', max_age=600)
+    # #188: store state + nonce + PKCE code_verifier in cookie
+    response.set_cookie('oidc_state', f"{state}:{nonce}:{code_verifier}", httponly=True, secure=is_secure, samesite='Lax', max_age=600)
     return response
 
 
@@ -132,19 +131,22 @@ def oidc_callback():
     if not code:
         return jsonify({'error': 'Authorization code is required'}), 400
     
-    # NS: Verify CSRF state + extract nonce (MK Feb 2026)
+    # NS: Verify CSRF state + extract nonce + PKCE verifier (#188)
     stored_cookie = request.cookies.get('oidc_state', '')
     stored_nonce = None
-    if ':' in stored_cookie:
-        stored_state, stored_nonce = stored_cookie.split(':', 1)
-    else:
-        stored_state = stored_cookie
+    stored_verifier = None
+    cookie_parts = stored_cookie.split(':')
+    stored_state = cookie_parts[0] if cookie_parts else ''
+    if len(cookie_parts) >= 2:
+        stored_nonce = cookie_parts[1]
+    if len(cookie_parts) >= 3:
+        stored_verifier = cookie_parts[2]
     if not stored_state or stored_state != state:
         logging.warning(f"[OIDC] State mismatch - possible CSRF attack")
         return jsonify({'error': 'Invalid state parameter (CSRF protection)'}), 400
 
-    # Step 1: Exchange code for tokens
-    token_data = oidc_exchange_code(config, code)
+    # Step 1: Exchange code for tokens (with PKCE verifier if available)
+    token_data = oidc_exchange_code(config, code, code_verifier=stored_verifier)
     if 'error' in token_data:
         logging.warning(f"[OIDC] Token exchange failed: {token_data['error']}")
         return jsonify({'error': 'Authentication failed - please try again'}), 401

@@ -1119,34 +1119,54 @@ def get_smbios_autoconfig_status_all(cluster_id):
     mgr = cluster_managers[cluster_id]
     
     try:
-        # Get all nodes - try different methods
+        # #198: get nodes with online/offline status
+        node_status = {}
         try:
-            node_status = mgr.get_node_status()
-            node_names = list(node_status.keys()) if node_status else []
+            node_status = mgr.get_node_status() or {}
         except:
+            pass
+        node_names = list(node_status.keys()) if node_status else []
+        if not node_names:
             try:
                 nodes = mgr.get_nodes()
                 node_names = [n.get('node', n.get('name', '')) for n in nodes if n]
             except:
                 node_names = []
-        
+
         if not node_names:
             return jsonify({'error': 'No nodes available'}), 400
-        
+
+        # #198: bulk-resolve node IPs from cluster/status (same as deploy-all)
+        node_ips = {}
+        try:
+            cs_resp = mgr._api_get(f"https://{mgr.host}:8006/api2/json/cluster/status")
+            if cs_resp.status_code == 200:
+                for item in cs_resp.json().get('data', []):
+                    if item.get('type') == 'node':
+                        node_ips[item.get('name', '')] = item.get('ip', '')
+        except:
+            pass
+
         results = {}
-        
+
         for node_name in node_names:
             if not node_name:
                 continue
-                
+
+            # #198: skip offline nodes early
+            ns = node_status.get(node_name, {})
+            if ns.get('offline') or ns.get('status') == 'offline':
+                results[node_name] = {'installed': False, 'running': False, 'error': 'Node offline'}
+                continue
+
             try:
-                # Get node IP
-                node_ip = mgr._get_node_ip(node_name)
+                # use bulk-resolved IP, fall back to _get_node_ip
+                node_ip = node_ips.get(node_name) or mgr._get_node_ip(node_name)
                 if not node_ip:
                     results[node_name] = {'installed': False, 'running': False, 'error': 'Could not determine node IP'}
                     continue
-                
-                ssh = mgr._ssh_connect(node_ip)
+
+                ssh = mgr._ssh_connect(node_ip, retries=1)
                 if not ssh:
                     results[node_name] = {'installed': False, 'running': False, 'error': 'SSH not available'}
                     continue

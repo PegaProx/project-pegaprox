@@ -157,6 +157,7 @@
             const [testEmailAddress, setTestEmailAddress] = useState('');
             const [loginBgFile, setLoginBgFile] = useState(null);
             const [loginBgError, setLoginBgError] = useState(null);
+            const [discoveredPlugins, setDiscoveredPlugins] = useState([]);
             
             // Password policy state - NS Jan 2026
             const [passwordPolicy, setPasswordPolicy] = useState({
@@ -190,6 +191,7 @@
                     fetchUsers();
                     fetchAuditLogs();
                     fetchServerSettings();
+                    fetchPlugins();
                     fetchTenants();
                     fetchPermissions();
                     fetchClusters();
@@ -466,6 +468,7 @@
             
             // update custom role
             const handleUpdateRole = async (roleId, data) => {
+                console.log('[ROLE] Saving role:', roleId, data);
                 try {
                     const r = await fetch(`${API_URL}/roles/${roleId}`, {
                         method: 'PUT',
@@ -473,12 +476,20 @@
                         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                         body: JSON.stringify(data)
                     });
+                    console.log('[ROLE] Response:', r.status, r.statusText);
                     if(r.ok) {
                         setEditingRole(null);
                         fetchRoles();
                         addToast(t('roleSaved') || 'Role saved', 'success');
+                    } else {
+                        const err = await r.json().catch(() => ({}));
+                        console.log('[ROLE] Error response:', err);
+                        addToast(err.error || `Failed to update role (${r.status})`, 'error');
                     }
-                } catch(e) {}
+                } catch(e) {
+                    console.error('[ROLE] Network error:', e);
+                    addToast('Network error: ' + e.message, 'error');
+                }
             };
             
             // delete custom role
@@ -996,7 +1007,31 @@
                     console.error('fetching server settings:', err);
                 }
             };
-            
+
+            // NS: Mar 2026 - Plugin management
+            const fetchPlugins = async () => {
+                try {
+                    const res = await fetch(`${API_URL}/plugins`, { credentials: 'include', headers: getAuthHeaders() });
+                    if (res && res.ok) setDiscoveredPlugins(await res.json());
+                } catch (e) { console.warn('plugins fetch:', e); }
+            };
+            const togglePlugin = async (pluginId, enabled) => {
+                try {
+                    const action = enabled ? 'disable' : 'enable';
+                    const res = await fetch(`${API_URL}/plugins/${pluginId}/${action}`, {
+                        method: 'POST', credentials: 'include', headers: getAuthHeaders()
+                    });
+                    if (res && res.ok) {
+                        const data = await res.json().catch(() => ({}));
+                        addToast(data.message || `Plugin ${action}d`, 'success');
+                        fetchPlugins();
+                    } else {
+                        const err = await res.json().catch(() => ({}));
+                        addToast(err.error || `Failed to ${action} plugin`, 'error');
+                    }
+                } catch (e) { addToast('Network error', 'error'); }
+            };
+
             // LW: Feb 2026 - LDAP save and test functions
             const saveLdapSettings = async () => {
                 setLoading(true);
@@ -3811,12 +3846,10 @@
                                                         </td>
                                                         <td className="px-4 py-3 text-right">
                                                             {!role.builtin && (
-                                                                <button
-                                                                    onClick={() => handleDeleteRole(role.id, role.tenant_id)}
-                                                                    className="text-red-400 hover:text-red-300 text-sm"
-                                                                >
-                                                                    {t('delete') || 'Delete'}
-                                                                </button>
+                                                                <div className="flex gap-2 justify-end">
+                                                                    <button onClick={() => setEditingRole({...role})} className="text-blue-400 hover:text-blue-300 text-sm">{t('edit') || 'Edit'}</button>
+                                                                    <button onClick={() => handleDeleteRole(role.id, role.tenant_id)} className="text-red-400 hover:text-red-300 text-sm">{t('delete') || 'Delete'}</button>
+                                                                </div>
                                                             )}
                                                         </td>
                                                     </tr>
@@ -3824,7 +3857,50 @@
                                             </tbody>
                                         </table>
                                     </div>
-                                    
+
+
+                                    {/* Edit Role Form - #167 */}
+                                    {editingRole && (
+                                        <div className="bg-proxmox-dark border border-blue-500/30 rounded-xl p-4 space-y-4 mt-4">
+                                            <h4 className="font-medium text-white">{t('editRole') || 'Edit Role'}: {editingRole.name || editingRole.id}</h4>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'}</label>
+                                                    <input value={editingRole.name || ''} onChange={e => setEditingRole({...editingRole, name: e.target.value})}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('scope') || 'Scope'}</label>
+                                                    <select value={editingRole.tenant_id || ''} onChange={e => setEditingRole({...editingRole, tenant_id: e.target.value})}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm">
+                                                        <option value="">{t('global') || 'Global'}</option>
+                                                        {tenants.map(t => (<option key={t.id} value={t.id}>{t.name}</option>))}
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-2">{t('permissions') || 'Permissions'}</label>
+                                                <div className="grid grid-cols-4 gap-2 max-h-64 overflow-y-auto bg-proxmox-darker p-3 rounded-lg">
+                                                    {allPermissions.map(p => (
+                                                        <label key={p.permission} className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer hover:text-white">
+                                                            <input type="checkbox" checked={(editingRole.permissions || []).includes(p.permission)}
+                                                                onChange={e => {
+                                                                    if (e.target.checked) setEditingRole({...editingRole, permissions: [...(editingRole.permissions || []), p.permission]});
+                                                                    else setEditingRole({...editingRole, permissions: (editingRole.permissions || []).filter(x => x !== p.permission)});
+                                                                }} className="rounded border-gray-600" />
+                                                            {p.permission}
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => handleUpdateRole(editingRole.id, { name: editingRole.name, permissions: editingRole.permissions, tenant_id: editingRole.tenant_id })}
+                                                    className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm">{t('save') || 'Save'}</button>
+                                                <button onClick={() => setEditingRole(null)} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm">{t('cancel') || 'Cancel'}</button>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {/* Role Templates Section */}
                                     <div className="mt-6">
                                         <h4 className="text-md font-semibold text-white mb-3 flex items-center gap-2">
@@ -4926,6 +5002,63 @@
                                         </div>
                                     </div>
                                     
+                                    {/* NS: Plugin Management */}
+                                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
+                                        <div className="flex items-center justify-between">
+                                            <h4 className="font-medium text-white flex items-center gap-2">
+                                                <Icons.Package className="w-4 h-4" />
+                                                {t('plugins') || 'Plugins'}
+                                            </h4>
+                                            <button onClick={async () => {
+                                                try {
+                                                    await fetch(`${API_URL}/plugins/rescan`, { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
+                                                    fetchPlugins();
+                                                    addToast('Plugins rescanned', 'success');
+                                                } catch (e) {}
+                                            }} className="text-xs text-gray-400 hover:text-white flex items-center gap-1">
+                                                <Icons.RefreshCw className="w-3 h-3" />
+                                                Rescan
+                                            </button>
+                                        </div>
+                                        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
+                                            <p className="text-xs text-yellow-400">
+                                                {t('pluginDisclaimer') || 'PegaProx takes no responsibility or liability for community plugins. Administrators should always review and scan plugin code before enabling. Only install plugins from trusted sources.'}
+                                            </p>
+                                        </div>
+                                        {discoveredPlugins.length === 0 ? (
+                                            <p className="text-sm text-gray-500">{t('noPlugins') || 'No plugins detected. Place plugin folders in the plugins/ directory.'}</p>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {discoveredPlugins.map(plugin => (
+                                                    <div key={plugin.id} className="flex items-center justify-between p-3 bg-proxmox-darker rounded-lg border border-proxmox-border">
+                                                        <div className="flex-1 min-w-0 mr-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="font-medium text-white text-sm">{plugin.name}</span>
+                                                                <span className="text-xs text-gray-500">v{plugin.version}</span>
+                                                            </div>
+                                                            {plugin.author && <p className="text-xs text-gray-500">{t('pluginAuthor') || 'by'} {plugin.author}</p>}
+                                                            {plugin.description && <p className="text-xs text-gray-400 mt-0.5">{plugin.description}</p>}
+                                                            {plugin.error && <p className="text-xs text-red-400 mt-0.5">{plugin.error}</p>}
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <div className={`toggle-switch ${plugin.enabled ? 'active' : ''}`} onClick={() => togglePlugin(plugin.id, plugin.enabled)} />
+                                                            <button onClick={async () => {
+                                                                if (!confirm(`Delete plugin "${plugin.name}"? This removes all plugin files.`)) return;
+                                                                try {
+                                                                    const r = await fetch(`${API_URL}/plugins/${plugin.id}`, { method: 'DELETE', credentials: 'include', headers: getAuthHeaders() });
+                                                                    if (r && r.ok) { addToast('Plugin deleted', 'success'); fetchPlugins(); }
+                                                                    else { const e = await r.json().catch(() => ({})); addToast(e.error || 'Failed', 'error'); }
+                                                                } catch (e) { addToast('Error', 'error'); }
+                                                            }} className="text-red-400/50 hover:text-red-400 transition-colors" title="Delete plugin">
+                                                                <Icons.Trash2 className="w-4 h-4" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
                                     {/* Save Button */}
                                     <div className="flex justify-end gap-3">
                                         <button
@@ -4937,7 +5070,7 @@
                                             {t('saveSettings')}
                                         </button>
                                     </div>
-                                    
+
                                     {/* Restart Server Section */}
                                     <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
                                         <div className="flex items-center justify-between">
@@ -5021,9 +5154,10 @@
                                             </button>
                                         </div>
                                     </div>
+
                                 </div>
                             )}
-                            
+
                             {activeTab === 'audit' && (
                                 <div className="space-y-4">
                                     {/* Filters and Export */}
@@ -5650,6 +5784,11 @@
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-proxmox-dark text-gray-300 hover:text-white transition-colors">
                                                                 <Icons.Github className="w-3 h-3" />
                                                                 <strong>IMNotMax</strong> — French
+                                                            </a>
+                                                            <a href="https://github.com/FernandoRD" target="_blank" rel="noopener noreferrer"
+                                                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-proxmox-dark text-gray-300 hover:text-white transition-colors">
+                                                                <Icons.Github className="w-3 h-3" />
+                                                                <strong>FernandoRD</strong> — Portuguese
                                                             </a>
                                                         </div>
                                                     </div>

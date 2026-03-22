@@ -1849,6 +1849,92 @@
             );
         }
 
+        // NS: Excluded Pools from auto-balancing
+        function ExcludedPoolsList({ clusterId, addToast, getAuthHeaders }) {
+            const { t } = useTranslation();
+            const [excludedPools, setExcludedPools] = useState([]);
+            const [allPools, setAllPools] = useState([]);
+
+            const fetchExcluded = async () => {
+                try {
+                    const r = await fetch(`${API_URL}/clusters/${clusterId}/excluded-pools`, { credentials: 'include', headers: getAuthHeaders() });
+                    if (r.ok) setExcludedPools(await r.json());
+                } catch (e) {}
+            };
+            const fetchPools = async () => {
+                try {
+                    const r = await fetch(`${API_URL}/clusters/${clusterId}/pools`, { credentials: 'include', headers: getAuthHeaders() });
+                    if (r.ok) { const data = await r.json(); setAllPools(data.pools || data || []); }
+                } catch (e) {}
+            };
+            useEffect(() => { fetchExcluded(); fetchPools(); }, [clusterId]);
+
+            const excludePool = async (poolId) => {
+                const r = await fetch(`${API_URL}/clusters/${clusterId}/excluded-pools/${poolId}`, {
+                    method: 'POST', credentials: 'include',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: 'Manually excluded' })
+                });
+                if (r.ok) { addToast(`Pool "${poolId}" excluded`, 'success'); fetchExcluded(); }
+                else addToast('Failed to exclude pool', 'error');
+            };
+            const includePool = async (poolId) => {
+                const r = await fetch(`${API_URL}/clusters/${clusterId}/excluded-pools/${poolId}`, {
+                    method: 'DELETE', credentials: 'include', headers: getAuthHeaders()
+                });
+                if (r.ok) { addToast(`Pool "${poolId}" included`, 'success'); fetchExcluded(); }
+                else addToast('Failed', 'error');
+            };
+
+            const excludedNames = excludedPools.map(p => p.pool_name);
+            const available = allPools.filter(p => !excludedNames.includes(p.poolid || p.id || p.name));
+
+            return (
+                <div>
+                    {excludedPools.length > 0 && (
+                        <div className="space-y-1 mb-3">
+                            {excludedPools.map(pool => (
+                                <div key={pool.pool_name} className="flex items-center justify-between px-3 py-2 bg-red-500/5 border border-red-500/20 rounded-lg">
+                                    <div className="flex items-center gap-2">
+                                        <Icons.Layers className="w-4 h-4 text-red-400" />
+                                        <span className="text-sm text-white">{pool.pool_name}</span>
+                                        {pool.reason && <span className="text-xs text-gray-500">({pool.reason})</span>}
+                                    </div>
+                                    <button onClick={() => includePool(pool.pool_name)} className="text-xs text-green-400 hover:text-green-300">{t('include') || 'Include'}</button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    <div className="flex gap-2">
+                        <select
+                            id={`excludePoolSelect-${clusterId}`}
+                            className="flex-1 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
+                            defaultValue=""
+                        >
+                            <option value="" disabled>{t('selectPool') || 'Select pool to exclude...'}</option>
+                            {available.map(p => (
+                                <option key={p.poolid || p.name} value={p.poolid || p.name}>
+                                    {p.poolid || p.name}{p.comment ? ` — ${p.comment}` : ''}
+                                </option>
+                            ))}
+                        </select>
+                        <button
+                            onClick={() => {
+                                const select = document.getElementById(`excludePoolSelect-${clusterId}`);
+                                if (!select?.value) return;
+                                excludePool(select.value);
+                                select.value = '';
+                            }}
+                            className="px-3 py-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 text-sm flex items-center gap-1"
+                        >
+                            <Icons.Ban className="w-4 h-4" />
+                            {t('exclude') || 'Exclude'}
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
         // update Manager Section Component (for Settings tab)
         function UpdateManagerSection({ clusterId, addToast }) {
             const { t } = useTranslation();
@@ -2095,19 +2181,19 @@
                         headers: getAuthHeaders()
                     });
                     if (!r.ok) {
-                        setRollingUpdate(null);
+                        // #179: don't clear on transient errors (node rebooting, API temporarily down)
                         return;
                     }
                     const d = await r.json();
-                    // Backend already clears old/invalid status, just use what it returns
                     if (d.success && d.rolling_update) {
                         setRollingUpdate(d.rolling_update);
-                    } else {
+                    } else if (d.success) {
+                        // only clear when API explicitly says no rolling update running
                         setRollingUpdate(null);
                     }
                 } catch (e) {
-                    console.error('getting rolling update status:', e);
-                    setRollingUpdate(null);
+                    // #179: network error during node reboot — keep existing state, don't hide log
+                    console.warn('rolling status poll error:', e);
                 }
             };
 
@@ -2968,7 +3054,7 @@
                                 <div className="bg-proxmox-dark rounded-lg p-3 mb-4 text-sm">
                                     <div className="flex justify-between text-gray-400">
                                         <span>{t('nodes')}:</span>
-                                        <span className="text-white">{updateStatus?.summary?.total_nodes || 0}</span>
+                                        <span className="text-white">{skipUpToDate ? `${nodesWithUpdates}/${updateStatus?.summary?.total_nodes || 0}` : (updateStatus?.summary?.total_nodes || 0)}</span>
                                     </div>
                                     <div className="flex justify-between text-gray-400">
                                         <span>{t('packagesAvailable')}:</span>
@@ -2976,7 +3062,7 @@
                                     </div>
                                     <div className="flex justify-between text-gray-400">
                                         <span>{t('estimatedTime')}:</span>
-                                        <span className="text-white">~{(updateStatus?.summary?.total_nodes || 1) * (includeReboot ? 10 : 5)} {t('minutes')}</span>
+                                        <span className="text-white">~{(skipUpToDate ? (nodesWithUpdates || 1) : (updateStatus?.summary?.total_nodes || 1)) * (includeReboot ? 10 : 5)} {t('minutes')}</span>
                                     </div>
                                     {skipUpToDate && (
                                         <div className="flex justify-between text-gray-400 mt-1">

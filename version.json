@@ -1,7 +1,7 @@
 {
-    "version": "0.9.2.2",
-    "build": "2026.03.20",
-    "release_date": "2026-03-20",
+    "version": "0.9.3",
+    "build": "2026.03.22",
+    "release_date": "2026-03-22",
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
     "update_archive": "https://github.com/PegaProx/project-pegaprox/archive/refs/heads/main.tar.gz",
@@ -38,6 +38,7 @@
         "pegaprox/api/vms.py",
         "pegaprox/api/vmware.py",
         "pegaprox/api/ceph.py",
+        "pegaprox/api/plugins.py",
         "pegaprox/api/site_recovery.py",
         "pegaprox/api/xhm.py",
         "pegaprox/api/.ssh_ws_server.py",
@@ -198,6 +199,32 @@
     ],
     "changelog_0922": [
         "fix: sponsor section visible in both Corporate and Modern layout"
+    ],
+    "changelog_093": [
+        "feat: plugin system — auto-discover, enable/disable, runtime loading, plugin API",
+        "feat: pool exclusion from auto-balancing (#exclude pools like VMs/nodes)",
+        "feat: migration tolerance/hysteresis — deadband + 15min VM cooldown to prevent ping-pong",
+        "feat: storage cluster tolerance — per-storage-cluster deadband for storage balancing",
+        "feat: CVE scanner PNG + PDF export",
+        "feat: backup schedule editing (#207)",
+        "feat: custom role editing (#167)",
+        "feat: @FernandoRD added to About credits (Portuguese)",
+        "fix: cross-cluster replication clone uses target storage on source cluster (#192)",
+        "fix: CVE scanner / hardening SSH fails on failover node — wrong IP (#199)",
+        "fix: SMBIOS status-all random SSH failures — skip offline nodes (#198)",
+        "fix: PBS VM backups not showing for linked PBS (#143)",
+        "fix: login background upload 403 behind reverse proxy — CSRF check (#210)",
+        "fix: rolling update log vanishes during node reboot (#179)",
+        "fix: rolling update confirmation shows wrong node count (#180)",
+        "fix: migration false failure on WARNINGS exit status (#184)",
+        "fix: Ceph panel not rendering on PVE 9 + Ceph Squid — multi-node fallback (#191)",
+        "fix: OIDC PKCE support for Authentik (#188)",
+        "fix: reverse proxy WebSocket port reuse for VNC/SSH (PR #173)",
+        "fix: nginx.conf example updated with correct WebSocket URL patterns",
+        "fix: support bundle deque for large logs — prevents OOM on 700MB+ log dirs",
+        "fix: custom role name not persisted — name/ID conflation (#167)",
+        "fix: cluster icon stays Database when offline (only color changes)",
+        "fix: corporate overview Cluster Storage shows all datastores (shared + local)"
     ],
     "breaking_changes": []
 }

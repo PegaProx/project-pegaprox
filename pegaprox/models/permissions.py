@@ -88,6 +88,10 @@ PERMISSIONS = {
     'site_recovery.manage': 'Create/edit/delete recovery plans and VMs',
     'site_recovery.failover': 'Execute failover, failback and test operations',
 
+    # Plugin permissions
+    'plugins.view': 'View installed plugins',
+    'plugins.manage': 'Enable, disable and configure plugins',
+
     # Admin permissions
     'admin.users': 'Manage users',
     'admin.roles': 'Manage custom roles',
@@ -173,6 +177,7 @@ ROLE_PERMISSIONS = {
         'pool.view', 'pool.assign',
         'replication.view',
         'site_recovery.view',
+        'plugins.view',
         'pbs.view', 'pbs.datastore.view', 'pbs.datastore.gc', 'pbs.datastore.verify',
         'pbs.snapshot.notes', 'pbs.snapshot.browse',
         'pbs.jobs.view', 'pbs.tasks.view',
@@ -194,6 +199,7 @@ ROLE_PERMISSIONS = {
         'pool.view',
         'replication.view',
         'site_recovery.view',
+        'plugins.view',
         'pbs.view', 'pbs.datastore.view', 'pbs.jobs.view', 'pbs.tasks.view',
         'pbs.notifications.view', 'pbs.traffic.view', 'pbs.disks.view', 'pbs.subscription.view',
         'vmware.view', 'vmware.vm.view', 'vmware.host.view', 'vmware.datastore.view', 'vmware.network.view',

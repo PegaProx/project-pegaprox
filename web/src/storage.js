@@ -56,6 +56,7 @@
             const [newClusterName, setNewClusterName] = useState('');
             const [newClusterStorages, setNewClusterStorages] = useState([]);
             const [newClusterThreshold, setNewClusterThreshold] = useState(20);
+            const [newClusterTolerance, setNewClusterTolerance] = useState(5);
             const [balancingLoading, setBalancingLoading] = useState(false);
             
             // NS: ESXi Integration state - Dec 2025
@@ -312,7 +313,8 @@
                         body: JSON.stringify({
                             name: newClusterName,
                             storages: newClusterStorages,
-                            threshold: newClusterThreshold
+                            threshold: newClusterThreshold,
+                            tolerance: newClusterTolerance
                         })
                     });
                     if (response && response.ok) {
@@ -1312,8 +1314,8 @@
                                                 </div>
                                             )}
                                             
-                                            {/* Threshold Slider */}
-                                            <div className="p-4 bg-proxmox-dark rounded-lg">
+                                            {/* Threshold + Tolerance Sliders */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg space-y-4">
                                                 <Slider
                                                     label={t('balancingThreshold') || 'Balancing Threshold'}
                                                     description={t('thresholdDesc') || 'Trigger balancing when imbalance exceeds this value'}
@@ -1322,6 +1324,21 @@
                                                     min={5}
                                                     max={50}
                                                     step={5}
+                                                />
+                                                <Slider
+                                                    label={t('migrationTolerance') || 'Tolerance'}
+                                                    description={t('migrationToleranceDesc') || 'Deadband to prevent ping-pong (0 = disabled)'}
+                                                    value={clusterStatus.tolerance || 5}
+                                                    onChange={(v) => {
+                                                        setClusterStatus(prev => prev ? {...prev, tolerance: v} : null);
+                                                        if (thresholdTimer.current) clearTimeout(thresholdTimer.current);
+                                                        thresholdTimer.current = setTimeout(async () => {
+                                                            try { await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${clusterStatus.id}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({tolerance: v}) }); } catch(e) {}
+                                                        }, 500);
+                                                    }}
+                                                    min={0}
+                                                    max={20}
+                                                    step={1}
                                                 />
                                             </div>
                                             
@@ -1483,6 +1500,15 @@
                                             min={5}
                                             max={50}
                                             step={5}
+                                        />
+                                        <Slider
+                                            label={t('migrationTolerance') || 'Tolerance'}
+                                            description={t('migrationToleranceDesc') || 'Deadband to prevent ping-pong (0 = disabled)'}
+                                            value={newClusterTolerance}
+                                            onChange={setNewClusterTolerance}
+                                            min={0}
+                                            max={20}
+                                            step={1}
                                         />
                                     </div>
                                     <div className="flex gap-2 justify-end pt-4">

@@ -193,23 +193,25 @@ def get_ceph_overview(cluster_id):
         if not online_nodes:
             return jsonify(result)
 
-        node = online_nodes[0]
+        # #191: try each online node until one has Ceph (not all nodes run Ceph daemons)
+        ceph_node = None
+        for candidate in online_nodes:
+            try:
+                sr = session.get(_ceph_url(manager, candidate, '/status'), timeout=10)
+                if sr.status_code == 200:
+                    ceph_node = candidate
+                    result['available'] = True
+                    result['status'] = sr.json().get('data', {})
+                    break
+            except:
+                continue
 
-        # Check if Ceph is available
-        try:
-            status_r = session.get(_ceph_url(manager, node, '/status'), timeout=10)
-            if status_r.status_code == 200:
-                result['available'] = True
-                result['status'] = status_r.json().get('data', {})
-            elif status_r.status_code in (501, 500):
-                return jsonify(result)
-        except:
+        if not ceph_node:
             return jsonify(result)
 
-        if not result['available']:
-            return jsonify(result)
+        result['node'] = ceph_node
 
-        # Fetch all Ceph data
+        # Fetch Ceph data from per-node endpoints (works on PVE 7/8/9)
         endpoints = {
             'osd': '/osd',
             'mon': '/mon',
@@ -222,13 +224,49 @@ def get_ceph_overview(cluster_id):
 
         for key, sub in endpoints.items():
             try:
-                r = session.get(_ceph_url(manager, node, sub), timeout=10)
+                r = session.get(_ceph_url(manager, ceph_node, sub), timeout=10)
                 if r.status_code == 200:
                     raw = r.json().get('data', [])
-                    # MK: OSD endpoint returns CRUSH tree, flatten it (#113)
                     if key == 'osd':
                         raw = _flatten_osd_tree(raw)
                     result[key] = raw
+            except:
+                pass
+
+        # #191: fallback for missing data — try other nodes, then cluster endpoints
+        # some endpoints may 501 on specific PVE versions (PVE 9 + Ceph Squid)
+        for key, sub in endpoints.items():
+            if result.get(key):
+                continue
+            # try other online nodes
+            for fallback in online_nodes:
+                if fallback == ceph_node:
+                    continue
+                try:
+                    r = session.get(_ceph_url(manager, fallback, sub), timeout=10)
+                    if r.status_code == 200:
+                        raw = r.json().get('data', [])
+                        if key == 'osd':
+                            raw = _flatten_osd_tree(raw)
+                        result[key] = raw
+                        break
+                except:
+                    continue
+
+        # last resort: cluster-level metadata endpoint (PVE 9+)
+        cluster_url = f"https://{host}:8006/api2/json/cluster/ceph"
+        if not result.get('osd') or not result.get('mon'):
+            try:
+                r = session.get(f"{cluster_url}/metadata", timeout=10)
+                if r.status_code == 200:
+                    meta = r.json().get('data', {})
+                    for mkey in ('osd', 'mon', 'mgr', 'mds'):
+                        if not result.get(mkey) and meta.get(mkey):
+                            mdata = meta[mkey]
+                            if isinstance(mdata, list):
+                                result[mkey] = mdata
+                            elif isinstance(mdata, dict):
+                                result[mkey] = [{'name': k, **(v if isinstance(v, dict) else {})} for k, v in mdata.items()]
             except:
                 pass
 

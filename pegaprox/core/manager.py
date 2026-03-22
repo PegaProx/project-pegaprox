@@ -174,7 +174,8 @@ class PegaProxManager:
         self.stop_event = threading.Event()
         self.last_run = None
         self.last_migration_log = []
-        
+        self._vm_migration_cooldown = {}  # {vmid: timestamp} — prevent ping-pong
+
         # maintenance mode
         self.nodes_in_maintenance = {}
         self._cached_node_dict = {}
@@ -1209,16 +1210,17 @@ class PegaProxManager:
         
         score_diff = max_score - min_score
         threshold_value = self.config.migration_threshold
-        
-        # self.logger.debug(f"scores: {scores}")  # very spammy
+        tolerance = getattr(self.config, 'migration_tolerance', 10) or 0
+        effective_threshold = threshold_value + tolerance
+
         self.logger.info(f"Score difference: {score_diff:.2f} (Min: {min_node}={min_score:.2f}, Max: {max_node}={max_score:.2f})")
-        self.logger.info(f"Migration threshold: {threshold_value}%")
-        
-        if score_diff > threshold_value:
-            self.logger.info(f"[WARN] Balance needed! Score difference {score_diff:.2f} > threshold {threshold_value}")
+        self.logger.info(f"Migration threshold: {threshold_value} + tolerance {tolerance} = {effective_threshold}")
+
+        if score_diff > effective_threshold:
+            self.logger.info(f"[WARN] Balance needed! Score difference {score_diff:.2f} > {effective_threshold}")
             return True, max_node, min_node
         else:
-            self.logger.info(f"[OK] Cluster is balanced. Score difference {score_diff:.2f} <= threshold {threshold_value}")
+            self.logger.info(f"[OK] Cluster balanced. Score diff {score_diff:.2f} <= {effective_threshold}")
             return False, None, None
     
     def _check_affinity_violation(self, vmid, target_node, vm_nodes=None):
@@ -1413,15 +1415,29 @@ class PegaProxManager:
         excluded_vmids = self.get_balancing_excluded_vms()
         if excluded_vmids:
             self.logger.info(f"VMs excluded from balancing: {excluded_vmids}")
-        
+
+        # NS: Get excluded pools
+        excluded_pools = self.get_balancing_excluded_pools()
+        if excluded_pools:
+            self.logger.info(f"Pools excluded from balancing: {excluded_pools}")
+
         # Filter VMs on source node that are running
+        # NS: VM cooldown — skip VMs migrated in last 15 min to prevent ping-pong
+        cooldown_secs = 900
+        now = time.time()
+        cooled_vmids = {vmid for vmid, ts in self._vm_migration_cooldown.items() if now - ts < cooldown_secs}
+        # clean up old entries
+        self._vm_migration_cooldown = {v: t for v, t in self._vm_migration_cooldown.items() if now - t < cooldown_secs}
+
         candidates = [
-            vm for vm in vms 
-            if vm.get('node') == source_node and 
+            vm for vm in vms
+            if vm.get('node') == source_node and
             vm.get('status') == 'running' and
             vm.get('type') in ['qemu', 'lxc'] and
             vm.get('vmid') not in excluded_vmids and  # MK: Skip excluded VMs
-            vm.get('vmid') not in exclude_vmids  # LW: Skip already-migrated VMs this cycle
+            vm.get('vmid') not in exclude_vmids and  # LW: Skip already-migrated VMs this cycle
+            vm.get('pool', '') not in excluded_pools and  # NS: Skip VMs in excluded pools
+            vm.get('vmid') not in cooled_vmids  # NS: Skip recently migrated VMs
         ]
         
         # Log if any VMs were excluded
@@ -2991,6 +3007,33 @@ class PegaProxManager:
             self.logger.error(f"Error checking VM balancing exclusion: {e}")
             return {'excluded': False}
     
+    def get_balancing_excluded_pools(self) -> list:
+        """Get list of pool names excluded from balancing"""
+        try:
+            db = get_db()
+            cursor = db.conn.cursor()
+            cursor.execute('SELECT pool_name FROM balancing_excluded_pools WHERE cluster_id = ?', (self.id,))
+            return [row['pool_name'] for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def set_pool_balancing_excluded(self, pool_name: str, excluded: bool, reason: str = '', user: str = ''):
+        try:
+            db = get_db()
+            cursor = db.conn.cursor()
+            if excluded:
+                cursor.execute(
+                    'INSERT OR REPLACE INTO balancing_excluded_pools (cluster_id, pool_name, reason, created_by, created_at) VALUES (?, ?, ?, ?, ?)',
+                    (self.id, pool_name, reason, user, datetime.now().isoformat()))
+            else:
+                cursor.execute('DELETE FROM balancing_excluded_pools WHERE cluster_id = ? AND pool_name = ?',
+                               (self.id, pool_name))
+            db.conn.commit()
+            return True
+        except Exception as e:
+            self.logger.error(f"Error setting pool exclusion: {e}")
+            return False
+
     def check_vm_storage_type(self, node: str, vmid: int, vm_type: str) -> str:
         # public wrapper for _ha_check_vm_storage
         return self._ha_check_vm_storage(vmid, vm_type, node)
@@ -6000,8 +6043,11 @@ echo "AGENT_INSTALLED_OK"
                 if cs_resp.status_code == 200:
                     for item in cs_resp.json().get('data', []):
                         if item.get('type') == 'node' and item.get('name') == node_name and item.get('local', 0) == 1:
-                            self.logger.info(f"[NodeIP] {node_name} is the local node, using {primary_ip}")
-                            return primary_ip
+                            # #199: in failover, self.host is the actual connected node,
+                            # self.config.host is the (possibly dead) configured primary
+                            local_ip = host if host != primary_ip else primary_ip
+                            self.logger.info(f"[NodeIP] {node_name} is the local node, using {local_ip}")
+                            return local_ip
             except Exception:
                 pass
 
@@ -11333,6 +11379,7 @@ echo "AGENT_INSTALLED_OK"
                     if success:
                         migrations_done += 1
                         already_migrated_vmids.append(vmid)
+                        self._vm_migration_cooldown[vmid] = time.time()  # NS: cooldown to prevent ping-pong
                     else:
                         self.logger.warning(f"Migration failed for {vm_name}, stopping further migrations this cycle")
                         break

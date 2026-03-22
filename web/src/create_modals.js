@@ -1658,7 +1658,7 @@
             // Proxmox config
             const [config, setConfig] = useState({
                 name: '', host: '', user: 'root@pam', pass: '',
-                ssl_verification: false, migration_threshold: 20, check_interval: 300,
+                ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
                 auto_migrate: false, balance_containers: false, balance_local_disks: false,
                 dry_run: false, ssh_key: '',
             });

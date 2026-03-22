@@ -300,6 +300,11 @@ def scan_all_nodes_cves(cluster_id):
 
     results = []
     for node_name in node_status:
+        # #199: skip offline nodes — no point trying SSH on dead nodes
+        ns = node_status.get(node_name, {})
+        if ns.get('offline') or ns.get('status') == 'offline':
+            results.append({'node': node_name, 'error': 'Node offline'})
+            continue
         try:
             scan = mgr.scan_node_packages(node_name)
             results.append(scan)

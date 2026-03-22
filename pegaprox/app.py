@@ -152,9 +152,13 @@ def create_app():
                 has_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
                 origin = request.headers.get('Origin', '')
                 allowed_origins = get_allowed_origins() or []
+                # #210: also check X-Forwarded-Proto/Host for reverse proxy setups
+                fwd_host = request.headers.get('X-Forwarded-Host', '')
+                fwd_proto = request.headers.get('X-Forwarded-Proto', request.scheme)
                 has_valid_origin = origin and (
                     origin in allowed_origins or
-                    origin.startswith(f"{request.scheme}://{request.host}")
+                    origin.startswith(f"{request.scheme}://{request.host}") or
+                    (fwd_host and origin.startswith(f"{fwd_proto}://{fwd_host}"))
                 )
                 if not has_xhr and not has_valid_origin:
                     return jsonify({'error': 'CSRF validation failed'}), 403
@@ -196,6 +200,10 @@ def create_app():
 
     # Register all API blueprints
     register_blueprints(app)
+
+    # Load enabled plugins
+    from pegaprox.api.plugins import load_enabled_plugins
+    load_enabled_plugins(app)
 
     return app
 
@@ -629,6 +637,10 @@ def main(debug_mode=False):
     from pegaprox.background.site_recovery import start_heartbeat
     start_heartbeat()
     print("Started site recovery heartbeat monitor")
+
+    # Start plugin background tasks
+    from pegaprox.api.plugins import start_plugin_backgrounds
+    start_plugin_backgrounds()
 
     # Warm up pool cache
     def warmup_pool_cache():

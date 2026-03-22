@@ -1127,7 +1127,9 @@ def run_auto_storage_balance():
                         usages = [s['usage_percent'] for s in storage_stats]
                         imbalance = max(usages) - min(usages)
                         
-                        if imbalance <= sc.get('threshold', 20):
+                        # NS: tolerance deadband to prevent storage ping-pong
+                        effective_threshold = sc.get('threshold', 20) + sc.get('tolerance', 5)
+                        if imbalance <= effective_threshold:
                             # Update last run time
                             with _storage_config_lock:
                                 # Re-find the cluster in case it changed

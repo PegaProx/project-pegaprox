@@ -1058,7 +1058,9 @@ def get_vm_backups(cluster_id, node, vm_type, vmid):
                 filename = volid.split('/')[-1] if '/' in volid else volid.split(':')[-1]
 
                 # double-check vmid match (PVE filter isn't always exact)
-                if f'-{vmid}-' in filename or filename.startswith(f'vzdump-{vm_type[:4]}-{vmid}'):
+                # #143: PBS volids use path format backup/vm/{vmid}/ instead of vzdump filename
+                if (f'-{vmid}-' in filename or filename.startswith(f'vzdump-{vm_type[:4]}-{vmid}')
+                        or f'/vm/{vmid}/' in volid or f'/ct/{vmid}/' in volid):
                     backups.append({
                         'volid': volid,
                         'storage': stor_name,
@@ -4917,8 +4919,9 @@ def _execute_replication(job):
             'full': 1,
             'name': f'xcrepl-{vmid}-tmp',
         }
-        if target_storage:
-            clone_data['storage'] = target_storage
+        # #192: don't set storage here — target_storage is for the TARGET cluster,
+        # but the clone runs on the SOURCE cluster. Let PVE use the source VM's storage.
+        # target_storage is correctly passed to remote_migrate_vm() below.
 
         clone_resp = source_mgr._api_post(clone_url, data=clone_data)
         if clone_resp.status_code != 200:

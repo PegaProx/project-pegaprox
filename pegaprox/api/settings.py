@@ -2848,28 +2848,29 @@ def generate_support_bundle():
                     log_file = lf
                     break
 
+            from collections import deque as _deque
+
             if log_file:
                 try:
                     with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
-                        lines = f.readlines()
-                        last_lines = lines[-1000:] if len(lines) > 1000 else lines
+                        last_lines = list(_deque(f, maxlen=1000))
                         zf.writestr(f"{bundle_prefix}/pegaprox.log", ''.join(_redact_log(l) for l in last_lines))
                 except Exception as e:
                     zf.writestr(f"{bundle_prefix}/pegaprox_log_error.txt", f"Failed: {str(e)}")
             else:
                 zf.writestr(f"{bundle_prefix}/pegaprox.log", "Log file not found. Checked: " + ", ".join(possible_log_files))
 
-            # collect per-cluster logs from logs/ directory
+            # collect per-cluster logs (top 10 most recent, skip huge reads)
             import glob as _glob
             cluster_logs = _glob.glob(os.path.join(LOG_DIR, '*.log'))
-            for cl_log in cluster_logs:
+            cluster_logs.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+            for cl_log in cluster_logs[:10]:
                 fname = os.path.basename(cl_log)
                 if fname == 'pegaprox.log':
-                    continue  # already handled above
+                    continue
                 try:
                     with open(cl_log, 'r', encoding='utf-8', errors='replace') as f:
-                        lines = f.readlines()
-                        last_lines = lines[-500:] if len(lines) > 500 else lines
+                        last_lines = list(_deque(f, maxlen=500))
                         zf.writestr(f"{bundle_prefix}/logs/{fname}", ''.join(_redact_log(l) for l in last_lines))
                 except Exception:
                     pass

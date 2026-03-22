@@ -443,7 +443,7 @@ def get_cluster_resources(cluster_id):
 # Password/key changes must go through dedicated endpoints with their own auth
 # MK: also keeps 'sort_order' out because that was causing issues with drag-and-drop
 ALLOWED_CONFIG_FIELDS = {
-    'name', 'host', 'user', 'ssl_verification', 'migration_threshold',
+    'name', 'host', 'user', 'ssl_verification', 'migration_threshold', 'migration_tolerance',
     'check_interval', 'auto_migrate', 'balance_containers', 'balance_local_disks',
     'dry_run', 'enabled', 'ha_enabled', 'fallback_hosts', 'ssh_user', 'ssh_port',
     'ha_settings', 'excluded_nodes',
@@ -767,6 +767,51 @@ def remove_excluded_vm(cluster_id, vmid):
         })
     else:
         return jsonify({'error': 'Failed to include VM'}), 500
+
+
+# NS: Pool exclusion from auto-balancing
+@bp.route('/api/clusters/<cluster_id>/excluded-pools', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_excluded_pools(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr: return jsonify({'error': 'Cluster not found'}), 404
+    pools = mgr.get_balancing_excluded_pools()
+    # get details from DB
+    db = get_db()
+    rows = db.query('SELECT pool_name, reason, created_by, created_at FROM balancing_excluded_pools WHERE cluster_id = ?', (cluster_id,)) or []
+    return jsonify([dict(r) for r in rows])
+
+
+@bp.route('/api/clusters/<cluster_id>/excluded-pools/<pool_name>', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def exclude_pool(cluster_id, pool_name):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr: return jsonify({'error': 'Cluster not found'}), 404
+    data = request.json or {}
+    user = getattr(request, 'session', {}).get('user', 'system')
+    reason = data.get('reason', 'Manually excluded')
+    if mgr.set_pool_balancing_excluded(pool_name, True, reason, user):
+        log_audit(user, 'cluster.pool_excluded', f"Pool '{pool_name}' excluded from balancing")
+        return jsonify({'success': True, 'message': f"Pool '{pool_name}' excluded"})
+    return jsonify({'error': 'Failed'}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/excluded-pools/<pool_name>', methods=['DELETE'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def include_pool(cluster_id, pool_name):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr: return jsonify({'error': 'Cluster not found'}), 404
+    user = getattr(request, 'session', {}).get('user', 'system')
+    if mgr.set_pool_balancing_excluded(pool_name, False, user=user):
+        log_audit(user, 'cluster.pool_included', f"Pool '{pool_name}' re-included in balancing")
+        return jsonify({'success': True, 'message': f"Pool '{pool_name}' included"})
+    return jsonify({'error': 'Failed'}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/fallback-hosts', methods=['GET'])

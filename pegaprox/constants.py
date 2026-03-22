@@ -8,8 +8,8 @@ import os
 from pathlib import Path
 
 # Version
-PEGAPROX_VERSION = "Beta 0.9.2.2"
-PEGAPROX_BUILD = "2026.03.20"
+PEGAPROX_VERSION = "Beta 0.9.3"
+PEGAPROX_BUILD = "2026.03.22"
 
 # File Paths & Directories
 CONFIG_DIR = 'config'
@@ -49,9 +49,11 @@ WEB_DIR = 'web'
 SSL_DIR = 'ssl'
 STATIC_DIR = 'static'
 IMAGES_DIR = 'images'
+PLUGINS_DIR = 'plugins'
 
 # Ensure directories exist
 Path(LOG_DIR).mkdir(exist_ok=True)
+Path(PLUGINS_DIR).mkdir(exist_ok=True)
 Path(WEB_DIR).mkdir(exist_ok=True)
 Path(SSL_DIR).mkdir(exist_ok=True)
 
