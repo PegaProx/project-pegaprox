@@ -466,23 +466,45 @@ export * from '/static/js/novnc/core/rfb.js';
 
 def main(debug_mode=False):
     """Main entry point - starts PegaProx server."""
-    from pegaprox.utils.auth import load_users, load_sessions, create_default_users
-    from pegaprox.utils.audit import load_audit_log
-    from pegaprox.core.config import load_config
-    from pegaprox.core.pbs import load_pbs_servers
-    from pegaprox.core.vmware import load_vmware_servers
-    from pegaprox.models.tasks import PegaProxConfig
-    from pegaprox.core.manager import PegaProxManager
-    from pegaprox.background.broadcast import start_broadcast_thread
-    from pegaprox.background.alerts import start_alert_thread
-    from pegaprox.background.scheduler import start_scheduler_thread
-    from pegaprox.background.password_expiry import start_password_expiry_thread
-    from pegaprox.background.cross_cluster_lb import start_cross_cluster_lb_thread
-    from pegaprox.background.cross_cluster_replication import start_cross_cluster_replication_thread
-    from pegaprox.api.schedules import start_scheduler as start_actions_scheduler
-    from pegaprox.api.helpers import load_server_settings
-    from pegaprox.utils.rbac import get_pool_membership_cache
-    from pegaprox.constants import AUDIT_RETENTION_DAYS
+    try:
+        from pegaprox.utils.auth import load_users, load_sessions, create_default_users
+        from pegaprox.utils.audit import load_audit_log
+        from pegaprox.core.config import load_config
+        from pegaprox.core.pbs import load_pbs_servers
+        from pegaprox.core.vmware import load_vmware_servers
+        from pegaprox.models.tasks import PegaProxConfig
+        from pegaprox.core.manager import PegaProxManager
+        from pegaprox.background.broadcast import start_broadcast_thread
+        from pegaprox.background.alerts import start_alert_thread
+        from pegaprox.background.scheduler import start_scheduler_thread
+        from pegaprox.background.password_expiry import start_password_expiry_thread
+        from pegaprox.background.cross_cluster_lb import start_cross_cluster_lb_thread
+        from pegaprox.background.cross_cluster_replication import start_cross_cluster_replication_thread
+        from pegaprox.api.schedules import start_scheduler as start_actions_scheduler
+        from pegaprox.api.helpers import load_server_settings
+        from pegaprox.utils.rbac import get_pool_membership_cache
+        from pegaprox.constants import AUDIT_RETENTION_DAYS
+    except ModuleNotFoundError as e:
+        missing_name = getattr(e, "name", str(e))
+        if str(missing_name).startswith("pegaprox."):
+            print("\nERROR: Startup dependency check failed.")
+            print(f"Missing application module: {missing_name}")
+            print("This usually means an incomplete/mixed update.")
+            print("Re-run: ./update.sh --force\n")
+        else:
+            print("\nERROR: Startup dependency check failed.")
+            print(f"Missing Python dependency: {missing_name}")
+            print("Fix with:")
+            print("  ./venv/bin/python -m pip install -r requirements.txt")
+            print("Then restart pegaprox.\n")
+        sys.exit(1)
+    except ImportError as e:
+        print("\nERROR: Startup dependency check failed.")
+        print(f"Import error: {e}")
+        print("Fix with:")
+        print("  ./venv/bin/python -m pip install -r requirements.txt")
+        print("Then restart pegaprox.\n")
+        sys.exit(1)
 
     # Initialize SSH semaphore
     g.init_ssh_semaphore(SSH_MAX_CONCURRENT)
@@ -549,7 +571,14 @@ def main(debug_mode=False):
     print()
 
     # Create Flask app
-    app = create_app()
+    try:
+        app = create_app()
+    except RuntimeError as e:
+        # Keep startup failures actionable for systemd/journal users.
+        if "Startup integrity check failed:" in str(e):
+            print(f"\nERROR: {e}\n")
+            sys.exit(1)
+        raise
 
     # Init user system
     print("Initializing user system...")
