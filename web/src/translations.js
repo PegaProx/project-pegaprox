@@ -164,7 +164,7 @@
                 lastLogin: 'Letzte Anmeldung',
                 never: 'Nie',
                 profile: 'Profil',
-                
+
                 // PegaProx Settings
                 pegaproxSettings: 'PegaProx Einstellungen',
                 serverSettings: 'Server',
@@ -224,7 +224,7 @@
                 restartInitiated: 'Server-Neustart wurde eingeleitet',
                 reconnecting: 'Verbindung wird wiederhergestellt...',
                 restartFailed: 'Server-Neustart fehlgeschlagen',
-                
+
                 // Tenants & Permissions
                 // Feature request from r/selfhosted - MSPs wanted multi-tenant support
                 // Took a weekend to implement but people seem to like it
@@ -241,7 +241,7 @@
                 defaultTenant: 'Standard-Mandant',
                 tenantClusters: 'Cluster für diesen Mandanten',
                 allClusters: 'Alle Cluster',
-                
+
                 // Cluster Groups - NS Jan 2026
                 clusterGroups: 'Cluster-Gruppen',
                 clusterGroup: 'Cluster-Gruppe',
@@ -316,7 +316,7 @@
                 tenantUpdated: 'Mandant aktualisiert',
                 cannotDeleteDefaultTenant: 'Standard-Mandant kann nicht gelöscht werden',
                 reassignUsersFirst: 'Benutzer müssen zuerst neu zugewiesen werden',
-                
+
                 // Custom Roles section
                 roles: 'Rollen',
                 customRoles: 'Benutzerdefinierte Rollen',
@@ -351,7 +351,7 @@
                 vmAclSaved: 'VM-Berechtigungen gespeichert',
                 vmAclDeleted: 'VM-Berechtigungen entfernt',
                 confirmDeleteVmAcl: 'Benutzerdefinierte Berechtigungen für diese VM entfernen?',
-                
+
                 // Pool Permissions - MK Jan 2026
                 poolPermissions: 'Pool-Berechtigungen',
                 poolPermissionsDesc: 'Gewähren Sie Benutzern oder Gruppen Zugriff auf Proxmox Resource Pools. Berechtigungen gelten für alle VMs im Pool.',
@@ -397,7 +397,7 @@
                 permissionsFor: 'Berechtigungen für',
                 addPermission: 'Berechtigung hinzufügen',
                 groupName: 'Gruppenname',
-                
+
                 auditLog: 'Audit Log',
                 auditLogDescription: 'Alle Benutzeraktionen der letzten 90 Tage',
                 noAuditLogs: 'Keine Audit-Einträge vorhanden',
@@ -521,7 +521,7 @@
                 allActions: 'Alle Aktionen',
                 exportAuditLog: 'Exportieren',
                 refreshAuditLog: 'Aktualisieren',
-                
+
                 // Header
                 addCluster: 'Cluster hinzufügen',
                 addXcpngPool: 'XCP-ng Pool hinzufügen (Tech Preview)',
@@ -534,7 +534,7 @@
                 addConnection: 'Verbindung hinzufügen',
                 connectionType: 'Verbindungstyp',
                 clusterManagement: 'PegaProx Cluster Management for Proxmox VE',
-                
+
                 // Tabs
                 overview: 'Übersicht',
                 resources: 'Ressourcen',
@@ -544,7 +544,7 @@
                 showing: 'Zeige',
                 perPage: 'Pro Seite',
                 loadingDatacenter: 'Lade Datacenter Daten...',
-                
+
                 // Cluster
                 clusters: 'Cluster',
                 noClusterSelected: 'Kein Cluster ausgewählt',
@@ -595,7 +595,7 @@
                 avgScore: 'Avg. Score',
                 avgCpu: 'Avg. CPU',
                 avgRam: 'Avg. RAM',
-                
+
                 // Nodes
                 nodes: 'Nodes',
                 node: 'Node',
@@ -619,7 +619,7 @@
                 allocated: 'zugewiesen',
                 showMore: 'Mehr anzeigen',
                 showLess: 'Weniger anzeigen',
-                
+
                 // VMs & Resources
                 virtualMachines: 'Virtuelle Maschinen',
                 containers: 'Container',
@@ -802,7 +802,7 @@
                 cpu: 'CPU',
                 disk: 'Disk',
                 network: 'Netzwerk',
-                
+
                 // VM Creation Wizard
                 node: 'Node',
                 next: 'Nächste',
@@ -813,7 +813,7 @@
                 noVirtioDrivers: 'Keine VirtIO Treiber',
                 allIsos: 'Alle ISOs',
                 virtioDriversHint: 'Wird als zusätzliches CD-ROM eingebunden für Windows Treiberinstallation',
-                
+
                 // MK: New wizard translations
                 advancedCpu: 'Erweiterte CPU-Einstellungen',
                 cpuAffinity: 'CPU-Affinität',
@@ -953,7 +953,7 @@
                 onlyForVms: 'Nur für VMs verfügbar',
                 cloneNotes: 'Notizen zum Clone...',
                 optional: 'optional',
-                
+
                 gridView: 'Kachelansicht',
                 listView: 'Listenansicht',
                 compactView: 'Kompaktansicht',
@@ -1006,19 +1006,19 @@
                 week: 'Woche',
                 month: 'Monat',
                 year: 'Jahr',
-                
+
                 // Detail View
                 hostname: 'Hostname',
                 tags: 'Tags',
                 description: 'Beschreibung',
                 changesRequireRestart: 'Hinweis: Manche Änderungen erfordern einen Neustart',
-                
+
                 // Tags - NS Jan 2026
                 manageTags: 'Tags verwalten',
                 noTags: 'Keine Tags',
                 newTag: 'Neuer Tag...',
                 existingTags: 'Vorhandene Tags',
-                
+
                 // Schedules - MK Jan 2026
                 schedules: 'Zeitpläne',
                 scheduledActions: 'Geplante Aktionen',
@@ -1039,7 +1039,7 @@
                 forWeekly: 'für wöchentlich',
                 days: 'Tage',
                 lastRun: 'Letzter Lauf',
-                
+
                 // Reports - NS Jan 2026
                 reports: 'Berichte',
                 reportsAnalytics: 'Berichte & Analysen',
@@ -1142,7 +1142,7 @@
                 nodesOnline: 'Nodes online',
                 datacenterOverview: 'Datacenter Übersicht',
                 noRunningVms: 'Keine laufenden VMs',
-                
+
                 // CVE Scanner - MK Mar 2026
                 cveScanner: 'CVE Scanner',
                 cveScanDesc: 'Scannt alle Nodes auf veraltete Pakete und Sicherheitslücken per SSH.',
@@ -1206,7 +1206,7 @@
                 together: 'Zusammen',
                 separate: 'Getrennt',
                 enforced: 'Erzwungen',
-                
+
                 // Config Modal Tabs
                 generalTab: 'Allgemein',
                 resourcesTab: 'Ressourcen',
@@ -1219,7 +1219,7 @@
                 proxmoxTasks: 'Proxmox Tasks',
                 pegaproxActions: 'PegaProx Aktionen',
                 optionsTab: 'Optionen',
-                
+
                 // Datacenter
                 summary: 'Zusammenfassung',
                 cluster: 'Cluster',
@@ -1253,7 +1253,7 @@
                 exclusionRule2: 'Ausgeschlossene Nodes erhalten keine VMs während Load-Balancing-Migrationen',
                 exclusionRule3: 'Ausgeschlossene Nodes sind weiterhin sichtbar und können manuelle Migrationen empfangen',
                 exclusionRule4: 'VMs auf ausgeschlossenen Nodes können trotzdem migriert werden, wenn der Node überlastet ist',
-                
+
                 // NS: Backup translations - Dec 2025
                 createBackup: 'Backup erstellen',
                 noBackups: 'Keine Backups gefunden',
@@ -1284,13 +1284,13 @@
                 compressNone: 'Keine',
                 backupNotes: 'Notizen (optional)',
                 backupNotesPlaceholder: 'z.B. Vor großem Update, wöchentliches Backup...',
-                
+
                 // HA
                 ha: 'HA',
                 haResources: 'HA Ressourcen',
                 haGroups: 'HA Gruppen',
                 haStatus: 'HA Status',
-                
+
                 metricServer: 'Metric Server',
                 cpuCompatibility: 'CPU Kompatibilität',
                 cpuCompatibilityMode: 'CPU Kompatibilitätsmodus',
@@ -1400,7 +1400,7 @@
                 link: 'Link',
                 resourceUsage: 'Ressourcennutzung',
                 memory: 'Speicher',
-                
+
                 // Storage
                 addStorage: 'Storage hinzufügen',
                 storageId: 'Storage ID',
@@ -1420,7 +1420,7 @@
                 pool: 'Pool',
                 portal: 'Portal',
                 skipCertVerification: 'Zertifikatsprüfung überspringen',
-                
+
                 // Backup
                 backupJobs: 'Backup Jobs',
                 noBackupJobs: 'Keine Backup Jobs',
@@ -1439,13 +1439,13 @@
                 schedule: 'Zeitplan',
                 selection: 'Auswahl',
                 retention: 'Aufbewahrung',
-                
+
                 // Replication
                 replicationJobs: 'Replikationsjobs',
                 noReplicationJobs: 'Keine Replikationsjobs',
                 guest: 'Guest',
                 job: 'Job',
-                
+
                 // Firewall
                 firewallOptions: 'Firewall Optionen',
                 firewallRules: 'Firewall Regeln',
@@ -1534,7 +1534,7 @@
                 balancingEnabled: 'Balancing aktiviert',
                 optionsTitle: 'Optionen',
                 intervalBetweenChecks: 'Intervall zwischen Balance-Checks',
-                
+
                 // HA
                 highAvailability: 'High Availability (HA)',
                 haEnabled: 'High Availability aktiviert',
@@ -1576,10 +1576,10 @@
                 ctStillRunning: 'Der Container läuft noch. Er wird vor dem Löschen gestoppt.',
                 primary: 'Primary',
                 fallbacks: 'Fallbacks',
-                
+
                 // Messages
                 connectionError: 'Verbindungsfehler',
-                
+
                 // Task Bar
                 tasks: 'Tasks',
                 taskMigrate: 'Migration',
@@ -1620,7 +1620,7 @@
                 configSaved: 'Konfiguration gespeichert',
                 operationFailed: 'Operation fehlgeschlagen',
                 confirmAction: 'Aktion bestätigen',
-                
+
                 // Misc
                 lastCheck: 'Letzter Check',
                 clusterInfo: 'Cluster Info',
@@ -1636,7 +1636,7 @@
                 help: 'Hilfe',
                 lastMigrations: 'Letzte Migrationen',
                 noMigrations: 'Keine Migrationen',
-                
+
                 // Options labels
                 keyboardLayout: 'Tastaturlayout',
                 httpProxy: 'HTTP Proxy',
@@ -1680,7 +1680,7 @@
                 failureThresholdHint: 'Anzahl fehlgeschlagener Checks bevor Node als offline gilt',
                 hardwareWatchdog: 'Hardware Watchdog',
                 watchdogWarning: 'VORSICHT: Node rebootet automatisch bei Quorum-Verlust!',
-                
+
                 // Fencing Explanation - NS Jan 2026
                 fencingExplanation: 'Wie Split-Brain verhindert wird',
                 fencingStep1Title: '1. Quorum-Verlust Erkennung',
@@ -1694,13 +1694,13 @@
                 fencingWarning: 'WICHTIG: Ohne Fencing-Mechanismus kann Split-Brain zu Datenkorruption führen!',
                 fencingRecommendation: 'Empfehlung für 2-Node Cluster:',
                 fencingRecList: '• Quorum-Hosts konfigurieren (Gateway, DNS-Server)\n• Hardware Watchdog aktivieren wenn verfügbar\n• Recovery-Delay auf mindestens 30 Sekunden setzen',
-                
+
                 enableHA: 'HA Aktivieren',
                 disableHA: 'HA Deaktivieren',
                 changesAfterRestart: 'Änderungen nach Neustart aktiv',
                 important2NodeCluster: 'wichtig für 2-Node Cluster!',
                 online: 'Online',
-                
+
                 // 2-Node Cluster Mode - NS Jan 2026
                 twoNodeMode: '2-Node Cluster Modus',
                 twoNodeWarning: '2-Node Cluster Limitierung',
@@ -1711,7 +1711,7 @@
                 twoNodeCredentialsInfo: 'PegaProx verwendet die Cluster-Zugangsdaten um sich per SSH auf den überlebenden Node zu verbinden und "pvecm expected 1" auszuführen.',
                 twoNodeTip: 'Tipp',
                 twoNodeTipText: 'Für beste Ergebnisse installiere "sshpass" auf dem PegaProx Server: apt install sshpass',
-                
+
                 // Split-Brain Risk - 2-Node - NS Jan 2026
                 splitBrainRisk: 'Split-Brain Risiko ohne Fencing!',
                 splitBrainRiskDesc: 'Wenn beide Nodes leben aber das Netzwerk dazwischen ausfällt, kann das Erzwingen von Quorum dazu führen dass BEIDE Nodes dieselbe VM starten = Datenkorruption!',
@@ -1724,7 +1724,7 @@
                 quorumHostsConfigured: 'Quorum-Hosts konfiguriert',
                 recoveryDelayCheck: 'Recovery-Verzögerung ≥ 30 Sekunden',
                 selfFencingEnabled: 'Self-Fencing aktiviert',
-                
+
                 // Storage-based Split-Brain Protection - NS Jan 2026
                 storageHeartbeat: 'Storage-basierter Split-Brain Schutz',
                 recommendedFor2Node: 'Empfohlen für 2-Node Cluster!',
@@ -1746,7 +1746,7 @@
                 step4Recovery: 'Erst nach Bestätigung/Timeout startet Recovery',
                 nodeAgentRequired: 'Node-Agent erforderlich!',
                 nodeAgentRequiredDesc: 'Damit dieses Feature funktioniert, musst du den PegaProx Node-Agent auf jedem Proxmox-Node installieren. Der Agent schreibt Heartbeats und reagiert auf Poison Pills.',
-                
+
                 // Automatic Split-Brain Protection - NS Jan 2026 - FULLY AUTOMATIC
                 splitBrainProtection: 'Split-Brain Schutz',
                 fullyAutomatic: '100% AUTOMATISCH',
@@ -1759,19 +1759,19 @@
                 sshOnlyMode: 'SSH-Only Schutz Modus',
                 noSharedStorageFound: 'Kein Shared Storage (NFS/CephFS) gefunden. Schutz funktioniert über SSH-Verifizierung.',
                 notSafeForDualNetwork: 'Nicht sicher für Dual-Network Setups (getrennte Server/Storage Netzwerke)',
-                
+
                 // Block Storage Warning - NS Jan 2026
                 blockStorageOnly: 'Nur Block-Storage gefunden',
                 blockStorageExplain: 'Block-Storage (LVM, iSCSI, RBD) kann keine Heartbeat-Dateien speichern. Für vollen Dual-Network Schutz ein kleines NFS-Share hinzufügen.',
                 sshOnlyActive: 'SSH-Only Schutz aktiv',
                 sshOnlyRisk: 'Funktioniert für Single-Network. Für Dual-Network (getrennte Server/iSCSI) ein kleines NFS-Share hinzufügen (100MB reichen).',
-                
+
                 // Multiple Storages - NS Jan 2026
                 clickToSelect: 'Klicken zum Auswählen',
                 selected: 'Ausgewählt',
                 currentlyActive: 'Aktuell aktiv',
                 blockStoragesIgnored: 'Block-Storages (nicht verwendbar)',
-                
+
                 // Self-Fence Protection - NS Jan 2026
                 selfFenceProtection: 'Self-Fence Schutz',
                 advancedSettings: 'Erweiterte Einstellungen',
@@ -1816,7 +1816,7 @@
                 dualNetworkProtectionDesc: 'Voraussetzung: PegaProx Server kann Shared Storage mounten (NFS/CephFS)',
                 sharedStoragePath: 'Shared Storage Pfad',
                 agentAutoInstall: 'Node-Agent wird automatisch via SSH installiert',
-                
+
                 // Device Passthrough
                 devicePassthrough: 'Device Passthrough',
                 pciDevices: 'PCI Devices',
@@ -1840,13 +1840,13 @@
                 iommuGroup: 'IOMMU Gruppe',
                 vendor: 'Hersteller',
                 adding: 'Wird hinzugefügt...',
-                
+
                 bandwidthLimits: 'Bandbreitenlimits',
                 maxWorkers: 'Max. Workers',
                 nextVmid: 'Nächste VMID',
                 userTagAccess: 'Benutzer-Tag Zugriff',
                 registeredTags: 'Registrierte Tags',
-                
+
                 // Subscription
                 subscriptionStatus: 'Subscription Status',
                 licensed: 'Lizenziert',
@@ -1868,7 +1868,7 @@
                 subscriptionBenefit1: 'Zugang zum Enterprise Repository mit stabilen Updates',
                 subscriptionBenefit2: 'Technischer Support durch Proxmox',
                 subscriptionBenefit3: 'Keine Subscription-Warnung beim Login',
-                
+
                 // Maintenance
                 maintenanceModeTitle: 'Wartungsmodus aktivieren',
                 maintenanceWarning: 'Achtung: Alle laufenden VMs und Container auf diesem Node werden automatisch auf andere Nodes migriert.',
@@ -1926,7 +1926,7 @@
                 sshSettingsDesc: 'Wird für Node-Updates, Reboot und Shutdown benötigt. Wenn leer, wird der Proxmox-Benutzer/Passwort verwendet.',
                 sshKeyOptional: 'SSH Key (Optional)',
                 sshKeyExplanation: 'SSH-Features (SMBIOS Auto-Config, Custom Scripts, 2-Node HA) verwenden automatisch deine Login-Daten. Füge hier nur einen Key hinzu, wenn Password-Auth auf deinen Nodes deaktiviert ist.',
-                
+
                 // Common notifications
                 connectionError: 'Verbindungsfehler',
                 saveFailed: 'Speichern fehlgeschlagen',
@@ -1951,7 +1951,7 @@
                 unlockVm: 'VM entsperren',
                 vmLocked: 'VM ist gesperrt',
                 vmUnlocked: 'VM entsperrt',
-                
+
                 // Security Settings
                 securitySettings: 'Sicherheitseinstellungen',
                 securityDashboard: 'Security Dashboard',
@@ -2025,13 +2025,13 @@
                 locked: 'gesperrt',
                 attempts: 'Versuche',
                 remaining: 'verbleibend',
-                
+
                 // About page translations
                 about: 'Über',
                 developmentTeam: 'Entwicklungsteam',
                 creditsAcknowledgments: 'Credits & Danksagungen',
                 links: 'Links',
-                
+
                 // update Manager
                 updateManager: 'Update Manager',
                 updateManagerDesc: 'Prüfen und installieren Sie Updates auf allen Cluster-Nodes',
@@ -2062,7 +2062,7 @@
                 forceUpdateWarning: 'Laufende VMs auf diesem Node könnten beeinträchtigt werden wenn ein Neustart durchgeführt wird.',
                 continueAnyway: 'Trotzdem fortfahren?',
                 rollingUpdateDesc: 'Aktualisiert alle Nodes nacheinander. Jeder Node wird in den Wartungsmodus versetzt, VMs werden migriert, Updates installiert und optional neu gestartet.',
-                
+
                 // PegaProx Auto-Update - NS Jan 2026
                 confirmUpdate: 'Update wird heruntergeladen und installiert. Ein Backup wird erstellt. Der Server startet automatisch neu. Fortfahren?',
                 downloadingUpdate: 'Update wird heruntergeladen...',
@@ -2091,7 +2091,7 @@
                 restoringBackup: 'Backup wird wiederhergestellt...',
                 rollbackSuccess: 'Wiederherstellung erfolgreich! Server startet neu...',
                 rollbackWarning: '⚠️ Beim Zurücksetzen wird der Server neu gestartet. Stellen Sie sicher, dass alle Arbeiten gespeichert sind.',
-                
+
                 // Security / Military Grade Encryption - NS Jan 2026
                 securityStatus: 'Sicherheitsstatus',
                 dataEncryption: 'Datenverschlüsselung',
@@ -2264,18 +2264,18 @@
                 interval: 'Intervall',
                 saveSettings: 'Einstellungen speichern',
                 haEnabled: 'HA aktiviert',
-                
+
                 // VM Detail buttons
                 console: 'Konsole',
                 configuration: 'Konfiguration',
-                
+
                 // Config Modal
                 cpuCores: 'CPU Kerne',
                 cpuLimit: 'CPU Limit',
                 memory: 'RAM',
                 hardware: 'Hardware',
                 disks: 'Festplatten',
-                
+
                 // Config Modal Tabs
                 mountIso: 'ISO einbinden',
                 noIsoEject: 'Kein ISO (auswerfen)',
@@ -2399,7 +2399,7 @@
                 qemuGuestAgentHint: 'Ermöglicht Shutdown, Freeze/Thaw für Snapshots',
                 fstrim: 'FSTRIM nach Clone/Migration',
                 fstrimHint: 'Automatisch TRIM nach Clone ausführen',
-                
+
                 // More modals
                 optional: 'optional',
                 snapshotDescription: 'Beschreibung des Snapshots...',
@@ -2607,7 +2607,7 @@
                 dryRunShort: 'Dry Run',
                 connecting: 'Verbinde...',
                 needsRestart: 'NEUSTART ERFORDERLICH',
-                
+
                 // NS: Alerts, Tasks, Tags, Affinity - Dec 2025
                 alerts: 'Alarme',
                 alertsDesc: 'E-Mail-Benachrichtigungen bei Schwellwert-Überschreitungen',
@@ -2631,7 +2631,7 @@
                 smtpFromEmailRequired: 'Absender E-Mail ist erforderlich',
                 emailRecipients: 'E-Mail Empfänger',
                 addRecipient: 'Empfänger hinzufügen',
-                
+
                 scheduledTasks: 'Geplante Aufgaben',
                 scheduledTasksDesc: 'VM-Operationen automatisch planen',
                 createTask: 'Aufgabe erstellen',
@@ -2649,7 +2649,7 @@
                 daily: 'Täglich',
                 weekly: 'Wöchentlich',
                 monthly: 'Monatlich',
-                
+
                 tagsLabels: 'Tags & Labels',
                 tagsDesc: 'VMs kategorisieren und gruppieren',
                 createTag: 'Tag erstellen',
@@ -2657,7 +2657,7 @@
                 tagColor: 'Farbe',
                 noTags: 'Keine Tags definiert',
                 assignedVms: 'Zugewiesene VMs',
-                
+
                 affinityRules: 'Affinitätsregeln',
                 customScripts: 'Eigene Skripte',
                 scriptsDesc: 'Führe eigene .sh oder .py Skripte auf Cluster-Nodes aus',
@@ -2838,7 +2838,7 @@
                 noAffinityRules: 'Keine Affinitätsregeln',
                 enforceRule: 'Regel erzwingen',
                 enforceRuleHint: 'Migration blockieren wenn Regel verletzt würde',
-                
+
                 // Console Settings - NS Jan 2026
                 consoleSettings: 'Konsolen-Ports',
                 vncPort: 'VNC Port',
@@ -2861,7 +2861,7 @@
                 connectingWs: 'Verbinde WebSocket',
                 wsConnected: 'WebSocket verbunden, warte auf Server...',
                 ipFetchFailed: 'IP-Ermittlung fehlgeschlagen',
-                
+
                 smtpSettings: 'SMTP Einstellungen',
                 smtpHost: 'SMTP Server',
                 smtpPort: 'Port',
@@ -2872,10 +2872,10 @@
                 smtpTls: 'TLS verwenden',
                 smtpSsl: 'SSL verwenden',
                 alertCooldown: 'Alarm-Cooldown (Sekunden)',
-                
+
                 migrationHistory: 'Migrations-Verlauf',
                 noMigrationHistory: 'Keine Migrationen aufgezeichnet',
-                
+
                 // LW: Password expiry settings
                 passwordExpiry: 'Passwort-Ablauf',
                 passwordExpiryDesc: 'Benutzer müssen ihr Passwort nach einer bestimmten Anzahl von Tagen ändern.',
@@ -2883,7 +2883,7 @@
                 sendExpiryEmails: 'E-Mail-Benachrichtigungen senden wenn Passwort bald abläuft',
                 expiryDays: 'Passwort läuft ab nach',
                 warningDays: 'Benutzer warnen vor',
-                
+
                 // LW: Password expiry banner
                 passwordExpired: 'Ihr Passwort ist abgelaufen!',
                 passwordExpiresIn: 'Ihr Passwort läuft in {days} Tagen ab',
@@ -2891,7 +2891,7 @@
                 pleaseChangeSoon: 'Bitte ändern Sie es rechtzeitig.',
                 changePassword: 'Passwort ändern',
                 dismissForNow: 'Später erinnern',
-                
+
                 // LW: Reset all passwords - Dec 2025
                 forcePasswordReset: 'Passwort-Reset erzwingen',
                 forcePasswordResetDesc: 'Alle Benutzerpasswörter sofort ablaufen lassen. Nach Sicherheitsvorfällen verwenden.',
@@ -2902,7 +2902,7 @@
                 includeAdminsWarning: 'Achtung: Sie müssen dann auch Ihr Passwort ändern!',
                 includeAdminsInExpiry: 'Admin-Konten einschließen',
                 includeAdminsInExpiryDesc: 'Auch Admins müssen ihr Passwort regelmäßig ändern',
-                
+
                 // Theme System - NS Jan 2026
                 appearance: 'Erscheinungsbild',
                 themeDesc: 'Wähle ein Farbthema für die Oberfläche',
@@ -2913,7 +2913,7 @@
                 defaultThemeDesc: 'Standard-Theme für neue Benutzer festlegen. Benutzer können ihr Theme in "Mein Profil" ändern.',
                 currentDefault: 'Aktueller Standard',
                 themeInProfile: 'Ändere dein Theme in "Mein Profil" (klicke auf deinen Benutzernamen oben rechts)',
-                
+
                 // UI Layout - LW Jan 2026
                 // LW: Feb 2026 - Layout Style (Modern vs Corporate)
                 layoutStyle: 'Layout-Stil',
@@ -2993,8 +2993,8 @@
                 monitor: 'Überwachung',
                 configure: 'Konfiguration',
                 console: 'Konsole',
-                
-                
+
+
                 snapshots: 'Snapshots',
                 snapshotsOverview: 'Snapshot Übersicht',
                 snapshotsCleanUp: 'Cleanup',
@@ -3165,7 +3165,7 @@
                 lastLogin: 'Last Login',
                 never: 'Never',
                 profile: 'Profile',
-                
+
                 // PegaProx Settings
                 pegaproxSettings: 'PegaProx Settings',
                 serverSettings: 'Server',
@@ -3225,7 +3225,7 @@
                 restartInitiated: 'Server restart initiated',
                 reconnecting: 'Reconnecting...',
                 restartFailed: 'Server restart failed',
-                
+
                 // Tenants & Permissions
                 // Reddit feature request - MSPs needed this for customer isolation
                 tenants: 'Tenants',
@@ -3240,7 +3240,7 @@
                 defaultTenant: 'Default Tenant',
                 tenantClusters: 'Clusters for this tenant',
                 allClusters: 'All clusters',
-                
+
                 // Cluster Groups - NS Jan 2026
                 clusterGroups: 'Cluster Groups',
                 clusterGroup: 'Cluster Group',
@@ -3315,7 +3315,7 @@
                 tenantUpdated: 'Tenant updated',
                 cannotDeleteDefaultTenant: 'Cannot delete default tenant',
                 reassignUsersFirst: 'Users must be reassigned first',
-                
+
                 // Custom Roles section
                 roles: 'Roles',
                 customRoles: 'Custom Roles',
@@ -3350,7 +3350,7 @@
                 vmAclSaved: 'VM permissions saved',
                 vmAclDeleted: 'VM permissions removed',
                 confirmDeleteVmAcl: 'Remove custom permissions for this VM?',
-                
+
                 // Pool Permissions - MK Jan 2026
                 poolPermissions: 'Pool Permissions',
                 poolPermissionsDesc: 'Grant users or groups access to Proxmox resource pools. Permissions apply to all VMs within the pool.',
@@ -3396,7 +3396,7 @@
                 permissionsFor: 'Permissions for',
                 addPermission: 'Add Permission',
                 groupName: 'Group Name',
-                
+
                 auditLog: 'Audit Log',
                 auditLogDescription: 'All user actions from the last 90 days',
                 noAuditLogs: 'No audit entries available',
@@ -3520,7 +3520,7 @@
                 allActions: 'All Actions',
                 exportAuditLog: 'Export',
                 refreshAuditLog: 'Refresh',
-                
+
                 // Header
                 addCluster: 'Add Cluster',
                 addXcpngPool: 'Add XCP-ng Pool (Tech Preview)',
@@ -3533,7 +3533,7 @@
                 addConnection: 'Add Connection',
                 connectionType: 'Connection Type',
                 clusterManagement: 'PegaProx Cluster Management for Proxmox VE',
-                
+
                 // Tabs
                 overview: 'Overview',
                 resources: 'Resources',
@@ -3543,7 +3543,7 @@
                 showing: 'Showing',
                 perPage: 'Per page',
                 loadingDatacenter: 'Loading datacenter data...',
-                
+
                 // Cluster
                 clusters: 'Clusters',
                 noClusterSelected: 'No Cluster Selected',
@@ -3594,7 +3594,7 @@
                 avgScore: 'Avg. Score',
                 avgCpu: 'Avg. CPU',
                 avgRam: 'Avg. RAM',
-                
+
                 // Nodes
                 nodes: 'Nodes',
                 node: 'Node',
@@ -3618,7 +3618,7 @@
                 allocated: 'allocated',
                 showMore: 'Show more',
                 showLess: 'Show less',
-                
+
                 // VMs & Resources
                 virtualMachines: 'Virtual Machines',
                 containers: 'Containers',
@@ -3801,7 +3801,7 @@
                 cpu: 'CPU',
                 disk: 'Disk',
                 network: 'Network',
-                
+
                 // VM Creation Wizard
                 node: 'Node',
                 next: 'Next',
@@ -3812,7 +3812,7 @@
                 noVirtioDrivers: 'No VirtIO Drivers',
                 allIsos: 'All ISOs',
                 virtioDriversHint: 'Will be mounted as additional CD-ROM for Windows driver installation',
-                
+
                 // MK: New wizard translations
                 advancedCpu: 'Advanced CPU Settings',
                 cpuAffinity: 'CPU Affinity',
@@ -3950,7 +3950,7 @@
                 onlyForVms: 'Only available for VMs',
                 cloneNotes: 'Notes for clone...',
                 optional: 'optional',
-                
+
                 gridView: 'Grid View',
                 listView: 'List View',
                 compactView: 'Compact View',
@@ -4003,19 +4003,19 @@
                 week: 'Week',
                 month: 'Month',
                 year: 'Year',
-                
+
                 // Detail View
                 hostname: 'Hostname',
                 tags: 'Tags',
                 description: 'Description',
                 changesRequireRestart: 'Note: Some changes require a restart',
-                
+
                 // Tags - NS Jan 2026
                 manageTags: 'Manage Tags',
                 noTags: 'No tags',
                 newTag: 'New tag...',
                 existingTags: 'Existing tags',
-                
+
                 // Schedules - MK Jan 2026
                 schedules: 'Schedules',
                 scheduledActions: 'Scheduled Actions',
@@ -4036,7 +4036,7 @@
                 forWeekly: 'for weekly',
                 days: 'Days',
                 lastRun: 'Last Run',
-                
+
                 // Reports - NS Jan 2026
                 reports: 'Reports',
                 reportsAnalytics: 'Reports & Analytics',
@@ -4139,7 +4139,7 @@
                 nodesOnline: 'Nodes Online',
                 datacenterOverview: 'Datacenter Overview',
                 noRunningVms: 'No running VMs',
-                
+
                 // CVE Scanner - MK Mar 2026
                 cveScanner: 'CVE Scanner',
                 cveScanDesc: 'Scans all nodes for outdated packages and security vulnerabilities via SSH.',
@@ -4203,7 +4203,7 @@
                 together: 'Together',
                 separate: 'Separate',
                 enforced: 'Enforced',
-                
+
                 // Config Modal Tabs
                 generalTab: 'General',
                 resourcesTab: 'Resources',
@@ -4216,7 +4216,7 @@
                 proxmoxTasks: 'Proxmox Tasks',
                 pegaproxActions: 'PegaProx Actions',
                 optionsTab: 'Options',
-                
+
                 // Datacenter
                 summary: 'Summary',
                 cluster: 'Cluster',
@@ -4250,7 +4250,7 @@
                 exclusionRule2: 'Excluded nodes will NOT receive VMs during load balancing migrations',
                 exclusionRule3: 'Excluded nodes are still visible and can receive manual migrations',
                 exclusionRule4: 'VMs on excluded nodes may still be migrated away if the node is overloaded',
-                
+
                 // NS: Backup translations - Dec 2025
                 createBackup: 'Create Backup',
                 noBackups: 'No backups found',
@@ -4281,13 +4281,13 @@
                 compressNone: 'None',
                 backupNotes: 'Notes (optional)',
                 backupNotesPlaceholder: 'e.g. Before major update, weekly backup...',
-                
+
                 // HA
                 ha: 'HA',
                 haResources: 'HA Resources',
                 haGroups: 'HA Groups',
                 haStatus: 'HA Status',
-                
+
                 metricServer: 'Metric Server',
                 cpuCompatibility: 'CPU Compatibility',
                 cpuCompatibilityMode: 'CPU Compatibility Mode',
@@ -4397,7 +4397,7 @@
                 link: 'Link',
                 resourceUsage: 'Resource Usage',
                 memory: 'Memory',
-                
+
                 // Storage
                 addStorage: 'Add Storage',
                 storageId: 'Storage ID',
@@ -4417,7 +4417,7 @@
                 pool: 'Pool',
                 portal: 'Portal',
                 skipCertVerification: 'Skip Certificate Verification',
-                
+
                 // Backup
                 backupJobs: 'Backup Jobs',
                 noBackupJobs: 'No Backup Jobs',
@@ -4436,13 +4436,13 @@
                 schedule: 'Schedule',
                 selection: 'Selection',
                 retention: 'Retention',
-                
+
                 // Replication
                 replicationJobs: 'Replication Jobs',
                 noReplicationJobs: 'No Replication Jobs',
                 guest: 'Guest',
                 job: 'Job',
-                
+
                 // Firewall
                 firewallOptions: 'Firewall Options',
                 firewallRules: 'Firewall Rules',
@@ -4530,7 +4530,7 @@
                 balancingEnabled: 'Balancing enabled',
                 optionsTitle: 'Options',
                 intervalBetweenChecks: 'Interval between balance checks',
-                
+
                 // HA
                 highAvailability: 'High Availability (HA)',
                 haEnabled: 'High Availability enabled',
@@ -4572,10 +4572,10 @@
                 ctStillRunning: 'The container is still running. It will be stopped before deletion.',
                 primary: 'Primary',
                 fallbacks: 'Fallbacks',
-                
+
                 // Messages
                 connectionError: 'Connection Error',
-                
+
                 // Task Bar
                 tasks: 'Tasks',
                 taskMigrate: 'Migration',
@@ -4616,7 +4616,7 @@
                 configSaved: 'Configuration saved',
                 operationFailed: 'Operation failed',
                 confirmAction: 'Confirm Action',
-                
+
                 // Misc
                 lastCheck: 'Last Check',
                 clusterInfo: 'Cluster Info',
@@ -4632,7 +4632,7 @@
                 help: 'Help',
                 lastMigrations: 'Last Migrations',
                 noMigrations: 'No migrations',
-                
+
                 // Options labels
                 keyboardLayout: 'Keyboard Layout',
                 httpProxy: 'HTTP Proxy',
@@ -4676,7 +4676,7 @@
                 failureThresholdHint: 'Number of failed checks before node is considered offline',
                 hardwareWatchdog: 'Hardware Watchdog',
                 watchdogWarning: 'CAUTION: Node will automatically reboot on quorum loss!',
-                
+
                 // Fencing Explanation - NS Jan 2026
                 fencingExplanation: 'How Split-Brain is Prevented',
                 fencingStep1Title: '1. Quorum Loss Detection',
@@ -4690,13 +4690,13 @@
                 fencingWarning: 'IMPORTANT: Without fencing mechanism, split-brain can cause data corruption!',
                 fencingRecommendation: 'Recommendation for 2-Node Clusters:',
                 fencingRecList: '• Configure quorum hosts (gateway, DNS server)\n• Enable hardware watchdog if available\n• Set recovery delay to at least 30 seconds',
-                
+
                 enableHA: 'Enable HA',
                 disableHA: 'Disable HA',
                 changesAfterRestart: 'Changes active after restart',
                 important2NodeCluster: 'important for 2-node clusters!',
                 online: 'Online',
-                
+
                 // 2-Node Cluster Mode - NS Jan 2026
                 twoNodeMode: '2-Node Cluster Mode',
                 twoNodeWarning: '2-Node Cluster Limitation',
@@ -4707,7 +4707,7 @@
                 twoNodeCredentialsInfo: 'PegaProx will use the cluster credentials to SSH into the surviving node and run "pvecm expected 1" to restore quorum.',
                 twoNodeTip: 'Tip',
                 twoNodeTipText: 'For best results, install "sshpass" on the PegaProx server: apt install sshpass',
-                
+
                 // Split-Brain Risk - 2-Node - NS Jan 2026
                 splitBrainRisk: 'Split-Brain Risk Without Fencing!',
                 splitBrainRiskDesc: 'If both nodes are alive but network between them fails, forcing quorum can cause BOTH nodes to run the same VM = data corruption!',
@@ -4720,7 +4720,7 @@
                 quorumHostsConfigured: 'Quorum hosts configured',
                 recoveryDelayCheck: 'Recovery delay ≥ 30 seconds',
                 selfFencingEnabled: 'Self-fencing enabled',
-                
+
                 // Storage-based Split-Brain Protection - NS Jan 2026
                 storageHeartbeat: 'Storage-based Split-Brain Protection',
                 recommendedFor2Node: 'Recommended for 2-Node Clusters!',
@@ -4742,7 +4742,7 @@
                 step4Recovery: 'Only after confirmation/timeout does recovery proceed',
                 nodeAgentRequired: 'Node Agent Required!',
                 nodeAgentRequiredDesc: 'For this feature to work, you need to install the PegaProx Node Agent on each Proxmox node. The agent writes heartbeats and responds to poison pills.',
-                
+
                 // Automatic Split-Brain Protection - NS Jan 2026 - FULLY AUTOMATIC
                 splitBrainProtection: 'Split-Brain Protection',
                 fullyAutomatic: '100% AUTOMATIC',
@@ -4755,19 +4755,19 @@
                 sshOnlyMode: 'SSH-Only Protection Mode',
                 noSharedStorageFound: 'No shared storage (NFS/CephFS) found. Protection works via SSH verification.',
                 notSafeForDualNetwork: 'Not safe for dual-network setups (separate server/storage networks)',
-                
+
                 // Block Storage Warning - NS Jan 2026
                 blockStorageOnly: 'Only Block Storage Found',
                 blockStorageExplain: 'Block storage (LVM, iSCSI, RBD) cannot store heartbeat files. For full dual-network protection, add a small NFS share.',
                 sshOnlyActive: 'SSH-Only Protection Active',
                 sshOnlyRisk: 'Works for single-network. For dual-network (separate server/iSCSI), add a small NFS share (100MB is enough).',
-                
+
                 // Multiple Storages - NS Jan 2026
                 clickToSelect: 'Click to select',
                 selected: 'Selected',
                 currentlyActive: 'Currently active',
                 blockStoragesIgnored: 'Block storages (not usable)',
-                
+
                 // Self-Fence Protection - NS Jan 2026
                 selfFenceProtection: 'Self-Fence Protection',
                 advancedSettings: 'Advanced Settings',
@@ -4812,7 +4812,7 @@
                 dualNetworkProtectionDesc: 'Requires: PegaProx server can mount the shared storage (NFS/CephFS)',
                 sharedStoragePath: 'Shared Storage Path',
                 agentAutoInstall: 'Node agent will auto-install via SSH',
-                
+
                 // Device Passthrough
                 devicePassthrough: 'Device Passthrough',
                 pciDevices: 'PCI Devices',
@@ -4836,13 +4836,13 @@
                 iommuGroup: 'IOMMU Group',
                 vendor: 'Vendor',
                 adding: 'Adding...',
-                
+
                 bandwidthLimits: 'Bandwidth Limits',
                 maxWorkers: 'Max Workers',
                 nextVmid: 'Next VMID',
                 userTagAccess: 'User Tag Access',
                 registeredTags: 'Registered Tags',
-                
+
                 // Subscription
                 subscriptionStatus: 'Subscription Status',
                 licensed: 'Licensed',
@@ -4864,7 +4864,7 @@
                 subscriptionBenefit1: 'Access to Enterprise Repository with stable updates',
                 subscriptionBenefit2: 'Technical support from Proxmox',
                 subscriptionBenefit3: 'No subscription warning on login',
-                
+
                 // Maintenance
                 maintenanceModeTitle: 'Enable Maintenance Mode',
                 maintenanceWarning: 'Warning: All running VMs and containers on this node will be automatically migrated to other nodes.',
@@ -4941,7 +4941,7 @@
                 interval: 'Interval',
                 saveSettings: 'Save Settings',
                 haEnabled: 'HA Enabled',
-                
+
                 // Common notifications
                 connectionError: 'Connection error',
                 saveFailed: 'Save failed',
@@ -4966,7 +4966,7 @@
                 unlockVm: 'Unlock VM',
                 vmLocked: 'VM is locked',
                 vmUnlocked: 'VM unlocked',
-                
+
                 // Security Settings
                 securitySettings: 'Security Settings',
                 securityDashboard: 'Security Dashboard',
@@ -5040,13 +5040,13 @@
                 locked: 'locked',
                 attempts: 'attempts',
                 remaining: 'remaining',
-                
+
                 // About page translations
                 about: 'About',
                 developmentTeam: 'Development Team',
                 creditsAcknowledgments: 'Credits & Acknowledgments',
                 links: 'Links',
-                
+
                 // update Manager
                 updateManager: 'Update Manager',
                 updateManagerDesc: 'Check and install updates on all cluster nodes',
@@ -5084,7 +5084,7 @@
                 nodesRemaining: 'Nodes remaining',
                 includeReboot: 'Reboot after update',
                 includeRebootHint: 'Recommended for kernel updates',
-                
+
                 // PegaProx Auto-Update - NS Jan 2026
                 confirmUpdate: 'This will download and install the update. A backup will be created. The server will restart automatically. Continue?',
                 downloadingUpdate: 'Downloading update...',
@@ -5113,7 +5113,7 @@
                 restoringBackup: 'Restoring from backup...',
                 rollbackSuccess: 'Rollback successful! Server is restarting...',
                 rollbackWarning: '⚠️ Rollback will restart the server. Make sure you have saved any unsaved work.',
-                
+
                 // Security / Military Grade Encryption - NS Jan 2026
                 securityStatus: 'Security Status',
                 dataEncryption: 'Data Encryption',
@@ -5260,18 +5260,18 @@
                 currentStep: 'Current Step',
                 updateLogs: 'Update Logs',
                 started: 'Started',
-                
+
                 // VM Detail buttons
                 console: 'Console',
                 configuration: 'Configuration',
-                
+
                 // Config Modal
                 cpuCores: 'CPU Cores',
                 cpuLimit: 'CPU Limit',
                 memory: 'Memory (RAM)',
                 hardware: 'Hardware',
                 disks: 'Disks',
-                
+
                 // Config Modal Tabs
                 mountIso: 'Mount ISO',
                 noIsoEject: 'No ISO (eject)',
@@ -5396,7 +5396,7 @@
                 qemuGuestAgentHint: 'Enables shutdown, freeze/thaw for snapshots',
                 fstrim: 'FSTRIM after Clone/Migration',
                 fstrimHint: 'Automatically run TRIM after clone',
-                
+
                 // More modals
                 optional: 'optional',
                 snapshotDescription: 'Snapshot description...',
@@ -5604,7 +5604,7 @@
                 dryRunShort: 'Dry Run',
                 connecting: 'Connecting...',
                 needsRestart: 'NEEDS RESTART',
-                
+
                 // NS: Alerts, Tasks, Tags, Affinity - Dec 2025
                 alerts: 'Alerts',
                 alertsDesc: 'Email notifications when thresholds are exceeded',
@@ -5628,7 +5628,7 @@
                 smtpFromEmailRequired: 'From email address is required',
                 emailRecipients: 'Email Recipients',
                 addRecipient: 'Add Recipient',
-                
+
                 scheduledTasks: 'Scheduled Tasks',
                 scheduledTasksDesc: 'Automate VM operations on a schedule',
                 createTask: 'Create Task',
@@ -5646,7 +5646,7 @@
                 daily: 'Daily',
                 weekly: 'Weekly',
                 monthly: 'Monthly',
-                
+
                 tagsLabels: 'Tags & Labels',
                 tagsDesc: 'Categorize and group VMs',
                 createTag: 'Create Tag',
@@ -5654,7 +5654,7 @@
                 tagColor: 'Color',
                 noTags: 'No tags defined',
                 assignedVms: 'Assigned VMs',
-                
+
                 affinityRules: 'Affinity Rules',
                 customScripts: 'Custom Scripts',
                 scriptsDesc: 'Run custom .sh or .py scripts on cluster nodes',
@@ -5835,7 +5835,7 @@
                 noAffinityRules: 'No affinity rules',
                 enforceRule: 'Enforce Rule',
                 enforceRuleHint: 'Block migrations that would violate this rule',
-                
+
                 // Console Settings - NS Jan 2026
                 consoleSettings: 'Console Ports',
                 vncPort: 'VNC Port',
@@ -5858,7 +5858,7 @@
                 connectingWs: 'Connecting WebSocket',
                 wsConnected: 'WebSocket connected, waiting for server...',
                 ipFetchFailed: 'Failed to fetch IP',
-                
+
                 smtpSettings: 'SMTP Settings',
                 smtpHost: 'SMTP Server',
                 smtpPort: 'Port',
@@ -5869,10 +5869,10 @@
                 smtpTls: 'Use TLS',
                 smtpSsl: 'Use SSL',
                 alertCooldown: 'Alert Cooldown (seconds)',
-                
+
                 migrationHistory: 'Migration History',
                 noMigrationHistory: 'No migrations recorded',
-                
+
                 // LW: Password expiry settings
                 passwordExpiry: 'Password Expiry',
                 passwordExpiryDesc: 'Force users to change their password after a specified number of days.',
@@ -5880,7 +5880,7 @@
                 sendExpiryEmails: 'Send email notifications when password is about to expire',
                 expiryDays: 'Password expires after',
                 warningDays: 'Warn users before',
-                
+
                 // LW: Password expiry banner
                 passwordExpired: 'Your password has expired!',
                 passwordExpiresIn: 'Your password expires in {days} days',
@@ -5888,7 +5888,7 @@
                 pleaseChangeSoon: 'Please change it soon.',
                 changePassword: 'Change Password',
                 dismissForNow: 'Remind me later',
-                
+
                 // LW: Reset all passwords - Dec 2025
                 forcePasswordReset: 'Force Password Reset',
                 forcePasswordResetDesc: 'Expire all user passwords immediately. Use after security incidents.',
@@ -5899,7 +5899,7 @@
                 includeAdminsWarning: 'Warning: You will also need to change your password!',
                 includeAdminsInExpiry: 'Include admin accounts',
                 includeAdminsInExpiryDesc: 'Admins will also need to change their passwords regularly',
-                
+
                 // Theme System - NS Jan 2026
                 appearance: 'Appearance',
                 themeDesc: 'Choose a color theme for the interface',
@@ -5910,7 +5910,7 @@
                 defaultThemeDesc: 'Set the default theme for new users. Users can change their theme in My Profile.',
                 currentDefault: 'Current default',
                 themeInProfile: 'Change your theme in My Profile (click your username in the top right)',
-                
+
                 // UI Layout - LW Jan 2026
                 // LW: Feb 2026 - Layout Style (Modern vs Corporate)
                 layoutStyle: 'Layout Style',
@@ -5990,8 +5990,8 @@
                 monitor: 'Monitor',
                 configure: 'Configure',
                 console: 'Console',
-                
-                
+
+
                 snapshots: 'Snapshots',
                 snapshotsOverview: 'Snapshot Overview',
                 snapshotsCleanUp: 'Cleanup',
@@ -6052,7 +6052,7 @@
                 osVersion: 'Version OS',
                 guestAgentNotInstalled: 'QEMU Guest Agent non installé',
                 guestAgentInstallHint: 'Installez qemu-guest-agent pour afficher les informations d\'hôte, du système d\'exploitation et du noyau.',
-        
+
                 // LW: Feb 2026 - Corporate VM Detail View
                 vmSummary: 'Résumé VM',
                 generalInfo: 'Général',
@@ -6120,7 +6120,7 @@
                 lvmStorage: 'LVM',
                 lvmThinStorage: 'LVM-Thin',
                 zfsStorage: 'ZFS',
-        
+
                 // Auth
                 login: 'Connexion',
                 logout: 'Déconnexion',
@@ -6164,7 +6164,7 @@
                 lastLogin: 'Dernière connexion',
                 never: 'Jamais',
                 profile: 'Profil',
-        
+
                 // PegaProx Settings
                 pegaproxSettings: 'Paramètres de PegaProx',
                 serverSettings: 'Serveur',
@@ -6224,7 +6224,7 @@
                 restartInitiated: 'Redémarrage du serveur initié',
                 reconnecting: 'Reconnexion...',
                 restartFailed: 'Le redémarrage du serveur a échoué.',
-        
+
                 // Tenants & Permissions
                 // Reddit feature request - MSPs needed this for customer isolation
                 tenants: 'Tenant',
@@ -6239,7 +6239,7 @@
                 defaultTenant: 'Tenant par défaut',
                 tenantClusters: 'Clusters pour ce tenant',
                 allClusters: 'Tous les clusters',
-        
+
                 // Cluster Groups - NS Jan 2026
                 clusterGroups: 'Groupes de cluster',
                 clusterGroup: 'Groupe de cluster',
@@ -6274,7 +6274,7 @@
                 noTenantAllVisible: 'Aucun propriétaire (visible à tous)',
                 groupTenantHint: 'Si attribué, seul ce tenant peut voir les clusters dans ce groupe',
                 groupsTip: 'Conseil : Attribuez des groupes aux tenants dans les Paramètres ↑ Groupes de cluster pour le contrôle d\'accès.',
-        
+
                 permissions: 'Permissions',
                 permission: 'Permission',
                 permissionsDesc: 'Configurez les droits d\'accès granulaires pour les utilisateurs. Les paramètres par défaut basés sur les rôles peuvent être remplacés par utilisateur.',
@@ -6290,7 +6290,7 @@
                 tenantUpdated: 'Tenant mis à jour',
                 cannotDeleteDefaultTenant: 'Ne peut pas supprimer le tenant par défaut',
                 reassignUsersFirst: 'Les utilisateurs doivent d\'abord être réaffectés.',
-        
+
                 // Custom Roles section
                 roles: 'Rôles',
                 customRoles: 'Rôles personnalisés',
@@ -6325,7 +6325,7 @@
                 vmAclSaved: 'Permissions des VM enregistrées',
                 vmAclDeleted: 'Permissions de la VM supprimées',
                 confirmDeleteVmAcl: 'Supprimer les permissions personnalisées de cette VM ?',
-        
+
                 // Pool Permissions - MK Jan 2026
                 poolPermissions: 'Permissions de Pool',
                 poolPermissionsDesc: 'Accordez aux utilisateurs ou groupes l\'accès aux pools Proxmox. Les permissions s\'appliquent à tous les VMs du groupe.',
@@ -6371,7 +6371,7 @@
                 permissionsFor: 'Permissions pour',
                 addPermission: 'Ajouter une permission',
                 groupName: 'Nom du groupe',
-        
+
                 auditLog: 'Journal d\'audit',
                 auditLogDescription: 'Toutes les actions des utilisateurs au cours des 90 derniers jours',
                 noAuditLogs: 'Aucune entrée d\'audit disponible',
@@ -6492,7 +6492,7 @@
                 allActions: 'Toutes les actions',
                 exportAuditLog: 'Exporter',
                 refreshAuditLog: 'Actualiser',
-        
+
                 // Header
                 addCluster: 'Ajouter un Cluster',
                 addXcpngPool: 'Ajouter un Pool XCP-ng (Préversion Technique)',
@@ -6505,7 +6505,7 @@
                 addConnection: 'Ajouter une Connexion',
                 connectionType: 'Type de connexion',
                 clusterManagement: 'Gestion de cluster',
-        
+
                 // Tabs
                 overview: 'Vue d\\',
                 resources: 'Ressources',
@@ -6515,7 +6515,7 @@
                 showing: 'Affichant',
                 perPage: 'Par page',
                 loadingDatacenter: 'Chargement...',
-        
+
                 // Cluster
                 clusters: 'Clusters',
                 noClusterSelected: 'Aucun cluster sélectionné',
@@ -6566,7 +6566,7 @@
                 avgScore: 'Moyenne des notes',
                 avgCpu: 'Moyenne CPU',
                 avgRam: 'Moyenne de la RAM',
-        
+
                 // Nodes
                 nodes: 'Nœuds',
                 node: 'Nœud',
@@ -6589,7 +6589,7 @@
                 diskUsage: 'Utilisation du disque',
                 showMore: 'Montrer plus',
                 showLess: 'Montrer moins',
-        
+
                 // VMs & Resources
                 virtualMachines: 'Machines virtuelles',
                 containers: 'Conteneurs',
@@ -6772,7 +6772,7 @@
                 cpu: 'CPU',
                 disk: 'Disque',
                 network: 'Réseau',
-        
+
                 // VM Creation Wizard
                 node: 'Nœud',
                 next: 'Suivant',
@@ -6783,7 +6783,7 @@
                 noVirtioDrivers: 'Aucun pilote VirtIO',
                 allIsos: 'Toutes les ISOs',
                 virtioDriversHint: 'Sera monté en tant que CD-ROM supplémentaire pour l\'installation de pilotes Windows',
-        
+
                 // MK: New wizard translations
                 advancedCpu: 'Paramètres avancés du processeur',
                 cpuAffinity: 'Affinité du processeur',
@@ -6904,7 +6904,7 @@
                 onlyForVms: 'Disponible uniquement pour les VMs',
                 cloneNotes: 'Notes pour le clonage...',
                 optional: 'Facultatif',
-        
+
                 gridView: 'Vue en grille',
                 listView: 'Vue liste',
                 compactView: 'Vue compacte',
@@ -6956,19 +6956,19 @@
                 week: 'Semaine',
                 month: 'Mois',
                 year: 'Année',
-        
+
                 // Detail View
                 hostname: 'Nom d\'hôte',
                 tags: 'Étiquettes',
                 description: 'Description',
                 changesRequireRestart: 'Remarque : Certaines modifications nécessitent un redémarrage.',
-        
+
                 // Tags - NS Jan 2026
                 manageTags: 'Gérer les Étiquettes',
                 noTags: 'Aucun tag défini',
                 newTag: 'Nouveau tag...',
                 existingTags: 'Étiquettes existantes',
-        
+
                 // Schedules - MK Jan 2026
                 schedules: 'Calendriers',
                 scheduledActions: 'Actions Planifiées',
@@ -6989,7 +6989,7 @@
                 forWeekly: 'par semaine',
                 days: 'jours',
                 lastRun: 'Dernière Exécution',
-        
+
                 // Reports - NS Jan 2026
                 reports: 'Rapports',
                 reportsAnalytics: 'Rapports et Analyses',
@@ -7027,7 +7027,7 @@
                 nodesOnline: 'Nœuds en ligne',
                 datacenterOverview: 'Vue d\'ensemble du centre de données',
                 noRunningVms: 'Aucune VM en cours d\'exécution',
-        
+
                 // CVE Scanner - MK Mar 2026
                 cveScanner: 'Scanneur de vulnérabilités CVE',
                 cveScanDesc: 'Scanne tous les nœuds pour détecter des paquets obsolètes et des vulnérabilités de sécurité par SSH.',
@@ -7063,7 +7063,7 @@
                 cveApplyHint: 'Appliquer les corrections via le Gestionnaire de mises à jour',
                 openUpdateManager: 'Ouvrir le Gestionnaire de mises à jour',
                 description: 'Description',
-        
+
                 // Automation Tab - NS Jan 2026
                 automation: 'Automatisation',
                 schedulesDesc: 'Commencer, arrêter, redémarrer ou créer des instantanés de VM en fonction d\'un calendrier',
@@ -7091,7 +7091,7 @@
                 together: 'Ensemble (même hôte)',
                 separate: 'Différents hôtes',
                 enforced: 'Contrôlé',
-        
+
                 // Config Modal Tabs
                 generalTab: 'Général',
                 resourcesTab: 'Ressources',
@@ -7104,7 +7104,7 @@
                 proxmoxTasks: 'Tâches Proxmox',
                 pegaproxActions: 'Actions PegaProx',
                 optionsTab: 'Options',
-        
+
                 // Datacenter
                 summary: 'Sommaire',
                 cluster: 'Cluster',
@@ -7135,7 +7135,7 @@
                 exclusionRule2: 'Les nœuds exclus ne recevront pas les VMs durant les migrations de répartition du charge.',
                 exclusionRule3: 'Les nœuds exclus sont toujours visibles et peuvent recevoir des migrations manuelles.',
                 exclusionRule4: 'Les VMs sur les nœuds exclus peuvent toujours être migrées si le nœud est surchargé.',
-        
+
                 // NS: Backup translations - Dec 2025
                 createBackup: 'Créer une Sauvegarde',
                 noBackups: 'Aucune sauvegarde trouvée',
@@ -7166,13 +7166,13 @@
                 compressNone: 'Aucune',
                 backupNotes: 'Notes (optionnel)',
                 backupNotesPlaceholder: 'Avant une mise à jour majeure, sauvegarde hebdomadaire...',
-        
+
                 // HA
                 ha: 'HA',
                 haResources: 'Ressources d\'HA',
                 haGroups: 'Groupes HA',
                 haStatus: 'Statut HA',
-        
+
                 cpuCompatibility: 'Compatibilité CPU',
                 cpuCompatibilityMode: 'Mode de compatibilité CPU',
                 cpuCompatibilityDesc: 'Assurez-vous la compatibilité de la migration en direct entre différentes générations de processeurs.',
@@ -7281,7 +7281,7 @@
                 link: 'Lien',
                 resourceUsage: 'Utilisation des ressources',
                 memory: 'Mémoire (RAM)',
-        
+
                 // Storage
                 addStorage: 'Ajouter un stockage',
                 storageId: 'Identifiant du stockage',
@@ -7301,7 +7301,7 @@
                 pool: 'Groupe de ressources',
                 portal: 'Portail',
                 skipCertVerification: 'Passer la vérification du certificat',
-        
+
                 // Backup
                 backupJobs: 'Tâches de sauvegarde',
                 noBackupJobs: 'Aucune tâche de sauvegarde',
@@ -7320,13 +7320,13 @@
                 schedule: 'Planification',
                 selection: 'Sélection',
                 retention: 'Rétention',
-        
+
                 // Replication
                 replicationJobs: 'Tâches de réplication',
                 noReplicationJobs: 'Aucun Job de Réplication',
                 guest: 'Invité',
                 job: 'Tâche',
-        
+
                 // Firewall
                 firewallOptions: 'Options du pare-feu',
                 firewallRules: 'Règles de pare-feu',
@@ -7353,7 +7353,7 @@
                 fwLogLevelOut: 'Niveau de journalisation Sortie',
                 fwAddAlias: 'Ajouter un Alias',
                 fwAddIpset: 'Ajouter un ensemble d\'IPs',
-        
+
                 // Ceph
                 ceph: 'Ceph',
                 cephStatus: 'Statut de Ceph',
@@ -7371,7 +7371,7 @@
                 cephNotInstalledOnNode: 'Ceph n\'est pas configuré sur ce nœud.',
                 cephInstallHint: 'Pour configurer Ceph, ouvrez un nœud et utilisez l\'onglet Ceph pour initialiser.',
                 cephInit: 'Initialiser Ceph',
-        
+
                 // RBD Mirroring
                 cephMirroring: 'Miroir',
                 cephMirrorMode: 'Mode miroir',
@@ -7396,7 +7396,7 @@
                 cephMirrorInterval: 'Intervalle',
                 cephMirrorSiteName: 'Nom du site',
                 cephMirrorBackToOverview: 'Retour à l’aperçu',
-        
+
                 // Settings
                 balancingConfig: 'Configuration du balancing',
                 migrationThreshold: 'Seuil de migration',
@@ -7412,7 +7412,7 @@
                 balancingEnabled: 'Équilibrage activé',
                 optionsTitle: 'Options',
                 intervalBetweenChecks: 'Interval entre les vérifications de l\'équilibre',
-        
+
                 // HA
                 highAvailability: 'Haute disponibilité (HA)',
                 haEnabled: 'HA Activé',
@@ -7454,10 +7454,10 @@
                 ctStillRunning: 'Le conteneur est toujours en cours d\'exécution. Il sera arrêté avant la suppression.',
                 primary: 'Primaire',
                 fallbacks: 'Retours d\'ursule',
-        
+
                 // Messages
                 connectionError: 'Erreur de connexion',
-        
+
                 // Task Bar
                 tasks: 'Tâches',
                 taskMigrate: 'Migration',
@@ -7498,7 +7498,7 @@
                 configSaved: 'Configuration enregistrée',
                 operationFailed: 'L\'opération a échoué.',
                 confirmAction: 'Confirmer l\'action',
-        
+
                 // Misc
                 lastCheck: 'Dernière vérification',
                 clusterInfo: 'Informations sur le cluster',
@@ -7514,7 +7514,7 @@
                 help: 'Aide',
                 lastMigrations: 'Dernières migrations',
                 noMigrations: 'Aucune migration',
-        
+
                 // Options labels
                 keyboardLayout: 'Dispositions du clavier',
                 httpProxy: 'Proxy HTTP',
@@ -7558,7 +7558,7 @@
                 failureThresholdHint: 'Nombre de vérifications échouées avant que le nœud ne soit considéré comme hors ligne',
                 hardwareWatchdog: 'Watchdog matériel',
                 watchdogWarning: 'ATTENTION : Le nœud redémarrera automatiquement en cas de perte de majorité !',
-        
+
                 // Fencing Explanation - NS Jan 2026
                 fencingExplanation: 'Comment la Split-Brain est préventée',
                 fencingStep1Title: 'Détection de perte de quorum',
@@ -7572,13 +7572,13 @@
                 fencingWarning: 'IMPORTANT : Sans mécanisme de clôture, le split-brain peut causer une corruption des données !',
                 fencingRecommendation: 'Recommandation pour des clusters à 2 nœuds :',
                 fencingRecList: '• Configurer les hôtes du quorum (passerelle, serveur DNS)\n• Activer le gardien matériel si disponible\n• Définir un délai de récupération d\'au moins 30 secondes',
-        
+
                 enableHA: 'Activer le HA',
                 disableHA: 'Désactiver l\'HA',
                 changesAfterRestart: 'Les changements s\'appliquent après le redémarrage.',
                 important2NodeCluster: 'Important pour les clusters à deux nœuds !',
                 online: 'En ligne',
-        
+
                 // 2-Node Cluster Mode - NS Jan 2026
                 twoNodeMode: 'Mode de cluster à deux nœuds',
                 twoNodeWarning: 'Limitation de cluster à deux nœuds',
@@ -7589,7 +7589,7 @@
                 twoNodeCredentialsInfo: 'PegaProx utilisera les identifiants du cluster pour se connecter via SSH au nœud survivant et exécutera la commande "pvecm expected 1" pour restaurer le quorum.',
                 twoNodeTip: 'Conseil',
                 twoNodeTipText: 'Pour obtenir les meilleurs résultats, installez "sshpass" sur le serveur PegaProx : apt install sshpass',
-        
+
                 // Split-Brain Risk - 2-Node - NS Jan 2026
                 splitBrainRisk: 'Risque de Split-Brain Sans Électrification!',
                 splitBrainRiskDesc: 'Si les deux nœuds sont actifs mais que le réseau entre eux échoue, imposer un quorum peut faire QUELQUES nœuds exécuter la même VM = corruption des données !',
@@ -7602,7 +7602,7 @@
                 quorumHostsConfigured: 'Quorum d\'hôtes configurés',
                 recoveryDelayCheck: 'Délai de récupération ≥ 30 secondes',
                 selfFencingEnabled: 'Fermoir auto-activé',
-        
+
                 // Storage-based Split-Brain Protection - NS Jan 2026
                 storageHeartbeat: 'Protection contre le split‑brain basée sur le stockage',
                 recommendedFor2Node: 'Recommandé pour les clusters à 2 nœuds !',
@@ -7624,7 +7624,7 @@
                 step4Recovery: 'La récupération ne commence que après la confirmation ou le délai d\'attente.',
                 nodeAgentRequired: 'Agent du nœud requis!',
                 nodeAgentRequiredDesc: 'Pour que cette fonctionnalité fonctionne, vous devez installer l\'Agent PegaProx Node sur chaque nœud Proxmox. L\'agent envoie des battements de cœur et répond aux pilules mortelles.',
-        
+
                 // Automatic Split-Brain Protection - NS Jan 2026 - FULLY AUTOMATIC
                 splitBrainProtection: 'Protection contre le split-brain',
                 fullyAutomatic: '100% AUTOMATIQUE',
@@ -7637,19 +7637,19 @@
                 sshOnlyMode: 'Mode de protection SSH uniquement',
                 noSharedStorageFound: 'Aucun stockage partagé (NFS/CephFS) trouvé. La protection fonctionne par vérification SSH.',
                 notSafeForDualNetwork: 'Non sécurisé pour les configurations en double réseau (réseaux séparés serveur/stockage)',
-        
+
                 // Block Storage Warning - NS Jan 2026
                 blockStorageOnly: 'Stockage de bloc trouvé',
                 blockStorageExplain: 'Le stockage de blocs (LVM, iSCSI, RBD) ne peut pas stocker les fichiers de cœur de battement. Pour une protection complète en double réseau, ajoutez un petit partage NFS.',
                 sshOnlyActive: 'Protection SSH active',
                 sshOnlyRisk: 'Fonctionne pour un réseau simple. Pour un réseau double (serveur/iSCSI séparé), ajoutez une petite partage NFS (100Mo suffit).',
-        
+
                 // Multiple Storages - NS Jan 2026
                 clickToSelect: 'Cliquer pour sélectionner',
                 selected: 'Sélectionné',
                 currentlyActive: 'Actuellement actif',
                 blockStoragesIgnored: 'Stockages de blocs indisponibles',
-        
+
                 // Self-Fence Protection - NS Jan 2026
                 selfFenceProtection: 'Protection auto-réglée',
                 advancedSettings: 'Paramètres Avancés',
@@ -7674,7 +7674,7 @@
                 selfFenceUninstalling: 'Désinstallation de l\'agent...',
                 enable2NodeMode: 'Activer le mode de cluster à deux nœuds',
                 twoNodeModeDesc: 'Forcer automatiquement le quorum lorsqu\'un nœud échoue',
-        
+
                 // Legacy translations (kept for compatibility)
                 autoSplitBrainProtection: 'Protection automatique contre le split-brain',
                 noSetupRequired: 'AUCUNE CONFIGURATION NÉCÉSSITÉE',
@@ -7690,7 +7690,7 @@
                 dualNetworkProtectionDesc: 'Le serveur PegaProx doit monter le stockage partagé (NFS/CephFS)',
                 sharedStoragePath: 'Chemin du stockage partagé',
                 agentAutoInstall: 'L\'agent du nœud s\'installera automatiquement via SSH',
-        
+
                 // Device Passthrough
                 devicePassthrough: 'Transfert de périphérique',
                 pciDevices: 'Périphériques PCI',
@@ -7714,13 +7714,13 @@
                 iommuGroup: 'Groupe d\'IOMMU',
                 vendor: 'Vendeur',
                 adding: 'Ajout en cours…',
-        
+
                 bandwidthLimits: 'Limites de bande passante',
                 maxWorkers: 'Nombre maximal de travailleurs',
                 nextVmid: 'Prochain ID de machine virtuelle',
                 userTagAccess: 'Accès par étiquette d\'utilisateur',
                 registeredTags: 'Tags enregistrés',
-        
+
                 // Subscription
                 subscriptionStatus: 'Statut de la souscription',
                 licensed: 'Licencié',
@@ -7742,7 +7742,7 @@
                 subscriptionBenefit1: 'Accès au dépôt d\'entreprise avec mises à jour stables',
                 subscriptionBenefit2: 'Support technique de Proxmox',
                 subscriptionBenefit3: 'Avertissement d\'abonnement absent à la connexion',
-        
+
                 // Maintenance
                 maintenanceModeTitle: 'Activer le mode maintenance',
                 maintenanceWarning: 'Attention : Toutes les VMs et conteneurs en cours d\'exécution sur ce nœud seront automatiquement migrés vers d\'autres nœuds.',
@@ -7819,7 +7819,7 @@
                 interval: 'Intervalle',
                 saveSettings: 'Sauvegarder les paramètres',
                 haEnabled: 'HA Activé',
-        
+
                 // Common notifications
                 connectionError: 'Erreur de connexion',
                 saveFailed: 'Échec de sauvegarde',
@@ -7844,7 +7844,7 @@
                 unlockVm: 'Déverrouiller la VM',
                 vmLocked: 'La machine virtuelle est verrouillée.',
                 vmUnlocked: 'VM déverrouillée',
-        
+
                 // Security Settings
                 securitySettings: 'Paramètres de sécurité',
                 securityDashboard: 'Tableau de bord de sécurité',
@@ -7918,13 +7918,13 @@
                 locked: 'Verrouillé',
                 attempts: 'tentatives',
                 remaining: 'restant',
-        
+
                 // About page translations
                 about: 'À propos',
                 developmentTeam: 'Équipe de développement',
                 creditsAcknowledgments: 'Crédits et remerciements',
                 links: 'Liens',
-        
+
                 // update Manager
                 updateManager: 'Gestionnaire de mises à jour',
                 updateManagerDesc: 'Vérifiez et installez les mises à jour sur tous les nœuds du cluster.',
@@ -7962,7 +7962,7 @@
                 nodesRemaining: 'Nœuds restants',
                 includeReboot: 'Redémarrer après la mise à jour',
                 includeRebootHint: 'Recommandé pour les mises à jour du noyau',
-        
+
                 // PegaProx Auto-Update - NS Jan 2026
                 confirmUpdate: 'Cela téléchargera et installera la mise à jour. Une sauvegarde sera créée. Le serveur redémarrera automatiquement. Continuer ?',
                 downloadingUpdate: 'Téléchargement de la mise à jour...',
@@ -7991,7 +7991,7 @@
                 restoringBackup: 'Restauration à partir de sauvegarde...',
                 rollbackSuccess: 'Annulation réussie ! Le serveur redémarre...',
                 rollbackWarning: '⚠️ Le rollback redémarrera le serveur. Assurez-vous d\'avoir enregistré tout travail non enregistré.',
-        
+
                 // Security / Military Grade Encryption - NS Jan 2026
                 securityStatus: 'État de Sécurité',
                 dataEncryption: 'Chiffrement des données',
@@ -8138,18 +8138,18 @@
                 currentStep: 'Étape Actuelle',
                 updateLogs: 'Journal des mises à jour',
                 started: 'Débuté',
-        
+
                 // VM Detail buttons
                 console: 'Console',
                 configuration: 'Configuration',
-        
+
                 // Config Modal
                 cpuCores: 'Cœurs de processeur',
                 cpuLimit: 'Limite de processeur',
                 memory: 'Mémoire (RAM)',
                 hardware: 'Matériel',
                 disks: 'Disques',
-        
+
                 // Config Modal Tabs
                 mountIso: 'Monter un ISO',
                 noIsoEject: 'Aucun ISO (éjecter)',
@@ -8274,12 +8274,12 @@
                 qemuGuestAgentHint: 'Active le redémarrage, le freeze/unfreeze des point de restauration',
                 fstrim: 'FSTRIM après Clonage/Migration',
                 fstrimHint: 'Exécuter automatiquement TRIM après la clonage',
-        
+
                 // More modals
                 optional: 'Facultatif',
                 snapshotDescription: 'Description du point de restauration..',
                 saveRamState: 'Enregistrer l\'état de la RAM (Veille)',
-        
+
                 // NS: Feb 2026 - Efficient snapshot translations
                 spaceEfficientSnapshot: 'Point de restauration frugal en espace',
                 spaceEfficientSnapshots: 'Points de restauration frugaux en espace',
@@ -8303,7 +8303,7 @@
                 fsFrozen: 'FS gelé',
                 recommended: 'Recommandé',
                 snapshotSizeGb: 'Taille du point de restauration (Go)',
-        
+
                 create: 'Créer',
                 createReplicationJob: 'Créer une tâche de réplication',
                 targetNode: 'Nœud cible',
@@ -8457,7 +8457,7 @@
                 dryRunShort: 'Exécution Sécheuse',
                 connecting: 'Connexion...',
                 needsRestart: 'NÉEDE REDÉMARRE',
-        
+
                 // NS: Alerts, Tasks, Tags, Affinity - Dec 2025
                 alerts: 'Alertes',
                 alertsDesc: 'Notifications par email lorsque les seuils sont dépassés',
@@ -8481,7 +8481,7 @@
                 smtpFromEmailRequired: 'Une adresse e-mail est requise.',
                 emailRecipients: 'Destinataires d\'e-mail',
                 addRecipient: 'Ajouter un destinataire',
-        
+
                 scheduledTasks: 'Tâches Planifiées',
                 scheduledTasksDesc: 'Automatiser les opérations de VM selon un calendrier',
                 createTask: 'Créer une tâche',
@@ -8499,7 +8499,7 @@
                 daily: 'Journalière',
                 weekly: 'Semaine',
                 monthly: 'Mensuel',
-        
+
                 tagsLabels: 'Étiquettes & Balises',
                 tagsDesc: 'Catégoriser et regrouper les VMs',
                 createTag: 'Créer un Étiquette',
@@ -8507,7 +8507,7 @@
                 tagColor: 'Couleur',
                 noTags: 'Aucun tag défini',
                 assignedVms: 'VMs assignées',
-        
+
                 affinityRules: 'Règles d\'affinité',
                 customScripts: 'Scripts personnalisés',
                 scriptsDesc: 'Exécuter des scripts .sh ou .py personnalisés sur les nœuds du cluster',
@@ -8529,7 +8529,7 @@
                 viewOutput: 'Afficher la sortie',
                 noOutput: 'Aucune sortie disponible',
                 output: 'Sortie',
-        
+
                 // CIS Hardening
                 hardenNode: 'Hardener le nœud PVE',
                 hardenDesc: 'Appliquer les contrôles de durcissement du benchmark CIS aux nœuds individuels Proxmox VE via SSH.',
@@ -8662,7 +8662,7 @@
                 stigAuditLock: 'Règles d\'audit immuables',
                 stigAuditLockDesc: 'Verrouille la configuration de l\'audit avec le drapeau -e 2. Les règles ne peuvent être modifiées sans redémarrage, empêchant les attaquants de désactiver l\'audit.',
                 stigAuditLockImpact: 'Les modifications des règles d\'audit nécessitent un redémarrage.',
-        
+
                 // PegaProx Recommendations
                 pegaApparmor: 'AppArmor (Contrôle d\'accès obligatoire)',
                 pegaApparmorDesc: 'Active AppArmor et applique tous les profils. Limite ce qui peut être accédé même si un programme est compromise — ajoute une couche de sécurité au-delà des permissions de fichiers standard.',
@@ -8676,7 +8676,7 @@
                 pegaAuditd: 'Activer le démon d\'audit (auditd)',
                 pegaAuditdDesc: 'Installe et active auditd pour le journalisation des événements système. Associez avec la norme STIG « Journalisation de commandes privilégiées » pour des règles d\'audit completes.',
                 pegaAuditdImpact: 'Overhead minimal - prérequis pour les règles d\'audit',
-        
+
                 affinityDesc: 'Déterminez quelles VMs/CTs doivent exécuter ensemble ou séparément',
                 createAffinityRule: 'Créer une règle',
                 editAffinityRule: 'Modifier la règle',
@@ -8688,7 +8688,7 @@
                 noAffinityRules: 'Aucune règle d\'affinité',
                 enforceRule: 'Appliquer la règle',
                 enforceRuleHint: 'Bloquer les migrations qui violeraient cette règle',
-        
+
                 // Console Settings - NS Jan 2026
                 consoleSettings: 'Ports de console',
                 vncPort: 'Port VNC',
@@ -8711,7 +8711,7 @@
                 connectingWs: 'Connexion WebSocket',
                 wsConnected: 'WebSocket connecté, en attente du serveur...',
                 ipFetchFailed: 'Échec lors de la récupération de l’IP',
-        
+
                 smtpSettings: 'Paramètres SMTP',
                 smtpHost: 'Serveur SMTP',
                 smtpPort: 'Port',
@@ -8722,10 +8722,10 @@
                 smtpTls: 'Utilisez TLS',
                 smtpSsl: 'Utilisez SSL',
                 alertCooldown: 'Délai d\'alerte (secondes)',
-        
+
                 migrationHistory: 'Historique de migration',
                 noMigrationHistory: 'Aucune migration enregistrée',
-        
+
                 // LW: Password expiry settings
                 passwordExpiry: 'Expiration du mot de passe',
                 passwordExpiryDesc: 'Forcer les utilisateurs à changer leur mot de passe après un nombre spécifié de jours.',
@@ -8733,7 +8733,7 @@
                 sendExpiryEmails: 'Envoyez des notifications par e-mail lorsque le mot de passe va expirer.',
                 expiryDays: 'Mot de passe expiré après',
                 warningDays: 'Avertissez les utilisateurs avant',
-        
+
                 // LW: Password expiry banner
                 passwordExpired: 'Votre mot de passe a expiré !',
                 passwordExpiresIn: 'Votre mot de passe expire dans {days} jours',
@@ -8741,7 +8741,7 @@
                 pleaseChangeSoon: 'Merci de le changer prochainement.',
                 changePassword: 'Changer le mot de passe',
                 dismissForNow: 'Me rappelle plus tard',
-        
+
                 // LW: Reset all passwords - Dec 2025
                 forcePasswordReset: 'Forcer le réinitialisation du mot de passe',
                 forcePasswordResetDesc: 'Tous les mots de passe des utilisateurs expirent immédiatement. Utiliser après les incidents de sécurité.',
@@ -8752,7 +8752,7 @@
                 includeAdminsWarning: 'Attention : Vous devrez également changer votre mot de passe !',
                 includeAdminsInExpiry: 'Inclure les comptes administrateurs',
                 includeAdminsInExpiryDesc: 'Les administrateurs devront également changer régulièrement leurs mots de passe.',
-        
+
                 // Theme System - NS Jan 2026
                 appearance: 'Apparence',
                 themeDesc: 'Choisissez un thème de couleur pour l\'interface',
@@ -8763,7 +8763,7 @@
                 defaultThemeDesc: 'Définissez le thème par défaut pour de nouveaux utilisateurs. Les utilisateurs peuvent changer leur thème dans Mon Profil.',
                 currentDefault: 'Configuration par défaut actuelle',
                 themeInProfile: 'Changez votre thème dans Mon Profil (cliquez sur votre nom d\'utilisateur en haut à droite)',
-        
+
                 // UI Layout - LW Jan 2026
                 // LW: Feb 2026 - Layout Style (Modern vs Corporate)
                 layoutStyle: 'Style de mise en page',
@@ -8832,8 +8832,8 @@
                 monitor: 'Surveiller',
                 configure: 'Configurer',
                 console: 'Console',
-        
-        
+
+
                 snapshots: 'Point de restauration',
                 snapshotsOverview: 'Aperçu des point de restauration',
                 snapshotsCleanUp: 'Nettoyage',
@@ -8846,6 +8846,7 @@
                 noSnapshots: 'Aucun point de restauration trouvé',
             },
             es: {
+                // Spanish translations by @ColombianJoker
                 // General
                 loading: 'Cargando...',
                 save: 'Guardar',
@@ -8880,7 +8881,7 @@
                 results: 'resultados',
                 noResults: 'Sin resultados',
                 target: 'Objetivo',
-                source: 'Fuente',
+                source: 'Origen',
                 rules: 'Reglas',
                 default: 'Predeterminado',
                 none: 'Ninguno',
@@ -8891,7 +8892,12 @@
                 osVersion: 'Versión de SO',
                 guestAgentNotInstalled: 'Agente de huésped QEMU no instalado',
                 guestAgentInstallHint: 'Instale qemu-guest-agent para mostrar nombre de máquina, SO e info de kernel',
-                
+                available: "disponible",
+                filterSidebar: "Filtrar...",
+                found: "encontrado",
+                items: "ítems",
+                runningOf: "en ejecución de",
+
                 // LW: Feb 2026 - Corporate VM Detail View / Vista detallada de VM corporativa
                 vmSummary: 'Resumen de VM',
                 generalInfo: 'General',
@@ -8958,7 +8964,10 @@
                 lvmStorage: 'LVM',
                 lvmThinStorage: 'LVM-Thin',
                 zfsStorage: 'ZFS',
-                
+                storageMappings: "Mapeos de almacenamiento",
+                storageOverview: "Almacenamiento del nodo",
+
+
                 // Auth
                 login: 'Entrar',
                 logout: 'Cerrar sesión',
@@ -9002,7 +9011,7 @@
                 lastLogin: 'Último ingreso',
                 never: 'Nunca',
                 profile: 'Perfil',
-                
+
                 // PegaProx Settings / Valores de PegaProx
                 pegaproxSettings: 'Valores de PegaProx',
                 serverSettings: 'Servidor',
@@ -9042,7 +9051,9 @@
                 restartInitiated: 'Comenzó el reinicio del servidor',
                 reconnecting: 'Reconectando...',
                 restartFailed: 'Falló el reinicio del servidor',
-                
+                layoutSelectionDesc: "Escoja su estilo de interfaz preferido. Puede cambiar esto en cualquier momento en Perfil -> Stilo de Interfaz,",
+                layoutSelectionHint: "Puede cambiarlo en cualquier momento bajo Perfil -> Estilo de Interfaz",
+
                 // Tenants & Permissions & Tenants y Permisos
                 // Reddit feature request - MSPs needed this for customer isolation
                 tenants: 'Tenants',
@@ -9057,7 +9068,7 @@
                 defaultTenant: 'Tenant predeterminado',
                 tenantClusters: 'Clusters para este tenant',
                 allClusters: 'Todos los clústeres',
-                
+
                 // Cluster Groups - NS Jan 2026 / Grupos de clústeres
                 clusterGroups: 'Grupos de clústeres',
                 clusterGroup: 'Grupo de cluster',
@@ -9090,7 +9101,24 @@
                 noTenantAllVisible: 'Sin tenant (visible para todos)',
                 groupTenantHint: 'Si se asigna, solo este tenant podría ver los clústeres en este grupo',
                 groupsTip: 'Tip: Asigne grupos a tenants en Valores ↑ Grupos de clústeres para control de acceso',
-                
+                excludedPools: "Pools excluidos",
+                excludedPoolsDesc: "Todas las VMs en esos pools serán ignoradas durante un auto-rebalanceo.",
+                noClustersAdded: "Aún no se han agregado clústeres",
+                noControlsSelected: "No se seleccionaron controles",
+                noDatastores: "No hay datastores",
+                noEvents: "Aún no hay eventos de failover",
+                noIssues: "No se encontraron problemas",
+                noNetworkData: "No hay datos de red disponibles",
+                noScanResults: "Aún no hay resultados de escaneo",
+                noScanResultsDesc: "Haga clic en 'Escanear todos los nodos' para buscar paquetes vulnerables",
+                noSnapshotReplJobs: "No hay tareas de replicación de instantáneas",
+                noVmsOnBridge: "No hay VMs asignadas",
+                nodesClean: "Nodos limpios",
+                nodesScanned: "Nodos escaneados",
+                openUpdateManager: "Abrir Gestor de actualizaciones",
+                overTime: "a través del tiempo",
+                presentOnNodes: "Presente en los nodos",
+
                 permissions: 'Permisos',
                 permission: 'Permiso',
                 permissionsDesc: 'Configure permisos granulares de usuario. Los predeterminados basados en roles pueden ser sobreseídos por usuario.',
@@ -9106,7 +9134,7 @@
                 tenantUpdated: 'Tenant actualizado',
                 cannotDeleteDefaultTenant: 'No se puede remover el tenant predeterminado',
                 reassignUsersFirst: 'Deben reasignarse primero los usuarios',
-                
+
                 // Custom Roles section / Sección de roles personalizados
                 roles: 'Roles',
                 customRoles: 'Roles personalizados',
@@ -9141,7 +9169,7 @@
                 vmAclSaved: 'Permisos de VM guardados',
                 vmAclDeleted: 'Permisos de VM removidos',
                 confirmDeleteVmAcl: '¿Remover los permisos personalizados para esta VM?',
-                
+
                 // Pool Permissions - MK Jan 2026 / Permisos de pool
                 poolPermissions: 'Permisos de pool',
                 poolPermissionsDesc: 'Asigne acceso a usuario o grupos a pools de recursos de Proxmos. Los permisos aplican para todas la VMs en el pool.',
@@ -9163,6 +9191,7 @@
                 poolMembers: 'Miembros',
                 members: 'miembros',
                 addVmToPool: 'Agregar VM al pool',
+                assignToPool: "Asignar a pool",
                 removeFromPool: 'Remover del pool',
                 vmAddedToPool: 'VM agregada al pool',
                 vmRemovedFromPool: 'VM removida del pool',
@@ -9186,7 +9215,8 @@
                 permissionsFor: 'Permisos para',
                 addPermission: 'Agregar permisos',
                 groupName: 'Nombre de grupo',
-                
+
+
                 auditLog: 'Registros de auditoría',
                 auditLogDescription: 'Todas las acciones de usuario de los últimos 90 días',
                 noAuditLogs: 'No hay registros de auditoría disponibles',
@@ -9259,10 +9289,19 @@
                 snapshotCreated: 'Instantánea creada',
                 snapshotDeleted: 'Instantánea removida',
                 snapshotRestored: 'Instantánea restaurada',
+                snapshotDesc: "Enfoque de clonar + migrar. Funciona con cualquier almacenamiento (LVM, dir, etc).",
+                snapshotName: "Nombre de la instantánea",
+                snapshotReplNote: "Crea un clon completo de la VM y lo migra al nodo destino. La réplica anterior se reemplaza en cada ejecución.",
                 rollbackConfirm: '¿Reversar realmente a esta instantánea? ¡Esto no podría deshacerse!',
+                rollbackStarted: "Reversión (Rollback) iniciada",
+                rpo: "RPO",
+                rpoDesc: "Objetivo de punto de recuperación (RPO) - tiempo desde la última replicación",
                 replicationCreated: 'Replicación creada',
                 replicationDeleted: 'Replicación removida',
                 replicationTriggered: 'Replicación disparada',
+                replicationHint: "Cree una tarea de replicación para mantener los datos de las VMs sincronizados entre los nodos",
+                replicationInfoDesc: "Mantenga los datos de las VMs sincronizados entre los nodos para failover y recuperación de desastres. Dos modos disponibles:",
+                replicationInfoTitle: "Replicación de VMs",
                 haEnabled: 'HA activada',
                 haDisabled: 'HA desactivada',
                 noFallbackHosts: 'No se encontraron máquinas para retornar (¿Cluster de un único nodo?)',
@@ -9307,7 +9346,7 @@
                 allActions: 'Todas las acciones',
                 exportAuditLog: 'Exportar',
                 refreshAuditLog: 'Refrescar',
-                
+
                 // Header / Encabezado
                 addCluster: 'Agregar cluster',
                 pveClusterDesc: 'Máquinas virtuales y contenedores',
@@ -9316,7 +9355,7 @@
                 addConnection: 'Agregar conexión',
                 connectionType: 'Tipo de conexión',
                 clusterManagement: 'PegaProx Cluster Management for Proxmox VE',
-                
+
                 // Tabs / Pestañas
                 overview: 'Vista general',
                 resources: 'Recursos',
@@ -9326,7 +9365,7 @@
                 showing: 'Mostrando',
                 perPage: 'Por página',
                 loadingDatacenter: 'Cargando datos de datacenter...',
-                
+
                 // Cluster
                 clusters: 'Clústeres',
                 noClusterSelected: 'No hay un cluster seleccionado',
@@ -9335,6 +9374,10 @@
                 multiClusterSummary: 'Resumen de todos los clústeres gestionados',
                 clustersConnected: 'Clústeres conectados',
                 clusterOverview: 'Vista general de cluster',
+                clusterCpu: "CPU en el cluster",
+                clusterMemory: "Memoria en el cluster",
+                clusterServices: "Servicios de cluster",
+                clusterStorage: "Almacenamiento en el cluster",
                 vmsRunning: 'VMs corriendo',
                 vmsStopped: 'VMs detenidas',
                 noClustersConfigured: 'No hay clústeres configurados',
@@ -9365,6 +9408,7 @@
                 connecting: 'Conectando...',
                 addNewCluster: 'Agregar un nuevo cluster',
                 testConnection: 'Probar la conexión',
+                testCleanup: "Limpiar prueba",
                 deleteCluster: 'Remover cluster',
                 deleteClusterConfirm: '¿Remover realmente el cluster?',
                 clusterHealth: 'Salud del cluster',
@@ -9377,7 +9421,7 @@
                 avgScore: 'Puntos promedio',
                 avgCpu: 'CPU promedio',
                 avgRam: 'RAM promedio',
-                
+
                 // Nodes / Nodos
                 nodes: 'Nodos',
                 node: 'Nodo',
@@ -9401,7 +9445,13 @@
                 allocated: 'asignado',
                 showMore: 'Mostrar más',
                 showLess: 'Mostrar menos',
-                
+                fixAvailable: "actualización disponible",
+                installing: "Instalando...",
+                inventoryOverview: "Vista General de Inventario",
+                items: "ítems",
+                recentItems: "Recientes",
+                rename: "Renombrar",
+
                 // VMs & Resources / VMs y recursos
                 virtualMachines: 'Máquinas virtuales',
                 containers: 'Contenedores',
@@ -9492,10 +9542,12 @@
                 selectClusterFirst: 'Primero seleccione un cluster destino',
                 simulationMode: 'Modo simulación',
                 sourceVm: 'VM origen',
+                sourceBridge: "Red (puente) origen",
+                sourceStorage: "Almacenamiento origen",
                 targetCluster: 'Cluster destino',
                 targetNode: 'Nodo destino',
                 targetStorage: 'Almacenamiento destino',
-                targetBridge: 'Red destino (puente)',
+                targetBridge: 'Red (puente) destino',
                 moveDisk: 'Mover disco',
                 resizeDisk: 'Cambiar tamaño de disco',
                 diskResized: 'Disco cambiado',
@@ -9503,6 +9555,7 @@
                 deleteSourceDiskWarning: 'El disco original se mantendrá en el almacenamiento origen. Puede removerlo manualmente después.',
                 move: 'Mover',
                 from: 'desde',
+                nativeProxmoxReplication: "Replicación Nativa (ZFS) de Proxmox",
                 noNetworkInterfaces: 'No hay interfaces de red',
                 nameRequired: 'Se requiere el nombre',
                 newVmid: 'Nuevo VM ID (opcional)',
@@ -9584,7 +9637,10 @@
                 cpu: 'CPU',
                 disk: 'Disco',
                 network: 'Red',
-                
+                networkMappings: "Mapeos de red",
+                networkOverview: "Vista General de la Red",
+                networking: "Redes",
+
                 // VM Creation Wizard
                 node: 'Nodo',
                 next: 'Siguiente',
@@ -9595,7 +9651,7 @@
                 noVirtioDrivers: 'Sin manejadores de VirtIO',
                 allIsos: 'Todos los ISOs',
                 virtioDriversHint: 'Será montado como un CD adicional para la instalación de los manejadores de Windows',
-                
+
                 // MK: New wizard translations // Traducciones del nuevo asistente
                 advancedCpu: 'Valores avanzados de CPU',
                 cpuAffinity: 'Afinidad de CPU',
@@ -9733,7 +9789,7 @@
                 onlyForVms: 'Disponible solo para VMs',
                 cloneNotes: 'Notas para clonar...',
                 optional: 'opcional',
-                
+
                 gridView: 'Vista de grilla',
                 listView: 'Vista de lista',
                 compactView: 'Vista compacta',
@@ -9785,19 +9841,19 @@
                 week: 'Semana',
                 month: 'Mes',
                 year: 'Año',
-                
+
                 // Detail View / Vista de detalle
                 hostname: 'Nombre de máquina',
                 tags: 'Tags',
                 description: 'Descripción',
                 changesRequireRestart: 'Nota: Algunos cambios requieren de reinicio',
-                
+
                 // Tags - NS Jan 2026
                 manageTags: 'Gestionar Tags',
                 noTags: 'Sin tags',
                 newTag: 'Nuevo tag...',
                 existingTags: 'Tags existentes',
-                
+
                 // Schedules - MK Jan 2026
                 schedules: 'Agendamientos',
                 scheduledActions: 'Acciones agendadas',
@@ -9818,7 +9874,7 @@
                 forWeekly: 'semanal',
                 days: 'Días',
                 lastRun: 'Última ejecución',
-                
+
                 // Reports - NS Jan 2026 / Reportes
                 reports: 'Reportes',
                 reportsAnalytics: 'Reportes & Analítica',
@@ -9828,7 +9884,9 @@
                 pluginDisclaimer: 'PegaProx no asume responsabilidad alguna por plugins de la comunidad. Los administradores deben revisar y escanear el código del plugin antes de activarlo.',
                 pluginAuthor: 'por',
                 recoveryPlans: 'Planes de Recuperación',
-                createPlan: 'Crear Plan',
+                createPlan: 'Crear plan',
+                deletePlan: "Remover plan",
+                editPlan: "Editar plan",
                 planName: 'Nombre del Plan',
                 sourceCluster: 'Clúster de Origen',
                 targetCluster: 'Clúster de Destino',
@@ -9866,7 +9924,25 @@
                 nodesOnline: 'Nodos en línea',
                 datacenterOverview: 'Vista general de datacenter',
                 noRunningVms: 'No hay VMs en ejecución',
-                
+                enablePluginsHint: "Activar plugins en Configuración -> Servidor -> Plugins",
+                exportPdf: "Exportar como PDF",
+                exportPng: "Exportar como PNG",
+                failoverComplete: "Failover completado",
+                failoverFailed: "Error en la conmutación por failover",
+                failoverHistory: "Historial de failover",
+                failoverRunning: "Ejecutando failover...",
+                failoverTimeout: "Tiempo de espera (Timeout) de failover (s)",
+                includeRam: "Incluir memoria",
+                planCompleted: "Completado",
+                planFailed: "Fallido",
+                planReady: "Listo",
+                planRunning: "En ejecución",
+                planTesting: "En pruebas",
+                postWebhook: "Webhook post failover",
+                preWebhook: "Webhook pre failover",
+                siteRecoveryDesc: "Planes de recuperación de sitio y orquestación de failover",
+
+
                 // Automation Tab - NS Jan 2026 / Automatización
                 automation: 'Automatización',
                 schedulesDesc: 'Iniciar, detener, reiniciar o tomar instantáneas de VMs automáticamente según una agenda',
@@ -9894,7 +9970,7 @@
                 together: 'Juntas',
                 separate: 'Separadas',
                 enforced: 'Forzoso',
-                
+
                 // Config Modal Tabs / Pestañas modales de configuración
                 generalTab: 'General',
                 resourcesTab: 'Recursos',
@@ -9907,7 +9983,7 @@
                 proxmoxTasks: 'Tareas de Proxmox',
                 pegaproxActions: 'Acciones de PegaProx',
                 optionsTab: 'Opciones',
-                
+
                 // Datacenter
                 summary: 'Resumen',
                 cluster: 'Cluster',
@@ -9938,7 +10014,7 @@
                 exclusionRule2: 'Los nodos excluidos no recibirán VMs durante las migraciones de balanceo de cargas',
                 exclusionRule3: 'Los nodos excluidos siguen siendo visibles y pueden recibir migraciones manuales',
                 exclusionRule4: 'Las VMs en nodos excluidos pueden ser migradas desde el nodo si está sobrecargado',
-                
+
                 // NS: Backup translations - Dec 2025 / Copias de respaldo
                 createBackup: 'Crear copia',
                 noBackups: 'No se encontraron copias de respaldo',
@@ -9969,13 +10045,14 @@
                 compressNone: 'Nada',
                 backupNotes: 'Notas (opcional)',
                 backupNotesPlaceholder: 'p.ej. Antes de una actualización mayor, copia semanal...',
-                
+                backupServers: "Servidores de copia",
+
                 // HA / Alta Disponibilidad
                 ha: 'HA',
                 haResources: 'Recursos de HA',
                 haGroups: 'Grupos de HA',
                 haStatus: 'Estado de HA',
-                
+
                 metricServer: 'Servidor de Métricas',
                 cpuCompatibility: 'Compatibilidad de CPU',
                 cpuCompatibilityMode: 'Modo de compatibilidad de CPU',
@@ -10085,7 +10162,7 @@
                 link: 'Enlace',
                 resourceUsage: 'Usos de recursos',
                 memory: 'Memoria',
-                
+
                 // Storage / Almacenamiento
                 addStorage: 'Agregar almacenamiento',
                 storageId: 'ID de almacenamiento',
@@ -10105,7 +10182,7 @@
                 pool: 'Pool',
                 portal: 'Portal',
                 skipCertVerification: 'Obviar la validación de certificados',
-                
+
                 // Backup / Copias de respaldo
                 backupJobs: 'Tareas de copia',
                 noBackupJobs: 'No se hallaron tareas de copia',
@@ -10124,13 +10201,14 @@
                 schedule: 'Agenda',
                 selection: 'Selección',
                 retention: 'Retención',
-                
+
                 // Replication / Replicación
                 replicationJobs: 'Tareas de replicación',
                 noReplicationJobs: 'No se hallaron tareas de replicación',
                 guest: 'Invitado',
                 job: 'Tarea',
-                
+                confirmDeleteReplication: "¿Remover realmente esta replicación",
+
                 // Firewall / Cortafuegos
                 firewallOptions: 'Opciones de cortafuegos',
                 firewallRules: 'Reglas de cortafuegos',
@@ -10157,7 +10235,7 @@
                 fwLogLevelOut: 'Nivel de registros de salida',
                 fwAddAlias: 'Agregar alias',
                 fwAddIpset: 'Agregar conjunto de direcciones IP',
-                
+
                 // Ceph
                 ceph: 'Ceph',
                 cephStatus: 'Estado de Ceph',
@@ -10174,7 +10252,31 @@
                 cephNotInstalledDesc: 'No se ha configurado un cluster Ceph en este cluster Proxmix.',
                 cephNotInstalledOnNode: 'Ceph no está configurado en este nodo.',
                 cephInstallHint: 'Para configurar Ceph, abra un nodo y use la pestaña "Ceph" para inicializar',
-                
+                cephInit: "Inicializar Ceph",
+                cephMirrorAddPeer: "Agregar Peer",
+                cephMirrorAddSchedule: "Agregar programación",
+                cephMirrorBackToOverview: "Volver a la vista general",
+                cephMirrorDemote: "Degradar (Demote)",
+                cephMirrorDisable: "Desactivar Mirroring",
+                cephMirrorEnable: "Activar Mirroring",
+                cephMirrorForcePromote: "Forzar promoción (¡puede causar pérdida de datos!)",
+                cephMirrorHealth: "Salud del Mirror",
+                cephMirrorImages: "Imágenes",
+                cephMirrorInterval: "Intervalo",
+                cephMirrorMode: "Modo de Mirroring",
+                cephMirrorModeImage: "Imagen (individual)",
+                cephMirrorModePool: "Pool (todas las imágenes)",
+                cephMirrorNoPoolsEnabled: "Ningún pool tiene el mirroring activado",
+                cephMirrorPeers: "Peers",
+                cephMirrorPromote: "Promover (Promote)",
+                cephMirrorRemovePeer: "Remover Peer",
+                cephMirrorResync: "Resincronizar",
+                cephMirrorSchedules: "Programación de Instantáneas",
+                cephMirrorSiteName: "Nombre del sitio",
+                cephMirrorSshRequired: "El Mirroring de RBD requiere acceso SSH al cluster",
+                cephMirrorSyncStatus: "Estado de sincronización",
+                cephMirroring: "Mirroring",
+
                 // Settings / Valores
                 balancingConfig: 'Configuración del balanceo',
                 migrationThreshold: 'Límites para la migración',
@@ -10192,7 +10294,7 @@
                 balancingEnabled: 'Balanceo activado',
                 optionsTitle: 'Opciones',
                 intervalBetweenChecks: 'Intervalo entre chequeos pre balanceo',
-                
+
                 // HA / Alta Disponibilidad
                 highAvailability: 'Alta Disponibilidad (HA)',
                 haEnabled: 'La alta disponibilidad está activada',
@@ -10234,10 +10336,10 @@
                 ctStillRunning: 'El contenedor está corriendo. Sera detenida antes de la remoción.',
                 primary: 'Primario',
                 fallbacks: 'Suplentes',
-                
+
                 // Messages / Mensajes
                 connectionError: 'Error de conexión',
-                
+
                 // Task Bar
                 tasks: 'Tareas',
                 taskMigrate: 'Migración',
@@ -10278,7 +10380,7 @@
                 configSaved: 'Configuración guardada',
                 operationFailed: 'Operación fallida',
                 confirmAction: 'Confirmar la acción',
-                
+
                 // Misc / Misceláneos
                 lastCheck: 'Última validación',
                 clusterInfo: 'Información de cluster',
@@ -10294,7 +10396,7 @@
                 help: 'Ayuda',
                 lastMigrations: 'Últimas migraciones',
                 noMigrations: 'Sin migraciones',
-                
+
                 // Options labels / Etiquetas de las opciones
                 keyboardLayout: 'Distribución de teclado',
                 httpProxy: 'Proxy HTTP',
@@ -10338,7 +10440,15 @@
                 failureThresholdHint: 'Número de chequeos fallidos antes de que se considere fallido un nodo',
                 hardwareWatchdog: 'Watchdog de hardware',
                 watchdogWarning: 'ADVERTENCIA: ¡El nodo se reiniciaría automáticamente con la pérdida de cuórum!',
-                
+                quorumLost: "Cuórum perdido",
+                quorumOk: "Cuórum OK",
+                readinessFailed: "Prueba de preparación fallida",
+                readinessPassed: "Prueba de preparación aprobada",
+                reverseProxy: "Proxy inverso",
+                reverseProxyEnabled: "Detrás de un proxy inverso (nginx/HAProxy)",
+                reverseProxyHint: "Deshabilita el SSL integrado y se vincula solo a 127.0.0.1. El proxy termina el SSL y reenvía la petición a PegaProx.",
+                reverseProxyWarning: "Configuración de ejemplo para nginx disponible en examples/nginx.conf en el directorio de instalación.",
+
                 // Fencing Explanation - NS Jan 2026 / Explicación de cercado
                 fencingExplanation: 'Como se previenen situaciones de cerebro dividido',
                 fencingStep1Title: '1. Detección de la pérdida de cuórum',
@@ -10357,7 +10467,7 @@
                 changesAfterRestart: 'Los cambios se activarán luego de un reinicio',
                 important2NodeCluster: '¡importante para clústeres de dos nodos!',
                 online: 'En línea',
-                
+
                 // 2-Node Cluster Mode - NS Jan 2026 / Modo de cluster de dos nodos
                 twoNodeMode: 'Modo de cluster de dos nodos',
                 twoNodeWarning: 'Limitaciones de cluster de dos nodos',
@@ -10368,7 +10478,7 @@
                 twoNodeCredentialsInfo: 'PegaProx usará las credenciales de cluster para usar SSH al nodo sobreviviente y usar \'pvecm expected 1\' para recuperar el cuórum.',
                 twoNodeTip: 'Tip',
                 twoNodeTipText: 'Para mejores resultados instale \'sshpass\' en el servidor PegaProx: \'app install sshpass\'',
-                
+
                 // Split-Brain Risk - 2-Node - NS Jan 2026 / Riesgos de cerebro dividido
                 splitBrainRisk: '¡Riesgo de cerebro dividido sin cercado!',
                 splitBrainRiskDesc: 'Si ambos nodos están en línea pero la red entre ellos falla, forzar el cuórum puede causar que ambos nodos ejecuten la misma VM -> ¡corrupción de datos!',
@@ -10381,7 +10491,7 @@
                 quorumHostsConfigured: 'Hay máquinas de cuórum configuradas',
                 recoveryDelayCheck: 'Temporizador de recuperación (>30s)',
                 selfFencingEnabled: 'Auto cercado habilitado',
-                
+
                 // Storage-based Split-Brain Protection - NS Jan 2026
                 storageHeartbeat: 'Protección contra cerebro dividido con base en almacenamiento',
                 recommendedFor2Node: 'Recomendado para clústeres de dos nodos',
@@ -10403,7 +10513,7 @@
                 step4Recovery: 'Solo luego de la confirmación/vencimiento del temporizador comienza el proceso de recuperación',
                 nodeAgentRequired: '¡Se requiere agente de nodo!',
                 nodeAgentRequiredDesc: 'Para que esta característica funcione, debe instalar el agente de nodo PegaProx en cada nodo Proxmox. El agente escribe señales de vida y responde a las "pastillas venenosas".',
-                
+
                 // Automatic Split-Brain Protection - NS Jan 2026 - FULLY AUTOMATIC
                 // Protección automática contra cerebro dividido
                 splitBrainProtection: 'Protección contra cerebro dividido',
@@ -10417,19 +10527,19 @@
                 sshOnlyMode: 'Protección solo por SSH',
                 noSharedStorageFound: 'No se halló almacenamiento compartido (NFS/CephFS). La protección solo funciona por validaciones SSH.',
                 notSafeForDualNetwork: 'No hay configuraciones de doble red seguras (redes separadas de servidor y de almacenamiento)',
-                
+
                 // Block Storage Warning - NS Jan 2026 / Advertencias de almacenamiento de bloque
                 blockStorageOnly: 'Solo se halló almacenamiento de bloque',
                 blockStorageExplain: 'Los archivos de señales de vida no se pueden depositar en almacenamiento de bloque (LVM, iSCSI, RBD). Para la protección completa de red dual, agregue un pequeño recurso compartido NFS.',
                 sshOnlyActive: 'Solo está activa la protección por SSH',
                 sshOnlyRisk: 'Funciona para una única red. Para redes duales (separadas de servidor y de iSCSI) agregue un pequeño recurso compartido NFS (<= 100MB)',
-                
+
                 // Multiple Storages - NS Jan 2026 / Múltiples almacenamientos
                 clickToSelect: 'Clic para seleccionar',
                 selected: 'Seleccionado',
                 currentlyActive: 'Activos actualmente',
                 blockStoragesIgnored: 'Almacenamientos de bloque (no usables)',
-                
+
                 // Self-Fence Protection - NS Jan 2026 / Protección con auto cercado
                 selfFenceProtection: 'Protección con auto cercado',
                 advancedSettings: 'Valores avanzados',
@@ -10474,7 +10584,7 @@
                 dualNetworkProtectionDesc: 'Requerimientos: Que el servidor PegaProx pueda montar el almacenamiento compartido (NFS/CephFS)',
                 sharedStoragePath: 'Ruta al almacenamiento compartido',
                 agentAutoInstall: 'El agente de nodo se auto instalará usando SSH',
-                
+
                 // Device Passthrough / Paso de dispositivos
                 devicePassthrough: 'Passthrough de dispositivos',
                 pciDevices: 'Dispositivos PCI',
@@ -10498,13 +10608,13 @@
                 iommuGroup: 'Grupo IOMMU',
                 vendor: 'Proveedor',
                 adding: 'Agregando...',
-                
+
                 bandwidthLimits: 'Límites de ancho de banda',
                 maxWorkers: 'Trabajadores máximos',
                 nextVmid: 'Siguiente ID de VM',
                 userTagAccess: 'Tag de acceso de usuario',
                 registeredTags: 'Tags registrados',
-                
+
                 // Subscription / Subscripción
                 subscriptionStatus: 'Estado de la subscripción',
                 licensed: 'Licenciado',
@@ -10526,7 +10636,7 @@
                 subscriptionBenefit1: 'Acceso al depósito (repo) Enterprise con actualizaciones estables',
                 subscriptionBenefit2: 'Soporte técnico de Proxmox',
                 subscriptionBenefit3: 'Evitar advertencias de \'no subscription\' al entrar',
-                
+
                 // Maintenance / Mantenimiento
                 maintenanceModeTitle: 'Activar modo mantenimiento',
                 maintenanceWarning: 'Advertencia: Todas las VM y contenedores corriendo serán migrados automáticamente a otros nodos',
@@ -10603,7 +10713,11 @@
                 interval: 'Intervalo',
                 saveSettings: 'Guardar valores',
                 haEnabled: 'HA habilitado',
-                
+                confirmEmergency: "¿Iniciar failover de emergencia? VMs origen NO serán cerradas.",
+                confirmFailover: "¿Iniciar failover? Esto migrará todas las VMs protegidas al cluster destino.",
+                packageName: "Paquete",
+                pending: "Pendiente",
+
                 // Common notifications / Notificaciones comunes
                 connectionError: 'Error de conexión',
                 saveFailed: 'Falló guardar',
@@ -10628,7 +10742,7 @@
                 unlockVm: 'Desbloquear VM',
                 vmLocked: 'VM bloqueada',
                 vmUnlocked: 'VM desbloqueada',
-                
+
                 // Security Settings / Valores de seguridad
                 securitySettings: 'Valores de seguridad',
                 securityDashboard: 'Tablero de seguridad',
@@ -10702,13 +10816,13 @@
                 locked: 'Bloqueada',
                 attempts: 'intentos',
                 remaining: 'remanentes',
-                
+
                 // About page translations / Acerca de
                 about: 'Acerca de',
                 developmentTeam: 'Grupo de desarrollo',
                 creditsAcknowledgments: 'Créditos y agradecimientos',
                 links: 'Enlaces',
-                
+
                 // update Manager / Gestor de actualizaciones
                 updateManager: 'Gestor de actualizaciones',
                 updateManagerDesc: 'Buscar e instalar actualizaciones en todos los nodos del cluster',
@@ -10745,7 +10859,7 @@
                 nodesRemaining: 'Nodos remanentes',
                 includeReboot: 'Reiniciar luego de la actualización',
                 includeRebootHint: 'Recomendado para actualizaciones de kernel',
-                
+
                 // PegaProx Auto-Update - NS Jan 2026 / Actualizaciones automáticas
                 confirmUpdate: 'Descargará e instalará la actualización. Creará un respaldo y el servidor se reiniciará automáticamente. ¿Desea continuar?',
                 downloadingUpdate: 'Descargando actualización...',
@@ -10765,7 +10879,7 @@
                 whatsNew: 'Novedades',
                 breakingChanges: 'Cambios importantes',
                 doNotCloseWindow: 'Favor, no cerrar esta ventana...',
-                
+
                 // Rollback / Reversar
                 rollback: 'Reversar',
                 rollbackDesc: 'Restaurar una versión anterior desde una copia',
@@ -10776,13 +10890,13 @@
                 restoringBackup: 'Restaurando desde la copia...',
                 rollbackSuccess: '¡Restauración exitosa! El servidor se está reiniciando...',
                 rollbackWarning: '⚠️ Reversar la versión reiniciará el servidor. Asegúrese de haber guardado cualquier cambio pendiente.',
-                
+
                 // Gestión de versiones y limpieza
                 deleteBackup: 'Remover respaldo',
                 confirmDeleteBackup: '¿Remover realmente esta copia?',
                 backupDeleted: 'Copia removida correctamente',
                 startRollingUpdate: 'Iniciar actualización gradual',
-                
+
                 // Security / Military Grade Encryption - NS Jan 2026 / Seguridad - Cifrado de grado militar
                 securityStatus: 'Estado de la seguridad',
                 dataEncryption: 'Cifrado de datos',
@@ -10805,7 +10919,7 @@
                 lastRotation: 'Última rotación',
                 backups: 'Respaldos',
                 allowedOrigins: 'Orígenes permitidos',
-                
+
                 // IP Whitelisting
                 ipWhitelisting: 'Lista de IPs permitidas',
                 enableIPWhitelist: 'Activar permisos por IPs',
@@ -10817,7 +10931,7 @@
                 blockedIPs: 'Siempre bloqueadas',
                 testIP: 'Probar el acceso de IP',
                 supportedFormats: 'Formatos soportados',
-                
+
                 // Config Backup/Restore / Respaldo y recuperación de la configuración
                 configBackupRestore: 'Respaldo y recuperación de la configuración',
                 exportConfig: 'Exportar la configuración',
@@ -10931,18 +11045,18 @@
                 currentStep: 'Paso actual',
                 updateLogs: 'Registros de actualización',
                 started: 'Iniciada',
-                
+
                 // VM Detail buttons / Botones de detalle de VM
                 console: 'Consola',
                 configuration: 'Configuración',
-                
+
                 // Config Modal / Modal de configuración
                 cpuCores: 'Núcleos de CPU',
                 cpuLimit: 'Límite de CPU',
                 memory: 'Memoria (RAM)',
                 hardware: 'Hardware',
                 disks: 'Discos',
-                
+
                 // Config Modal Tabs / Pestaña de configuración modal
                 mountIso: 'Montar ISO',
                 noIsoEject: 'Sin ISO (expulsar)',
@@ -11031,12 +11145,15 @@
                 qemuGuestAgentHint: 'Activa el cierre, congelado/descongelado de instantáneas',
                 fstrim: 'FSTRIM después de clonado/migración',
                 fstrimHint: 'Correr TRIM automáticamente luego del clonado',
-                
+                bootDelay: "Espera de inicio (s)",
+                bootGroup: "Grupo de inicio",
+                bridgePorts: "Puertos del puente (bridge)",
+
                 // More modals / Más modales
                 optional: 'opcional',
                 snapshotDescription: 'Descripción de la instantánea...',
                 saveRamState: 'Guardar estado de la RAM (hibernar)',
-                
+
                 // NS: Feb 2026 - Efficient snapshot translations / Instantáneas eficientes en espacio
                 spaceEfficientSnapshot: 'Instantánea eficiente en espacio',
                 spaceEfficientSnapshots: 'Instantáneas eficientes en espacio',
@@ -11060,7 +11177,7 @@
                 fsFrozen: 'FS congelado',
                 recommended: 'Recomendado',
                 snapshotSizeGb: 'Tamaño de instantánea (GB)',
-                
+
                 create: 'Crear',
                 createReplicationJob: 'Crear tarea de replicación',
                 targetNode: 'Nodo destino',
@@ -11068,15 +11185,21 @@
                 unlimited: 'Ilimitado',
                 comment: 'Comentario',
                 commentPlaceholder: 'p.ej. Replicación para DR',
+                cadaMinute: "Cada minuto",
                 every5min: 'Cada 5 minutos',
+                every5Min: 'Cada 5 minutos',
                 every15min: 'Cada 15 minutos',
+                every15Min: 'Cada 15 minutos',
                 every30min: 'Cada 30 minutos',
+                every30Min: 'Cada 30 minutos',
                 hourly: 'Cada hora',
+                everyHour: "Cada hora",
                 every2hours: 'Cada 2 horas',
                 every4hours: 'Cada 4 horas',
                 every6hours: 'Cada 6 horas',
                 every12hours: 'Cada 12 horas',
                 daily: 'Diario (a media noche)',
+                timeAgo: "atrás",
                 size: 'Tamaño',
                 enableFirewall: 'Activar cortafuegos',
                 editNetwork: 'Editar la red',
@@ -11129,6 +11252,7 @@
                 time: 'Hora',
                 timezone: 'Huso horario',
                 localTime: 'Hora local',
+                timezoneSaved: "Zona horaria actualizada",
                 sslCertificates: 'Certificados SSL',
                 uploadCustomCert: 'Subir certificado personalizado',
                 issuer: 'Emisor',
@@ -11149,6 +11273,7 @@
                 noLogEntries: 'No hay entradas en el registro',
                 datastore: 'Datastore',
                 datastores: 'Datastores',
+                datastoreView: "Vista de Datastore",
                 esxiHosts: 'Hosts ESXi',
                 connectEsxi: 'Conectar Host ESXi',
                 esxiHostname: 'Hostname/IP de ESXi',
@@ -11239,7 +11364,7 @@
                 dryRunShort: 'Simulación',
                 connecting: 'Conectando...',
                 needsRestart: 'REQUIERE REINICIO',
-                
+
                 // NS: Alerts, Tasks, Tags, Affinity - Dec 2025
                 alerts: 'Alertas',
                 alertsDesc: 'Notificaciones por correo electrónico cuando se superan los umbrales',
@@ -11263,7 +11388,7 @@
                 smtpFromEmailRequired: 'La dirección de correo del remitente es obligatoria',
                 emailRecipients: 'Destinatarios del correo',
                 addRecipient: 'Agregar destinatario',
-                
+
                 scheduledTasks: 'Tareas agendadas',
                 scheduledTasksDesc: 'Automatizar operaciones en VM según una agenda',
                 createTask: 'Crear tarea',
@@ -11281,7 +11406,7 @@
                 daily: 'Diario',
                 weekly: 'Semanal',
                 monthly: 'Mensual',
-                
+
                 tagsLabels: 'Tags y Etiquetas',
                 tagsDesc: 'Clasificar y agrupar VMs',
                 createTag: 'Crear tag',
@@ -11289,7 +11414,7 @@
                 tagColor: 'Color',
                 noTags: 'No se hallaron tags',
                 assignedVms: 'VMs asignadas',
-                
+
                 affinityRules: 'Reglas de afinidad',
                 customScripts: 'Scripts personalizados',
                 scriptsDesc: 'Ejecutar scripts personalizados (.sh or .py) en los nodos del cluster',
@@ -11322,7 +11447,7 @@
                 noAffinityRules: 'Sin reglas de afinidas',
                 enforceRule: 'Forzar la regla',
                 enforceRuleHint: 'Bloquear las migraciones que violarían esta regla',
-                
+
                 // Console Settings - NS Jan 2026 / Valores de consola
                 consoleSettings: 'Puertos de consola',
                 vncPort: 'Puerto VNC',
@@ -11345,7 +11470,7 @@
                 connectingWs: 'Conectando a WebSocket',
                 wsConnected: 'Conectado a WebSocket, esperando al servidor...',
                 ipFetchFailed: 'Falló conseguir la IP',
-                
+
                 smtpSettings: 'Configuración SMTP',
                 smtpHost: 'Servidor SMTP',
                 smtpPort: 'Puerto',
@@ -11358,7 +11483,7 @@
                 alertCooldown: 'Tiempo de espera entre alertas (segundos)',
                 migrationHistory: 'Historial de migraciones',
                 noMigrationHistory: 'No hay registradas migraciones',
-                
+
                 // LW: Password expiry settings / Valores de expiración de contraseñas
                 passwordExpiry: 'Expiración de contraseñas',
                 passwordExpiryDesc: 'Forzar a los usuarios a cambiar las contraseñas después de un número de días específicos',
@@ -11366,7 +11491,7 @@
                 sendExpiryEmails: 'Envíe notificaciones por correo cuando una contraseña esté cerca de expirar',
                 expiryDays: 'La contraseña expira luego de',
                 warningDays: 'Advierta a los usuarios antes de',
-                
+
                 // LW: Password expiry banner / Aviso de expiración de contraseña
                 passwordExpired: '¡Su contraseña ha expirado!',
                 passwordExpiresIn: 'Su contraseña expirará en {days} días',
@@ -11374,7 +11499,7 @@
                 pleaseChangeSoon: 'Favor, cámbiela pronto.',
                 changePassword: 'Cambiar contraseña',
                 dismissForNow: 'Recordarlo más tarde',
-                
+
                 // LW: Reset all passwords - Dec 2025 / Forzar el reestablecimiento de contraseñas
                 forcePasswordReset: 'Forzar reestablecimiento de contraseña',
                 forcePasswordResetDesc: 'Hacer que todas las contraseñas expiren inmediatamente. Usarlo después de incidentes de seguridad.',
@@ -11385,7 +11510,7 @@
                 includeAdminsWarning: 'Advertencia: ¡Usted también deberá cambiar su contraseña!',
                 includeAdminsInExpiry: 'Incluir cuentas de administrador',
                 includeAdminsInExpiryDesc: 'Los administradores también deberán cambiar sus contraseñas regularmente',
-                
+
                 // Theme System - NS Jan 2026 / Tema (visual) del sistema
                 appearance: 'Apariencia',
                 themeDesc: 'Elija un tema de color para la interfaz',
@@ -11396,7 +11521,7 @@
                 defaultThemeDesc: 'Establezca el tema predeterminado para los nuevos usuarios. Los usuarios pueden cambiar su tema en Perfil.',
                 currentDefault: 'Predeterminado actual',
                 themeInProfile: 'Cambie su tema en Perfil (haga clic en su nombre de usuario en la parte superior derecha)',
-                
+
                 // UI Layout - LW Jan 2026 / Estilo de diseño de UI
                 // LW: Feb 2026 - Layout Style (Modern vs Corporate)
                 layoutStyle: 'Estilo de diseño',
@@ -11421,7 +11546,7 @@
                 taskbarAutoExpandDisabled: 'Autoexpandir barra de tareas deshabilitado',
                 dragToResize: 'Arrastrar para redimensionar',
                 userColumnHint: 'Muestra el usuario de PegaProx si está disponible; de lo contrario, el usuario de Proxmox',
-                
+
                 // LW: Support Bundle translations - Feb 2026 / Paquete de soporte
                 support: 'Soporte',
                 supportBundle: 'Paquete de soporte',
@@ -11447,7 +11572,7 @@
                 documentation: 'Documentación',
                 releases: 'Versiones (releases)',
                 quickSystemInfo: 'Información rápida del sistema',
-                
+
                 // MK: Storage Rescan translations - Feb 2026 / Reescaneo del almacenamiento
                 rescan: 'Reescanear',
                 rescanningStorage: 'Reescaneando almacenamiento...',
@@ -11465,7 +11590,8 @@
                 rescanStorageDesc: 'Reescanea el almacenamiento para detectar cambios.',
                 recommended: 'Recomendado',
                 scanning: 'Escaneando...',
-                
+                anyStorage: "cualquier almacenamiento",
+
                 themeChanged: 'Tema cambiado a',
                 themeChangeFailed: 'Falló el guardar el tema',
                 uiLayout: 'Distribución de la UI',
@@ -11476,7 +11602,7 @@
                 monitor: 'Monitor',
                 configure: 'Configurar',
                 console: 'Consola',
-                
+
                 snapshots: 'Instantáneas',
                 snapshotsOverview: 'Vista general de las instantáneas',
                 snapshotsCleanUp: 'Limpieza',
@@ -11487,6 +11613,219 @@
                 snapshotsAge: 'Edad',
                 snapshotsAction: 'Acción',
                 noSnapshots: 'No se hallaron instantáneas',
+
+                // ACME Let's Encrypt
+                acmeAutoRenew: "Auto-renovación activa (30 días antes del vencimiento)",
+                acmeDaysLeft: "días faltantes",
+                acmeEmail: "dirección de correo",
+                acmeEmailHint: "Usado para notificaciones de vencimiento de Let's Encrypt",
+                acmeExpires: "Válido hasta",
+                acmeIssuer: "Emisor",
+                acmePort80: "El puerto 80 debe ser accesible (reto HTTP-01). Docker: mapear puerto 80. Proxy inverso: pase /.well-known/.",
+                acmeRequest: "Solicitar certificado",
+                acmeRequesting: "Solicitando certificado",
+                acmeSelfSigned: "Auto-firmado",
+                acmeStaging: "Pruebas (staging)",
+                acmeStagingHint: "Usa Let's Encrypt",
+                acmeSuccess: "¡Certificado emitido con éxito!",
+                acmeTitle: "Let's Encrypt",
+
+                // Mappings / Presentados
+                addMapping: "Agregar presentado",
+                addReplication: "Agregar replicación",
+                addVmToPlan: "Agregar VM al plan",
+                addXcpngPool: "Agregar pool XCP-ng (Tech Preview)",
+                saveMappings: "Guardar mapeos",
+
+                checkStatus: "Revisar estado",
+                checking: "Revisando",
+                checkingHardening: "Verificando controles CIS vía SSH...",
+                scanAllNodes: "Escanear todos los nodos",
+                scanRunning: "Ejecutando escaneo de vulnerabilidades en todos los nodos...",
+                scanTakesMinute: "Esto puede tardar un minuto",
+                scannedAt: "Escaneado el",
+
+                // CIS Hardening
+                cisCoreDumps: "Desactivar Volcados core",
+                cisCoreDumpsDesc: "Evita que el sistema cree volcados de memoria (dumps) cuando los programas fallan, los cuales pueden contener contraseñas y llaves",
+                cisCoreDumpsImpact: "Ninguno - los fallos de las VMs se siguen registrando normalmente",
+                cisCron: "Aseguramiento de acceso Cron/At",
+                cisCronDesc: "Restringe el acceso al programador de tareas solo al usuario root, previniendo ataques de persistencia",
+                cisCronImpact: "Ninguno - las tareas programadas de PVE se ejecutan como root",
+                cisFilePerms: "Permisos de archivos del sistema",
+                cisFilePermsDesc: "Establece los permisos correctos en /etc/passwd, /etc/shadow, /etc/group y /etc/gshadow",
+                cisFilePermsImpact: "Sin impacto - aseguramiento estándar de Linux",
+                cisFs: "Desactivar módulos de sistemas de archivos no utilizados",
+                cisFsDesc: "Evita la carga de módulos del kernel de sistemas de archivos poco usados (cramfs, freevxfs, hfs, hfsplus, jffs2)",
+                cisFsImpact: "Ninguno - las VMs y contenedores no se ven afectados",
+                cisJournald: "Aseguramiento de Journald",
+                cisJournaldDesc: "Configura registros (logs) persistentes y comprimidos que sobreviven a reinicios para análisis forense",
+                cisJournaldImpact: "Mejores capacidades de análisis forense",
+                cisMounts: "Aseguramiento de opciones de montaje",
+                cisMountsDesc: "Aplica nodev, nosuid y noexec a /tmp, /var/tmp y /dev/shm para prevenir la escalada de privilegios",
+                cisMountsImpact: "Sin impacto en las operaciones del clúster o las VMs",
+                cisNet: "Desactivar protocolos de red no utilizados",
+                cisNetDesc: "Evita la carga de protocolos de red poco frecuentes (dccp, sctp, rds, tipc)",
+                cisNetImpact: "Ninguno - no son utilizados por Proxmox",
+                cisPam: "Bloqueo de cuenta (pam_faillock)",
+                cisPamDesc: "Bloquea cuentas tras 5 intentos fallidos de inicio de sesión, se desbloquea automáticamente tras 10 minutos. Root excluido.",
+                cisPamImpact: "Funciona junto a Fail2Ban para defensa en profundidad",
+                cisSshCrypto: "Aseguramiento criptográfico de SSH",
+                cisSshCryptoDesc: "Configura SSH para usar solo cifrados fuertes (AES-GCM/CTR), intercambio de llaves seguro (Curve25519) y MACs robustas (SHA2-ETM)",
+                cisSshCryptoImpact: "Clientes SSH muy antiguos podrían no conectarse",
+                cisSshPerms: "Permisos de archivos SSH",
+                cisSshPermsDesc: "Establece permisos seguros (600) en la configuración de SSH y las llaves del host",
+                cisSshPermsImpact: "Ninguno - SSH funciona normalmente",
+                cisTimeout: "Tiempo de espera del Shell (Timeout)",
+                cisTimeoutDesc: "Cierra automáticamente las sesiones de shell inactivas después de 15 minutos",
+                cisTimeoutImpact: "Solo se ven afectadas las sesiones SSH interactivas",
+
+
+                hardenCisRef: "Basado en los estándares de CIS Benchmark, Auditoría de Seguridad Lynis y las guías STIG del DoD",
+                hardenConfirm: "⚠️ Advertencia: Los controles de aseguramiento (hardening) seleccionados se aplicarán a este nodo.\n\nLos archivos de configuración del sistema serán modificados. Algunos cambios podrían requerir un reinicio.\n\n¿Desea continuar?",
+                hardenDesc: "Aplica controles de aseguramiento CIS Benchmark a nodos PVE individuales vía SSH.",
+                hardenEmpty: "Seleccione un nodo y haga clic",
+                hardenEmptyDesc: "PegaProx verifica cuáles controles CIS ya están aplicados y le permite habilitar los restantes.",
+                hardenNode: "Asegurar nodo PVE (Hardening)",
+
+                cveApplyHint: "Apply fixes via the Update Manager",
+                cveScanDesc: "Scans all nodes for outdated packages and security vulnerabilities via SSH.",
+                cveScanFailed: "CVE scan failed",
+                cveScanner: "CVE Scanner",
+                dangerZone: "Zona de peligro",
+                pveImpact: "Impacto en PVE",
+
+                debsecanExplain: "debsecan es una herramienta de Debian que compara los paquetes instalados con el Rastreador de Seguridad de Debian para detectar CVEs (Vulnerabilidades y Exposiciones Comunes) conocidos. Sin ella, solo se muestran las actualizaciones de paquetes pendientes; con ella, obtienes los IDs de CVE reales y las calificaciones de severidad.",
+                debsecanInstallInfo: "Instala el paquete ligero debsecan (~50KB) en todos los nodos del clúster vía SSH.",
+                debsecanNotInstalled: "debsecan no está instalado",
+                installDebsecan: "Installar debsecan",
+
+                // Lynis y Seguridad del Sistema
+                linkReplication: "Enlazar tarea de replicación (opcional)",
+                lynAcct: "Contabilidad de procesos",
+                lynAcctDesc: "Registra información sobre la ejecución de cada proceso para análisis forense (use 'lastcomm' para ver)",
+                lynAcctImpact: "Sobrecarga mínima",
+                lynAide: "Monitoreo de integridad de archivos (AIDE)",
+                lynAideDesc: "Crea una base de datos de firmas (checksums) para detectar cambios no autorizados en binarios y configs del sistema",
+                lynAideImpact: "La construcción inicial de la BD se ejecuta en segundo plano",
+                lynAptShow: "Gestión de parches (apt-show-versions)",
+                lynAptShowDesc: "Instala apt-show-versions para una vista rápida de los paquetes instalados y su estado de actualización",
+                lynAptShowImpact: "Ninguno - herramienta de consulta de solo lectura",
+                lynBanners: "Banners de inicio de sesión",
+                lynBannersDesc: "Muestra un aviso legal antes del ingreso, requerido por marcos de cumplimiento (PCI-DSS, HIPAA)",
+                lynBannersImpact: "Ninguno - solo cosmético",
+                lynCompilers: "Restringir acceso a compiladores",
+                lynCompilersDesc: "Limita el uso de compiladores (gcc, g++, make) solo al usuario root, evitando que atacantes compilen exploits",
+                lynCompilersImpact: "Los usuarios que no sean root no podrán compilar",
+                lynDebsums: "Verificación de paquetes (debsums)",
+                lynDebsumsDesc: "Instala debsums para verificar la integridad de los archivos de los paquetes y detectar archivos corruptos o alterados",
+                lynDebsumsImpact: "Ninguno - herramienta de verificación de solo lectura",
+                lynDns: "Servidor de nombres de respaldo",
+                lynDnsDesc: "Asegura que haya al menos 2 servidores DNS configurados para redundancia (configurable)",
+                lynDnsImpact: "Previene caídas del servicio DNS",
+                lynPkgCleanup: "Limpieza de paquetes antiguos",
+                lynPkgCleanupDesc: "Elimina archivos de configuración sobrantes de paquetes desinstalados previamente",
+                lynPkgCleanupImpact: "Ninguno - elimina remanentes de configuración sin uso",
+                lynPostfix: "Aseguramiento del banner de Postfix",
+                lynPostfixDesc: "Elimina la información de la versión del software del banner del servidor de correo para evitar exposición",
+                lynPostfixImpact: "Ninguno - solo oculta la versión",
+                lynPwAging: "Expiración de contraseñas",
+                lynPwAgingDesc: "Fuerza el cambio de contraseña cada 365 días con un aviso de 30 días. Root excluido.",
+                lynPwAgingImpact: "Los usuarios deben cambiar sus contraseñas anualmente",
+                lynPwHash: "Iteraciones de hash de contraseña",
+                lynPwHashDesc: "Aumenta las iteraciones de hash SHA (5000-500000 rondas), haciendo los ataques de fuerza bruta significativamente más lentos",
+                lynPwHashImpact: "Solo afecta a contraseñas nuevas o cambiadas",
+                lynPwHistory: "Historial de contraseñas",
+                lynPwHistoryDesc: "Evita la reutilización de las últimas 24 contraseñas vía pam_pwhistory.",
+                lynPwHistoryImpact: "Los usuarios no pueden usar contraseñas recientes",
+                lynPwQuality: "Calidad de contraseñas PAM",
+                lynPwQualityDesc: "Impone políticas de contraseñas fuertes: mín. 12 caracteres, mayúsculas, minúsculas, números y símbolos. Instala libpam-pwquality.",
+                lynPwQualityImpact: "Los usuarios deben definir contraseñas más robustas",
+                lynSysstat: "Estadísticas del sistema (sysstat)",
+                lynSysstatDesc: "Recopila estadísticas de CPU, memoria, E/S de disco y red a lo largo del tiempo (use 'sar' para datos históricos)",
+                lynSysstatImpact: "Sobrecarga mínima - ayuda a diagnosticar problemas",
+                lynTmpdir: "Aislar /tmp por sesión",
+                lynTmpdirDesc: "Crea directorios temporales aislados para cada sesión de usuario, evitando ataques de condición de carrera en /tmp",
+                lynTmpdirImpact: "Ninguno - solo afecta a sesiones interactivas",
+                lynUmask: "Umask predeterminado (027)",
+                lynUmaskDesc: "Restringe los permisos de archivos por defecto para que solo sean legibles por el dueño y el grupo",
+                lynUmaskImpact: "Nuevos archivos serán más restrictivos por defecto",
+                lynUsb: "Desactivar almacenamiento USB/Firewire",
+                lynUsbDesc: "Evita la carga de drivers de almacenamiento USB y Firewire para bloquear robo de datos. Teclados y mouses seguirán funcionando.",
+                lynUsbImpact: "Las unidades USB no serán reconocidas",
+                lynisRecommendations: "Recomendaciones Lynis",
+
+                // PegaProx AppArmor
+                pegaApparmor: "AppArmor (Control de acceso obligatorio - MAC)",
+                pegaApparmorDesc: "Habilita AppArmor y forza todos los perfiles. Restringe a qué pueden acceder los programas incluso si están comprometidos, añadiendo una capa de seguridad más allá de los permisos de archivo estándar.",
+                pegaApparmorImpact: "Ninguno para PVE estándar; los servicios personalizados podrían necesitar perfiles",
+                pegaAuditd: "Habilitar Demonio de Auditoría (auditd)",
+                pegaAuditdDesc: "Instala y habilita auditd para el registro de eventos del sistema. Combine con STIG para reglas de auditoría completas.",
+                pegaAuditdImpact: "Sobrecarga mínima; es un requisito previo para las reglas de auditoría",
+                pegaDisableSvc: "Desactivar servicios innecesarios",
+                pegaDisableSvcDesc: "Detiene y desactiva Bluetooth, CUPS (impresión) y Avahi (mDNS). Menos servicios en ejecución significan una menor superficie de ataque.",
+                pegaDisableSvcImpact: "Sin impresión local ni Bluetooth; irrelevante para servidores",
+                pegaSysctl: "Aseguramiento (Hardening) de Red y Kernel vía Sysctl",
+                pegaSysctlDesc: "Aplica más de 20 parámetros sysctl: protección contra IP spoofing, bloqueo de redirección ICMP, defensa contra SYN flood, ASLR, restricción de dmesg, alcance de ptrace y protección de enlaces simbólicos.",
+                pegaSysctlImpact: "Ninguno; aseguramiento estándar para servidores de producción",
+
+                // Stig AIDE Audit / Auditoría Stig AIDE
+                stigAideAudit: "Protección de herramienta de auditoría (AIDE)",
+                stigAideAuditDesc: "Agrega binarios de auditoría (auditd, ausearch, aureport) al monitoreo de integridad de archivos AIDE con firmas SHA512. Requiere AIDE.",
+                stigAideAuditImpact: "Ninguno - solo monitorea los binarios de la herramienta de auditoría",
+                stigAuditBoot: "Auditoría en el arranque (Boot)",
+                stigAuditBootDesc: "Agrega el parámetro de kernel audit=1 para habilitar la auditoría desde el primer momento del arranque, cerrando la brecha de registros iniciales",
+                stigAuditBootImpact: "Mínimo - ~1-2s adicionales en el tiempo de arranque. Requiere reinicio.",
+                stigAuditLock: "Reglas de auditoría inmutables",
+                stigAuditLockDesc: "Bloquea la configuración de auditoría con el flag -e 2. Las reglas no pueden modificarse sin reiniciar, evitando que atacantes deshabiliten la auditoría.",
+                stigAuditLockImpact: "Los cambios en las reglas de auditoría requieren reinicio",
+                stigAuditRules: "Registro de comandos privilegiados",
+                stigAuditRulesDesc: "Registro exhaustivo de sudo/su/passwd, cambios de permisos, modificaciones de cuentas, carga de módulos del kernel, configuración de red y cambios en /etc/pve/",
+                stigAuditRulesImpact: "Mínimo - solo audita usuarios humanos (auid>=1000)",
+                stigInactive: "Desactivar cuentas inactivas",
+                stigInactiveDesc: "Desactiva automáticamente las cuentas de usuario tras 35 días sin iniciar sesión. Se excluyen root y cuentas de servicio.",
+                stigInactiveImpact: "Cuentas sin uso desactivadas tras 35 días",
+                stigLegacy: "Eliminar servicios legados inseguros",
+                stigLegacyDesc: "Elimina paquetes como telnet, rsh, talk, ntalk, nis que transmiten datos (incluyendo contraseñas) en texto plano",
+                stigLegacyImpact: "Ninguno - Proxmox utiliza exclusivamente SSH",
+                stigMemProt: "Protección de memoria - Aseguramiento (Hardening) del Kernel",
+                stigMemProtDesc: "Parámetros del kernel: init_on_alloc=1, init_on_free=1, page_alloc.shuffle=1, slab_nomerge. Previene fugas de información y ataques use-after-free.",
+                stigMemProtImpact: "~1-3% de sobrecarga de rendimiento. Requiere reinicio.",
+                stigRecommendations: "Directrices",
+                stigSession: "Límite de sesiones simultáneas",
+                stigSessionDesc: "Limita a cada usuario a un máximo de 10 sesiones de inicio simultáneas. Root excluido para operaciones del clúster.",
+                stigSessionImpact: "Sin impacto - root tiene sesiones ilimitadas",
+
+                confirmRename: "Renombrar clúster a",
+                confirmResetName: "Restablecer nombre original del clúster",
+                confirmTestCleanup: "¿Eliminar las VMs de prueba en el clúster destino?",
+                connectedVms: "VMs conectadas",
+                connectionLive: "En vivo",
+                connectionPolling: "Sondeo (Polling)",
+                continueAnyway: "¿Continuar de todos modos?",
+                controlsActive: "controles activos",
+                controlsApplied: "controles aplicados",
+
+                // XCP-ng
+                xcpngConnectHint: "Conéctese al host maestro del pool. El puerto XAPI 443 se utiliza por defecto.",
+                xcpngDesc: "XCP-ng / Xen Hypervisor (Tech Preview)",
+                xcpngTechPreviewNote: "Algunas funciones pueden estar limitadas o sujetas a cambios.",
+
+                // Replicación navita (ZFS) de Proxmox
+                zfsNativeDesc: "Envío/recepción incremental de ZFS. Rápido y eficiente, requiere ZFS en ambos nodos.",
+                zfsReplicationDesc: "La replicación de ZFS utiliza instantáneas incrementales para mantener los datos sincronizados entre nodos. Ideal para clústeres de 2 nodos donde Ceph no es práctico. Requiere almacenamiento ZFS tanto en el nodo origen como en el destino.",
+                zfsReplicationTitle: "Replicación ZFS para clústeres pequeños",
+                zfsRequired: "Tanto el nodo origen como el destino deben usar almacenamiento ZFS",
+
+                topConsumers: "Mayores consumidores",
+                topCpuConsumers: "Top CPU",
+                topMemConsumers: "Top Memoria",
+                totalClusters: "Clústeres totales",
+                totalUpdates: "Actualizaciones totales",
+                trustedProxies: "Proxies de confianza",
+                trustedProxiesHint: "IPs/CIDRs separados por comas. Vacío = solo loopback (127.0.0.1). Ejemplo: 10.0.0.1, 172.16.0.0/12",
+                upToDate: "Actualizado",
+
             },
             pt: {
                 // Geral
@@ -11648,7 +11987,7 @@
                 lastLogin: 'Último Login',
                 never: 'Nunca',
                 profile: 'Perfil',
-                
+
                 // PegaProx Settings
                 pegaproxSettings: 'Configurações do PegaProx',
                 serverSettings: 'Servidor',
@@ -11708,7 +12047,7 @@
                 restartInitiated: 'Reinicialização do servidor iniciada',
                 reconnecting: 'Reconectando...',
                 restartFailed: 'Falha ao reiniciar o servidor',
-                
+
                 // Tenants & Permissions
                 tenants: 'Tenants',
                 tenant: 'Tenant',
@@ -11722,7 +12061,7 @@
                 defaultTenant: 'Tenant Padrão',
                 tenantClusters: 'Clusters para este tenant',
                 allClusters: 'Todos os clusters',
-                
+
                 // Cluster Groups - NS Jan 2026
                 clusterGroups: 'Grupos de Cluster',
                 clusterGroup: 'Grupo de Cluster',
@@ -11797,7 +12136,7 @@
                 tenantUpdated: 'Tenant atualizado',
                 cannotDeleteDefaultTenant: 'Não é possível excluir o tenant padrão',
                 reassignUsersFirst: 'Os usuários devem ser reatribuídos primeiro',
-                
+
                 // Custom Roles section
                 roles: 'Funções',
                 customRoles: 'Funções Personalizadas',
@@ -11832,7 +12171,7 @@
                 vmAclSaved: 'Permissões de VM salvas',
                 vmAclDeleted: 'Permissões de VM removidas',
                 confirmDeleteVmAcl: 'Remover permissões personalizadas para esta VM?',
-                
+
                 // Pool Permissions - MK Jan 2026
                 poolPermissions: 'Permissões de Pool',
                 poolPermissionsDesc: 'Conceda a usuários ou grupos acesso a pools de recursos do Proxmox. As permissões se aplicam a todas as VMs dentro do pool.',
@@ -11878,7 +12217,7 @@
                 permissionsFor: 'Permissões para',
                 addPermission: 'Adicionar Permissão',
                 groupName: 'Nome do Grupo',
-                
+
                 auditLog: 'Log de Auditoria',
                 auditLogDescription: 'Todas as ações de usuários dos últimos 90 dias',
                 noAuditLogs: 'Nenhuma entrada de auditoria disponível',
@@ -11995,7 +12334,7 @@
                 allActions: 'Todas as Ações',
                 exportAuditLog: 'Exportar',
                 refreshAuditLog: 'Atualizar',
-                
+
                 // Header
                 addCluster: 'Adicionar Cluster',
                 addXcpngPool: 'Adicionar Pool XCP-ng (Tech Preview)',
@@ -12008,7 +12347,9 @@
                 addConnection: 'Adicionar Conexão',
                 connectionType: 'Tipo de Conexão',
                 clusterManagement: 'Gerenciamento de Cluster PegaProx para Proxmox VE',
-                
+                renameCluster: "RenombrarCluster",
+                renameHint: "Dejar vacío para volver al nombre original",
+
                 // Tabs
                 overview: 'Visão Geral',
                 resources: 'Recursos',
@@ -12017,7 +12358,7 @@
                 showing: 'Mostrando',
                 perPage: 'Por página',
                 loadingDatacenter: 'Carregando dados do datacenter...',
-                
+
                 // Cluster
                 clusters: 'Clusters',
                 noClusterSelected: 'Nenhum Cluster Selecionado',
@@ -12066,7 +12407,7 @@
                 avgScore: 'Pontuação Média',
                 avgCpu: 'CPU Média',
                 avgRam: 'RAM Média',
-                
+
                 // Nodes
                 nodes: 'Nós',
                 loadingMetrics: 'Carregando métricas...',
@@ -12087,7 +12428,7 @@
                 allocated: 'alocado',
                 showMore: 'Mostrar mais',
                 showLess: 'Mostrar menos',
-                
+
                 // VMs & Resources
                 virtualMachines: 'Máquinas Virtuais',
                 containers: 'Containers',
@@ -12264,7 +12605,7 @@
                 ram: 'RAM',
                 cpu: 'CPU',
                 disk: 'Disco',
-                
+
                 // VM Creation Wizard
                 next: 'Próximo',
                 guestOs: 'Sistema Operacional Convidado',
@@ -12274,7 +12615,7 @@
                 noVirtioDrivers: 'Sem Drivers VirtIO',
                 allIsos: 'Todas as ISOs',
                 virtioDriversHint: 'Será montado como um CD-ROM adicional para instalação de drivers no Windows',
-                
+
                 // MK: New wizard translations
                 advancedCpu: 'Configurações Avançadas de CPU',
                 cpuAffinity: 'Afinidade de CPU',
@@ -12405,7 +12746,7 @@
                 linkedCloneDesc: 'Mais rápido, requer imagem base',
                 onlyForVms: 'Disponível apenas para VMs',
                 cloneNotes: 'Notas para o clone...',
-                
+
                 gridView: 'Visão em Grade',
                 listView: 'Visão em Lista',
                 compactView: 'Visão Compacta',
@@ -12453,18 +12794,18 @@
                 week: 'Semana',
                 month: 'Mês',
                 year: 'Ano',
-                
+
                 // Detail View
                 tags: 'Tags',
                 description: 'Descrição',
                 changesRequireRestart: 'Nota: Algumas alterações exigem reinicialização',
-                
+
                 // Tags - NS Jan 2026
                 manageTags: 'Gerenciar Tags',
                 noTags: 'Sem tags',
                 newTag: 'Nova tag...',
                 existingTags: 'Tags existentes',
-                
+
                 // Schedules - MK Jan 2026
                 schedules: 'Agendamentos',
                 scheduledActions: 'Ações Agendadas',
@@ -12485,7 +12826,7 @@
                 forWeekly: 'para semanalmente',
                 days: 'Dias',
                 lastRun: 'Última Execução',
-                
+
                 // Reports - NS Jan 2026
                 reports: 'Relatórios',
                 reportsAnalytics: 'Relatórios e Análises',
@@ -12537,7 +12878,7 @@
                 clustersOnline: 'Clusters Online',
                 datacenterOverview: 'Visão Geral do Datacenter',
                 noRunningVms: 'Nenhuma VM em execução',
-                
+
                 // CVE Scanner - MK Mar 2026
                 cveScanner: 'Scanner de CVE',
                 cveScanDesc: 'Escaneia todos os nós em busca de pacotes desatualizados e vulnerabilidades de segurança via SSH.',
@@ -12597,7 +12938,7 @@
                 together: 'Juntos',
                 separate: 'Separados',
                 enforced: 'Forçado',
-                
+
                 // Config Modal Tabs
                 generalTab: 'Geral',
                 resourcesTab: 'Recursos',
@@ -12610,7 +12951,7 @@
                 proxmoxTasks: 'Tarefas do Proxmox',
                 pegaproxActions: 'Ações do PegaProx',
                 optionsTab: 'Opções',
-                
+
                 // Datacenter
                 backup: 'Backup',
                 replication: 'Replicação',
@@ -12637,7 +12978,7 @@
                 exclusionRule2: 'Nós excluídos NÃO receberão VMs durante migrações de balanceamento de carga',
                 exclusionRule3: 'Nós excluídos ainda são visíveis e podem receber migrações manuais',
                 exclusionRule4: 'VMs em nós excluídos ainda podem ser migradas para fora se o nó estiver sobrecarregado',
-                
+
                 // NS: Backup translations - Dec 2025
                 createBackup: 'Criar Backup',
                 noBackups: 'Nenhum backup encontrado',
@@ -12667,12 +13008,12 @@
                 compressNone: 'Nenhuma',
                 backupNotes: 'Notas (opcional)',
                 backupNotesPlaceholder: 'ex: Antes de atualização importante, backup semanal...',
-                
+
                 // HA
                 ha: 'HA',
                 haResources: 'Recursos de HA',
                 haGroups: 'Grupos de HA',
-                
+
                 metricServer: 'Servidor de Métricas',
                 cpuCompatibility: 'Compatibilidade de CPU',
                 cpuCompatibilityMode: 'Modo de Compatibilidade de CPU',
@@ -12779,7 +13120,7 @@
                 link: 'Link',
                 resourceUsage: 'Uso de Recursos',
                 memory: 'Memória',
-                
+
                 // Storage
                 addStorage: 'Adicionar Armazenamento',
                 storageId: 'ID do Armazenamento',
@@ -12797,7 +13138,7 @@
                 pool: 'Pool',
                 portal: 'Portal',
                 skipCertVerification: 'Pular Verificação de Certificado',
-                
+
                 // Backup
                 backupJobs: 'Jobs de Backup',
                 noBackupJobs: 'Nenhum Job de Backup',
@@ -12814,13 +13155,13 @@
                 schedule: 'Agendamento',
                 selection: 'Seleção',
                 retention: 'Retenção',
-                
+
                 // Replication
                 replicationJobs: 'Jobs de Replicação',
                 noReplicationJobs: 'Nenhum Job de Replicação',
                 guest: 'Convidado',
                 job: 'Job',
-                
+
                 // Firewall
                 firewallOptions: 'Opções de Firewall',
                 firewallRules: 'Regras de Firewall',
@@ -12907,7 +13248,7 @@
                 balancingEnabled: 'Balanceamento habilitado',
                 optionsTitle: 'Opções',
                 intervalBetweenChecks: 'Intervalo entre verificações de equilíbrio',
-                
+
                 // HA
                 highAvailability: 'Alta Disponibilidade (HA)',
                 haMonitoring: 'Monitoramento de HA',
@@ -12943,10 +13284,10 @@
                 migrated: 'migrado',
                 primary: 'Primário',
                 fallbacks: 'Fallbacks',
-                
+
                 // Messages
                 connectionError: 'Erro de Conexão',
-                
+
                 // Task Bar
                 tasks: 'Tarefas',
                 taskMigrate: 'Migração',
@@ -12985,7 +13326,7 @@
                 configSaved: 'Configuração salva',
                 operationFailed: 'Operação falhou',
                 confirmAction: 'Confirmar Ação',
-                
+
                 // Misc
                 lastCheck: 'Última Verificação',
                 clusterInfo: 'Info do Cluster',
@@ -13000,7 +13341,7 @@
                 help: 'Ajuda',
                 lastMigrations: 'Últimas Migrações',
                 noMigrations: 'Nenhuma migração',
-                
+
                 // Options labels
                 keyboardLayout: 'Layout do Teclado',
                 httpProxy: 'Proxy HTTP',
@@ -13041,7 +13382,7 @@
                 failureThresholdHint: 'Número de verificações com falha antes que o nó seja considerado offline',
                 hardwareWatchdog: 'Watchdog de Hardware',
                 watchdogWarning: 'CUIDADO: O nó reiniciará automaticamente em caso de perda de quórum!',
-                
+
                 // Fencing Explanation - NS Jan 2026
                 fencingExplanation: 'Como o Split-Brain é Evitado',
                 fencingStep1Title: '1. Detecção de Perda de Quórum',
@@ -13055,12 +13396,12 @@
                 fencingWarning: 'IMPORTANTE: Sem mecanismo de fencing, o split-brain pode causar corrupção de dados!',
                 fencingRecommendation: 'Recomendação para Clusters de 2 Nós:',
                 fencingRecList: '• Configure hosts de quórum (gateway, servidor DNS)\n• Habilite o hardware watchdog, se disponível\n• Defina o atraso de recuperação para pelo menos 30 segundos',
-                
+
                 enableHA: 'Habilitar HA',
                 disableHA: 'Desabilitar HA',
                 changesAfterRestart: 'Alterações ativas após reiniciar',
                 important2NodeCluster: 'importante para clusters de 2 nós!',
-                
+
                 // 2-Node Cluster Mode - NS Jan 2026
                 twoNodeMode: 'Modo de Cluster de 2 Nós',
                 twoNodeWarning: 'Limitação de Cluster de 2 Nós',
@@ -13071,7 +13412,7 @@
                 twoNodeCredentialsInfo: 'O PegaProx usará as credenciais do cluster para acessar o nó sobrevivente via SSH e executar "pvecm expected 1" para restaurar o quórum.',
                 twoNodeTip: 'Dica',
                 twoNodeTipText: 'Para melhores resultados, instale o "sshpass" no servidor PegaProx: apt install sshpass',
-                
+
                 // Split-Brain Risk - 2-Node - NS Jan 2026
                 splitBrainRisk: 'Risco de Split-Brain sem Fencing!',
                 splitBrainRiskDesc: 'Se ambos os nós estiverem vivos, mas a rede entre eles falhar, forçar o quórum pode fazer com que AMBOS os nós executem a mesma VM = CORRUPÇÃO DE DADOS!',
@@ -13084,7 +13425,7 @@
                 quorumHostsConfigured: 'Hosts de quórum configurados',
                 recoveryDelayCheck: 'Atraso de recuperação ≥ 30 segundos',
                 selfFencingEnabled: 'Self-fencing habilitado',
-                
+
                 // Storage-based Split-Brain Protection - NS Jan 2026
                 storageHeartbeat: 'Proteção Split-Brain baseada em Armazenamento',
                 recommendedFor2Node: 'Recomendado para Clusters de 2 Nós!',
@@ -13106,7 +13447,7 @@
                 step4Recovery: 'A recuperação prossegue apenas após confirmação ou timeout',
                 nodeAgentRequired: 'Agente de Nó Necessário!',
                 nodeAgentRequiredDesc: 'Para que este recurso funcione, você precisa instalar o PegaProx Node Agent em cada nó do Proxmox. O agente escreve os heartbeats e responde às pílulas de veneno.',
-                
+
                 // Automatic Split-Brain Protection - NS Jan 2026 - FULLY AUTOMATIC
                 splitBrainProtection: 'Proteção Contra Split-Brain',
                 fullyAutomatic: '100% AUTOMÁTICO',
@@ -13119,19 +13460,19 @@
                 sshOnlyMode: 'Modo de Proteção Somente-SSH',
                 noSharedStorageFound: 'Nenhum armazenamento compartilhado (NFS/CephFS) encontrado. A proteção funciona via verificação SSH.',
                 notSafeForDualNetwork: 'Não é seguro para setups de rede dupla (redes de servidor e armazenamento separadas)',
-                
+
                 // Block Storage Warning - NS Jan 2026
                 blockStorageOnly: 'Apenas Armazenamento em Bloco Encontrado',
                 blockStorageExplain: 'Armazenamentos em bloco (LVM, iSCSI, RBD) não podem armazenar arquivos de heartbeat. Para proteção total em rede dupla, adicione um pequeno compartilhamento NFS.',
                 sshOnlyActive: 'Proteção Somente-SSH Ativa',
                 sshOnlyRisk: 'Funciona para rede única. Para rede dupla (servidor/iSCSI separados), adicione um pequeno compartilhamento NFS (100MB é suficiente).',
-                
+
                 // Multiple Storages - NS Jan 2026
                 clickToSelect: 'Clique para selecionar',
                 selected: 'Selecionado',
                 currentlyActive: 'Ativo no momento',
                 blockStoragesIgnored: 'Armazenamentos em bloco (não utilizáveis)',
-                
+
                 // Self-Fence Protection - NS Jan 2026
                 selfFenceProtection: 'Proteção de Autoproteção (Self-Fence)',
                 advancedSettings: 'Configurações Avançadas',
@@ -13173,7 +13514,7 @@
                 dualNetworkProtectionDesc: 'Requer: O servidor PegaProx deve conseguir montar o armazenamento compartilhado (NFS/CephFS)',
                 sharedStoragePath: 'Caminho do Armazenamento Compartilhado',
                 agentAutoInstall: 'O agente do nó será instalado automaticamente via SSH',
-                
+
                 // Device Passthrough
                 devicePassthrough: 'Passthrough de Dispositivo',
                 pciDevices: 'Dispositivos PCI',
@@ -13196,13 +13537,13 @@
                 iommuGroup: 'Grupo IOMMU',
                 vendor: 'Fabricante',
                 adding: 'Adicionando...',
-                
+
                 bandwidthLimits: 'Limites de Banda',
                 maxWorkers: 'Máximo de Workers',
                 nextVmid: 'Próximo VMID',
                 userTagAccess: 'Acesso de Usuário a Tags',
                 registeredTags: 'Tags Registradas',
-                
+
                 // Subscription
                 subscriptionStatus: 'Status da Assinatura',
                 licensed: 'Licenciado',
@@ -13224,7 +13565,7 @@
                 subscriptionBenefit1: 'Acesso ao Repositório Enterprise com atualizações estáveis',
                 subscriptionBenefit2: 'Suporte técnico do Proxmox',
                 subscriptionBenefit3: 'Nenhum aviso de falta de assinatura ao fazer login',
-                
+
                 // Maintenance
                 maintenanceModeTitle: 'Habilitar Modo de Manutenção',
                 maintenanceWarning: 'Aviso: Todas as VMs e containers em execução neste nó serão migrados automaticamente para outros nós.',
@@ -13295,7 +13636,7 @@
                 collapse: 'Recolher',
                 threshold: 'Limiar',
                 interval: 'Intervalo',
-                
+
                 // Common notifications
                 saveFailed: 'Falha ao salvar',
                 deleteError: 'Erro ao excluir',
@@ -13313,7 +13654,7 @@
                 rollbackFailed: 'Falha na reversão (rollback)',
                 startFailed: 'Falha ao iniciar',
                 vmLocked: 'A VM está bloqueada',
-                
+
                 // Security Settings
                 securitySettings: 'Configurações de Segurança',
                 securityDashboard: 'Painel de Segurança',
@@ -13379,13 +13720,13 @@
                 unlocked: 'desbloqueado',
                 attempts: 'tentativas',
                 remaining: 'restante',
-                
+
                 // About page translations
                 about: 'Sobre',
                 developmentTeam: 'Equipe de Desenvolvimento',
                 creditsAcknowledgments: 'Créditos e Agradecimentos',
                 links: 'Links',
-                
+
                 // update Manager
                 updateManager: 'Gerenciador de Atualizações',
                 updateManagerDesc: 'Verificar e instalar atualizações em todos os nós do cluster',
@@ -13418,7 +13759,7 @@
                 nodesRemaining: 'Nós restantes',
                 includeReboot: 'Reiniciar após atualizar',
                 includeRebootHint: 'Recomendado para atualizações de kernel',
-                
+
                 // PegaProx Auto-Update - NS Jan 2026
                 confirmUpdate: 'Isso irá baixar e instalar a atualização. Um backup será criado. O servidor reiniciará automaticamente. Continuar?',
                 downloadingUpdate: 'Baixando atualização...',
@@ -13446,7 +13787,7 @@
                 restoringBackup: 'Restaurando do backup...',
                 rollbackSuccess: 'Reversão concluída com sucesso! O servidor está reiniciando...',
                 rollbackWarning: '⚠️ A reversão reiniciará o servidor. Certifique-se de ter salvo qualquer trabalho pendente.',
-                
+
                 // Security / Military Grade Encryption - NS Jan 2026
                 securityStatus: 'Status de Segurança',
                 dataEncryption: 'Criptografia de Dados',
@@ -13584,17 +13925,17 @@
                 currentNode: 'Nó Atual',
                 currentStep: 'Passo Atual',
                 updateLogs: 'Logs de Atualização',
-                
+
                 // VM Detail buttons
                 // console: 'Console', // Já definido
                 // configuration: 'Configuração', // Já definido
-                
+
                 // Config Modal
                 cpuCores: 'Núcleos de CPU',
                 cpuLimit: 'Limite de CPU',
                 memory: 'Memória (RAM)',
                 hardware: 'Hardware',
-                
+
                 // Config Modal Tabs
                 mountIso: 'Montar ISO',
                 noIsoEject: 'Sem ISO (ejetar)',
@@ -13703,7 +14044,7 @@
                 qemuGuestAgentHint: 'Habilita desligamento e freeze/thaw para snapshots',
                 fstrim: 'FSTRIM após Clone/Migração',
                 fstrimHint: 'Executar TRIM automaticamente após clonagem',
-                
+
                 // More modals
                 snapshotDescription: 'Descrição do snapshot...',
                 saveRamState: 'Salvar estado da RAM (Hibernar)',
@@ -13873,7 +14214,7 @@
                 autoBalanceDesc: 'Os discos serão migrados automaticamente quando o desequilíbrio exceder o limiar. VMs com snapshots/backups ativos são ignoradas.',
                 dryRunShort: 'Dry Run',
                 needsRestart: 'REQUER REINICIALIZAÇÃO',
-                
+
                 // NS: Alerts, Tasks, Tags, Affinity - Dec 2025
                 alertsDesc: 'Notificações por e-mail quando os limites forem excedidos',
                 createAlert: 'Criar Alerta',
@@ -13896,7 +14237,7 @@
                 smtpFromEmailRequired: 'O e-mail de origem é obrigatório',
                 emailRecipients: 'Destinatários de E-mail',
                 addRecipient: 'Adicionar Destinatário',
-                
+
                 scheduledTasks: 'Tarefas Agendadas',
                 scheduledTasksDesc: 'Automatize operações de VM conforme um cronograma',
                 createTask: 'Criar Tarefa',
@@ -13906,7 +14247,7 @@
                 taskSchedule: 'Agendamento',
                 scheduleTime: 'Hora',
                 noScheduledTasks: 'Nenhuma tarefa agendada',
-                
+
                 tagsLabels: 'Tags e Rótulos',
                 tagsDesc: 'Categorize e agrupe as VMs',
                 createTag: 'Criar Tag',
@@ -13914,7 +14255,7 @@
                 tagColor: 'Cor',
                 noTags: 'Nenhuma tag definida',
                 assignedVms: 'VMs Atribuídas',
-                
+
                 affinityRules: 'Regras de Afinidade',
                 customScripts: 'Scripts Personalizados',
                 scriptsDesc: 'Execute scripts .sh ou .py personalizados nos nós do cluster',
@@ -13934,7 +14275,7 @@
                 scriptWarning: 'Scripts rodam com permissões do usuário SSH. Certifique-se de que os scripts são seguros antes de executar.',
                 passwordRequiredForScripts: 'Confirmação de senha necessária por segurança',
                 viewOutput: 'Ver Saída',
-                
+
                 // CIS Hardening
                 hardenNode: 'Harden Node PVE',
                 hardenDesc: 'Aplica controles de hardening do CIS Benchmark em nós PVE individuais via SSH.',
@@ -14075,7 +14416,7 @@
                 noAffinityRules: 'Nenhuma regra de afinidade',
                 enforceRule: 'Forçar Regra',
                 enforceRuleHint: 'Bloquear migrações que violariam esta regra',
-                
+
                 // Console Settings - NS Jan 2026
                 consoleSettings: 'Portas de Console',
                 vncPort: 'Porta VNC',
@@ -14097,7 +14438,7 @@
                 connectingWs: 'Conectando WebSocket',
                 wsConnected: 'WebSocket conectado, aguardando servidor...',
                 ipFetchFailed: 'Falha ao buscar IP',
-                
+
                 smtpSettings: 'Configurações SMTP',
                 smtpHost: 'Servidor SMTP',
                 smtpPort: 'Porta',
@@ -14108,10 +14449,10 @@
                 smtpTls: 'Usar TLS',
                 smtpSsl: 'Usar SSL',
                 alertCooldown: 'Intervalo entre Alertas (segundos)',
-                
+
                 migrationHistory: 'Histórico de Migração',
                 noMigrationHistory: 'Nenhuma migração registrada',
-                
+
                 // LW: Password expiry settings
                 passwordExpiry: 'Expiração de Senha',
                 passwordExpiryDesc: 'Forçar usuários a alterar a senha após um número especificado de dias.',
@@ -14119,14 +14460,14 @@
                 sendExpiryEmails: 'Enviar notificações por e-mail quando a senha estiver prestes a expirar',
                 expiryDays: 'A senha expira após',
                 warningDays: 'Avisar usuários antes de',
-                
+
                 // LW: Password expiry banner
                 passwordExpired: 'Sua senha expirou!',
                 passwordExpiresIn: 'Sua senha expira em {days} dias',
                 pleaseChangeNow: 'Por favor, altere-a agora.',
                 pleaseChangeSoon: 'Por favor, altere-a em breve.',
                 dismissForNow: 'Lembrar mais tarde',
-                
+
                 // LW: Reset all passwords - Dec 2025
                 forcePasswordReset: 'Forçar Redefinição de Senha',
                 forcePasswordResetDesc: 'Expirar todas as senhas de usuários imediatamente. Use após incidentes de segurança.',
@@ -14137,7 +14478,7 @@
                 includeAdminsWarning: 'Aviso: Você também precisará alterar sua senha!',
                 includeAdminsInExpiry: 'Incluir contas de administrador',
                 includeAdminsInExpiryDesc: 'Administradores também precisarão alterar suas senhas regularmente',
-                
+
                 // Theme System - NS Jan 2026
                 appearance: 'Aparência',
                 themeDesc: 'Escolha um tema de cor para a interface',
@@ -14148,7 +14489,7 @@
                 defaultThemeDesc: 'Define o tema padrão para novos usuários. Os usuários podem alterar o tema em Meu Perfil.',
                 currentDefault: 'Padrão atual',
                 themeInProfile: 'Altere seu tema em Meu Perfil (clique no seu usuário no canto superior direito)',
-                
+
                 // UI Layout - LW Jan 2026
                 // LW: Feb 2026 - Layout Style (Modern vs Corporate)
                 layoutStyle: 'Estilo de Layout',
@@ -14221,7 +14562,7 @@
                 layoutDesc: 'Escolha entre diferentes layouts de interface.',
                 inventory: 'Inventário',
                 selectItem: 'Selecione um item na árvore',
-                
+
                 snapshots: 'Snapshots',
                 snapshotsOverview: 'Visão Geral de Snapshots',
                 snapshotsCleanUp: 'Limpeza',
@@ -14279,4 +14620,3 @@
                 lynPwHistoryImpact: 'Usuários não podem reutilizar senhas recentes',
             },
         };
-
