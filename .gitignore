@@ -29,6 +29,6 @@ archive/
 .DS_Store
 .vscode/
 .idea/
+.zed/
 *.swp
 *.swo
-
