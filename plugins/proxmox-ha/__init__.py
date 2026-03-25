@@ -36,6 +36,8 @@ from flask import request, jsonify
 
 from pegaprox.api.plugins import register_plugin_route
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access
+from pegaprox.utils.auth import load_users
+from pegaprox.utils.rbac import has_permission
 
 PLUGIN_ID = 'proxmox-ha'
 log = logging.getLogger(f'plugin.{PLUGIN_ID}')
@@ -95,8 +97,17 @@ def ha_handler():
     """
     method = request.method
 
+    # ---- RBAC --------------------------------------------------------------
+    _users_db = load_users()
+    _current_user = _users_db.get(request.session.get('user'), {})
+
+    _PERM_VIEW      = 'ha.view'
+    _PERM_RESOURCES = 'ha.resources'
+
     # ---- GET ---------------------------------------------------------------
     if method == 'GET':
+        if not has_permission(_current_user, _PERM_VIEW):
+            return jsonify({'error': 'Permission denied', 'required': _PERM_VIEW}), 403
         cluster_id = request.args.get('cluster_id', '').strip()
         manager, err = _get_manager_or_error(cluster_id)
         if err:
@@ -126,6 +137,8 @@ def ha_handler():
 
     # ---- POST (add) --------------------------------------------------------
     if method == 'POST':
+        if not has_permission(_current_user, _PERM_RESOURCES):
+            return jsonify({'error': 'Permission denied', 'required': _PERM_RESOURCES}), 403
         body = request.get_json(silent=True) or {}
         cluster_id = body.get('cluster_id', '').strip()
         manager, err = _get_manager_or_error(cluster_id)
@@ -161,6 +174,8 @@ def ha_handler():
 
     # ---- PUT (update) ------------------------------------------------------
     if method == 'PUT':
+        if not has_permission(_current_user, _PERM_RESOURCES):
+            return jsonify({'error': 'Permission denied', 'required': _PERM_RESOURCES}), 403
         body = request.get_json(silent=True) or {}
         cluster_id = body.get('cluster_id', '').strip()
         manager, err = _get_manager_or_error(cluster_id)
@@ -200,6 +215,8 @@ def ha_handler():
 
     # ---- DELETE (remove) ---------------------------------------------------
     if method == 'DELETE':
+        if not has_permission(_current_user, _PERM_RESOURCES):
+            return jsonify({'error': 'Permission denied', 'required': _PERM_RESOURCES}), 403
         cluster_id = request.args.get('cluster_id', '').strip()
         manager, err = _get_manager_or_error(cluster_id)
         if err:
