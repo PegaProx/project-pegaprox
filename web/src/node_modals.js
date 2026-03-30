@@ -541,6 +541,7 @@
             const [loading, setLoading] = useState(true);
             const [data, setData] = useState({});
             const isXcpng = clusterType === 'xcpng';
+            const isSylve = clusterType === 'sylve';
 
             // NS: Disk creation modal state - Dec 2025
             const [diskModal, setDiskModal] = useState({ open: false, type: null });
@@ -559,7 +560,11 @@
             const authHeaders = getAuthHeaders();  // NS: Get auth headers
 
             // LW: XCP-ng doesn't have Ceph, repos differ, subscription not applicable
-            const tabs = isXcpng ? [
+            const tabs = isSylve ? [
+                { id: 'summary', label: 'Summary', icon: Icons.Activity },
+                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
+                { id: 'network', label: 'Network', icon: Icons.Network },
+            ] : isXcpng ? [
                 { id: 'summary', label: 'Summary', icon: Icons.Activity },
                 { id: 'performance', label: 'Performance', icon: Icons.BarChart },
                 { id: 'shell', label: 'Shell', icon: Icons.Terminal },
@@ -632,7 +637,7 @@
                         newData.lvmthin = results[2] || [];
                         newData.zfs = results[3] || [];
                     }
-                    else if (tab === 'performance') newData.performance = results[0] || {};
+                    else if (tab === 'performance') newData.performance = results[0]?.data || results[0] || {};
                     else if (tab === 'repos') newData.repos = results[0]?.repositories || [];
                     else if (tab === 'tasks') newData.tasks = results[0] || [];
                     else if (tab === 'subscription') newData.subscription = results[0] || {};
@@ -4139,4 +4144,3 @@
                 </div>
             );
         }
-

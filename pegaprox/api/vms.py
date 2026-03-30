@@ -50,7 +50,7 @@ def get_datacenter_status(cluster_id):
         return error
 
     # MK: XCP-ng clusters build status from their own cached data
-    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+    if getattr(manager, 'cluster_type', 'proxmox') in ('xcpng', 'sylve'):
         try:
             st = manager.get_cluster_status()
             nodes = manager.get_nodes()
@@ -59,12 +59,18 @@ def get_datacenter_status(cluster_id):
             nodes_online = sum(1 for n in nodes if n.get('status') == 'online')
             total_disk = sum(s.get('total', 0) for s in storages)
             used_disk = sum(s.get('used', 0) for s in storages)
-            vms_running = len([v for v in vms if v.get('status') == 'running'])
-            vms_stopped = len([v for v in vms if v.get('status') == 'stopped'])
+            vms_running = len([v for v in vms if v.get('type') != 'lxc' and v.get('status') == 'running'])
+            vms_stopped = len([v for v in vms if v.get('type') != 'lxc' and v.get('status') != 'running'])
+            cluster_type = getattr(manager, 'cluster_type', 'xcpng')
+            container_running = len([v for v in vms if v.get('type') == 'lxc' and v.get('status') == 'running'])
+            container_stopped = len([v for v in vms if v.get('type') == 'lxc' and v.get('status') != 'running'])
             return jsonify({
-                'cluster': {'name': manager.config.name, 'quorate': None, 'standalone': False, 'version': 0, 'cluster_type': 'xcpng'},
+                'cluster': {'name': manager.config.name, 'quorate': None, 'standalone': False, 'version': 0, 'cluster_type': cluster_type},
                 'nodes': {'online': nodes_online, 'offline': len(nodes) - nodes_online, 'total': len(nodes)},
-                'guests': {'vms': {'running': vms_running, 'stopped': vms_stopped}, 'containers': {'running': 0, 'stopped': 0}},
+                'guests': {
+                    'vms': {'running': vms_running, 'stopped': vms_stopped},
+                    'containers': {'running': container_running, 'stopped': container_stopped}
+                },
                 'resources': {
                     'cpu': {'total': st.get('total_cpu', 0), 'used': 0, 'percent': 0},
                     'memory': {'total': st.get('total_mem', 0), 'used': st.get('used_mem', 0), 'percent': round(st['used_mem'] / st['total_mem'] * 100, 1) if st.get('total_mem') else 0},
@@ -72,7 +78,7 @@ def get_datacenter_status(cluster_id):
                 }
             })
         except Exception as e:
-            return jsonify({'error': safe_error(e, 'Failed to get XCP-ng status')}), 500
+            return jsonify({'error': safe_error(e, 'Failed to get alternate cluster status')}), 500
 
     try:
         host = manager.host
@@ -164,13 +170,13 @@ def get_cluster_vms_list(cluster_id):
         return error
 
     # MK: XCP-ng clusters use their own get_vms()
-    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+    if getattr(manager, 'cluster_type', 'proxmox') in ('xcpng', 'sylve'):
         try:
             vms = manager.get_vms()
             vms.sort(key=lambda x: x.get('vmid', 0))
             return jsonify({'vms': vms})
         except Exception as e:
-            return jsonify({'error': safe_error(e, 'Failed to list XCP-ng VMs')}), 500
+            return jsonify({'error': safe_error(e, 'Failed to list alternate cluster guests')}), 500
 
     # NS: use manager method instead of raw API call - handles timeouts gracefully
     resources = manager.get_vm_resources()
@@ -7380,6 +7386,4 @@ def create_container_api(cluster_id, node):
         return jsonify(result)
     else:
         return jsonify(result), 400
-
-
 
