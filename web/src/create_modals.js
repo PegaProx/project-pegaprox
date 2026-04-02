@@ -2626,7 +2626,7 @@
                             
                             {activeTab === 'security' && (
                                 <div className="space-y-6">
-                                    {/* Password Change */}
+                                    {/* Password Change — only for local users (#164) */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4">
                                         <h3 className="text-white font-medium mb-4 flex items-center gap-2">
                                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2634,6 +2634,12 @@
                                             </svg>
                                             {t('resetPassword')}
                                         </h3>
+                                        {user?.auth_source && user.auth_source !== 'local' ? (
+                                            <div className="text-sm text-gray-400 py-2">
+                                                <p>{t('passwordManagedExternally') || `Your password is managed by ${user.auth_source === 'ldap' ? 'LDAP / Active Directory' : user.auth_source === 'entra' ? 'Microsoft Entra ID' : 'your identity provider'}.`}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('passwordManagedExternallyHint') || 'Please change your password directly in your directory service.'}</p>
+                                            </div>
+                                        ) : (
                                         <form onSubmit={handleChangePassword} className="space-y-3">
                                             <input
                                                 type="password"
@@ -2668,6 +2674,7 @@
                                                 {t('resetPassword')}
                                             </button>
                                         </form>
+                                        )}
                                     </div>
                                     
                                     {/* 2FA Section */}

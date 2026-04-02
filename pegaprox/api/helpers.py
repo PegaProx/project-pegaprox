@@ -251,7 +251,7 @@ def get_connected_manager(cluster_id):
     return manager, None
 
 def check_cluster_access(cluster_id):
-    """Check if current user can access a cluster based on tenant.
+    """Check if current user can access a cluster based on tenant or VM ACLs.
     Returns (True, None) if allowed, (False, error_response) if not.
     """
     from flask import request, jsonify
@@ -261,6 +261,13 @@ def check_cluster_access(cluster_id):
     user = users.get(request.session['user'], {})
     allowed = get_user_clusters(user)
     if allowed is not None and cluster_id not in allowed:
+        # #248: check VM ACLs as fallback — users with VM-level access can reach the cluster
+        username = request.session.get('user', '')
+        from pegaprox.utils.rbac import load_vm_acls
+        cluster_acls = load_vm_acls().get(cluster_id, {})
+        for vmid, acl in cluster_acls.items():
+            if username in acl.get('users', []) or '*' in acl.get('users', []):
+                return True, None
         return False, (jsonify({'error': 'Access denied to this cluster'}), 403)
     return True, None
 

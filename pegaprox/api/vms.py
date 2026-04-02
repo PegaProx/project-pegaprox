@@ -4728,8 +4728,9 @@ def _execute_local_replication(job):
             return
 
         snap_task = snap_resp.json().get('data')
-        if not _wait_for_task(mgr, snap_task):
-            _update_repl_status(db, job_id, 'error', 'Snapshot task did not complete')
+        snap_ok, snap_detail = _wait_for_task(mgr, snap_task)
+        if not snap_ok:
+            _update_repl_status(db, job_id, 'error', f'Snapshot failed: {snap_detail}')
             return
 
         # 3. get next free VMID
@@ -4759,9 +4760,10 @@ def _execute_local_replication(job):
             return
 
         clone_task = clone_resp.json().get('data')
-        if not _wait_for_task(mgr, clone_task, timeout=1800):
+        clone_ok, clone_detail = _wait_for_task(mgr, clone_task, timeout=1800)
+        if not clone_ok:
             _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
-            _update_repl_status(db, job_id, 'error', 'Clone task timed out')
+            _update_repl_status(db, job_id, 'error', f'Clone failed: {clone_detail}')
             return
 
         logging.info(f"[REPL] Job {job_id}: clone {clone_vmid} created")
@@ -4780,10 +4782,12 @@ def _execute_local_replication(job):
                 return
 
             mig_task = mig_result.get('task')
-            if mig_task and not _wait_for_task(mgr, mig_task, timeout=3600):
-                _cleanup_clone_and_snap(mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
-                _update_repl_status(db, job_id, 'error', 'Migration timed out')
-                return
+            if mig_task:
+                mig_ok, mig_detail = _wait_for_task(mgr, mig_task, timeout=3600)
+                if not mig_ok:
+                    _cleanup_clone_and_snap(mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                    _update_repl_status(db, job_id, 'error', f'Migration failed: {mig_detail}')
+                    return
 
         logging.info(f"[REPL] Job {job_id}: clone migrated to {target_node}")
 
@@ -4917,8 +4921,9 @@ def _execute_replication(job):
             return
 
         snap_task = snap_resp.json().get('data')
-        if not _wait_for_task(source_mgr, snap_task):
-            _update_repl_status(db, job_id, 'error', 'Snapshot task did not complete')
+        snap_ok, snap_detail = _wait_for_task(source_mgr, snap_task)
+        if not snap_ok:
+            _update_repl_status(db, job_id, 'error', f'Snapshot failed: {snap_detail}')
             return
 
         logging.info(f"[XCREPL] Job {job_id}: snapshot '{snap_name}' created")
@@ -4957,9 +4962,10 @@ def _execute_replication(job):
             return
 
         clone_task = clone_resp.json().get('data')
-        if not _wait_for_task(source_mgr, clone_task, timeout=1800):
+        clone_ok, clone_detail = _wait_for_task(source_mgr, clone_task, timeout=1800)
+        if not clone_ok:
             _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, snap_name)
-            _update_repl_status(db, job_id, 'error', 'Clone task timed out (30 min)')
+            _update_repl_status(db, job_id, 'error', f'Clone failed: {clone_detail}')
             return
 
         logging.info(f"[XCREPL] Job {job_id}: clone {clone_vmid} created from snapshot")
@@ -4975,7 +4981,7 @@ def _execute_replication(job):
                 clone_cfg = cfg_resp.json().get('data', {})
                 source_storages = set()
                 for k, v in clone_cfg.items():
-                    if k.startswith(('scsi', 'virtio', 'ide', 'sata', 'rootfs', 'mp')) and isinstance(v, str) and ':' in v:
+                    if k.startswith(('scsi', 'virtio', 'ide', 'sata', 'efidisk', 'tpmstate', 'rootfs', 'mp')) and isinstance(v, str) and ':' in v:
                         stor = v.split(':')[0]
                         if stor and stor != 'none':
                             source_storages.add(stor)
@@ -5019,9 +5025,13 @@ def _execute_replication(job):
 
             if result.get('success'):
                 mig_task = result.get('task')
-                _wait_for_task(source_mgr, mig_task, timeout=3600)
-                logging.info(f"[XCREPL] Job {job_id}: migration complete")
-                _update_repl_status(db, job_id, 'ok', '')
+                mig_ok, mig_detail = _wait_for_task(source_mgr, mig_task, timeout=3600)
+                if mig_ok:
+                    logging.info(f"[XCREPL] Job {job_id}: migration complete")
+                    _update_repl_status(db, job_id, 'ok', '')
+                else:
+                    logging.error(f"[XCREPL] Job {job_id}: migration task failed: {mig_detail}")
+                    _update_repl_status(db, job_id, 'error', f'Migration task failed: {mig_detail}')
             else:
                 _update_repl_status(db, job_id, 'error', f'Migration failed: {result.get("error")}')
 
@@ -5067,9 +5077,10 @@ def _update_repl_status(db, job_id, status, error=''):
 def _wait_for_task(mgr, task_upid, timeout=600, poll=5):
     """Poll Proxmox task status until it finishes or times out.
     MK: similar to the cleanup thread logic but blocking.
+    Returns (success: bool, detail: str) — detail has PVE status or error info.
     """
     if not task_upid:
-        return False
+        return (False, 'no task UPID')
     elapsed = 0
     while elapsed < timeout:
         try:
@@ -5078,14 +5089,15 @@ def _wait_for_task(mgr, task_upid, timeout=600, poll=5):
                 if t and t.get('upid') == task_upid:
                     st = t.get('status', '')
                     if st and st != 'running':
-                        # NS: WARNINGS is still a success (PVE reports non-fatal issues)
-                        return st in ('OK', 'WARNINGS')
+                        ok = st in ('OK', 'WARNINGS')
+                        detail = st if ok else (t.get('exitstatus') or st)
+                        return (ok, detail)
                     break
         except Exception:
             pass
         time.sleep(poll)
         elapsed += poll
-    return False
+    return (False, f'timed out after {timeout}s')
 
 
 def _cleanup_snapshot(mgr, node, vmid, vm_type, snap_name):
@@ -7042,6 +7054,10 @@ def cross_cluster_migrate_api():
     source_node = data.get('source_node')
     target_node = data.get('target_node')
     target_storage = data.get('target_storage')
+    # per-storage mapping: {"local-lvm": "ceph-pool", "local": "nfs-stor"} → PVE format "local-lvm:ceph-pool,local:nfs-stor"
+    storage_map = data.get('target_storage_map')
+    if storage_map and isinstance(storage_map, dict):
+        target_storage = ','.join(f"{s}:{t}" for s, t in storage_map.items())
     # per-NIC bridge mapping: {"vmbr0": "vmbr0", "vmbr1": "vmbr2"} → PVE format "vmbr0=vmbr0,vmbr1=vmbr2"
     bridge_map = data.get('target_bridge_map')
     if bridge_map and isinstance(bridge_map, dict):
@@ -7080,7 +7096,7 @@ def cross_cluster_migrate_api():
             config = vm_info.get('config', {})
             total_disk_gb = 0
             for key, value in config.items():
-                if key.startswith(('scsi', 'virtio', 'sata', 'ide')) and 'size' in str(value):
+                if key.startswith(('scsi', 'virtio', 'sata', 'ide', 'efidisk', 'tpmstate')) and 'size' in str(value):
                     # Extract size from disk config
                     import re
                     size_match = re.search(r'size=(\d+)([GMT])', str(value))

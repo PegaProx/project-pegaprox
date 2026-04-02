@@ -2659,6 +2659,8 @@
             const [targetStorage, setTargetStorage] = useState('');
             const [targetBridgeMap, setTargetBridgeMap] = useState({});  // {sourceBridge: targetBridge}
             const [sourceNics, setSourceNics] = useState([]);  // [{id: 'net0', bridge: 'vmbr0'}, ...]
+            const [targetStorageMap, setTargetStorageMap] = useState({});  // {sourceStorage: targetStorage}
+            const [sourceDisks, setSourceDisks] = useState([]);  // [{id: 'scsi0', storage: 'local-lvm', size: '32G'}, ...]
             const [targetVmid, setTargetVmid] = useState('');
             const [online, setOnline] = useState(true);
             const [forceOnline, setForceOnline] = useState(false);  // Force online migration for large disks
@@ -2674,7 +2676,7 @@
             const [bootOrderIssues, setBootOrderIssues] = useState([]);
             const [estimatedDiskGb, setEstimatedDiskGb] = useState(0);  // Track disk size for warnings
 
-            const availableClusters = clusters.filter(c => c.id !== sourceCluster.id);
+            const availableClusters = clusters.filter(c => c.id !== sourceCluster?.id);
             const isQemu = vm.type === 'qemu';
             
             // Local authFetch helper
@@ -2748,6 +2750,25 @@
                         }
                     });
                     setEstimatedDiskGb(totalDiskGb);
+
+                    // Parse disks for per-storage mapping
+                    const disks = [];
+                    Object.keys(config).sort().forEach(key => {
+                        if (!key.match(/^(scsi|virtio|ide|sata|efidisk|tpmstate|rootfs|mp)\d*$/)) return;
+                        const val = config[key];
+                        if (typeof val !== 'string' || !val.includes(':')) return;
+                        if (val.includes('media=cdrom') || val === 'none') return;
+                        const stor = val.split(':')[0];
+                        if (!stor || stor === 'none') return;
+                        const sizeMatch = val.match(/size=(\d+[GMT]?)/);
+                        disks.push({ id: key, storage: stor, size: sizeMatch ? sizeMatch[1] : '' });
+                    });
+                    setSourceDisks(disks);
+                    setTargetStorageMap(prev => {
+                        const m = {};
+                        disks.forEach(d => { m[d.storage] = prev[d.storage] || d.storage; });
+                        return m;
+                    });
 
                     // Parse NICs for per-NIC bridge mapping
                     const nics = [];
@@ -2842,7 +2863,20 @@
                     // Get storage list for selected node
                     const storageRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes/${targetNode}/storage`);
                     if(storageRes && storageRes.ok) {
-                        setTargetStorages(await storageRes.json());
+                        const storages = await storageRes.json();
+                        setTargetStorages(storages);
+                        // update storage map: keep source name if exists on target, else first available
+                        const availStorNames = storages.map(s => s.storage);
+                        const storFallback = availStorNames[0] || 'local-lvm';
+                        setTargetStorageMap(prev => {
+                            const updated = {};
+                            Object.entries(prev).forEach(([src, tgt]) => {
+                                updated[src] = availStorNames.includes(src) ? src : (availStorNames.includes(tgt) ? tgt : storFallback);
+                            });
+                            return updated;
+                        });
+                        // keep single targetStorage for backward compat
+                        if (!targetStorage && storages.length) setTargetStorage(storages[0].storage);
                     }
 
                     // Get network list for selected node (including SDN VNets)
@@ -2869,10 +2903,12 @@
             };
 
             const handleMigrate = async () => {
-                if (!targetCluster || !targetNode || !targetStorage) return;
+                if (!targetCluster || !targetNode) return;
+                // need at least one storage selected (via map or single dropdown)
+                if (!Object.keys(targetStorageMap).length && !targetStorage) return;
                 setLoading(true);
                 const payload = {
-                    source_cluster: sourceCluster.id,
+                    source_cluster: sourceCluster?.id,
                     target_cluster: targetCluster,
                     vmid: vm.vmid,
                     vm_type: vm.type,
@@ -2884,6 +2920,10 @@
                     force_online: forceOnline,
                     delete_source: deleteSource
                 };
+                // per-storage mapping
+                if (Object.keys(targetStorageMap).length > 0) {
+                    payload.target_storage_map = targetStorageMap;
+                }
                 // per-NIC bridge mapping or single fallback
                 if (Object.keys(targetBridgeMap).length > 0) {
                     payload.target_bridge_map = targetBridgeMap;
@@ -3027,21 +3067,46 @@
                                                         </div>
                                                     ) : (
                                                         <>
-                                                            {/* Target Storage */}
+                                                            {/* Storage Mapping - per disk */}
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetStorage')}</label>
-                                                                <select
-                                                                    value={targetStorage}
-                                                                    onChange={(e) => setTargetStorage(e.target.value)}
-                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
-                                                                >
-                                                                    <option value="">{t('selectStorage')}</option>
-                                                                    {targetStorages.map(s => (
-                                                                        <option key={s.storage} value={s.storage}>
-                                                                            {s.storage} ({s.type})
-                                                                        </option>
-                                                                    ))}
-                                                                </select>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('storageMappings') || 'Storage Mapping'}</label>
+                                                                {sourceDisks.length > 0 ? (
+                                                                    <div className="space-y-2">
+                                                                        {/* group by unique source storage */}
+                                                                        {[...new Set(sourceDisks.map(d => d.storage))].map(srcStor => {
+                                                                            const disksOnStor = sourceDisks.filter(d => d.storage === srcStor);
+                                                                            return (
+                                                                            <div key={srcStor} className="flex items-center gap-2">
+                                                                                <span className="text-xs text-gray-400 w-28 shrink-0 truncate" title={`${srcStor} (${disksOnStor.map(d => d.id).join(', ')})`}>
+                                                                                    {srcStor} <span className="text-gray-600">({disksOnStor.map(d => d.id).join(', ')})</span>
+                                                                                </span>
+                                                                                <span className="text-gray-600">→</span>
+                                                                                <select
+                                                                                    value={targetStorageMap[srcStor] || ''}
+                                                                                    onChange={(e) => { setTargetStorageMap(prev => ({...prev, [srcStor]: e.target.value})); setTargetStorage(e.target.value); }}
+                                                                                    className="flex-1 px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm"
+                                                                                >
+                                                                                    <option value="">{t('selectStorage')}</option>
+                                                                                    {targetStorages.map(s => (
+                                                                                        <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                                                                                    ))}
+                                                                                </select>
+                                                                            </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                ) : (
+                                                                    <select
+                                                                        value={targetStorage}
+                                                                        onChange={(e) => setTargetStorage(e.target.value)}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                    >
+                                                                        <option value="">{t('selectStorage')}</option>
+                                                                        {targetStorages.map(s => (
+                                                                            <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                                                                        ))}
+                                                                    </select>
+                                                                )}
                                                             </div>
 
                                                             {/* Network Mapping - per NIC */}

@@ -12,7 +12,7 @@
         // const API_URL = 'https://pegaprox.internal/api' // old staging
         
         // NS: Central version constant - keep in sync with backend PEGAPROX_VERSION
-        const PEGAPROX_VERSION = "Beta 0.9.4";
+        const PEGAPROX_VERSION = "Beta 0.9.4.1";
         const DEBUG = false; // set true for verbose logging
 
         // NS: timezone list for node time config (matches backend get_timezones)

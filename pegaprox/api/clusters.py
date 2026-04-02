@@ -29,17 +29,33 @@ from pegaprox.api.helpers import load_server_settings, get_connected_manager, ch
 bp = Blueprint('clusters', __name__)
 
 @bp.route('/api/clusters', methods=['GET'])
-@require_auth(perms=['cluster.view'])
+@require_auth()
 def get_clusters():
-    """Get all configured clusters (filtered by tenant)
-    
+    """Get all configured clusters (filtered by tenant + VM ACLs)
+
     NS: Clusters are now sorted by sort_order, then by name for consistent ordering
+    LW: Apr 2026 - users with VM ACLs can see their clusters without cluster.view (#248)
     """
     # get user's allowed clusters
     users = load_users()
     user = users.get(request.session['user'], {})
+    user['username'] = request.session['user']
     allowed = get_user_clusters(user)
-    
+    has_cluster_view = has_permission(user, 'cluster.view')
+
+    # #248: users without cluster.view can still see clusters where they have VM ACLs
+    acl_cluster_ids = set()
+    if not has_cluster_view and user.get('role') != ROLE_ADMIN:
+        from pegaprox.utils.rbac import load_vm_acls
+        all_acls = load_vm_acls()
+        for cid, vm_acls in all_acls.items():
+            for vmid, acl in vm_acls.items():
+                if user['username'] in acl.get('users', []) or '*' in acl.get('users', []):
+                    acl_cluster_ids.add(cid)
+                    break
+        if not acl_cluster_ids:
+            return jsonify([])
+
     # Get cluster metadata from database (display_name, group_id, sort_order)
     db = get_db()
     cluster_meta = {}
@@ -53,45 +69,63 @@ def get_clusters():
             }
     except:
         pass
-    
+
     clusters = []
     for cluster_id, mgr in cluster_managers.items():
         # filter by tenant
         if allowed is not None and cluster_id not in allowed:
+            # fallback: allow if user has VM ACLs in this cluster
+            if cluster_id not in acl_cluster_ids:
+                continue
+        # without cluster.view, only show clusters with VM ACLs
+        if not has_cluster_view and user.get('role') != ROLE_ADMIN and cluster_id not in acl_cluster_ids:
             continue
-        
+
         meta = cluster_meta.get(cluster_id, {})
         display_name = meta.get('display_name') or ''
-            
-        clusters.append({
-            'id': cluster_id,
-            'name': mgr.config.name,
-            'display_name': display_name,
-            'group_id': meta.get('group_id'),
-            'sort_order': meta.get('sort_order', 0),
-            'host': mgr.config.host,
-            'status': 'running' if mgr.running else 'stopped',
-            'connected': mgr.is_connected,
-            'connection_error': mgr.connection_error,
-            'migration_threshold': mgr.config.migration_threshold,
-            'check_interval': mgr.config.check_interval,
-            'auto_migrate': mgr.config.auto_migrate,
-            'balance_containers': getattr(mgr.config, 'balance_containers', False),
-            'balance_local_disks': getattr(mgr.config, 'balance_local_disks', False),
-            'dry_run': mgr.config.dry_run,
-            'enabled': mgr.config.enabled,
-            'ha_enabled': mgr.config.ha_enabled,
-            'fallback_hosts': mgr.config.fallback_hosts,
-            'excluded_nodes': getattr(mgr.config, 'excluded_nodes', []),  # LW: Nodes excluded from balancing
-            'current_host': getattr(mgr, 'current_host', None),
-            'last_run': mgr.last_run.isoformat() if mgr.last_run else None,
-            'api_token_active': bool(getattr(mgr, '_using_api_token', False)),
-            'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
-        })
-    
+
+        # ACL-only users get minimal info (no admin settings)
+        if not has_cluster_view and user.get('role') != ROLE_ADMIN:
+            clusters.append({
+                'id': cluster_id,
+                'name': mgr.config.name,
+                'display_name': display_name,
+                'group_id': meta.get('group_id'),
+                'sort_order': meta.get('sort_order', 0),
+                'status': 'running' if mgr.running else 'stopped',
+                'connected': mgr.is_connected,
+                'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
+            })
+        else:
+            clusters.append({
+                'id': cluster_id,
+                'name': mgr.config.name,
+                'display_name': display_name,
+                'group_id': meta.get('group_id'),
+                'sort_order': meta.get('sort_order', 0),
+                'host': mgr.config.host,
+                'status': 'running' if mgr.running else 'stopped',
+                'connected': mgr.is_connected,
+                'connection_error': mgr.connection_error,
+                'migration_threshold': mgr.config.migration_threshold,
+                'check_interval': mgr.config.check_interval,
+                'auto_migrate': mgr.config.auto_migrate,
+                'balance_containers': getattr(mgr.config, 'balance_containers', False),
+                'balance_local_disks': getattr(mgr.config, 'balance_local_disks', False),
+                'dry_run': mgr.config.dry_run,
+                'enabled': mgr.config.enabled,
+                'ha_enabled': mgr.config.ha_enabled,
+                'fallback_hosts': mgr.config.fallback_hosts,
+                'excluded_nodes': getattr(mgr.config, 'excluded_nodes', []),
+                'current_host': getattr(mgr, 'current_host', None),
+                'last_run': mgr.last_run.isoformat() if mgr.last_run else None,
+                'api_token_active': bool(getattr(mgr, '_using_api_token', False)),
+                'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
+            })
+
     # MK: Sort clusters by sort_order first, then by name for consistent ordering
     clusters.sort(key=lambda c: (c.get('sort_order', 0), c.get('name', '').lower()))
-    
+
     return jsonify(clusters)
 
 

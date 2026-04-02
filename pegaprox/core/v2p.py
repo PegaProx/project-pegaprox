@@ -452,6 +452,21 @@ def _run_v2p_migration(task):
         task.log("Mounting ESXi datastore via SSHFS...")
         safe_pass = shlex.quote(esxi_pass)
 
+        # Pre-flight: check root partition space and resolve TMPDIR for subprocesses
+        rc_df, df_out, _ = _pve_node_exec(pve_mgr, task.target_node,
+            "df --output=avail / 2>/dev/null | tail -1", timeout=10)
+        avail_kb = int(df_out.strip()) if str(df_out or '').strip().isdigit() else 0
+        if avail_kb > 0 and avail_kb < 2 * 1024 * 1024:
+            task.log(f"⚠ Low disk space on target node root: {avail_kb // 1024}MB free")
+
+        # Resolve tmpdir on target storage so qemu-img/importdisk don't fill root
+        rc_tp, tmpdir_out, _ = _pve_node_exec(pve_mgr, task.target_node,
+            f"dir=$(pvesm path {task.target_storage}:1 2>/dev/null | xargs dirname 2>/dev/null) && "
+            f"[ -d \"$dir\" ] && echo $dir || echo /var/tmp",
+            timeout=10)
+        v2p_tmpdir = str(tmpdir_out or '').strip() or '/var/tmp'
+        task.log(f"TMPDIR for subprocesses: {v2p_tmpdir}")
+
         _pve_node_exec(pve_mgr, task.target_node,
             "grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || "
             "sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf 2>/dev/null || "
@@ -1248,18 +1263,31 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes):
             if not vol_id:
                 vol_id = f"{storage}:{fn_raw}"
             
-            # Get device path
+            # Get device path — quote vol_id to prevent shell splitting (#251)
             rc_p, out_p, _ = _pve_node_exec(pve_mgr, node,
-                f"pvesm path {vol_id} 2>&1", timeout=10)
-            dev_path = str(out_p or '').strip()
-            
-            if dev_path and rc_p == 0 and 'error' not in dev_path.lower():
+                f"pvesm path {shlex.quote(vol_id)} 2>&1", timeout=10)
+            dev_path = str(out_p or '').strip().split('\n')[0]
+
+            # #251: validate path starts with / — pvesm can return error text
+            # like "400 too many arguments" which then gets used as dd filename
+            if dev_path.startswith('/') and rc_p == 0:
                 logging.info(f"[V2P] Disk allocated: {vol_id} → {dev_path} (via: {attempt_cmd[:60]})")
                 return vol_id, dev_path
             else:
-                logging.warning(f"[V2P] Alloc OK but path failed: {vol_id} → {dev_path}")
-                # Try to derive path
-                return vol_id, dev_path or f"/dev/{storage}/{fn_raw}"
+                logging.warning(f"[V2P] pvesm path failed for {vol_id}: {dev_path[:100]}")
+                # derive path from storage type instead of returning garbage
+                if storage_type in ('dir', 'nfs', 'cifs', 'glusterfs'):
+                    derived = f"/mnt/pve/{storage}/images/{vmid}/{fn_raw}"
+                elif storage_type in ('lvmthin', 'lvm'):
+                    derived = f"/dev/{storage}/vm-{vmid}-disk-{disk_index}"
+                elif storage_type == 'zfspool':
+                    derived = f"/dev/zvol/{storage}/vm-{vmid}-disk-{disk_index}"
+                else:
+                    derived = None
+                if derived:
+                    logging.info(f"[V2P] Using derived path: {derived}")
+                    return vol_id, derived
+                return None, None
         else:
             last_error = out_str[:150]
     
@@ -1279,10 +1307,12 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes):
             if result:
                 vol_id = str(result).strip("'\"")
                 rc_p, out_p, _ = _pve_node_exec(pve_mgr, node,
-                    f"pvesm path {vol_id} 2>&1", timeout=10)
-                dev_path = str(out_p or '').strip()
-                logging.info(f"[V2P] Disk allocated via API: {vol_id} → {dev_path}")
-                return vol_id, dev_path
+                    f"pvesm path {shlex.quote(vol_id)} 2>&1", timeout=10)
+                dev_path = str(out_p or '').strip().split('\n')[0]
+                if dev_path.startswith('/'):
+                    logging.info(f"[V2P] Disk allocated via API: {vol_id} → {dev_path}")
+                    return vol_id, dev_path
+                logging.warning(f"[V2P] API alloc OK but path invalid: {vol_id} → {dev_path[:100]}")
     except Exception as e:
         logging.debug(f"[V2P] API alloc failed: {e}")
     
@@ -2790,6 +2820,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             # Redirect all output to log; progress monitored via /proc IO stats
             script_body = (
                 f"#!/bin/bash\n"
+                f"export TMPDIR='{v2p_tmpdir}'\n"
                 f"qemu-img convert -U -p -n -f {src_format} -O raw "
                 f"'{sshfs_src}' '{dev_path}' "
                 f"&> '{progress_log}'\n"
@@ -2818,6 +2849,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 task.log(f"  Retrying without -U flag...")
                 script_body_noU = (
                     f"#!/bin/bash\n"
+                    f"export TMPDIR='{v2p_tmpdir}'\n"
                     f"qemu-img convert -p -n -f {src_format} -O raw "
                     f"'{sshfs_src}' '{dev_path}' "
                     f"&> '{progress_log}'\n"
@@ -3057,7 +3089,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 task.log(f"  Importing disk {di} ({disk_gb:.1f} GB) → {task.target_storage}")
                 start_t = time.time()
                 rc_imp, out_imp, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm importdisk {task.proxmox_vmid} '{import_path}' {task.target_storage} --format raw 2>&1",
+                    f"TMPDIR='{v2p_tmpdir}' qm importdisk {task.proxmox_vmid} '{import_path}' {task.target_storage} --format raw 2>&1",
                     timeout=86400)
                 elapsed = time.time() - start_t
                 out_str = str(out_imp or '').strip()
