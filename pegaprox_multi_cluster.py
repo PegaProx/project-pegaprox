@@ -47,6 +47,7 @@ DONE: Archive-based update mechanism - NS feb 2026
 # CRITICAL: Gevent MUST be first!! dont move this!! - NS
 import os
 import sys
+import importlib.util
 
 USE_GEVENT = os.environ.get('PEGAPROX_NO_GEVENT', '').lower() not in ('1', 'true', 'yes')
 
@@ -114,11 +115,51 @@ def download_static_files():
     return _download()
 
 
+def check_startup_integrity():
+    """Run startup preflight checks without starting the server."""
+    from pegaprox.api import validate_blueprint_modules
+
+    missing_modules = validate_blueprint_modules()
+    required_runtime_modules = [
+        "requests",
+        "urllib3",
+        "certifi",
+        "charset_normalizer",
+    ]
+    missing_runtime = [
+        module_name
+        for module_name in required_runtime_modules
+        if importlib.util.find_spec(module_name) is None
+    ]
+
+    if missing_modules:
+        missing_text = ", ".join(missing_modules)
+        print("Startup check: FAILED")
+        print(f"Missing API module(s): {missing_text}")
+        print("This usually means an incomplete/mixed update.")
+        print("Re-run: ./update.sh --force")
+        return False
+
+    if missing_runtime:
+        missing_text = ", ".join(missing_runtime)
+        print("Startup check: FAILED")
+        print(f"Missing runtime dependency module(s): {missing_text}")
+        print("Fix with:")
+        print("  ./venv/bin/python -m pip install -r requirements.txt")
+        return False
+
+    print("Startup check: OK")
+    return True
+
+
 if __name__ == '__main__':
     if '--requirements' in sys.argv:
         print_system_requirements()
     elif '--download-static' in sys.argv:
         download_static_files()
+    elif '--check-startup' in sys.argv:
+        if not check_startup_integrity():
+            sys.exit(1)
     elif '--help' in sys.argv or '-h' in sys.argv:
         print("""
 PegaProx Server
@@ -130,6 +171,7 @@ Options:
   --debug           verbose logging
   --requirements    show requirements
   --download-static download js libs for offline mode
+  --check-startup   run startup integrity preflight and exit
   --help, -h        this message
 
 Env vars:

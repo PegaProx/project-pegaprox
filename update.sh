@@ -139,7 +139,7 @@ elif curl -sfL "$MIRROR_ARCHIVE" -o "$ARCHIVE" 2>/dev/null; then
     echo -e "${GREEN}OK (Mirror)${NC}"
 else
     echo -e "${YELLOW}Archive not found, falling back to individual files...${NC}"
-    # Fallback: download individual files (for repos without releases)
+    # Fallback: download individual files (for repos without archives)
     # NS: try GitHub first, fall back to mirror
     download_file() {
         local file=$1
@@ -186,22 +186,37 @@ except:
 " 2>/dev/null)
     fi
 
+    DOWNLOAD_FAILURES=0
+
     if [ -n "$PACKAGE_FILES" ]; then
-        echo "Downloading ${PACKAGE_FILES##*$'\n'} files..."
+        echo "Downloading file list from manifest..."
         while IFS= read -r pfile; do
             [ -z "$pfile" ] && continue
-            download_file "$pfile" || true
+            if ! download_file "$pfile"; then
+                DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1))
+            fi
         done <<< "$PACKAGE_FILES"
     else
         # absolute fallback - at least get the essentials
         echo "No file list found, downloading essentials..."
-        download_file "pegaprox_multi_cluster.py"
-        download_file "version.json"
-        download_file "requirements.txt"
-        download_file "deploy.sh"
-        download_file "update.sh"
-        download_file "web/index.html"
-        download_file "web/index.html.original"
+        if ! download_file "pegaprox_multi_cluster.py"; then DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1)); fi
+        if ! download_file "version.json"; then DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1)); fi
+        if ! download_file "requirements.txt"; then DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1)); fi
+        if ! download_file "deploy.sh"; then DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1)); fi
+        if ! download_file "update.sh"; then DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1)); fi
+        if ! download_file "web/index.html"; then DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1)); fi
+        if ! download_file "web/index.html.original"; then DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1)); fi
+    fi
+
+    if [ "$DOWNLOAD_FAILURES" -gt 0 ]; then
+        echo -e "${RED}Update aborted: $DOWNLOAD_FAILURES file(s) failed to download.${NC}"
+        echo "Restoring from backup..."
+        [ -f "$BACKUP_DIR/pegaprox_multi_cluster.py" ] && cp "$BACKUP_DIR/pegaprox_multi_cluster.py" . 2>/dev/null || true
+        [ -d "$BACKUP_DIR/pegaprox" ] && rm -rf pegaprox && cp -r "$BACKUP_DIR/pegaprox" . 2>/dev/null || true
+        [ -f "$BACKUP_DIR/version.json" ] && cp "$BACKUP_DIR/version.json" . 2>/dev/null || true
+        [ -f "$BACKUP_DIR/requirements.txt" ] && cp "$BACKUP_DIR/requirements.txt" . 2>/dev/null || true
+        rm -rf "$TMPDIR"
+        exit 1
     fi
 
     rm -rf "$TMPDIR"
@@ -264,7 +279,8 @@ if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ]; then
         # Copy files, preserving directory structure
         # Skip: config/, ssl/, logs/, backups/, cert.pem, key.pem, .git/
         if command -v rsync &> /dev/null; then
-            rsync -a --exclude='config/' --exclude='ssl/' --exclude='logs/' \
+            # Mirror upstream tree exactly to avoid mixed-version imports.
+            rsync -a --delete --exclude='config/' --exclude='ssl/' --exclude='logs/' \
                   --exclude='backups/' --exclude='cert.pem' --exclude='key.pem' \
                   --exclude='.git/' --exclude='.gitignore' \
                   "$CONTENT_DIR/" "$SCRIPT_DIR/"
