@@ -682,7 +682,9 @@ def main(debug_mode=False):
                         _ssl = str(Path(__file__).resolve().parent.parent / 'ssl')
                     renewed = check_and_renew(
                         _settings['domain'], _settings.get('acme_email', ''),
-                        _ssl, staging=_settings.get('acme_staging', False)
+                        _ssl,
+                        staging=_settings.get('acme_staging', False),
+                        directory_url=_settings.get('acme_directory_url', '')
                     )
                     if renewed:
                         logging.info("[ACME] Certificate renewed, restart required for new cert")

@@ -973,6 +973,13 @@ def update_server_settings():
                 settings['acme_email'] = str(data['acme_email']).strip()
             if 'acme_staging' in data:
                 settings['acme_staging'] = bool(data['acme_staging'])
+            if 'acme_provider' in data:
+                provider = str(data['acme_provider'] or 'letsencrypt').strip()
+                settings['acme_provider'] = provider if provider in ('letsencrypt', 'custom') else 'letsencrypt'
+            if 'acme_directory_url' in data:
+                settings['acme_directory_url'] = str(data['acme_directory_url'] or '').strip()
+            if settings.get('acme_provider') != 'custom':
+                settings['acme_directory_url'] = ''
             
             # security/bruteforce settings
             if 'login_max_attempts' in data:
@@ -1262,6 +1269,14 @@ def update_server_settings():
             settings['reverse_proxy_enabled'] = reverse_proxy
             settings['trusted_proxies'] = trusted_proxies
             settings['proxy_bind_address'] = proxy_bind
+            settings['acme_enabled'] = request.form.get('acme_enabled', str(settings.get('acme_enabled', 'false'))).lower() == 'true'
+            settings['acme_email'] = request.form.get('acme_email', settings.get('acme_email', '')).strip()
+            settings['acme_staging'] = request.form.get('acme_staging', str(settings.get('acme_staging', 'false'))).lower() == 'true'
+            acme_provider = request.form.get('acme_provider', settings.get('acme_provider', 'letsencrypt')).strip()
+            settings['acme_provider'] = acme_provider if acme_provider in ('letsencrypt', 'custom') else 'letsencrypt'
+            settings['acme_directory_url'] = request.form.get('acme_directory_url', settings.get('acme_directory_url', '')).strip()
+            if settings['acme_provider'] != 'custom':
+                settings['acme_directory_url'] = ''
             # hot-reload trusted proxies
             from pegaprox.utils.audit import load_trusted_proxies
             load_trusted_proxies(trusted_proxies)
@@ -1448,6 +1463,8 @@ def get_acme_status():
             'acme_enabled': settings.get('acme_enabled', False),
             'acme_email': settings.get('acme_email', ''),
             'acme_staging': settings.get('acme_staging', False),
+            'acme_provider': settings.get('acme_provider', 'letsencrypt'),
+            'acme_directory_url': settings.get('acme_directory_url', ''),
             'domain': settings.get('domain', ''),
             'cert': cert_info,
         })
@@ -1458,7 +1475,7 @@ def get_acme_status():
 @bp.route('/api/settings/acme/request', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
 def request_acme_certificate():
-    """Request a new Let's Encrypt certificate (admin only)"""
+    """Request a new ACME certificate (admin only)"""
     try:
         from pegaprox.core.acme import request_certificate
         from pathlib import Path
@@ -1474,23 +1491,36 @@ def request_acme_certificate():
         domain = data.get('domain') or settings.get('domain', '')
         email = data.get('email') or settings.get('acme_email', '')
         staging = data.get('staging', settings.get('acme_staging', False))
+        acme_provider = str(data.get('provider') or settings.get('acme_provider', 'letsencrypt')).strip() or 'letsencrypt'
+        directory_url = str(data.get('directory_url') or settings.get('acme_directory_url', '')).strip()
 
         if not domain:
             return jsonify({'error': 'Domain is required'}), 400
-        if not email:
+        if acme_provider not in ('letsencrypt', 'custom'):
+            return jsonify({'error': 'Invalid ACME provider'}), 400
+        if acme_provider == 'custom':
+            if not directory_url:
+                return jsonify({'error': 'Custom ACME directory URL is required'}), 400
+            if not directory_url.startswith(('https://', 'http://')):
+                return jsonify({'error': 'ACME directory URL must start with http:// or https://'}), 400
+        else:
+            directory_url = ''
+        if acme_provider == 'letsencrypt' and not email:
             return jsonify({'error': 'Email is required for Let\'s Encrypt'}), 400
 
         # persist ACME settings
         settings['acme_enabled'] = True
         settings['acme_email'] = email
         settings['acme_staging'] = bool(staging)
+        settings['acme_provider'] = acme_provider
+        settings['acme_directory_url'] = directory_url
         settings['domain'] = domain
         save_server_settings(settings)
 
         usr = getattr(request, 'session', {}).get('user', 'admin')
-        log_audit(usr, 'settings.acme_request', f"ACME certificate requested for {domain} ({'staging' if staging else 'production'})")
+        log_audit(usr, 'settings.acme_request', f"ACME certificate requested for {domain} via {acme_provider}")
 
-        result = request_certificate(domain, email, ssl_dir, staging=staging)
+        result = request_certificate(domain, email, ssl_dir, staging=staging, directory_url=directory_url)
 
         if result['success']:
             # enable SSL automatically
@@ -4177,6 +4207,3 @@ def test_ldap():
         results['steps'].append({'step': failed_step, 'status': 'error', 'detail': str(e)})
     
     return jsonify(results)
-
-
-

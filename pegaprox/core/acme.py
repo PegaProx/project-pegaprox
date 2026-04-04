@@ -1,4 +1,4 @@
-# MK: Mar 2026 - Lightweight ACME client for Let's Encrypt (#96)
+# MK: Mar 2026 - Lightweight ACME client for ACME-compatible CAs (#96)
 # Uses only cryptography + requests (no extra deps)
 # Supports HTTP-01 challenge only for now
 
@@ -114,20 +114,30 @@ def get_challenge_response(token):
     return _pending_challenges.get(token)
 
 
-def request_certificate(domain, email, ssl_dir, staging=False):
+def get_directory_url(staging=False, directory_url=None):
+    """Resolve the ACME directory URL, defaulting to Let's Encrypt."""
+    custom_url = (directory_url or '').strip()
+    if custom_url:
+        return custom_url
+    return ACME_DIRECTORY_STAGING if staging else ACME_DIRECTORY_PROD
+
+
+def request_certificate(domain, email, ssl_dir, staging=False, directory_url=None):
     """
-    Request a Let's Encrypt certificate via HTTP-01 challenge.
+    Request an ACME certificate via HTTP-01 challenge.
 
     Returns dict with 'success', 'message', optionally 'cert_path', 'key_path', 'expires'.
     The caller must ensure /.well-known/acme-challenge/<token> is served on port 80.
     """
-    acme_url = ACME_DIRECTORY_STAGING if staging else ACME_DIRECTORY_PROD
+    acme_url = get_directory_url(staging=staging, directory_url=directory_url)
     account_key_path = os.path.join(ssl_dir, 'acme_account.key')
 
     try:
         # Step 1: Load directory
-        logging.info(f"[ACME] Starting certificate request for {domain} ({'staging' if staging else 'production'})")
+        environment = 'custom' if (directory_url or '').strip() else ('staging' if staging else 'production')
+        logging.info(f"[ACME] Starting certificate request for {domain} ({environment}) via {acme_url}")
         dir_resp = requests.get(acme_url, timeout=15)
+        dir_resp.raise_for_status()
         directory = dir_resp.json()
 
         # Step 2: Load/create account key
@@ -333,13 +343,10 @@ def get_cert_info(ssl_dir):
         return None
 
 
-def check_and_renew(domain, email, ssl_dir, staging=False, days_before=30):
+def check_and_renew(domain, email, ssl_dir, staging=False, days_before=30, directory_url=None):
     """Check if cert needs renewal and renew if so. Returns True if renewed."""
     info = get_cert_info(ssl_dir)
     if not info:
-        return False
-
-    if not info['is_letsencrypt']:
         return False
 
     if info['days_left'] > days_before:
@@ -347,7 +354,7 @@ def check_and_renew(domain, email, ssl_dir, staging=False, days_before=30):
         return False
 
     logging.info(f"[ACME] Cert expires in {info['days_left']} days, renewing...")
-    result = request_certificate(domain, email, ssl_dir, staging)
+    result = request_certificate(domain, email, ssl_dir, staging=staging, directory_url=directory_url)
     if result['success']:
         logging.info(f"[ACME] Renewal successful! New expiry: {result.get('expires')}")
         return True

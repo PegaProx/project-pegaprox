@@ -126,8 +126,10 @@
                 ssl_cert_file: null,
                 ssl_key_file: null,
                 acme_enabled: false,
+                acme_provider: 'letsencrypt',
                 acme_email: '',
                 acme_staging: false,
+                acme_directory_url: '',
                 cert_info: null,
                 reverse_proxy_enabled: false,
                 trusted_proxies: '',
@@ -916,8 +918,10 @@
                             ssl_cert: data.ssl_cert_exists ? '(Zertifikat vorhanden)' : '',
                             ssl_key: data.ssl_key_exists ? '(Schlüssel vorhanden)' : '',
                             acme_enabled: data.acme_enabled || false,
+                            acme_provider: data.acme_provider || 'letsencrypt',
                             acme_email: data.acme_email || '',
                             acme_staging: data.acme_staging || false,
+                            acme_directory_url: data.acme_directory_url || '',
                             cert_info: data.cert_info || null,
                             http_redirect_port: data.http_redirect_port || 0,
                             reverse_proxy_enabled: data.reverse_proxy_enabled || false,
@@ -1132,6 +1136,11 @@
                     formData.append('reverse_proxy_enabled', serverSettings.reverse_proxy_enabled);
                     formData.append('trusted_proxies', serverSettings.trusted_proxies || '');
                     formData.append('proxy_bind_address', serverSettings.proxy_bind_address || '');
+                    formData.append('acme_enabled', serverSettings.acme_enabled);
+                    formData.append('acme_provider', serverSettings.acme_provider || 'letsencrypt');
+                    formData.append('acme_email', serverSettings.acme_email || '');
+                    formData.append('acme_staging', serverSettings.acme_staging);
+                    formData.append('acme_directory_url', serverSettings.acme_provider === 'custom' ? (serverSettings.acme_directory_url || '') : '');
                     formData.append('default_theme', serverSettings.default_theme || 'proxmoxDark');
                     // NS: alert recipients live in the same tab - must send them too (#131)
                     formData.append('alert_email_recipients', JSON.stringify(serverSettings.alert_email_recipients || []));
@@ -1191,8 +1200,12 @@
                     addToast(t('domain') + ' required', 'error');
                     return;
                 }
-                if (!serverSettings.acme_email) {
+                if (serverSettings.acme_provider === 'letsencrypt' && !serverSettings.acme_email) {
                     addToast(t('acmeEmail') + ' required', 'error');
+                    return;
+                }
+                if (serverSettings.acme_provider === 'custom' && !serverSettings.acme_directory_url) {
+                    addToast((t('acmeDirectoryUrl') || 'ACME Directory URL') + ' required', 'error');
                     return;
                 }
                 setAcmeLoading(true);
@@ -1203,8 +1216,10 @@
                         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
                         body: JSON.stringify({
                             domain: serverSettings.domain,
+                            provider: serverSettings.acme_provider || 'letsencrypt',
                             email: serverSettings.acme_email,
                             staging: serverSettings.acme_staging,
+                            directory_url: serverSettings.acme_provider === 'custom' ? serverSettings.acme_directory_url : '',
                         })
                     });
                     const data = await resp.json();
@@ -4767,7 +4782,7 @@
                                                                 </div>
                                                             </>
                                                         )}
-                                                        {serverSettings.cert_info.is_letsencrypt && serverSettings.acme_enabled && (
+                                                        {!serverSettings.cert_info.is_self_signed && serverSettings.acme_enabled && (
                                                             <div className="text-emerald-400 text-xs mt-1">✓ {t('acmeAutoRenew')}</div>
                                                         )}
                                                     </div>
@@ -4775,6 +4790,36 @@
                                             )}
 
                                             <div className="space-y-3">
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('acmeProvider') || 'ACME Provider'}</label>
+                                                    <select
+                                                        value={serverSettings.acme_provider || 'letsencrypt'}
+                                                        onChange={e => setServerSettings({
+                                                            ...serverSettings,
+                                                            acme_provider: e.target.value,
+                                                            acme_directory_url: e.target.value === 'custom' ? serverSettings.acme_directory_url : '',
+                                                        })}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    >
+                                                        <option value="letsencrypt">{t('acmeProviderLetsEncrypt') || 'Let\'s Encrypt'}</option>
+                                                        <option value="custom">{t('acmeProviderCustom') || 'Custom ACME URL'}</option>
+                                                    </select>
+                                                </div>
+
+                                                {serverSettings.acme_provider === 'custom' && (
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('acmeDirectoryUrl') || 'ACME Directory URL'}</label>
+                                                        <input
+                                                            type="url"
+                                                            value={serverSettings.acme_directory_url || ''}
+                                                            onChange={e => setServerSettings({...serverSettings, acme_directory_url: e.target.value})}
+                                                            placeholder="https://step-ca.example.com/acme/acme/directory"
+                                                            className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                        />
+                                                        <p className="text-xs text-gray-500 mt-1">{t('acmeDirectoryUrlHint') || 'Example: Step CA ACME directory endpoint'}</p>
+                                                    </div>
+                                                )}
+
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">{t('acmeEmail')}</label>
                                                     <input
@@ -4784,19 +4829,25 @@
                                                         placeholder="admin@example.com"
                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                     />
-                                                    <p className="text-xs text-gray-500 mt-1">{t('acmeEmailHint')}</p>
+                                                    <p className="text-xs text-gray-500 mt-1">
+                                                        {serverSettings.acme_provider === 'letsencrypt'
+                                                            ? t('acmeEmailHint')
+                                                            : (t('acmeEmailOptionalHint') || 'Optional, depending on your ACME server')}
+                                                    </p>
                                                 </div>
 
-                                                <label className="flex items-center gap-2 cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={serverSettings.acme_staging}
-                                                        onChange={e => setServerSettings({...serverSettings, acme_staging: e.target.checked})}
-                                                        className="rounded border-proxmox-border bg-proxmox-darker"
-                                                    />
-                                                    <span className="text-sm text-gray-300">{t('acmeStaging')}</span>
-                                                    <span className="text-xs text-gray-500">({t('acmeStagingHint')})</span>
-                                                </label>
+                                                {serverSettings.acme_provider === 'letsencrypt' && (
+                                                    <label className="flex items-center gap-2 cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={serverSettings.acme_staging}
+                                                            onChange={e => setServerSettings({...serverSettings, acme_staging: e.target.checked})}
+                                                            className="rounded border-proxmox-border bg-proxmox-darker"
+                                                        />
+                                                        <span className="text-sm text-gray-300">{t('acmeStaging')}</span>
+                                                        <span className="text-xs text-gray-500">({t('acmeStagingHint')})</span>
+                                                    </label>
+                                                )}
 
                                                 <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
                                                     <p className="text-xs text-blue-400">{t('acmePort80')}</p>
@@ -4810,7 +4861,7 @@
 
                                                 <button
                                                     onClick={handleAcmeRequest}
-                                                    disabled={acmeLoading || !serverSettings.domain || !serverSettings.acme_email}
+                                                    disabled={acmeLoading || !serverSettings.domain || (serverSettings.acme_provider === 'letsencrypt' && !serverSettings.acme_email) || (serverSettings.acme_provider === 'custom' && !serverSettings.acme_directory_url)}
                                                     className="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
                                                 >
                                                     {acmeLoading ? t('acmeRequesting') : t('acmeRequest')}
