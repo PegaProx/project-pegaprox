@@ -5,8 +5,13 @@
         // Create VM/CT Modal Component
         // LW: This handles both QEMU VMs and LXC containers
         // The wizard steps are a bit complex but users seem to like it
-        // ChatGPT helped with the step indicator UI - looks pretty clean
-        // TODO: add template support for quick vm creation
+        const VM_PRESETS = [
+            { label: 'Ubuntu 24.04 LTS', icon: '🐧', config: { ostype: 'l26', cores: 2, sockets: 1, memory: 2048, disk_size: '32', cpu: 'host', agent: true, bios: 'seabios', machine: 'i440fx', net_model: 'virtio', disk_type: 'scsi', disk_discard: true, disk_iothread: true } },
+            { label: 'Windows Server 2022', icon: '🖥️', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 4096, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', disk_discard: true } },
+            { label: 'Windows 11', icon: '💻', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 8192, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', tpm_version: 'v2.0' } },
+            { label: 'Minimal Linux', icon: '⚡', config: { ostype: 'l26', cores: 1, sockets: 1, memory: 512, disk_size: '8', cpu: 'host', agent: false, bios: 'seabios', net_model: 'virtio', disk_type: 'virtio' } },
+        ];
+
         function CreateVmModal({ vmType, clusterId, clusterType, nodes: initialNodes, onCreate, onClose }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
@@ -353,6 +358,21 @@
                                             placeholder="my-virtual-machine"
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                     </div>
+                                    {isQemu && (
+                                        <div className="pt-3 border-t border-proxmox-border">
+                                            <label className="block text-xs text-gray-500 mb-2">{t('quickTemplate') || 'Quick Template'}</label>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                {VM_PRESETS.map(p => (
+                                                    <button key={p.label} type="button"
+                                                        onClick={() => setConfig(prev => ({...prev, ...p.config}))}
+                                                        className="text-left p-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs hover:border-proxmox-orange/50 transition-colors flex items-center gap-2">
+                                                        <span>{p.icon}</span>
+                                                        <span className="text-gray-300">{p.label}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             );
                         case 1: // OS / Install Method

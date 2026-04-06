@@ -567,7 +567,8 @@ def auth_login():
             logging.warning(f"Failed to migrate password for {username}: {e}")
     
     # Create session
-    session_id = create_session(username, user['role'])
+    remember = data.get('remember', False)
+    session_id = create_session(username, user['role'], remember=bool(remember))
     
     # Update last login
     user['last_login'] = datetime.now().isoformat()

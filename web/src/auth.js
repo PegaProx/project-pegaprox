@@ -14,6 +14,7 @@
             const [loading, setLoading] = useState(false);
             const [showPassword, setShowPassword] = useState(false);
             const [requires2FA, setRequires2FA] = useState(false);
+            const [rememberMe, setRememberMe] = useState(() => localStorage.getItem('pegaprox-remember') === 'true');
             
             const [oidcLoading, setOidcLoading] = useState(false);
             
@@ -77,7 +78,8 @@
                 if (requires2FA && !totpCode) return;
                 
                 setLoading(true);
-                const result = await login(username, password, totpCode);
+                localStorage.setItem('pegaprox-remember', rememberMe);
+                const result = await login(username, password, totpCode, rememberMe);
                 
                 if (result?.requires_2fa) {
                     setRequires2FA(true);
@@ -194,6 +196,11 @@
                                     </div>
                                 )}
                                 
+                                <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
+                                    <input type="checkbox" checked={rememberMe} onChange={e => setRememberMe(e.target.checked)} className="rounded border-gray-600 bg-proxmox-dark" />
+                                    {t('rememberMe') || 'Remember me'}
+                                </label>
+
                                 <button
                                     type="submit"
                                     disabled={loading || !username || !password}

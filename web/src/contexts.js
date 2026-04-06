@@ -56,6 +56,7 @@
                 { code: 'fr', flag: '🇫🇷', label: 'FR', title: 'Français' },
                 { code: 'es', flag: '🇪🇸', label: 'ES', title: 'Español (LATAM)' },
                 { code: 'pt', flag: '🇧🇷', label: 'PT', title: 'Português' },
+                { code: 'ko', flag: '🇰🇷', label: 'KO', title: '한국어' },
             ];
             const activeLanguage = langs.find(l => l.code === language) || langs[0];
 
@@ -198,17 +199,15 @@
                 setLoading(false);
             };
             
-            // -lw: Main login handler - supports 2FA flow
-            // TODO: add "remember me" checkbox somtime
-            const login = async (username, password, totpCode = '') => {
+            // -lw: Main login handler - supports 2FA flow + remember me
+            const login = async (username, password, totpCode = '', remember = false) => {
                 setError(null);
-                // NS: Mar 2026 - removed login attempt log (username in console = bad)
                 try {
                     const resp = await fetch(`${API_URL}/auth/login`, {
                         method: 'POST',
                         credentials: 'include',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ username, password, totp_code: totpCode })
+                        body: JSON.stringify({ username, password, totp_code: totpCode, remember })
                     });
                     
                     const data = await resp.json();

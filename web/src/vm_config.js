@@ -808,7 +808,7 @@
                     if (response && response.ok) {
                         addToast(t('backupStarted') || 'Backup started');
                         setShowCreateBackup(false);
-                        // TODO: maybe auto-refresh backup list after a delay?
+                        setTimeout(() => fetchBackups(), 5000);
                     } else if (response) {
                         const err = await response.json();
                         addToast(err.error || 'Backup failed', 'error');
@@ -5128,7 +5128,7 @@
 
         // Sub-modals for disk/network operations
         // LW: Disk creation modal - handles both QEMU and LXC
-        // TODO(LW): Maybe add RAID level selection for ZFS pools?
+        // LW: ZFS RAID level is set at pool creation, not per-disk. Type shown in selector.
         function AddDiskModal({ isQemu, storageList, hardwareOptions, getNextDiskId, onAdd, onClose }) {
             const { t } = useTranslation();
             const [diskConfig, setDiskConfig] = useState({

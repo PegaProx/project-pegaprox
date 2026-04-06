@@ -279,3 +279,28 @@ def safe_error(e, default_msg='An internal error occurred'):
     """
     logging.error(f"[API] {default_msg}: {e}", exc_info=True)
     return default_msg
+
+
+def parse_pve_error(response_text, fallback='Proxmox API error'):
+    """Extract user-friendly error from Proxmox API response.
+    PVE returns JSON like {"data":null,"message":"some error\\n"} or plain text.
+    """
+    if not response_text:
+        return fallback
+    try:
+        import json
+        # PVE often has literal newlines in JSON strings — strip them
+        cleaned = response_text.replace('\n', ' ').replace('\r', '')
+        data = json.loads(cleaned)
+        msg = data.get('message') or data.get('errors') or data.get('error')
+        if isinstance(msg, dict):
+            msg = '; '.join(f"{k}: {v}" for k, v in msg.items())
+        if msg:
+            return str(msg).strip()
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        pass
+    # plain text — truncate and clean
+    text = response_text.strip()[:200]
+    if '<html' in text.lower():
+        return fallback
+    return text or fallback

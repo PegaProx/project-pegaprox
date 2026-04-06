@@ -768,9 +768,9 @@
                     }
                     
                     // === Tag Settings ===
-                    // MK: user-tag-access is complex - Proxmox API is picky about format
-                    // Skip for now - "free" is default anyway
-                    // TODO: Implement proper format if needed
+                    if (editingOptions.user_tag_access) {
+                        payload['user-tag-access'] = `user-allow=${editingOptions.user_tag_access}`;
+                    }
                     
                     // registered-tags is simpler - just semicolon-separated list
                     
@@ -1665,13 +1665,12 @@
                                             <div className="grid grid-cols-2 gap-4">
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">User Tag Access</label>
-                                                    <select value={editingOptions.user_tag_access || 'free'} disabled className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm opacity-50 cursor-not-allowed">
+                                                    <select value={editingOptions.user_tag_access || 'free'} onChange={e => setEditingOptions({...editingOptions, user_tag_access: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
                                                         <option value="free">Free - users can create any tags</option>
                                                         <option value="existing">Existing - only use existing tags</option>
                                                         <option value="list">List - only use registered tags</option>
                                                         <option value="none">None - no tag editing allowed</option>
                                                     </select>
-                                                    <span className="text-xs text-gray-500">Edit via Proxmox UI</span>
                                                 </div>
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">Registered Tags</label>

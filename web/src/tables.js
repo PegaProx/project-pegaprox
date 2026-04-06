@@ -66,8 +66,10 @@
             const history = historyRef.current;
 
             const formatBytes = (bytes) => {
-                const gb = bytes / 1073741824;
-                return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1048576).toFixed(1)} MB`;
+                if (!bytes) return '0 B';
+                const k = 1024, s = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + s[i];
             };
 
             const formatUptime = (seconds) => {
@@ -917,7 +919,7 @@
             const updateTask = metrics?.update_task;
             const canUpdate = isInMaintenance && maintenanceTask?.status && (['completed', 'completed_with_errors'].includes(maintenanceTask.status) || metrics?.maintenance_acknowledged) && !isUpdating;
 
-            const formatBytes = (bytes) => { const gb = bytes / 1073741824; return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1048576).toFixed(1)} MB`; };
+            const formatBytes = (bytes) => { if(!bytes)return'0 B';const k=1024,s=['B','KB','MB','GB','TB','PB'],i=Math.floor(Math.log(bytes)/Math.log(k));return(bytes/Math.pow(k,i)).toFixed(1)+' '+s[i]; };
             const formatUptime = (uptime) => {
                 if(!uptime) return '-';
                 const days = Math.floor(uptime / 86400);
@@ -1193,7 +1195,7 @@
         // LW: The main VM/CT list - supports cards, table, and detail view
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
-        // FIXME: rerenders too often, useMemo wuold help probably
+        // NS: filtering + sorting uses useMemo below (lines 1320+)
         function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
@@ -1315,7 +1317,6 @@
             };
 
             // LW: filter + sort in one useMemo for perf
-            // TODO: maybe split this up, its getting complex
             // MK: added tag/node/ip search, people kept complaining they couldnt find stuff
             const filteredResources = useMemo(() => {
                 let filtered = resources.filter(r => {

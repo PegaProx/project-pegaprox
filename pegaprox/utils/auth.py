@@ -391,7 +391,7 @@ def _load_sessions_legacy():
         except Exception as e:
             logging.debug(f"Could not load legacy sessions file: {e}")
 
-def create_session(username: str, role: str) -> str:
+def create_session(username: str, role: str, remember: bool = False) -> str:
     """Create a new session for a user
 
     NS: Also does session rotation - invalidates old sessions for same user
@@ -419,8 +419,9 @@ def create_session(username: str, role: str) -> str:
             'role': role,
             'created_at': time.time(),
             'last_activity': time.time(),
-            'ip': request.remote_addr if request else None,  # track IP for auditing
-            'user_agent': request.headers.get('User-Agent', '')[:200] if request else None
+            'ip': request.remote_addr if request else None,
+            'user_agent': request.headers.get('User-Agent', '')[:200] if request else None,
+            'remember': remember,  # NS: persistent session (30 days instead of default)
         }
 
     # Save sessions to disk (outside lock - I/O operation)
@@ -443,8 +444,9 @@ def validate_session(session_id: str) -> dict:
 
         session = active_sessions[session_id]
 
-        # check session has expired
-        if time.time() - session['last_activity'] > get_session_timeout():
+        # check session has expired — remember sessions last 30 days
+        timeout = 30 * 86400 if session.get('remember') else get_session_timeout()
+        if time.time() - session['last_activity'] > timeout:
             del active_sessions[session_id]
             expired = True
         else:
