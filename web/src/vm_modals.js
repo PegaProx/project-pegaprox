@@ -3553,7 +3553,7 @@
                                         </div>
                                     )}
                                     {cluster.connected ? (
-                                        <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`}>
+                                        <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`} title={t('clusterHealthTooltip')}>
                                             <span className={`text-xs font-semibold ${healthColors.text}`}>{cluster.healthScore}%</span>
                                         </div>
                                     ) : (
@@ -4320,7 +4320,7 @@
                                     
                                     {/* Health Badge */}
                                     {cluster.connected && (
-                                        <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`}>
+                                        <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`} title={t('clusterHealthTooltip')}>
                                             <span className={`text-xs font-semibold ${healthColors.text}`}>{cluster.healthScore}%</span>
                                         </div>
                                     )}
@@ -6153,11 +6153,12 @@
 
             const avgCpu = nodes.reduce((acc, [, m]) => acc + m.cpu_percent, 0) / nodes.length;
             const avgMem = nodes.reduce((acc, [, m]) => acc + m.mem_percent, 0) / nodes.length;
-            const avgScore = nodes.reduce((acc, [, m]) => acc + m.score, 0) / nodes.length;
+            const avgDisk = nodes.reduce((acc, [, m]) => acc + (m.disk_percent || 0), 0) / nodes.length;
             const onlineNodes = nodes.filter(([, m]) => m.status === 'online' && !m.maintenance_mode).length;
             const maintenanceNodes = nodes.filter(([, m]) => m.maintenance_mode).length;
+            const offlineNodes = nodes.length - onlineNodes - maintenanceNodes;
 
-            const healthScore = Math.max(0, 100 - (avgScore / 2));
+            const healthScore = Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgDisk * 0.2 + (nodes.length > 0 ? (offlineNodes / nodes.length) * 100 * 0.2 : 0)));
             const healthLabel = healthScore >= 80 ? t('excellent') : healthScore >= 60 ? t('good') : healthScore >= 40 ? t('warning') : t('critical');
             const healthColor = healthScore >= 80 ? '#22c55e' : healthScore >= 60 ? '#84cc16' : healthScore >= 40 ? '#eab308' : '#ef4444';
 
@@ -6165,7 +6166,7 @@
             const corpHealthColor = healthScore >= 80 ? '#60b515' : healthScore >= 60 ? '#60b515' : healthScore >= 40 ? '#efc006' : '#f54f47';
             if (isCorporate) {
                 return (
-                    <div className="p-3" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                    <div className="p-3" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}} title={t('clusterHealthTooltip')}>
                         <h3 className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{color: 'var(--corp-text-muted)'}}>{t('clusterHealth')}</h3>
                         <div className="flex items-center gap-4 flex-wrap">
                             <div className="flex items-center gap-2">
@@ -6189,7 +6190,7 @@
             }
 
             return (
-                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5">
+                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5" title={t('clusterHealthTooltip')}>
                     <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('clusterHealth')}</h3>
 
                     <div className="flex items-center justify-center mb-6">
@@ -6222,8 +6223,8 @@
                             <div className="text-xs text-gray-500">{t('nodesOnline')}</div>
                         </div>
                         <div className="text-center">
-                            <div className="text-2xl font-bold text-white">{avgScore.toFixed(0)}</div>
-                            <div className="text-xs text-gray-500">{t('avgScore')}</div>
+                            <div className="text-2xl font-bold text-white">{avgDisk.toFixed(1)}%</div>
+                            <div className="text-xs text-gray-500">{t('avgStorage')}</div>
                         </div>
                         <div className="text-center">
                             <div className="text-2xl font-bold text-white">{avgCpu.toFixed(1)}%</div>
