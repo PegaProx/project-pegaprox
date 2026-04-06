@@ -128,7 +128,8 @@
             'novnc@1.4.0': '',  // loaded as ES module, SRI not supported for dynamic import
             'xterm@5.3.0': 'sha384-xjfWUeCWdMtvpAb/SmM6lMzS6pQGcQa0loOl1d97j6Odw0vjK9nW3+dTb/bn/mwH',
             'xterm-addon-fit@0.8.0': 'sha384-dpjGwSSISUTz2taP54Bor7qkyMR20sSO9oe11UVYnGs2/YdUBf7HW30XKQx9PCzn',
-            'marked@15.0.7': 'sha384-H+hy9ULve6xfxRkWIh/YOtvDdpXgV2fmAGQkIDTxIgZwNoaoBal14Di2YTMR6MzR'
+            'marked@15.0.7': 'sha384-H+hy9ULve6xfxRkWIh/YOtvDdpXgV2fmAGQkIDTxIgZwNoaoBal14Di2YTMR6MzR',
+            'dompurify@3.2.4': 'sha384-eEu5CTj3qGvu9PdJuS+YlkNi7d2XxQROAFYOr59zgObtlcux1ae1Il3u7jvdCSWu'
         };
         
         function loadScriptWithFallback(cdnUrl, localUrl, integrityKey) {
@@ -187,6 +188,12 @@
                 'https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js',
                 '/static/js/marked.min.js',
                 'marked@15.0.7'
+            );
+        }).then(function() {
+            return loadScriptWithFallback(
+                'https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js',
+                '/static/js/purify.min.js',
+                'dompurify@3.2.4'
             );
         }).then(function() {
             // All libs loaded - transform babel scripts
