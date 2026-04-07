@@ -6146,26 +6146,50 @@
         }
 
         // Cluster Health Widget
-        function ClusterHealth({ metrics, isCorporate }) {
+        function ClusterHealth({ metrics, clusterStatus, isCorporate }) {
             const { t } = useTranslation();
             const nodes = Object.entries(metrics).filter(([k, m]) => m && typeof m === 'object' && k !== 'error' && k !== 'offline');
-            if (nodes.length === 0) return null;
+            if (nodes.length === 0 && !clusterStatus) return null;
 
-            const avgCpu = nodes.reduce((acc, [, m]) => acc + (m.cpu_percent ?? 0), 0) / nodes.length;
-            const avgMem = nodes.reduce((acc, [, m]) => acc + (m.mem_percent ?? 0), 0) / nodes.length;
-            const diskNodes = nodes.filter(([, m]) => m.disk_percent != null);
-            const avgDisk = diskNodes.length > 0 ? diskNodes.reduce((acc, [, m]) => acc + m.disk_percent, 0) / diskNodes.length : null;
+            // Node status from per-node metrics (has maintenance_mode info not in datacenter status)
             const onlineNodes = nodes.filter(([, m]) => m.status === 'online' && !m.maintenance_mode).length;
             const maintenanceNodes = nodes.filter(([, m]) => m.maintenance_mode).length;
-            const offlineNodes = nodes.length - onlineNodes - maintenanceNodes;
-            const offlineRatio = nodes.length > 0 ? (offlineNodes / nodes.length) * 100 : 0;
 
-            // When disk stats unavailable (e.g. XCP-ng), re-normalize: CPU 37.5%, RAM 37.5%, Offline 25%
-            const healthScore = avgDisk != null
-                ? Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgDisk * 0.2 + offlineRatio * 0.2))
-                : Math.max(0, 100 - (avgCpu * 0.375 + avgMem * 0.375 + offlineRatio * 0.25));
+            // Real-time display values from per-node SSE metrics (~1s updates)
+            const displayCpu = nodes.length > 0 ? nodes.reduce((acc, [, m]) => acc + (m.cpu_percent ?? 0), 0) / nodes.length : 0;
+            const displayMem = nodes.length > 0 ? nodes.reduce((acc, [, m]) => acc + (m.mem_percent ?? 0), 0) / nodes.length : 0;
+
+            // Health score inputs from cluster-level datacenter/status (same source as badge/overview)
+            let healthCpu, healthMem, healthStorage, offlineRatio, totalNodeCount;
+
+            if (clusterStatus && clusterStatus.resources) {
+                const resources = clusterStatus.resources;
+                healthCpu = resources.cpu?.percent || 0;
+                healthMem = resources.memory?.percent || 0;
+                healthStorage = resources.storage?.percent || 0;
+                totalNodeCount = clusterStatus.nodes?.total || nodes.length;
+                const offlineNodes = clusterStatus.nodes?.offline || 0;
+                offlineRatio = totalNodeCount > 0 ? (offlineNodes / totalNodeCount) * 100 : 0;
+            } else {
+                // Fallback: per-node data (when datacenter status not yet loaded)
+                healthCpu = displayCpu;
+                healthMem = displayMem;
+                const diskNodes = nodes.filter(([, m]) => m.disk_percent != null);
+                healthStorage = diskNodes.length > 0 ? diskNodes.reduce((acc, [, m]) => acc + m.disk_percent, 0) / diskNodes.length : 0;
+                totalNodeCount = nodes.length;
+                const offlineNodes = nodes.length - onlineNodes - maintenanceNodes;
+                offlineRatio = totalNodeCount > 0 ? (offlineNodes / totalNodeCount) * 100 : 0;
+            }
+
+            // Storage display: use cluster-level storage pools (not rootfs) when available
+            const displayStorage = clusterStatus?.resources?.storage?.percent ?? (nodes.length > 0
+                ? (() => { const dn = nodes.filter(([, m]) => m.disk_percent != null); return dn.length > 0 ? dn.reduce((acc, [, m]) => acc + m.disk_percent, 0) / dn.length : 0; })()
+                : 0);
+
+            // Unified formula - same weights as badge/overview (CPU 30%, RAM 30%, Storage 20%, Offline 20%)
+            const healthScore = Math.max(0, 100 - (healthCpu * 0.3 + healthMem * 0.3 + healthStorage * 0.2 + offlineRatio * 0.2));
             const healthLabel = healthScore >= 80 ? t('excellent') : healthScore >= 60 ? t('good') : healthScore >= 40 ? t('warning') : t('critical');
-            const healthColor = healthScore >= 80 ? '#22c55e' : healthScore >= 60 ? '#84cc16' : healthScore >= 40 ? '#eab308' : '#ef4444';
+            const healthColor = healthScore >= 80 ? '#22c55e' : healthScore >= 60 ? '#eab308' : healthScore >= 40 ? '#f97316' : '#ef4444';
 
             // LW: Feb 2026 - corporate compact variant (Clarity dark theme)
             const corpHealthColor = healthScore >= 80 ? '#60b515' : healthScore >= 60 ? '#60b515' : healthScore >= 40 ? '#efc006' : '#f54f47';
@@ -6181,9 +6205,9 @@
                                 <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{healthScore.toFixed(0)}</span>
                                 <span className="text-[11px]" style={{color: 'var(--corp-text-muted)'}}>{healthLabel}</span>
                             </div>
-                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>{t('nodesOnline')}: <span style={{color: 'var(--color-text)'}}>{onlineNodes}/{nodes.length}</span></span>
-                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>CPU: <span style={{color: 'var(--color-text)'}}>{avgCpu.toFixed(1)}%</span></span>
-                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>RAM: <span style={{color: 'var(--color-text)'}}>{avgMem.toFixed(1)}%</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>{t('nodesOnline')}: <span style={{color: 'var(--color-text)'}}>{onlineNodes}/{totalNodeCount}</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>CPU: <span style={{color: 'var(--color-text)'}}>{displayCpu.toFixed(1)}%</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>RAM: <span style={{color: 'var(--color-text)'}}>{displayMem.toFixed(1)}%</span></span>
                             {maintenanceNodes > 0 && (
                                 <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-warning)'}}>
                                     <Icons.Wrench className="w-3 h-3" /> {maintenanceNodes} {t('maintenance')}
@@ -6224,19 +6248,19 @@
 
                     <div className="grid grid-cols-2 gap-4">
                         <div className="text-center">
-                            <div className="text-2xl font-bold text-white">{onlineNodes}/{nodes.length}</div>
+                            <div className="text-2xl font-bold text-white">{onlineNodes}/{totalNodeCount}</div>
                             <div className="text-xs text-gray-500">{t('nodesOnline')}</div>
                         </div>
                         <div className="text-center">
-                            <div className="text-2xl font-bold text-white">{avgDisk != null ? `${avgDisk.toFixed(1)}%` : 'N/A'}</div>
+                            <div className="text-2xl font-bold text-white">{displayStorage.toFixed(1)}%</div>
                             <div className="text-xs text-gray-500">{t('avgStorage')}</div>
                         </div>
                         <div className="text-center">
-                            <div className="text-2xl font-bold text-white">{avgCpu.toFixed(1)}%</div>
+                            <div className="text-2xl font-bold text-white">{displayCpu.toFixed(1)}%</div>
                             <div className="text-xs text-gray-500">{t('avgCpu')}</div>
                         </div>
                         <div className="text-center">
-                            <div className="text-2xl font-bold text-white">{avgMem.toFixed(1)}%</div>
+                            <div className="text-2xl font-bold text-white">{displayMem.toFixed(1)}%</div>
                             <div className="text-xs text-gray-500">{t('avgRam')}</div>
                         </div>
                     </div>
