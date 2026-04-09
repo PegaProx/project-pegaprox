@@ -141,6 +141,8 @@
                 // Advanced (LXC)
                 unprivileged: true,
                 nesting: false,
+                keyctl: false,
+                fuse: false,
                 swap: 512,
                 swapUnit: 'MB',  // NS: unit selector for swap
                 ssh_public_keys: '',
@@ -1521,6 +1523,14 @@
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.nesting} onChange={e => setConfig({...config, nesting: e.target.checked})} className="rounded" />
                                             Nesting ({t('dockerSupport') || 'Docker support'})
+                                        </label>
+                                        <label className="flex items-center gap-2 text-sm text-gray-300">
+                                            <input type="checkbox" checked={config.keyctl} onChange={e => setConfig({...config, keyctl: e.target.checked})} className="rounded" />
+                                            keyctl ({t('keyctlDesc') || 'required for Docker in unprivileged LXC'})
+                                        </label>
+                                        <label className="flex items-center gap-2 text-sm text-gray-300">
+                                            <input type="checkbox" checked={config.fuse} onChange={e => setConfig({...config, fuse: e.target.checked})} className="rounded" />
+                                            FUSE ({t('fuseDesc') || 'allow FUSE mounts inside container'})
                                         </label>
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.onboot} onChange={e => setConfig({...config, onboot: e.target.checked})} className="rounded" />

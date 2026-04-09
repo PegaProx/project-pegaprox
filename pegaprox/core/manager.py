@@ -1783,11 +1783,15 @@ class PegaProxManager:
             exclude_nodes = []
         
         # NS: GitHub #40 - Exclude rebooting nodes
+        # MK: Apr 2026 - also exclude node currently being updated (#276)
+        # Race condition: node gets reboot command but rebooting_nodes isn't set yet
         if hasattr(self, '_rolling_update') and self._rolling_update:
             rebooting = self._rolling_update.get('rebooting_nodes', [])
-            if rebooting:
-                exclude_nodes = list(set(exclude_nodes + rebooting))
-                self.logger.debug(f"Excluding rebooting nodes: {rebooting}")
+            current = self._rolling_update.get('current_node', '')
+            exclude_rolling = [n for n in rebooting + [current] if n]
+            if exclude_rolling:
+                exclude_nodes = list(set(exclude_nodes + exclude_rolling))
+                self.logger.debug(f"Excluding rolling-update nodes: {exclude_rolling}")
         
         # LW: Also exclude nodes configured in cluster settings
         config_excluded = getattr(self.config, 'excluded_nodes', []) or []
@@ -7942,10 +7946,17 @@ echo "AGENT_INSTALLED_OK"
             if ssh_keys:
                 data['ssh-public-keys'] = ssh_keys
             
-            # Features (nesting, etc.)
+            # Features (nesting, keyctl, fuse, mount) — #278
             features = []
             if ct_config.get('nesting'):
                 features.append('nesting=1')
+            if ct_config.get('keyctl'):
+                features.append('keyctl=1')
+            if ct_config.get('fuse'):
+                features.append('fuse=1')
+            mount = ct_config.get('mount', '')
+            if mount:
+                features.append(f"mount={mount}")
             if features:
                 data['features'] = ','.join(features)
             
