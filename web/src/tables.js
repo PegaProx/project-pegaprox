@@ -484,7 +484,7 @@
                             >
                                 <Icons.Cog />
                             </button>
-                            <div className="text-right">
+                            <div className="text-right" title={t('nodeScoreTooltip')}>
                                 <div className="text-xs text-gray-500">Score</div>
                                 <div className={`font-mono font-bold text-lg ${
                                     metrics.score < 100 ? 'text-green-400' : metrics.score < 150 ? 'text-yellow-400' : 'text-red-400'
@@ -967,7 +967,7 @@
                                 </div>
                                 <span className="w-12 text-right" style={{color: '#adbbc4'}}>{ramPercent}%</span>
                                 {(() => { const d = histRef.current.mem; const mx = Math.max(...d, 1); const pts = d.map((v,i) => `${(i/19)*40},${12-((v/mx)*12)}`).join(' '); return <svg width="40" height="12" className="corp-sparkline-inline"><polyline fill="none" stroke="#9b59b6" strokeWidth="1" points={pts} /><circle cx="40" cy={12-((d[19]/mx)*12)} r="1.5" fill="#9b59b6" /></svg>; })()}
-                                {metrics.score != null && <span className="ml-3 w-16" style={{color: '#728b9a'}}>{t('score')}: <span style={{color: '#adbbc4'}}>{Number(metrics.score).toFixed(1)}</span></span>}
+                                {metrics.score != null && <span className="ml-3 w-16" style={{color: '#728b9a'}} title={t('nodeScoreTooltip')}>{t('score')}: <span style={{color: '#adbbc4'}}>{Number(metrics.score).toFixed(1)}</span></span>}
                                 <span className="ml-3" style={{color: '#728b9a'}}>{formatUptime(metrics.uptime)}</span>
                                 <span className="flex-1"></span>
                                 {isInMaintenance && maintenanceTask && maintenanceTask.status === 'running' && (

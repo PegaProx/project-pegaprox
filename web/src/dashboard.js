@@ -8561,7 +8561,7 @@
 
                                                 <div className={isCorporate ? 'space-y-3' : 'space-y-6'}>
                                                     {/* Cluster Health */}
-                                                    <ClusterHealth metrics={clusterMetrics} isCorporate={isCorporate} />
+                                                    <ClusterHealth metrics={clusterMetrics} clusterStatus={allClusterMetrics[selectedCluster?.id]?.data} isCorporate={isCorporate} />
 
                                                     {/* Migration History */}
                                                     <div className={isCorporate
