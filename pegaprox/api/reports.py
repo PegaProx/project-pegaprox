@@ -17,7 +17,7 @@ from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.rbac import get_user_clusters
 from pegaprox.api.helpers import check_cluster_access
 from pegaprox.background.metrics import load_metrics_history, start_metrics_collector
-from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP
+from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP, _init_db
 from pegaprox.api.schedules import start_scheduler
 
 bp = Blueprint('reports', __name__)
@@ -148,7 +148,7 @@ def get_integrated_syslog_events():
 
     sort_map = {
         'id': 'id',
-        'timestamp': 'timestamp',
+        'timestamp': 'timestamp_unix',
         'source_ip': 'source_ip',
         'hostname': 'hostname',
         'facility': 'facility',
@@ -158,7 +158,7 @@ def get_integrated_syslog_events():
         'protocol': 'protocol',
     }
 
-    sort_by = sort_map.get(request.args.get('sort_by', 'timestamp'), 'timestamp')
+    sort_by = sort_map.get(request.args.get('sort_by', 'timestamp'), 'timestamp_unix')
     sort_dir = 'asc' if request.args.get('sort_dir', 'desc').lower() == 'asc' else 'desc'
 
     db_path = os.path.abspath(DB_FILE)
@@ -178,12 +178,12 @@ def get_integrated_syslog_events():
     if search:
         like = f'%{search}%'
         where.append("""(
-            LOWER(COALESCE(timestamp, '')) LIKE ? OR
-            LOWER(COALESCE(source_ip, '')) LIKE ? OR
-            LOWER(COALESCE(hostname, '')) LIKE ? OR
-            LOWER(COALESCE(severity_text, '')) LIKE ? OR
-            LOWER(COALESCE(message, '')) LIKE ? OR
-            LOWER(COALESCE(protocol, '')) LIKE ?
+            COALESCE(timestamp, '') LIKE ? COLLATE NOCASE OR
+            COALESCE(source_ip, '') LIKE ? COLLATE NOCASE OR
+            COALESCE(hostname, '') LIKE ? COLLATE NOCASE OR
+            COALESCE(severity_text, '') LIKE ? COLLATE NOCASE OR
+            COALESCE(message, '') LIKE ? COLLATE NOCASE OR
+            COALESCE(protocol, '') LIKE ? COLLATE NOCASE
         )""")
         params.extend([like, like, like, like, like, like])
 
@@ -196,15 +196,15 @@ def get_integrated_syslog_events():
             pass
 
     if protocol:
-        where.append("UPPER(COALESCE(protocol, '')) = ?")
+        where.append("protocol = ?")
         params.append(protocol)
 
     if hostname:
-        where.append("LOWER(COALESCE(hostname, '')) LIKE ?")
+        where.append("hostname LIKE ? COLLATE NOCASE")
         params.append(f'%{hostname}%')
 
     if source_ip:
-        where.append("LOWER(COALESCE(source_ip, '')) LIKE ?")
+        where.append("source_ip LIKE ? COLLATE NOCASE")
         params.append(f'%{source_ip}%')
 
     if facility != '':
@@ -220,22 +220,50 @@ def get_integrated_syslog_events():
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
     try:
+        columns = {row['name'] for row in conn.execute("PRAGMA table_info(logs)").fetchall()}
+        if 'timestamp_unix' not in columns:
+            conn.close()
+            _init_db()
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
+
+        order_column = sort_by if 'timestamp_unix' in {row['name'] for row in conn.execute("PRAGMA table_info(logs)").fetchall()} else 'timestamp'
         total = conn.execute(
             f"SELECT COUNT(*) AS count FROM logs {where_sql}",
             params
         ).fetchone()['count']
 
-        rows = conn.execute(
-            f"""
-            SELECT id, timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol
-            FROM logs
-            {where_sql}
-            ORDER BY {sort_by} {sort_dir}, id DESC
-            LIMIT ? OFFSET ?
-            """,
-            [*params, per_page, offset]
-        ).fetchall()
+        secondary_sort = 'ASC' if sort_dir == 'asc' else 'DESC'
+
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT id, timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol
+                FROM logs
+                {where_sql}
+                ORDER BY {order_column} {sort_dir}, id {secondary_sort}
+                LIMIT ? OFFSET ?
+                """,
+                [*params, per_page, offset]
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if 'no such column: timestamp_unix' not in str(exc).lower():
+                raise
+            rows = conn.execute(
+                f"""
+                SELECT id, timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol
+                FROM logs
+                {where_sql}
+                ORDER BY timestamp {sort_dir}, id {secondary_sort}
+                LIMIT ? OFFSET ?
+                """,
+                [*params, per_page, offset]
+            ).fetchall()
 
         protocol_rows = conn.execute(
             """

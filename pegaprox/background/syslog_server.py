@@ -25,14 +25,23 @@ SEVERITY_MAP = {
 _syslog_thread = None
 
 
+def _connect_db(timeout=5):
+    conn = sqlite3.connect(DB_FILE, timeout=timeout)
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)};")
+    return conn
+
+
 def _init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = _connect_db()
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL;")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
+            timestamp TEXT NOT NULL,
+            timestamp_unix INTEGER NOT NULL,
             source_ip TEXT,
             hostname TEXT,
             facility INTEGER,
@@ -42,6 +51,26 @@ def _init_db():
             protocol TEXT
         )
     """)
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(logs)").fetchall()}
+    if 'timestamp_unix' not in columns:
+        cur.execute("ALTER TABLE logs ADD COLUMN timestamp_unix INTEGER")
+        cur.execute("""
+            UPDATE logs
+            SET timestamp_unix = COALESCE(
+                timestamp_unix,
+                CAST(unixepoch(timestamp) AS INTEGER),
+                CAST(unixepoch(REPLACE(timestamp, 'T', ' ')) AS INTEGER),
+                0
+            )
+            WHERE timestamp_unix IS NULL
+        """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp_unix_id ON logs(timestamp_unix DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_severity_timestamp ON logs(severity, timestamp_unix DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_facility_timestamp ON logs(facility, timestamp_unix DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_protocol_timestamp ON logs(protocol, timestamp_unix DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_hostname_timestamp ON logs(hostname, timestamp_unix DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_source_ip_timestamp ON logs(source_ip, timestamp_unix DESC, id DESC)")
     conn.commit()
     conn.close()
     logging.info(f"[Syslog] Database initialized: {DB_FILE}")
@@ -49,11 +78,11 @@ def _init_db():
 
 def _insert_log(entry):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
+        conn = _connect_db(timeout=5)
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO logs (timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO logs (timestamp, timestamp_unix, source_ip, hostname, facility, severity, severity_text, message, protocol)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, entry)
         conn.commit()
         conn.close()
@@ -109,6 +138,7 @@ def _udp_listener(host, port):
             hostname, facility, severity, severity_text, msg = parse_syslog(message)
             entry = (
                 datetime.now().isoformat(),
+                int(time.time()),
                 addr[0], hostname, facility, severity, severity_text, msg, "UDP"
             )
             _insert_log(entry)
@@ -148,6 +178,7 @@ def _tcp_listener(host, port):
                         hostname, facility, severity, severity_text, msg = parse_syslog(message)
                         entry = (
                             datetime.now().isoformat(),
+                            int(time.time()),
                             addr[0], hostname, facility, severity, severity_text, msg, "TCP"
                         )
                         _insert_log(entry)
@@ -187,6 +218,7 @@ def start_syslog_server():
     if _syslog_thread is not None:
         return
 
+    _init_db()
     _syslog_thread = threading.Thread(target=_syslog_loop, daemon=True, name='syslog-server')
     _syslog_thread.start()
     logging.info("[Syslog] Background thread started")
