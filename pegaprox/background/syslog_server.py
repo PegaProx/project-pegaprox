@@ -14,7 +14,6 @@ from datetime import datetime
 
 from pegaprox.constants import CONFIG_DIR
 
-# DB in config dir, not CWD
 DB_FILE = os.path.join(CONFIG_DIR, 'syslog.db')
 
 SEVERITY_MAP = {
@@ -25,38 +24,125 @@ SEVERITY_MAP = {
 _syslog_thread = None
 
 
-def _init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("PRAGMA journal_mode=WAL;")
+def _open_db(timeout=30):
+    conn = sqlite3.connect(DB_FILE, timeout=timeout)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    return conn
+
+
+def _init_indexes(cur):
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            source_ip TEXT,
-            hostname TEXT,
-            facility INTEGER,
-            severity INTEGER,
-            severity_text TEXT,
-            message TEXT,
-            protocol TEXT
-        )
+        CREATE INDEX IF NOT EXISTS idx_logs_timestamp_id
+        ON logs(timestamp DESC, id DESC)
     """)
-    conn.commit()
-    conn.close()
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_severity_timestamp_id
+        ON logs(severity, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_protocol_timestamp_id
+        ON logs(protocol, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_facility_timestamp_id
+        ON logs(facility, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_hostname_timestamp_id
+        ON logs(hostname COLLATE NOCASE, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_source_ip_timestamp_id
+        ON logs(source_ip COLLATE NOCASE, timestamp DESC, id DESC)
+    """)
+
+
+def _init_fts(cur):
+    try:
+        cur.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
+                timestamp,
+                source_ip,
+                hostname,
+                severity_text,
+                message,
+                protocol,
+                content='logs',
+                content_rowid='id'
+            )
+        """)
+        cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS logs_ai AFTER INSERT ON logs BEGIN
+                INSERT INTO logs_fts(rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES (new.id, new.timestamp, new.source_ip, new.hostname, new.severity_text, new.message, new.protocol);
+            END
+        """)
+        cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS logs_ad AFTER DELETE ON logs BEGIN
+                INSERT INTO logs_fts(logs_fts, rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES ('delete', old.id, old.timestamp, old.source_ip, old.hostname, old.severity_text, old.message, old.protocol);
+            END
+        """)
+        cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS logs_au AFTER UPDATE ON logs BEGIN
+                INSERT INTO logs_fts(logs_fts, rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES ('delete', old.id, old.timestamp, old.source_ip, old.hostname, old.severity_text, old.message, old.protocol);
+                INSERT INTO logs_fts(rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES (new.id, new.timestamp, new.source_ip, new.hostname, new.severity_text, new.message, new.protocol);
+            END
+        """)
+        has_rows = cur.execute("SELECT 1 FROM logs_fts LIMIT 1").fetchone()
+        if has_rows is None:
+            cur.execute("""
+                INSERT INTO logs_fts(rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                SELECT id, timestamp, source_ip, hostname, severity_text, message, protocol
+                FROM logs
+            """)
+        return True
+    except sqlite3.OperationalError as exc:
+        logging.info(f"[Syslog] FTS disabled for syslog DB: {exc}")
+        return False
+
+
+def _init_db():
+    conn = _open_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                source_ip TEXT,
+                hostname TEXT,
+                facility INTEGER,
+                severity INTEGER,
+                severity_text TEXT,
+                message TEXT,
+                protocol TEXT
+            )
+        """)
+        _init_indexes(cur)
+        _init_fts(cur)
+        conn.commit()
+    finally:
+        conn.close()
     logging.info(f"[Syslog] Database initialized: {DB_FILE}")
 
 
 def _insert_log(entry):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO logs (timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, entry)
-        conn.commit()
-        conn.close()
+        conn = _open_db(timeout=5)
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO logs (timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, entry)
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         logging.debug(f"[Syslog] Insert failed: {e}")
 

@@ -4,6 +4,7 @@
 import time
 import os
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -21,6 +22,40 @@ from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP
 from pegaprox.api.schedules import start_scheduler
 
 bp = Blueprint('reports', __name__)
+
+
+def _syslog_search_terms(search_text):
+    return [term for term in re.split(r'\s+', search_text.strip()) if term]
+
+
+def _syslog_escape_fts_term(term):
+    sanitized = ''.join(ch for ch in term if ch.isprintable() and ch not in '\x00\r\n\t')
+    sanitized = sanitized.replace('"', '""').strip()
+    return f'"{sanitized}"*' if sanitized else ''
+
+
+def _syslog_fts_query(search_text):
+    terms = _syslog_search_terms(search_text)
+    if not terms:
+        return ''
+    escaped_terms = [_syslog_escape_fts_term(term) for term in terms]
+    escaped_terms = [term for term in escaped_terms if term]
+    return ' AND '.join(escaped_terms)
+
+
+def _syslog_like_clause(search_text):
+    like = f'%{search_text}%'
+    return (
+        """(
+            timestamp LIKE ? COLLATE NOCASE OR
+            source_ip LIKE ? COLLATE NOCASE OR
+            hostname LIKE ? COLLATE NOCASE OR
+            severity_text LIKE ? COLLATE NOCASE OR
+            message LIKE ? COLLATE NOCASE OR
+            protocol LIKE ? COLLATE NOCASE
+        )""",
+        [like, like, like, like, like, like],
+    )
 
 @bp.route('/api/reports/summary', methods=['GET'])
 @require_auth()
@@ -139,23 +174,23 @@ def get_integrated_syslog_events():
         per_page = 50
     per_page = min(max(per_page, 1), 50)
 
-    search = (request.args.get('search') or '').strip().lower()
+    search = (request.args.get('search') or '').strip()
     severity = (request.args.get('severity') or '').strip()
     protocol = (request.args.get('protocol') or '').strip().upper()
-    hostname = (request.args.get('hostname') or '').strip().lower()
-    source_ip = (request.args.get('source_ip') or '').strip().lower()
+    hostname = (request.args.get('hostname') or '').strip()
+    source_ip = (request.args.get('source_ip') or '').strip()
     facility = (request.args.get('facility') or '').strip()
 
     sort_map = {
-        'id': 'id',
-        'timestamp': 'timestamp',
-        'source_ip': 'source_ip',
-        'hostname': 'hostname',
-        'facility': 'facility',
-        'severity': 'severity',
-        'severity_text': 'severity_text',
-        'message': 'message',
-        'protocol': 'protocol',
+        'id': 'logs.id',
+        'timestamp': 'logs.timestamp',
+        'source_ip': 'logs.source_ip',
+        'hostname': 'logs.hostname',
+        'facility': 'logs.facility',
+        'severity': 'logs.severity',
+        'severity_text': 'logs.severity_text',
+        'message': 'logs.message',
+        'protocol': 'logs.protocol',
     }
 
     sort_by = sort_map.get(request.args.get('sort_by', 'timestamp'), 'timestamp')
@@ -174,64 +209,80 @@ def get_integrated_syslog_events():
 
     where = []
     params = []
+    joins = []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA temp_store=MEMORY")
+    fts_available = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'logs_fts'"
+    ).fetchone() is not None
 
     if search:
-        like = f'%{search}%'
-        where.append("""(
-            LOWER(COALESCE(timestamp, '')) LIKE ? OR
-            LOWER(COALESCE(source_ip, '')) LIKE ? OR
-            LOWER(COALESCE(hostname, '')) LIKE ? OR
-            LOWER(COALESCE(severity_text, '')) LIKE ? OR
-            LOWER(COALESCE(message, '')) LIKE ? OR
-            LOWER(COALESCE(protocol, '')) LIKE ?
-        )""")
-        params.extend([like, like, like, like, like, like])
+        fts_query = _syslog_fts_query(search)
+        if fts_available and fts_query:
+            joins.append("JOIN logs_fts ON logs_fts.rowid = logs.id")
+            where.append("logs_fts MATCH ?")
+            params.append(fts_query)
+        else:
+            like_clause, like_params = _syslog_like_clause(search)
+            where.append(like_clause)
+            params.extend(like_params)
 
     if severity != '':
         try:
             severity_value = int(severity)
-            where.append('severity = ?')
+            where.append('logs.severity = ?')
             params.append(severity_value)
         except ValueError:
             pass
 
     if protocol:
-        where.append("UPPER(COALESCE(protocol, '')) = ?")
+        where.append("logs.protocol = ?")
         params.append(protocol)
 
     if hostname:
-        where.append("LOWER(COALESCE(hostname, '')) LIKE ?")
-        params.append(f'%{hostname}%')
+        where.append("logs.hostname LIKE ? COLLATE NOCASE")
+        params.append(f'{hostname}%')
 
     if source_ip:
-        where.append("LOWER(COALESCE(source_ip, '')) LIKE ?")
-        params.append(f'%{source_ip}%')
+        where.append("logs.source_ip LIKE ? COLLATE NOCASE")
+        params.append(f'{source_ip}%')
 
     if facility != '':
         try:
             facility_value = int(facility)
-            where.append('facility = ?')
+            where.append('logs.facility = ?')
             params.append(facility_value)
         except ValueError:
             pass
 
     where_sql = f"WHERE {' AND '.join(where)}" if where else ''
+    joins_sql = f"{' '.join(joins)}" if joins else ''
     offset = (page - 1) * per_page
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
     try:
         total = conn.execute(
-            f"SELECT COUNT(*) AS count FROM logs {where_sql}",
+            f"SELECT COUNT(*) AS count FROM logs {joins_sql} {where_sql}",
             params
         ).fetchone()['count']
 
         rows = conn.execute(
             f"""
-            SELECT id, timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol
+            SELECT
+                logs.id,
+                logs.timestamp,
+                logs.source_ip,
+                logs.hostname,
+                logs.facility,
+                logs.severity,
+                logs.severity_text,
+                logs.message,
+                logs.protocol
             FROM logs
+            {joins_sql}
             {where_sql}
-            ORDER BY {sort_by} {sort_dir}, id DESC
+            ORDER BY {sort_by} {sort_dir}, logs.id DESC
             LIMIT ? OFFSET ?
             """,
             [*params, per_page, offset]
