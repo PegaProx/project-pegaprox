@@ -189,7 +189,7 @@ def migrate_all_encryption():
     return jsonify({
         'success': True,
         'results': results,
-        'message': f"Migrated {results['clusters_migrated']} clusters to Military Grade encryption"
+        'message': f"Migrated {results['clusters_migrated']} clusters to AES-256-GCM"
     })
 
 

@@ -3132,6 +3132,7 @@
                 loading: 'Loading...',
                 save: 'Save',
                 cancel: 'Cancel',
+                ok: 'OK',
                 delete: 'Delete',
                 edit: 'Edit',
                 add: 'Add',
@@ -6201,6 +6202,7 @@
                 loading: 'Chargement...',
                 save: 'Enregistrer',
                 cancel: 'Annuler',
+                ok: 'OK',
                 delete: 'Supprimer',
                 edit: 'Modifier',
                 add: 'Ajouter',
@@ -7208,6 +7210,11 @@
 
                 // Reports - NS Jan 2026
                 reports: 'Rapports',
+                siteRecovery: 'Récupération de site',
+                siteRecoveryDesc: 'Plans de reprise après sinistre et orchestration du basculement',
+                plugins: 'Plugins',
+                pluginsDesc: 'Extensions optionnelles pour des fonctionnalités supplémentaires',
+                enablePluginsHint: 'Activez les plugins dans Paramètres → Serveur → Plugins',
                 reportsAnalytics: 'Rapports et Analyses',
                 lastHour: 'Dernière heure',
                 last24h: 'Dernières 24 heures',
@@ -9074,6 +9081,7 @@
                 loading: 'Cargando...',
                 save: 'Guardar',
                 cancel: 'Cancelar',
+                ok: 'OK',
                 delete: 'Remover',
                 edit: 'Editar',
                 add: 'Agregar',
@@ -13105,6 +13113,11 @@
                 days: 'Dias',
                 lastRun: 'Última Execução',
 
+                siteRecovery: 'Site Recovery',
+                siteRecoveryDesc: 'Planos de recuperação de desastres e orquestração de failover',
+                plugins: 'Plugins',
+                enablePluginsHint: 'Ative os plugins em Configurações → Servidor → Plugins',
+
                 // Reports - NS Jan 2026
                 reports: 'Relatórios',
                 reportsAnalytics: 'Relatórios e Análises',
@@ -14905,6 +14918,7 @@
                 loading: '로딩 중...',
                 save: '저장',
                 cancel: '취소',
+                ok: 'OK',
                 delete: '삭제',
                 edit: '편집',
                 add: '추가',

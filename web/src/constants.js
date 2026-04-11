@@ -35,5 +35,5 @@
         // LW: German first because thats what we started with
         // English added later. Some keys might still be missing
         // TODO: Maybe add French/Spanish someday?
-        // FIXME: some keys are definetly duplicated, cleanup needed
+        // FIXME: some keys are definitely duplicated, cleanup needed
         // =====================================================
