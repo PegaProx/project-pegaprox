@@ -1661,7 +1661,7 @@
                                                     {resource.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
                                                 </div>
                                                 <div>
-                                                    <div className={`font-medium truncate max-w-[150px] ${onVmNavigate ? 'text-blue-400 hover:text-blue-300 hover:underline cursor-pointer' : 'text-white'}`} onClick={onVmNavigate ? (e) => { e.stopPropagation(); onVmNavigate(resource); } : undefined}>
+                                                    <div className={`font-medium truncate ${onVmNavigate ? 'text-blue-400 hover:text-blue-300 hover:underline cursor-pointer' : 'text-white'}`} style={{maxWidth:'min(200px, 20vw)'}} onClick={onVmNavigate ? (e) => { e.stopPropagation(); onVmNavigate(resource); } : undefined}>
                                                         {resource.name || `${resource.type === 'qemu' ? 'VM' : 'CT'} ${resource.vmid}`}
                                                     </div>
                                                     <div className="text-xs text-gray-500">ID: {resource.vmid}</div>
@@ -1991,7 +1991,7 @@
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <div>
-                                                        <span className={`font-medium ${onVmNavigate ? 'text-blue-400 hover:text-blue-300 hover:underline cursor-pointer' : 'text-white'}`} onClick={onVmNavigate ? (e) => { e.stopPropagation(); onVmNavigate(resource); } : undefined}>{resource.name || '-'}</span>
+                                                        <span className={`font-medium truncate block ${onVmNavigate ? 'text-blue-400 hover:text-blue-300 hover:underline cursor-pointer' : 'text-white'}`} style={{maxWidth:'min(220px, 18vw)'}} onClick={onVmNavigate ? (e) => { e.stopPropagation(); onVmNavigate(resource); } : undefined} title={resource.name}>{resource.name || '-'}</span>
                                                         {resource.tags && (
                                                             <div className="flex flex-wrap gap-1 mt-1">
                                                                 {(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).slice(0, 3).map((tag, i) => (
@@ -2019,7 +2019,7 @@
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3">
-                                                    <span className="text-sm text-gray-300">{resource.node}</span>
+                                                    <span className="text-sm text-gray-300 truncate block" style={{maxWidth:'min(140px, 12vw)'}} title={resource.node}>{resource.node}</span>
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <span className="text-xs font-mono text-gray-400">{ipCache.current[resource.vmid] && ipCache.current[resource.vmid] !== 'loading' ? ipCache.current[resource.vmid] : '-'}</span>
@@ -2105,7 +2105,7 @@
                                                         {resource.status}
                                                     </span>
                                                 </td>
-                                                <td className="px-4 py-3">
+                                                <td className="px-4 py-3" style={{whiteSpace:'nowrap'}}>
                                                     {isCorporate ? (
                                                     <div className="flex items-center gap-0">
                                                         {/* power group */}

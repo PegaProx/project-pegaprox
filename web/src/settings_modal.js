@@ -2101,18 +2101,18 @@
                                     
                                     {/* Users Table */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl overflow-hidden">
-                                        <table className="w-full">
+                                        <table className="w-full" style={{tableLayout:'fixed'}}>
                                             <thead>
                                                 <tr className="border-b border-proxmox-border">
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('usernameLabel')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('displayName')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('role')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('tenant') || 'Tenant'}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">2FA</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('lastLogin')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('status')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('portal') || 'Portal'}</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase">{t('actions')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'18%'}}>{t('usernameLabel')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'15%'}}>{t('displayName')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'10%'}}>{t('role')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'10%'}}>{t('tenant') || 'Tenant'}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'5%'}}>2FA</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'12%'}}>{t('lastLogin')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'7%'}}>{t('status')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'7%'}}>{t('portal') || 'Portal'}</th>
+                                                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase" style={{width:'16%'}}>{t('actions')}</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -2132,7 +2132,7 @@
                                                             <div className="flex items-center gap-2">
                                                                 <UserAvatar user={user} sizeClass="w-8 h-8" textClass="text-sm" />
                                                                 <div>
-                                                                    <span className="text-white font-medium">{user.username}</span>
+                                                                    <span className="text-white font-medium truncate block" style={{maxWidth:'min(180px, 15vw)'}} title={user.username}>{user.username}</span>
                                                                     {editingUser === user.username && userFolders.length > 0 ? (
                                                                         <select
                                                                             value={user.user_folder || ''}
@@ -2150,7 +2150,7 @@
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td className="px-4 py-3 text-gray-300">{user.display_name || '-'}</td>
+                                                        <td className="px-4 py-3 text-gray-300"><span className="truncate block" style={{maxWidth:'min(160px, 12vw)'}} title={user.display_name}>{user.display_name || '-'}</span></td>
                                                         <td className="px-4 py-3">
                                                             {editingUser === user.username ? (
                                                                 <select
