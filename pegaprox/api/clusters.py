@@ -108,6 +108,7 @@ def get_clusters():
                 'connected': mgr.is_connected,
                 'connection_error': mgr.connection_error,
                 'migration_threshold': mgr.config.migration_threshold,
+                'migration_tolerance': getattr(mgr.config, 'migration_tolerance', 10),
                 'check_interval': mgr.config.check_interval,
                 'auto_migrate': mgr.config.auto_migrate,
                 'balance_containers': getattr(mgr.config, 'balance_containers', False),

@@ -3595,12 +3595,14 @@
             // LW: Added cluster filter and sorting
             // ============================================
             
+            const [snapshotsLoading, setSnapshotsLoading] = useState(false);
             const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {
+                setSnapshotsLoading(true);
                 try {
                     const body = {};
                     if (clusterId) body.cluster_id = clusterId;
                     if (filterDate) body.date = filterDate;
-                    
+
                     const res = await authFetch(`${API_URL}/snapshots/overview`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -3616,6 +3618,7 @@
                     console.error('Snapshot fetch failed:', err);
                     setGlobalSnapshots([]);
                 }
+                setSnapshotsLoading(false);
             };
             
             const applySnapshotFilter = async (clusterId) => {
@@ -8798,7 +8801,12 @@
                                                             </div>
                                                         </div>
 
-                                                        {!Array.isArray(sortedSnapshots) || sortedSnapshots.length === 0 ? (
+                                                        {snapshotsLoading ? (
+                                                            <div className="bg-proxmox-dark rounded-xl p-8 text-center">
+                                                                <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full mx-auto mb-3"></div>
+                                                                <p className="text-gray-400">{t('loadingSnapshots') || 'Loading snapshots...'}</p>
+                                                            </div>
+                                                        ) : !Array.isArray(sortedSnapshots) || sortedSnapshots.length === 0 ? (
                                                             <div className="bg-proxmox-dark rounded-xl p-8 text-center">
                                                                 <Icons.Camera className="mx-auto mb-3 w-10 h-10 text-gray-600" />
                                                                 <p className="text-gray-500">
@@ -10536,7 +10544,7 @@
                                                     <Slider
                                                         label={t('migrationTolerance') || 'Migration Tolerance'}
                                                         description={t('migrationToleranceDesc') || 'Deadband to prevent VMs from being migrated back and forth (0 = disabled)'}
-                                                        value={selectedCluster.migration_tolerance || 10}
+                                                        value={selectedCluster.migration_tolerance ?? 10}
                                                         onChange={v => updateConfig('migration_tolerance', v)}
                                                         min={0}
                                                         max={20}

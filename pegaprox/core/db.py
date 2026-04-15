@@ -2249,6 +2249,7 @@ class PegaProxDB:
                 'pass': self._decrypt(row['pass_encrypted']),
                 'ssl_verification': bool(row['ssl_verification']),
                 'migration_threshold': row['migration_threshold'],
+                'migration_tolerance': row['migration_tolerance'] if 'migration_tolerance' in row.keys() else 10,
                 'check_interval': row['check_interval'],
                 'auto_migrate': bool(row['auto_migrate']),
                 'balance_containers': bool(row['balance_containers']),
@@ -2320,6 +2321,7 @@ class PegaProxDB:
             'pass': decrypted_pass,
             'ssl_verification': bool(row['ssl_verification']),
             'migration_threshold': row['migration_threshold'],
+            'migration_tolerance': row['migration_tolerance'] if 'migration_tolerance' in row.keys() else 10,
             'check_interval': row['check_interval'],
             'auto_migrate': bool(row['auto_migrate']),
             'balance_containers': bool(row['balance_containers']),
@@ -2351,7 +2353,7 @@ class PegaProxDB:
         cursor.execute('''
             INSERT OR REPLACE INTO clusters
             (id, name, host, user, pass_encrypted, ssl_verification,
-             migration_threshold, check_interval, auto_migrate,
+             migration_threshold, migration_tolerance, check_interval, auto_migrate,
              balance_containers, balance_local_disks, dry_run, enabled,
              ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted,
              ssh_port, ha_settings, excluded_nodes, smbios_autoconfig,
@@ -2360,7 +2362,7 @@ class PegaProxDB:
              cluster_type,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -2369,6 +2371,7 @@ class PegaProxDB:
             self._encrypt(data.get('pass', '')),
             1 if data.get('ssl_verification', True) else 0,
             data.get('migration_threshold', 30),
+            data.get('migration_tolerance', 10),
             data.get('check_interval', 300),
             1 if data.get('auto_migrate', False) else 0,
             1 if data.get('balance_containers', False) else 0,

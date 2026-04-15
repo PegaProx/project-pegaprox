@@ -1532,7 +1532,7 @@
                                                 <Slider
                                                     label={t('migrationTolerance') || 'Tolerance'}
                                                     description={t('migrationToleranceDesc') || 'Deadband to prevent ping-pong (0 = disabled)'}
-                                                    value={clusterStatus.tolerance || 5}
+                                                    value={clusterStatus.tolerance ?? 5}
                                                     onChange={(v) => {
                                                         setClusterStatus(prev => prev ? {...prev, tolerance: v} : null);
                                                         if (thresholdTimer.current) clearTimeout(thresholdTimer.current);

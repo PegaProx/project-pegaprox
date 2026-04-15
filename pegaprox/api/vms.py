@@ -4424,89 +4424,84 @@ def snapshots_overview():
     
     LW: Added cluster_id filter - when provided, only shows snapshots from that cluster
     """
-    snapshots = []
+    from pegaprox.utils.concurrent import run_concurrent
     user = request.session.get('user', '')
     users_db = load_users()
     user_data = users_db.get(user, {})
     user_data['username'] = user
-    cutoff_date = None
     data = request.get_json(silent=True) or {}
-    date_compare = data.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    filter_limit = data.get("limit", 100)  # LW: Increased default limit
-    filter_cluster = data.get("cluster_id")  # MK: Optional cluster filter
+    # NS: don't filter by date unless user explicitly sets one — old default hid today's snapshots
+    date_filter = data.get("date")
+    filter_limit = data.get("limit", 200)
+    filter_cluster = data.get("cluster_id")
     is_admin = user_data.get('role') == ROLE_ADMIN
     user_clusters = user_data.get('clusters', [])
 
+    cutoff_date = None
+    if date_filter:
+        try:
+            cutoff_date = datetime.strptime(date_filter, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    all_vms = []
     for cluster_id, mgr in cluster_managers.items():
         if not mgr.is_connected:
             continue
-
-        # LW: Filter by specific cluster if provided
         if filter_cluster and cluster_id != filter_cluster:
             continue
-
         if not is_admin and user_clusters and cluster_id not in user_clusters:
             continue
-
         try:
-            resources = mgr.get_vm_resources()
-
-            for r in resources:
+            for r in mgr.get_vm_resources():
                 vmid = r.get('vmid')
                 node = r.get('node')
-                vm_name = r.get('name') or ''
-                vm_type = r.get('type', 'qemu')
-
-                if not vmid or not node:
-                    continue
-
-                manager = cluster_managers[cluster_id]
-                snapshots_present = manager.get_snapshots(node, vmid, vm_type)
-
-                for snap in snapshots_present:
-                    snap_name = snap.get('name')
-                    snap_ts = snap.get('snaptime')
-
-                    # skip invalid + implicit snapshot
-                    if not snap_name or not snap_ts or snap_name == 'current':
-                        continue
-
-                    snap_dt = datetime.fromtimestamp(snap_ts, tz=timezone.utc)
-                    now = datetime.now(timezone.utc)
-                    age_seconds = int((now - snap_dt).total_seconds())
-                    cutoff_date = datetime.strptime(date_compare, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-
-                    if snap_dt >= cutoff_date:
-                        continue
-
-                    if age_seconds < 3600:
-                        age = f"{age_seconds // 60} min"
-                    elif age_seconds < 86400:
-                        age = f"{age_seconds // 3600} h"
-                    else:
-                        age = f"{age_seconds // 86400} days"
-
-                    snapshots.append({
-                        "vmid": vmid,
-                        "vm_name": vm_name,
-                        "vm_type": vm_type,
-                        "node": node,
-                        "snapshot_name": snap_name,
-                        "snapshot_date": snap_dt.strftime('%Y-%m-%d %H:%M'),
-                        "age": age,
-                        "cluster_id": cluster_id
-                    })
-
+                if vmid and node:
+                    all_vms.append((cluster_id, node, vmid, r.get('name', ''), r.get('type', 'qemu')))
         except Exception as e:
-            logging.debug(f"Snapshot gathering failed for cluster {cluster_id}: {e}")
+            logging.warning(f"[Snapshots] Failed to list VMs for {cluster_id}: {e}")
 
-    # Sort and filter snapshots
+    # MK: fetch snapshots in parallel instead of sequential — huge speedup
+    def _fetch_snap(args):
+        cid, node, vmid, vm_name, vm_type = args
+        try:
+            mgr = cluster_managers.get(cid)
+            if not mgr:
+                return []
+            raw = mgr.get_snapshots(node, vmid, vm_type)
+            results = []
+            now = datetime.now(timezone.utc)
+            for snap in raw:
+                snap_name = snap.get('name')
+                snap_ts = snap.get('snaptime')
+                if not snap_name or not snap_ts or snap_name == 'current':
+                    continue
+                snap_dt = datetime.fromtimestamp(snap_ts, tz=timezone.utc)
+                if cutoff_date and snap_dt >= cutoff_date:
+                    continue
+                age_s = int((now - snap_dt).total_seconds())
+                age = f"{age_s // 60} min" if age_s < 3600 else f"{age_s // 3600} h" if age_s < 86400 else f"{age_s // 86400} days"
+                results.append({
+                    "vmid": vmid, "vm_name": vm_name, "vm_type": vm_type, "node": node,
+                    "snapshot_name": snap_name, "snapshot_date": snap_dt.strftime('%Y-%m-%d %H:%M'),
+                    "age": age, "cluster_id": cid
+                })
+            return results
+        except Exception:
+            return []
+
+    tasks = [lambda a=vm: _fetch_snap(a) for vm in all_vms]
+    parallel_results = run_concurrent(tasks, timeout=25.0)
+
+    snapshots = []
+    for batch in parallel_results:
+        if batch:
+            snapshots.extend(batch)
+
     snapshots.sort(key=lambda s: s["snapshot_date"], reverse=False)
     snapshots = snapshots[:filter_limit]
 
-    return jsonify({
-        "snapshots": snapshots
-    })
+    return jsonify({"snapshots": snapshots})
 
 
 @bp.route('/api/snapshots/delete', methods=['POST'])

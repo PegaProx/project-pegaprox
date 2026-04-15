@@ -616,17 +616,14 @@ def log_message(message):
         pass  # if we cant log, oh well
 
 def get_all_vms():
-    """get vmids from qm list"""
+    """read vmids from /etc/pve/.vmlist instead of spawning qm list (way cheaper)"""
     try:
-        result = subprocess.run(['qm', 'list'], capture_output=True, text=True)
-        vms = []
-        for line in result.stdout.splitlines()[1:]:  # skip header
-            parts = line.split()
-            if parts:
-                vms.append(parts[0])
-        return vms
+        import json as _json
+        with open('/etc/pve/.vmlist', 'r') as f:
+            data = _json.load(f)
+        return [str(vmid) for vmid, info in data.get('ids', {{}}).items() if info.get('type') == 'qemu']
     except Exception as e:
-        log_message(f"Error fetching VM list: {{e}}")
+        log_message(f"Error reading vmlist: {{e}}")
         return []
 
 def load_processed_vms():
@@ -642,12 +639,15 @@ def save_processed_vm(vmid):
         f.write(f"{{vmid}}\\n")
 
 def get_current_smbios(vmid):
-    """Get current SMBIOS settings"""
+    """read smbios from conf file directly — no perl overhead"""
     try:
-        result = subprocess.run(['qm', 'config', vmid], capture_output=True, text=True)
-        for line in result.stdout.splitlines():
-            if line.startswith('smbios1:'):
-                return line.split(':', 1)[1].strip()
+        conf_path = f"/etc/pve/qemu-server/{{vmid}}.conf"
+        if not os.path.exists(conf_path):
+            return None
+        with open(conf_path, 'r') as f:
+            for line in f:
+                if line.startswith('smbios1:'):
+                    return line.split(':', 1)[1].strip()
         return None
     except:
         return None
@@ -717,12 +717,8 @@ def set_smbios(vmid):
         return False
 
 def check_vm_exists(vmid):
-    """Check if VM exists"""
-    try:
-        result = subprocess.run(['qm', 'status', vmid], capture_output=True, text=True)
-        return result.returncode == 0
-    except:
-        return False
+    """Check if VM config exists on this node"""
+    return os.path.exists(f"/etc/pve/qemu-server/{{vmid}}.conf")
 
 def cleanup_processed_list(processed):
     """Remove VMs that no longer exist"""
@@ -753,7 +749,7 @@ def main():
                 cleanup_counter = 0
             
             current_vms = get_all_vms()
-            
+
             for vmid in current_vms:
                 if vmid not in processed:
                     if check_vm_exists(vmid):
@@ -765,8 +761,12 @@ def main():
                         else:
                             save_processed_vm(vmid)
                             processed.add(vmid)
+                elif vmid in processed and check_vm_exists(vmid) and needs_smbios_update(vmid):
+                    # VM was deleted + recreated with same ID
+                    log_message(f"VM {{vmid}} re-created, reconfiguring SMBIOS")
+                    set_smbios(vmid)
             
-            time.sleep(2)
+            time.sleep(30)
             
         except KeyboardInterrupt:
             log_message("=== SMBIOS Auto-Configurator stopped ===")
