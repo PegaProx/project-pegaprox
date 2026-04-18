@@ -102,8 +102,8 @@ async def ssh_handler(websocket):
     # Always fetch cluster creds to get ssh_port; also resolve node_ip
     # if it was not pre-fetched by the frontend.
     try:
-        print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}")
-        r = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}", cookies={'session': session_id}, timeout=10, verify=False)
+        print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}?node={node}")
+        r = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}", params={'node': node}, cookies={'session': session_id}, timeout=10, verify=False)
         print(f"Cluster creds response: {r.status_code}")
         if r.status_code == 200:
             creds = r.json()

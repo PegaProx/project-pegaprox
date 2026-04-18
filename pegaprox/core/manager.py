@@ -6617,10 +6617,19 @@ echo "AGENT_INSTALLED_OK"
             
             # ================================================================
             # STEP 3: Try candidates with connectivity probe (SSH port)
+            # Cap at 3 probes to bound latency: each probe has a 2s timeout,
+            # so worst-case (all fail) is 6s instead of N*2s.
+            # Candidates are already sorted by score desc, so the most likely
+            # management IPs are tried first.
             # ================================================================
+            probed = 0
             for score, ip, iface, reason in candidates:
                 if score < 20 or ip == primary_ip:
                     continue
+                if probed >= 3:
+                    self.logger.debug(f"[NodeIP] {node_name}: probe cap reached, skipping remaining candidates")
+                    break
+                probed += 1
                 if _quick_probe(ip, port=ssh_port):
                     self.logger.info(f"[NodeIP] {node_name} -> {ip} (score={score}, {reason}) reachable on :{ssh_port}")
                     return ip

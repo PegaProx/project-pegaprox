@@ -890,29 +890,37 @@ def get_cluster_creds_internal(cluster_id):
         if not node_ips:
             node_ips['_default'] = cluster_host
     else:
+        # ?node=<name>: resolve only the requested node (used by WS server to
+        # avoid probing every node in the cluster on each shell open).
+        requested_node = request.args.get('node', '').strip()
+
+        def _resolve_node(node_name):
+            node_ip = mgr._get_node_ip(node_name)
+            if node_ip:
+                node_ips[node_name] = node_ip
+                node_ips[node_name.lower()] = node_ip
+                logging.info(f"[CLUSTER-CREDS] node {node_name} ip={node_ip}")
+            else:
+                logging.warning(f"[CLUSTER-CREDS] _get_node_ip returned nothing for {node_name}")
+
         try:
-            # Use _get_node_ip per node: filters Corosync IPs, probes SSH port.
-            # cluster/status returns the Corosync ring IP which is not
-            # necessarily reachable via SSH from the PegaProx server.
-            # Use _cached_nodes if available (populated by get_cluster_nodes()),
-            # otherwise fall back to the same REST call as get_cluster_nodes().
-            nodes = getattr(mgr, '_cached_nodes', None)
-            if not nodes:
-                r = mgr._create_session().get(f"https://{cluster_host}:8006/api2/json/nodes", timeout=10)
-                if r.status_code == 200:
-                    nodes = r.json().get('data', [])
-                    mgr._cached_nodes = nodes
-            for n in (nodes or []):
-                node_name = n.get('node', n.get('name', ''))
-                if not node_name:
-                    continue
-                node_ip = mgr._get_node_ip(node_name)
-                if node_ip:
-                    node_ips[node_name] = node_ip
-                    node_ips[node_name.lower()] = node_ip
-                    logging.info(f"[CLUSTER-CREDS] node {node_name} ip={node_ip}")
-                else:
-                    logging.warning(f"[CLUSTER-CREDS] _get_node_ip returned nothing for {node_name}")
+            if requested_node:
+                # Single-node path: fast, avoids probing unrelated nodes.
+                _resolve_node(requested_node)
+            else:
+                # Bulk path: resolve all nodes (kept for UIs that need full mapping).
+                # Use _cached_nodes if available (populated by get_cluster_nodes()),
+                # otherwise fall back to the same REST call as get_cluster_nodes().
+                nodes = getattr(mgr, '_cached_nodes', None)
+                if not nodes:
+                    r = mgr._create_session().get(f"https://{cluster_host}:8006/api2/json/nodes", timeout=10)
+                    if r.status_code == 200:
+                        nodes = r.json().get('data', [])
+                        mgr._cached_nodes = nodes
+                for n in (nodes or []):
+                    node_name = n.get('node', n.get('name', ''))
+                    if node_name:
+                        _resolve_node(node_name)
         except Exception as e:
             logging.error(f"[CLUSTER-CREDS] Error getting node IPs: {e}")
 
