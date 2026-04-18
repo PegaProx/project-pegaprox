@@ -894,8 +894,15 @@ def get_cluster_creds_internal(cluster_id):
             # Use _get_node_ip per node: filters Corosync IPs, probes SSH port.
             # cluster/status returns the Corosync ring IP which is not
             # necessarily reachable via SSH from the PegaProx server.
-            nodes = mgr.get_nodes() or []
-            for n in nodes:
+            # Use _cached_nodes if available (populated by get_cluster_nodes()),
+            # otherwise fall back to the same REST call as get_cluster_nodes().
+            nodes = getattr(mgr, '_cached_nodes', None)
+            if not nodes:
+                r = mgr._create_session().get(f"https://{cluster_host}:8006/api2/json/nodes", timeout=10)
+                if r.status_code == 200:
+                    nodes = r.json().get('data', [])
+                    mgr._cached_nodes = nodes
+            for n in (nodes or []):
                 node_name = n.get('node', n.get('name', ''))
                 if not node_name:
                     continue
