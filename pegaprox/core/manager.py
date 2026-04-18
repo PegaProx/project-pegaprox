@@ -6684,9 +6684,15 @@ echo "AGENT_INSTALLED_OK"
             except (socket.gaierror, OSError):
                 pass
             
-            if node_name in self.config.host:
-                return self.config.host
-            
+            # Only fall back to the connected host when node_name matches it —
+            # use self.host (actual connected node, handles failover) and
+            # self.config.host (configured primary) to avoid returning a
+            # wrong IP when the cluster has multiple nodes.
+            connected = self.host or self.config.host
+            if node_name in connected or node_name in self.config.host:
+                self.logger.debug(f"[NodeIP] {node_name} matches connected host, using {connected}")
+                return connected
+
             self.logger.warning(f"[NodeIP] No reachable management IP for {node_name}")
             return None
             

@@ -847,7 +847,9 @@ def get_smbios_autoconfig_status(cluster_id, node):
         # Resolve SSH-reachable management IP via _get_node_ip (scores interfaces,
         # probes SSH port) -- cluster/status returns Corosync IP which may not
         # be reachable via SSH from the PegaProx server.
-        node_ip = mgr._get_node_ip(node) or mgr.host
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'installed': False, 'running': False, 'error': f'Could not determine SSH-reachable IP for node {node}'})
 
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
@@ -892,9 +894,11 @@ def deploy_smbios_autoconfig(cluster_id, node):
     
     mgr = cluster_managers[cluster_id]
     settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
-    
+
     try:
-        node_ip = mgr._get_node_ip(node) or mgr.host
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
 
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
@@ -944,9 +948,11 @@ def remove_smbios_autoconfig(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    
+
     try:
-        node_ip = mgr._get_node_ip(node) or mgr.host
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
 
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
@@ -995,9 +1001,11 @@ def control_smbios_autoconfig(cluster_id, node):
         return jsonify({'error': 'Invalid action. Use start, stop, restart, or rescan'}), 400
     
     mgr = cluster_managers[cluster_id]
-    
+
     try:
-        node_ip = mgr._get_node_ip(node) or mgr.host
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
 
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
@@ -1157,7 +1165,10 @@ def deploy_smbios_autoconfig_all(cluster_id):
     )
 
     for node in nodes:
-        node_ip = mgr._get_node_ip(node) or mgr.host
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            results.append({'node': node, 'success': False, 'error': 'Could not determine SSH-reachable IP'})
+            continue
         try:
             # NS: Staggered connections to prevent SSH server overload
             if results:  # Not the first node
@@ -1546,7 +1557,11 @@ def run_custom_script(cluster_id, script_id):
     all_output = []
 
     for node in nodes_to_run:
-        node_ip = mgr._get_node_ip(node) or mgr.host
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            results.append({'node': node, 'success': False, 'error': 'Could not determine SSH-reachable IP', 'output': ''})
+            all_output.append(f"=== {node} ===\nCould not determine SSH-reachable IP\n")
+            continue
         try:
             ssh = mgr._ssh_connect(node_ip)
             if not ssh:
