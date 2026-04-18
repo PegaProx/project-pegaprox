@@ -70,48 +70,18 @@ def get_node_ip_api(cluster_id, node):
             source = 'xcpng_fallback'
     else:
         try:
-            host = cluster_host
-
-            # Method 1: Cluster status API (has IPs for clustered nodes)
-            status_url = f"https://{host}:8006/api2/json/cluster/status"
-            r = mgr._create_session().get(status_url, timeout=10)
-
-            if r.status_code == 200:
-                for item in r.json().get('data', []):
-                    if item.get('type') == 'node':
-                        item_name = item.get('name', '')
-                        if item_name.lower() == node.lower() and item.get('ip'):
-                            node_ip = item.get('ip')
-                            source = 'cluster_status'
-                            break
-
-            # Method 2: Network configuration API
-            if not node_ip:
-                net_url = f"https://{host}:8006/api2/json/nodes/{node}/network"
-                r = mgr._create_session().get(net_url, timeout=5)
-                if r.status_code == 200:
-                    for iface in r.json().get('data', []):
-                        iface_type = iface.get('type', '')
-                        addr = iface.get('address', '')
-                        cidr = iface.get('cidr', '')
-
-                        if not addr and cidr:
-                            addr = cidr.split('/')[0]
-
-                        if addr and iface_type in ['bridge', 'eth', 'bond', 'OVSBridge', 'vlan']:
-                            node_ip = addr
-                            source = f'network_{iface.get("iface", "unknown")}'
-                            break
-
-            # Method 3: Fallback to cluster host
-            if not node_ip:
-                node_ip = cluster_host
-                source = 'cluster_host_fallback'
-
+            # Use _get_node_ip: scores interfaces, filters Corosync IPs out of
+            # management network, and probes SSH port for reachability.
+            node_ip = mgr._get_node_ip(node)
+            source = 'manager_get_node_ip'
         except Exception as e:
             logging.error(f"Error getting node IP: {e}")
-            node_ip = cluster_host
+            node_ip = None
             source = 'error_fallback'
+
+        if not node_ip:
+            node_ip = cluster_host
+            source = 'cluster_host_fallback'
 
     return jsonify({
         'ip': node_ip,
@@ -874,23 +844,11 @@ def get_smbios_autoconfig_status(cluster_id, node):
     mgr = cluster_managers[cluster_id]
     
     try:
-        # Get node IP and connect via SSH
-        # For single-node, use cluster host; for multi-node, resolve from cluster status
-        node_ip = mgr.host
-        
-        # Try to get actual node IP from cluster status
-        try:
-            status_url = f"https://{node_ip}:8006/api2/json/cluster/status"
-            r = mgr._create_session().get(status_url, timeout=10)
-            if r.status_code == 200:
-                for item in r.json().get('data', []):
-                    if item.get('type') == 'node' and item.get('name', '').lower() == node.lower():
-                        if item.get('ip'):
-                            node_ip = item.get('ip')
-                            break
-        except:
-            pass
-        
+        # Resolve SSH-reachable management IP via _get_node_ip (scores interfaces,
+        # probes SSH port) -- cluster/status returns Corosync IP which may not
+        # be reachable via SSH from the PegaProx server.
+        node_ip = mgr._get_node_ip(node) or mgr.host
+
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
             return jsonify({'installed': False, 'running': False, 'error': 'SSH not available - check SSH key in cluster settings'})
@@ -936,24 +894,12 @@ def deploy_smbios_autoconfig(cluster_id, node):
     settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
     
     try:
-        # Get node IP
-        node_ip = mgr.host
-        try:
-            status_url = f"https://{node_ip}:8006/api2/json/cluster/status"
-            r = mgr._create_session().get(status_url, timeout=10)
-            if r.status_code == 200:
-                for item in r.json().get('data', []):
-                    if item.get('type') == 'node' and item.get('name', '').lower() == node.lower():
-                        if item.get('ip'):
-                            node_ip = item.get('ip')
-                            break
-        except:
-            pass
-        
+        node_ip = mgr._get_node_ip(node) or mgr.host
+
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
             return jsonify({'error': 'SSH connection failed - check SSH key in cluster settings'}), 500
-        
+
         # Generate script with settings (defense-in-depth: strip quotes/backslashes - NS Feb 2026)
         def _sanitize_smbios(val):
             """Strip characters dangerous in Python string literals as defense-in-depth."""
@@ -1000,24 +946,12 @@ def remove_smbios_autoconfig(cluster_id, node):
     mgr = cluster_managers[cluster_id]
     
     try:
-        # Get node IP
-        node_ip = mgr.host
-        try:
-            status_url = f"https://{node_ip}:8006/api2/json/cluster/status"
-            r = mgr._create_session().get(status_url, timeout=10)
-            if r.status_code == 200:
-                for item in r.json().get('data', []):
-                    if item.get('type') == 'node' and item.get('name', '').lower() == node.lower():
-                        if item.get('ip'):
-                            node_ip = item.get('ip')
-                            break
-        except:
-            pass
-        
+        node_ip = mgr._get_node_ip(node) or mgr.host
+
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
             return jsonify({'error': 'SSH connection failed - check SSH key in cluster settings'}), 500
-        
+
         # Stop and disable service, remove files
         commands = [
             'systemctl stop pegaprox-smbios-autoconfig 2>/dev/null || true',
@@ -1063,20 +997,8 @@ def control_smbios_autoconfig(cluster_id, node):
     mgr = cluster_managers[cluster_id]
     
     try:
-        # Get node IP
-        node_ip = mgr.host
-        try:
-            status_url = f"https://{node_ip}:8006/api2/json/cluster/status"
-            r = mgr._create_session().get(status_url, timeout=10)
-            if r.status_code == 200:
-                for item in r.json().get('data', []):
-                    if item.get('type') == 'node' and item.get('name', '').lower() == node.lower():
-                        if item.get('ip'):
-                            node_ip = item.get('ip')
-                            break
-        except:
-            pass
-        
+        node_ip = mgr._get_node_ip(node) or mgr.host
+
         ssh = mgr._ssh_connect(node_ip)
         if not ssh:
             return jsonify({'error': 'SSH connection failed'}), 500
@@ -1136,16 +1058,7 @@ def get_smbios_autoconfig_status_all(cluster_id):
         if not node_names:
             return jsonify({'error': 'No nodes available'}), 400
 
-        # #198: bulk-resolve node IPs from cluster/status (same as deploy-all)
         node_ips = {}
-        try:
-            cs_resp = mgr._api_get(f"https://{mgr.host}:8006/api2/json/cluster/status")
-            if cs_resp.status_code == 200:
-                for item in cs_resp.json().get('data', []):
-                    if item.get('type') == 'node':
-                        node_ips[item.get('name', '')] = item.get('ip', '')
-        except:
-            pass
 
         results = {}
 
@@ -1214,7 +1127,6 @@ def deploy_smbios_autoconfig_all(cluster_id):
     
     # Get all nodes in cluster
     nodes = []
-    node_ips = {}
     try:
         cluster_host = mgr.host
         status_url = f"https://{cluster_host}:8006/api2/json/cluster/status"
@@ -1222,20 +1134,17 @@ def deploy_smbios_autoconfig_all(cluster_id):
         if r.status_code == 200:
             for item in r.json().get('data', []):
                 if item.get('type') == 'node':
-                    node_name = item.get('name')
-                    nodes.append(node_name)
-                    node_ips[node_name] = item.get('ip') or cluster_host
+                    nodes.append(item.get('name'))
         else:
             # Single node cluster - just use cluster host
             nodes = [mgr.config.host.split('.')[0]]
-            node_ips[nodes[0]] = cluster_host
     except Exception as e:
         logging.error(f"Error getting cluster nodes: {e}")
         return jsonify({'error': f'Could not get cluster nodes: {e}'}), 500
-    
+
     if not nodes:
         return jsonify({'error': 'No nodes found in cluster'}), 404
-    
+
     results = []
     def _sanitize_smbios_val(val):
         """Strip characters dangerous in Python string literals as defense-in-depth."""
@@ -1248,7 +1157,7 @@ def deploy_smbios_autoconfig_all(cluster_id):
     )
 
     for node in nodes:
-        node_ip = node_ips.get(node, mgr.config.host)
+        node_ip = mgr._get_node_ip(node) or mgr.host
         try:
             # NS: Staggered connections to prevent SSH server overload
             if results:  # Not the first node
@@ -1611,8 +1520,6 @@ def run_custom_script(cluster_id, script_id):
     # Get target nodes
     target_nodes = script['target_nodes']
     nodes_to_run = []
-    node_ips = {}
-    
     try:
         cluster_host = mgr.host
         status_url = f"https://{cluster_host}:8006/api2/json/cluster/status"
@@ -1623,24 +1530,23 @@ def run_custom_script(cluster_id, script_id):
                     node_name = item.get('name')
                     if target_nodes == 'all' or node_name in target_nodes.split(','):
                         nodes_to_run.append(node_name)
-                        node_ips[node_name] = item.get('ip') or cluster_host
     except Exception as e:
         logging.error(f"Error getting cluster nodes: {e}")
         return jsonify({'error': f'Could not get cluster nodes: {e}'}), 500
-    
+
     if not nodes_to_run:
         return jsonify({'error': 'No target nodes found'}), 404
-    
+
     # Log the execution attempt BEFORE running
     log_audit(usr, 'script.execution_started', f"Starting execution of script '{script['name']}' (ID: {script_id}) on {len(nodes_to_run)} nodes: {', '.join(nodes_to_run)}", cluster=cluster_name)
-    
+
     results = []
     script_ext = '.py' if script['type'] == 'python' else '.sh'
     interpreter = 'python3' if script['type'] == 'python' else 'bash'
     all_output = []
-    
+
     for node in nodes_to_run:
-        node_ip = node_ips.get(node, mgr.config.host)
+        node_ip = mgr._get_node_ip(node) or mgr.host
         try:
             ssh = mgr._ssh_connect(node_ip)
             if not ssh:

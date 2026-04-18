@@ -891,26 +891,21 @@ def get_cluster_creds_internal(cluster_id):
             node_ips['_default'] = cluster_host
     else:
         try:
-            host = cluster_host
-
-            # Method 1: Get from Proxmox cluster status API (has IPs for clustered nodes)
-            status_url = f"https://{host}:8006/api2/json/cluster/status"
-            r = mgr._create_session().get(status_url, timeout=10)
-
-            if r.status_code == 200:
-                status_data = r.json().get('data', [])
-                logging.info(f"[CLUSTER-CREDS] Cluster status returned {len(status_data)} items")
-                for item in status_data:
-                    if item.get('type') == 'node':
-                        node_name = item.get('name', '')
-                        node_ip = item.get('ip')
-                        logging.info(f"[CLUSTER-CREDS] Cluster status node: {node_name}, ip={node_ip}")
-                        if node_name and node_ip:
-                            # Store with original case and lowercase for matching
-                            node_ips[node_name] = node_ip
-                            node_ips[node_name.lower()] = node_ip
-
-
+            # Use _get_node_ip per node: filters Corosync IPs, probes SSH port.
+            # cluster/status returns the Corosync ring IP which is not
+            # necessarily reachable via SSH from the PegaProx server.
+            nodes = mgr.get_nodes() or []
+            for n in nodes:
+                node_name = n.get('node', n.get('name', ''))
+                if not node_name:
+                    continue
+                node_ip = mgr._get_node_ip(node_name)
+                if node_ip:
+                    node_ips[node_name] = node_ip
+                    node_ips[node_name.lower()] = node_ip
+                    logging.info(f"[CLUSTER-CREDS] node {node_name} ip={node_ip}")
+                else:
+                    logging.warning(f"[CLUSTER-CREDS] _get_node_ip returned nothing for {node_name}")
         except Exception as e:
             logging.error(f"[CLUSTER-CREDS] Error getting node IPs: {e}")
 

@@ -6422,44 +6422,27 @@ echo "AGENT_INSTALLED_OK"
                 primary_parsed = ipaddress.ip_address(primary_ip)  # IPv4 or IPv6
             except Exception:
                 primary_parsed = None
-            
-            # ================================================================
-            # STEP 0 (Issue #71): Quick path -- get IP from cluster/status
-            # The Proxmox cluster/status API returns each node's IP directly.
-            # This often works even when the complex interface matching fails
-            # (e.g., different VLANs, IPv6-only, or node offline via API).
-            # ================================================================
-            try:
-                cs_url = f"https://{host}:8006/api2/json/cluster/status"
-                cs_resp = self._api_get(cs_url)
-                if cs_resp.status_code == 200:
-                    for item in cs_resp.json().get('data', []):
-                        if item.get('type') == 'node' and item.get('name') == node_name:
-                            node_direct_ip = item.get('ip', '')
-                            if node_direct_ip and node_direct_ip != primary_ip:
-                                if _quick_probe(node_direct_ip):
-                                    self.logger.info(f"[NodeIP] {node_name} -> {node_direct_ip} (from cluster/status, reachable)")
-                                    return node_direct_ip
-                                else:
-                                    self.logger.debug(f"[NodeIP] {node_name}: cluster/status IP {node_direct_ip} not reachable on 8006, continuing...")
-                            break
-            except Exception as e:
-                self.logger.debug(f"[NodeIP] cluster/status quick path failed: {e}")
+
+            # Use the configured SSH port for reachability probes -- port 8006
+            # (Proxmox API) is open on ALL interfaces including cluster/corosync
+            # network, which makes it useless for finding the SSH-reachable IP.
+            ssh_port = getattr(self.config, 'ssh_port', 22) or 22
             
             # ================================================================
             # STEP 1: Find which interface the PRIMARY node uses for management
             # Query the PRIMARY node, NOT the target -- this was the old bug
+            # Run BEFORE STEP 0 so primary_network is available for filtering.
             # ================================================================
             primary_iface = None        # e.g., 'vmbr0.10' or 'vmbr0'
             primary_network = None      # ipaddress.IPv4Network
             primary_vlan_id = None      # e.g., '10', '510', or None
-            
+
             # Cache per-cluster to avoid repeated API calls
             if not hasattr(self, '_cached_mgmt_iface'):
                 self._cached_mgmt_iface = None
                 self._cached_mgmt_network = None
                 self._cached_mgmt_vlan = None
-            
+
             if self._cached_mgmt_iface:
                 primary_iface = self._cached_mgmt_iface
                 primary_network = self._cached_mgmt_network
@@ -6475,7 +6458,7 @@ echo "AGENT_INSTALLED_OK"
                             if item.get('type') == 'node' and item.get('local', 0) == 1:
                                 current_node_name = item.get('name')
                                 break
-                    
+
                     if not current_node_name:
                         nodes_url = f"https://{host}:8006/api2/json/nodes"
                         nodes_resp = self._api_get(nodes_url)
@@ -6484,7 +6467,7 @@ echo "AGENT_INSTALLED_OK"
                                 if n.get('status') == 'online':
                                     current_node_name = n.get('node')
                                     break
-                    
+
                     if current_node_name:
                         net_url = f"https://{host}:8006/api2/json/nodes/{current_node_name}/network"
                         net_resp = self._api_get(net_url)
@@ -6512,6 +6495,41 @@ echo "AGENT_INSTALLED_OK"
                                     continue
                 except Exception as e:
                     self.logger.debug(f"[NodeIP] Could not detect primary interface: {e}")
+
+            # ================================================================
+            # STEP 0 (Issue #71): Quick path -- get IP from cluster/status
+            # The Proxmox cluster/status API returns each node's IP directly.
+            # This often works even when the complex interface matching fails
+            # (e.g., different VLANs, IPv6-only, or node offline via API).
+            # NOTE: Runs after STEP 1 so we can verify the IP is in the
+            # management network -- cluster/status may return the Corosync
+            # ring IP (dedicated cluster network) which is NOT reachable from
+            # the PegaProx server even though it answers on port 8006.
+            # ================================================================
+            try:
+                cs_url = f"https://{host}:8006/api2/json/cluster/status"
+                cs_resp = self._api_get(cs_url)
+                if cs_resp.status_code == 200:
+                    for item in cs_resp.json().get('data', []):
+                        if item.get('type') == 'node' and item.get('name') == node_name:
+                            node_direct_ip = item.get('ip', '')
+                            if node_direct_ip and node_direct_ip != primary_ip:
+                                in_mgmt_net = True
+                                if primary_network:
+                                    try:
+                                        in_mgmt_net = ipaddress.ip_address(node_direct_ip) in primary_network
+                                    except Exception:
+                                        in_mgmt_net = False
+                                if not in_mgmt_net:
+                                    self.logger.debug(f"[NodeIP] {node_name}: cluster/status IP {node_direct_ip} not in mgmt network {primary_network}, skipping quick path")
+                                elif _quick_probe(node_direct_ip, port=ssh_port):
+                                    self.logger.info(f"[NodeIP] {node_name} -> {node_direct_ip} (from cluster/status, reachable on :{ssh_port})")
+                                    return node_direct_ip
+                                else:
+                                    self.logger.debug(f"[NodeIP] {node_name}: cluster/status IP {node_direct_ip} not reachable on :{ssh_port}, continuing...")
+                            break
+            except Exception as e:
+                self.logger.debug(f"[NodeIP] cluster/status quick path failed: {e}")
             
             # ================================================================
             # STEP 2: Get ALL network interfaces from the TARGET node
@@ -6598,16 +6616,16 @@ echo "AGENT_INSTALLED_OK"
             candidates.sort(key=lambda x: x[0], reverse=True)
             
             # ================================================================
-            # STEP 3: Try candidates with connectivity probe
+            # STEP 3: Try candidates with connectivity probe (SSH port)
             # ================================================================
             for score, ip, iface, reason in candidates:
                 if score < 20 or ip == primary_ip:
                     continue
-                if _quick_probe(ip):
-                    self.logger.info(f"[NodeIP] {node_name} -> {ip} (score={score}, {reason}) reachable")
+                if _quick_probe(ip, port=ssh_port):
+                    self.logger.info(f"[NodeIP] {node_name} -> {ip} (score={score}, {reason}) reachable on :{ssh_port}")
                     return ip
                 else:
-                    self.logger.debug(f"[NodeIP] {node_name}: {ip} score={score} NOT reachable")
+                    self.logger.debug(f"[NodeIP] {node_name}: {ip} score={score} NOT reachable on :{ssh_port}")
             
             # ================================================================
             # STEP 4: Corosync -- ONLY if in management network
@@ -6626,8 +6644,8 @@ echo "AGENT_INSTALLED_OK"
                                     try:
                                         la = ipaddress.ip_address(link_ip)
                                         if primary_network and la in primary_network:
-                                            if _quick_probe(link_ip):
-                                                self.logger.info(f"[NodeIP] {node_name} -> {link_ip} (corosync {key}, mgmt net) reachable")
+                                            if _quick_probe(link_ip, port=ssh_port):
+                                                self.logger.info(f"[NodeIP] {node_name} -> {link_ip} (corosync {key}, mgmt net) reachable on :{ssh_port}")
                                                 return link_ip
                                         else:
                                             self.logger.debug(f"[NodeIP] SKIP corosync {link_ip} ({key}) -- not in mgmt network")
@@ -6654,7 +6672,7 @@ echo "AGENT_INSTALLED_OK"
                 for af, socktype, proto, canonname, sa in addrs:
                     ip = sa[0]
                     if ip and ip != primary_ip and not ip.startswith('127.') and ip != '::1':
-                        if _quick_probe(ip):
+                        if _quick_probe(ip, port=ssh_port):
                             self.logger.info(f"[NodeIP] Resolved {node_name} to {ip} (DNS, {'IPv6' if af == socket.AF_INET6 else 'IPv4'})")
                             return ip
                 # If probe failed, return first result anyway
