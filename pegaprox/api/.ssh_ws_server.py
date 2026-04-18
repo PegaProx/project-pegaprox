@@ -97,28 +97,28 @@ async def ssh_handler(websocket):
     # Get node IP - use pre-fetched IP if available
     node_ip = prefetched_ip if prefetched_ip else None
     cluster_host = None
-    
-    # Only try API if we don't have a pre-fetched IP
-    if not node_ip:
-        # Method 1: Try API endpoint
-        try:
-            print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}")
-            r = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}", cookies={'session': session_id}, timeout=10, verify=False)
-            print(f"Cluster creds response: {r.status_code}")
-            if r.status_code == 200:
-                creds = r.json()
-                cluster_host = creds.get('host')
+    ssh_port = 22
+
+    # Always fetch cluster creds to get ssh_port; also resolve node_ip
+    # if it was not pre-fetched by the frontend.
+    try:
+        print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}")
+        r = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}", cookies={'session': session_id}, timeout=10, verify=False)
+        print(f"Cluster creds response: {r.status_code}")
+        if r.status_code == 200:
+            creds = r.json()
+            cluster_host = creds.get('host')
+            ssh_port = creds.get('ssh_port', 22) or 22
+            if not node_ip:
                 node_ips = creds.get('node_ips', {})
-                
-                # Try exact match first, then case-insensitive
                 node_ip = node_ips.get(node) or node_ips.get(node.lower())
-                
                 print(f"Got node_ips: {node_ips}, looking for: {node}, found: {node_ip}, cluster_host: {cluster_host}")
-            else:
-                print(f"Cluster creds failed: {r.status_code} - {r.text[:200] if r.text else 'no body'}")
-        except Exception as e:
-            print(f"Could not get node IP from API: {e}")
-        
+        else:
+            print(f"Cluster creds failed: {r.status_code} - {r.text[:200] if r.text else 'no body'}")
+    except Exception as e:
+        print(f"Could not get cluster creds from API: {e}")
+
+    if not node_ip:
         # Method 2: Fallback - read directly from clusters config file
         if not cluster_host:
             try:
@@ -147,9 +147,9 @@ async def ssh_handler(websocket):
                             print(f"Cluster {cluster_id} not in config, available: {list(clusters.keys())}")
             except Exception as e:
                 print(f"Config file fallback failed: {e}")
-        
+
         # Use cluster_host as fallback for node_ip
-        if not node_ip and cluster_host:
+        if cluster_host:
             node_ip = cluster_host
             print(f"Using cluster host as fallback: {cluster_host}")
     
@@ -232,17 +232,17 @@ async def ssh_handler(websocket):
                 
                 if pkey:
                     print(f"Using SSH key authentication")
-                    ssh.connect(node_ip, port=22, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
+                    ssh.connect(node_ip, port=ssh_port, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
                 else:
                     raise Exception("Could not parse SSH key - unsupported format")
-                    
+
             except Exception as key_error:
                 print(f"SSH key auth failed: {key_error}")
                 await websocket.send(f'{{"status":"error","message":"SSH key error: {str(key_error)}"}}')
                 return
         else:
             # Password authentication
-            ssh.connect(node_ip, port=22, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
+            ssh.connect(node_ip, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
         
         channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)
         channel.settimeout(0.1)

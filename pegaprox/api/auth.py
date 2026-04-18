@@ -923,9 +923,11 @@ def get_cluster_creds_internal(cluster_id):
     
     # NS Feb 2026: Never expose Proxmox password via API - shell proxy handles auth server-side
     # NS Mar 2026: removed user field from response, only SSH proxy needs it internally
+    ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
     return jsonify({
         'host': cluster_host,
-        'node_ips': node_ips
+        'node_ips': node_ips,
+        'ssh_port': ssh_port
     })
 
 
