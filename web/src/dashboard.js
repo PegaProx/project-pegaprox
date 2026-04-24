@@ -483,7 +483,7 @@
         }
 
         // Cluster Sidebar Item Component - NS Jan 2026
-        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu }) {
+        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, setReconfigureCluster, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu }) {
             const offlineNodesCount = Object.values(nodeAlerts || {})
                 .filter(alert => alert.cluster_id === cluster.id && alert.status === 'offline')
                 .length;
@@ -7833,6 +7833,7 @@
                                                                             setShowAssignGroup={setShowAssignGroup}
                                                                             setRenamingCluster={setRenamingCluster}
                                                                             setRenameValue={setRenameValue}
+                                                                            setReconfigureCluster={setReconfigureCluster}
                                                                             t={t}
                                                                             getAuthHeaders={getAuthHeaders}
                                                                             fetchClusters={fetchClusters}
@@ -7879,6 +7880,7 @@
                                                                     setShowAssignGroup={setShowAssignGroup}
                                                                     setRenamingCluster={setRenamingCluster}
                                                                     setRenameValue={setRenameValue}
+                                                                    setReconfigureCluster={setReconfigureCluster}
                                                                     t={t}
                                                                     getAuthHeaders={getAuthHeaders}
                                                                     fetchClusters={fetchClusters}
