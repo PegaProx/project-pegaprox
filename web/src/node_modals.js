@@ -2,6 +2,11 @@
         // PegaProx - Node Modals
         // NodeShell terminal, NodeModal, ConsoleModal
         // ═══════════════════════════════════════════════
+        function getNodeProxmoxUrl(nodeIp = '', nodeName = '') {
+            if (!nodeIp || !nodeName) return null;
+            return `https://${nodeIp.trim()}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
+        }
+
         // Node Shell Terminal Component using xterm.js with SSH
         function NodeShellTerminal({ node, clusterId, addToast }) {
             const { t } = useTranslation();
@@ -3217,10 +3222,12 @@
             const [showCertUpload, setShowCertUpload] = useState(false);
             const [certForm, setCertForm] = useState({ cert: '', key: '', restart: true });
             const [saving, setSaving] = useState(false);
+            const [nodeIp, setNodeIp] = useState('');
 
             const metrics = clusterMetrics?.[node] || {};
             const nodeOnline = metrics.status !== 'offline';
             const isMaint = metrics.maintenance_mode;
+            const proxmoxUrl = getNodeProxmoxUrl(nodeIp, node);
 
             const authFetch = async (url, opts = {}) => {
                 try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
@@ -3362,6 +3369,20 @@
             // LW: Feb 2026 - reset data and load summary when node changes
             useEffect(() => { setData({}); setConfigSubTab('network'); setMonitorSubTab('performance'); setActiveDetailTab('summary'); loadTabData('summary'); }, [node]);
 
+            useEffect(() => {
+                let cancelled = false;
+                setNodeIp('');
+                authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ip`)
+                    .then(r => r && r.ok ? r.json() : null)
+                    .then(ipData => {
+                        if (!cancelled) setNodeIp(ipData?.ip || '');
+                    })
+                    .catch(() => {
+                        if (!cancelled) setNodeIp('');
+                    });
+                return () => { cancelled = true; };
+            }, [clusterId, node]);
+
             // Load data when tab changes
             useEffect(() => {
                 if (activeDetailTab === 'summary' && !data.summary) loadTabData('summary');
@@ -3410,6 +3431,16 @@
                             </button>
                             <Icons.Server className="w-4 h-4" style={{color: nodeOnline ? '#49afd9' : '#f54f47'}} />
                             <span className="text-[14px] font-medium" style={{color: '#e9ecef'}}>{node}</span>
+                            {proxmoxUrl && (
+                                <button
+                                    onClick={() => window.open(proxmoxUrl, '_blank', 'noopener,noreferrer')}
+                                    className="p-1 rounded hover:bg-white/5"
+                                    style={{color: '#49afd9'}}
+                                    title={t('openInProxmox') || 'Open in Proxmox'}
+                                >
+                                    <Icons.ExternalLink className="w-3.5 h-3.5" />
+                                </button>
+                            )}
                             <span className={`corp-badge flex items-center gap-1 ${nodeOnline ? (isMaint ? 'corp-badge-maintenance' : 'corp-badge-online') : 'corp-badge-offline'}`}>
                                 {isMaint && <Icons.Wrench className="w-3 h-3" />}
                                 {isMaint ? t('maintenance') : nodeOnline ? t('online') : t('offline')}
@@ -4173,4 +4204,3 @@
                 </div>
             );
         }
-

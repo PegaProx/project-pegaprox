@@ -765,6 +765,21 @@
                 return `${mins}m`;
             };
 
+            const proxmoxHost = [
+                vm.node_ip,
+                vm.nodeIp,
+                vm.host,
+                vm.current_host,
+                vm.management_ip,
+                vm.managementIp,
+                vm.ip_address,
+                vm.ipAddress,
+                vm.node
+            ].find(value => typeof value === 'string' && value.trim());
+            const proxmoxUrl = proxmoxHost
+                ? `https://${proxmoxHost.trim()}:8006/#v1:0:=${encodeURIComponent(`${vm.type}/${vm.vmid}`)}:4:::::::`
+                : null;
+
             const handleAction = async (action) => {
                 await onAction(vm, action);
             };
@@ -928,6 +943,15 @@
                                 </div>
                             </div>
                             <div className="flex items-center gap-2">
+                                {proxmoxUrl && (
+                                    <button
+                                        onClick={() => window.open(proxmoxUrl, '_blank', 'noopener,noreferrer')}
+                                        className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors"
+                                        title={t('openInProxmox') || 'Open in Proxmox'}
+                                    >
+                                        <Icons.ExternalLink className="w-4 h-4" />
+                                    </button>
+                                )}
                                 {/* MK: Lock indicator */}
                                 {lockInfo?.locked && (
                                     <span 
@@ -6604,4 +6628,3 @@
                 </div>
             );
         };
-

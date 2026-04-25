@@ -2,6 +2,51 @@
         // PegaProx - Tables & Cards
         // NodeCard + ResourceTable
         // ═══════════════════════════════════════════════
+        function getProxmoxNodeHost(target = {}, fallbackName = '') {
+            const candidates = [
+                target.node_ip,
+                target.nodeIp,
+                target.host,
+                target.current_host,
+                target.management_ip,
+                target.managementIp,
+                target.ip_address,
+                target.ipAddress,
+                target.ip,
+                target.hostname,
+                target.node_host,
+                target.nodeHost,
+                fallbackName
+            ];
+            const match = candidates.find(value => typeof value === 'string' && value.trim());
+            return match ? match.trim() : null;
+        }
+
+        function getProxmoxObjectUrl(target = {}) {
+            const kind = target.kind || target.type;
+            const host = getProxmoxNodeHost(target, target.node || target.name);
+            if (!host) return null;
+
+            if (kind === 'node') {
+                const nodeName = target.name || target.node;
+                if (!nodeName) return null;
+                return `https://${host}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
+            }
+
+            if (kind === 'qemu' || kind === 'lxc') {
+                if (target.vmid == null || target.vmid === '') return null;
+                return `https://${host}:8006/#v1:0:=${encodeURIComponent(`${kind}/${target.vmid}`)}:4:::::::`;
+            }
+
+            return null;
+        }
+
+        function openProxmoxObject(target) {
+            const url = getProxmoxObjectUrl(target);
+            if (!url) return;
+            window.open(url, '_blank', 'noopener,noreferrer');
+        }
+
         // Node Card Component
         function NodeCard({ name, metrics, index, clusterId, onMaintenanceToggle, onStartUpdate, onOpenNodeConfig, onNodeAction, onRemoveNode, onMoveNode }) {
             const { t } = useTranslation();
@@ -88,6 +133,8 @@
             const isUpdating = metrics.is_updating;
             const updateTask = metrics.update_task;
             const isOffline = metrics.offline || metrics.status === 'offline';
+            const proxmoxTarget = { ...metrics, kind: 'node', name, node: name };
+            const proxmoxUrl = getProxmoxObjectUrl(proxmoxTarget);
             
             // Can only update if in maintenance and evacuation complete
             const canUpdate = isInMaintenance && 
@@ -102,7 +149,16 @@
                         className="relative card-hover bg-proxmox-card border-2 border-red-500/50 rounded-xl p-5 animate-slide-up"
                         style={{ animationDelay: `${index * 100}ms` }}
                     >
-                        <div className="absolute top-2 right-2">
+                        <div className="absolute top-2 right-2 flex items-center gap-2">
+                            {proxmoxUrl && (
+                                <button
+                                    onClick={() => openProxmoxObject(proxmoxTarget)}
+                                    className="p-1.5 rounded-lg bg-proxmox-dark/80 text-gray-300 hover:text-white hover:bg-proxmox-hover transition-colors"
+                                    title={t('openInProxmox') || 'Open in Proxmox'}
+                                >
+                                    <Icons.ExternalLink className="w-4 h-4" />
+                                </button>
+                            )}
                             <span className="px-2 py-1 bg-red-500 text-white text-xs font-bold rounded animate-pulse">
                                 OFFLINE
                             </span>
@@ -924,6 +980,8 @@
             const isUpdating = metrics?.is_updating;
             const updateTask = metrics?.update_task;
             const canUpdate = isInMaintenance && maintenanceTask?.status && (['completed', 'completed_with_errors'].includes(maintenanceTask.status) || metrics?.maintenance_acknowledged) && !isUpdating;
+            const proxmoxTarget = { ...metrics, kind: 'node', name, node: name };
+            const proxmoxUrl = getProxmoxObjectUrl(proxmoxTarget);
 
             const formatBytes = (bytes) => { if(!bytes)return'0 B';const k=1024,s=['B','KB','MB','GB','TB','PB'],i=Math.floor(Math.log(bytes)/Math.log(k));return(bytes/Math.pow(k,i)).toFixed(1)+' '+s[i]; };
             const formatUptime = (uptime) => {
@@ -978,6 +1036,11 @@
                                 <span className="flex-1"></span>
                                 {isInMaintenance && maintenanceTask && maintenanceTask.status === 'running' && (
                                     <span className="text-[11px] mr-2" style={{color: '#efc006'}}>{maintenanceTask.migrated_count || 0}/{maintenanceTask.total_vms || '?'} VMs</span>
+                                )}
+                                {proxmoxUrl && (
+                                    <button onClick={(e) => { e.stopPropagation(); openProxmoxObject(proxmoxTarget); }} className="p-0.5 hover:text-white" style={{color: '#49afd9'}} title={t('openInProxmox') || 'Open in Proxmox'}>
+                                        <Icons.ExternalLink className="w-3.5 h-3.5" />
+                                    </button>
                                 )}
                                 <button onClick={(e) => { e.stopPropagation(); onOpenNodeConfig && onOpenNodeConfig(name); }} className="p-0.5 hover:text-white" style={{color: '#728b9a'}} title={t('settings') || 'Settings'}>
                                     <Icons.Settings className="w-3.5 h-3.5" />
@@ -1107,11 +1170,16 @@
                                 </div>
                             </div>
 
-                            {/* Action Buttons */}
-                            <div className="corp-toolbar flex flex-wrap items-center gap-1 pt-1" style={{borderTop: '1px solid var(--corp-divider)'}}>
-                                {!isInMaintenance ? (
-                                    <button onClick={() => setShowMaintenanceConfirm(true)}>
-                                        <Icons.Wrench className="w-3 h-3" style={{color: '#efc006'}} /> {t('enterMaintenance') || t('maintenance')}
+                    {/* Action Buttons */}
+                    <div className="corp-toolbar flex flex-wrap items-center gap-1 pt-1" style={{borderTop: '1px solid var(--corp-divider)'}}>
+                        {proxmoxUrl && (
+                            <button onClick={() => openProxmoxObject(proxmoxTarget)}>
+                                <Icons.ExternalLink className="w-3 h-3" style={{color: '#49afd9'}} /> {t('openInProxmox') || 'Open in Proxmox'}
+                            </button>
+                        )}
+                        {!isInMaintenance ? (
+                            <button onClick={() => setShowMaintenanceConfirm(true)}>
+                                <Icons.Wrench className="w-3 h-3" style={{color: '#efc006'}} /> {t('enterMaintenance') || t('maintenance')}
                                     </button>
                                 ) : (
                                     <>
@@ -1419,6 +1487,13 @@
                 const gb = bytes / 1073741824;
                 return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1048576).toFixed(0)} MB`;
             };
+
+            const getVmProxmoxTarget = (resource) => ({
+                ...resource,
+                type: resource.type,
+                node: resource.node,
+                node_ip: resource.node_ip || resource.nodeIp || sourceCluster?.current_host || sourceCluster?.host
+            });
             
             // old version for reference
             // const formatBytes2 = (b) => b >= 1073741824 ? `${(b/1073741824).toFixed(1)} GB` : `${(b/1048576).toFixed(0)} MB`;
@@ -1772,6 +1847,15 @@
                                         <div className="flex items-center justify-between p-3 border-t border-proxmox-border bg-proxmox-dark/30">
                                             {/* Primary Actions - Always visible */}
                                             <div className="flex items-center gap-1">
+                                                {getProxmoxObjectUrl(getVmProxmoxTarget(resource)) && (
+                                                    <button
+                                                        onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))}
+                                                        className="p-1.5 rounded-lg hover:bg-cyan-500/20 text-gray-400 hover:text-cyan-400 transition-all"
+                                                        title={t('openInProxmox') || 'Open in Proxmox'}
+                                                    >
+                                                        <Icons.ExternalLink />
+                                                    </button>
+                                                )}
                                                 {resource.status === 'stopped' ? (
                                                     <button
                                                         onClick={() => handleAction(resource, 'start')}
@@ -2114,6 +2198,12 @@
                                                 <td className="px-4 py-3" style={{whiteSpace:'nowrap'}}>
                                                     {isCorporate ? (
                                                     <div className="flex items-center gap-0">
+                                                        {getProxmoxObjectUrl(getVmProxmoxTarget(resource)) && (
+                                                            <>
+                                                                <button onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))} className="corp-action-btn" title={t('openInProxmox') || 'Open in Proxmox'}><Icons.ExternalLink className="w-3.5 h-3.5" /></button>
+                                                                <span className="corp-toolbar-divider" style={{margin: '0 3px'}} />
+                                                            </>
+                                                        )}
                                                         {/* power group */}
                                                         <div className="corp-action-group">
                                                             {resource.status === 'stopped' ? (
@@ -2146,6 +2236,15 @@
                                                     </div>
                                                     ) : (
                                                     <div className="flex items-center gap-1">
+                                                        {getProxmoxObjectUrl(getVmProxmoxTarget(resource)) && (
+                                                            <button
+                                                                onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))}
+                                                                className="p-1.5 rounded-lg bg-proxmox-dark hover:bg-cyan-500/20 text-gray-400 hover:text-cyan-400 transition-all"
+                                                                title={t('openInProxmox') || 'Open in Proxmox'}
+                                                            >
+                                                                <Icons.ExternalLink />
+                                                            </button>
+                                                        )}
                                                         <button
                                                             onClick={() => onOpenConfig(resource)}
                                                             className="p-1.5 rounded-lg bg-proxmox-dark hover:bg-purple-500/20 text-gray-400 hover:text-purple-400 transition-all"
@@ -2306,6 +2405,18 @@
                                                     </div>
                                                 )}
                                             </div>
+                                            {getProxmoxObjectUrl(getVmProxmoxTarget(resource)) && (
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        openProxmoxObject(getVmProxmoxTarget(resource));
+                                                    }}
+                                                    className="p-1.5 rounded-lg text-gray-500 hover:text-cyan-400 hover:bg-cyan-500/10 transition-all"
+                                                    title={t('openInProxmox') || 'Open in Proxmox'}
+                                                >
+                                                    <Icons.ExternalLink className="w-4 h-4" />
+                                                </button>
+                                            )}
                                             <span className={`w-2 h-2 rounded-full ${
                                                 resource.status === 'running' ? 'bg-green-500' : 'bg-red-500'
                                             }`} />
@@ -2501,4 +2612,3 @@
                 </div>
             );
         }
-
