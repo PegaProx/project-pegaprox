@@ -590,6 +590,12 @@ def main(debug_mode=False):
             manager.start()
             g.cluster_managers[cluster_id] = manager
             print(f"Started XCP-ng manager for pool: {cluster_data['name']}")
+        elif ctype == 'sylve':
+            from pegaprox.core.sylve import SylveManager
+            manager = SylveManager(cluster_id, config_obj)
+            manager.start()
+            g.cluster_managers[cluster_id] = manager
+            print(f"Started Sylve manager for host: {cluster_data['name']}")
         else:
             manager = PegaProxManager(cluster_id, config_obj)
             manager.start()

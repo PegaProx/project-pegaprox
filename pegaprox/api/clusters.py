@@ -23,6 +23,7 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immedi
 from pegaprox.core.config import load_config, save_config
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
+from pegaprox.core.sylve import SylveManager
 from pegaprox.api.helpers import load_server_settings, get_connected_manager, check_cluster_access, safe_error
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
@@ -169,6 +170,11 @@ def add_cluster():
         if not manager.connect():
             error_detail = manager.connection_error or 'Failed to connect to XCP-ng pool'
             return jsonify({'error': f'Failed to connect: {error_detail}'}), 400
+    elif cluster_type == 'sylve':
+        manager = SylveManager(cluster_id, config)
+        if not manager.connect():
+            error_detail = manager.connection_error or 'Failed to connect to Sylve host'
+            return jsonify({'error': f'Failed to connect: {error_detail}'}), 400
     else:
         manager = PegaProxManager(cluster_id, config)
         # Test connection - MK: return actual error instead of generic message (#88)
@@ -186,7 +192,7 @@ def add_cluster():
         db.update_cluster(cluster_id, {'cluster_type': cluster_type})
 
     # Audit log
-    type_label = 'XCP-ng' if cluster_type == 'xcpng' else 'Proxmox'
+    type_label = 'XCP-ng' if cluster_type == 'xcpng' else 'Sylve' if cluster_type == 'sylve' else 'Proxmox'
     log_audit(request.session['user'], 'cluster.added', f"Added {type_label} cluster: {data.get('name')} ({data.get('host')})")
 
     result = {'id': cluster_id, 'message': 'Cluster added successfully'}
@@ -309,12 +315,12 @@ def get_cluster_nodes(cluster_id):
     manager = cluster_managers[cluster_id]
 
     # MK: XCP-ng clusters use their own get_nodes()
-    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+    if getattr(manager, 'cluster_type', 'proxmox') in ('xcpng', 'sylve'):
         try:
             nodes = manager.get_nodes()
             return jsonify(nodes)
         except Exception as e:
-            logging.debug(f"XCP-ng get_nodes failed for {cluster_id}: {e}")
+            logging.debug(f"Alt cluster get_nodes failed for {cluster_id}: {e}")
             return jsonify({'error': 'Connection temporarily unavailable', 'nodes': [], 'offline': True}), 503
 
     # Try to get live data
