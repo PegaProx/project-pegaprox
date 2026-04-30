@@ -343,12 +343,15 @@ def check_readiness(plan_id):
             issues.append({'severity': 'info', 'msg': f"VM {vm['vmid']}: no replication job linked"})
 
     # check target resources (basic: is there enough RAM?)
+    # MK Apr 2026 (#350) — get_node_status() returns mem_total/mem_used, not the
+    # /cluster/resources field names maxmem/mem. The old code subtracted two
+    # always-missing keys → 0 → warning fired even on clusters with 13G+ free.
     if tgt_mgr and tgt_mgr.is_connected:
         try:
             node_status = tgt_mgr.get_node_status()
             if node_status:
                 total_mem_free = sum(
-                    d.get('maxmem', 0) - d.get('mem', 0)
+                    d.get('mem_total', 0) - d.get('mem_used', 0)
                     for d in node_status.values()
                     if d.get('status') == 'online'
                 )

@@ -1659,16 +1659,32 @@ def backup_config():
             logging.error(f"[Backup] User data is string, not dict")
             return jsonify({'error': 'User data format error - please re-login'}), 500
         
-        # Verify password
-        password_salt = user.get('password_salt', '') if isinstance(user, dict) else ''
-        password_hash = user.get('password_hash', '') if isinstance(user, dict) else ''
-        
-        if not verify_password(user_password, password_salt, password_hash):
-            log_audit(username, 'config.backup_failed', 'Password verification failed')
-            logging.warning(f"[Backup] Password verification failed for {username}")
+        # Verify password.
+        # MK Apr 2026 (#355) — LDAP/OIDC users have no local password_hash; they
+        # authenticate against the upstream IdP each time. The old code only
+        # checked the local hash, so AD-mapped admins always got "Incorrect
+        # password" when creating a config backup. Branch on auth_source.
+        auth_source = (user.get('auth_source') if isinstance(user, dict) else None) or 'local'
+        password_ok = False
+        if auth_source == 'ldap':
+            try:
+                from pegaprox.utils.ldap import ldap_authenticate
+                ldap_res = ldap_authenticate(username, user_password)
+                password_ok = bool(ldap_res and ldap_res.get('success'))
+            except Exception as _ldap_err:
+                logging.warning(f"[Backup] LDAP password verification failed for {username}: {_ldap_err}")
+                password_ok = False
+        else:
+            password_salt = user.get('password_salt', '') if isinstance(user, dict) else ''
+            password_hash = user.get('password_hash', '') if isinstance(user, dict) else ''
+            password_ok = verify_password(user_password, password_salt, password_hash)
+
+        if not password_ok:
+            log_audit(username, 'config.backup_failed', f'Password verification failed (auth_source={auth_source})')
+            logging.warning(f"[Backup] Password verification failed for {username} (auth_source={auth_source})")
             return jsonify({'error': 'Incorrect password'}), 401
-        
-        logging.debug(f"[Backup] Password verified for {username}")
+
+        logging.debug(f"[Backup] Password verified for {username} via {auth_source}")
         
         # 2. Validate backup password
         backup_password = data.get('backup_password', '')
@@ -1930,16 +1946,29 @@ def restore_config():
             logging.error(f"[Restore] User data is string, not dict: {user[:50]}...")
             return jsonify({'error': 'User data format error - please re-login'}), 500
         
-        # Verify password
-        password_salt = user.get('password_salt', '') if isinstance(user, dict) else ''
-        password_hash = user.get('password_hash', '') if isinstance(user, dict) else ''
-        
-        if not verify_password(user_password, password_salt, password_hash):
-            log_audit(username, 'config.restore_failed', 'Password verification failed')
-            logging.warning(f"[Restore] Password verification failed for {username}")
+        # Verify password (mirror of #355 fix in backup endpoint — LDAP users
+        # have no local hash, so re-bind to the IdP for them).
+        auth_source = (user.get('auth_source') if isinstance(user, dict) else None) or 'local'
+        password_ok = False
+        if auth_source == 'ldap':
+            try:
+                from pegaprox.utils.ldap import ldap_authenticate
+                ldap_res = ldap_authenticate(username, user_password)
+                password_ok = bool(ldap_res and ldap_res.get('success'))
+            except Exception as _ldap_err:
+                logging.warning(f"[Restore] LDAP password verification failed for {username}: {_ldap_err}")
+                password_ok = False
+        else:
+            password_salt = user.get('password_salt', '') if isinstance(user, dict) else ''
+            password_hash = user.get('password_hash', '') if isinstance(user, dict) else ''
+            password_ok = verify_password(user_password, password_salt, password_hash)
+
+        if not password_ok:
+            log_audit(username, 'config.restore_failed', f'Password verification failed (auth_source={auth_source})')
+            logging.warning(f"[Restore] Password verification failed for {username} (auth_source={auth_source})")
             return jsonify({'error': 'Incorrect password'}), 401
-        
-        logging.debug(f"[Restore] Password verified for {username}")
+
+        logging.debug(f"[Restore] Password verified for {username} via {auth_source}")
         
         # 2. Validate backup password
         if not backup_password:

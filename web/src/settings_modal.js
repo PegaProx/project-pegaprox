@@ -1243,8 +1243,10 @@
                             domain: data.domain || '',
                             port: data.port || 5000,
                             ssl_enabled: data.ssl_enabled || false,
-                            ssl_cert: data.ssl_cert_exists ? '(Zertifikat vorhanden)' : '',
-                            ssl_key: data.ssl_key_exists ? '(Schlüssel vorhanden)' : '',
+                            // MK Apr 2026 (#354) — placeholders were hardcoded in German;
+                            // surfaced on English UIs too. Wrap in t() with English fallback.
+                            ssl_cert: data.ssl_cert_exists ? (t('certPresentPlaceholder') || '(certificate uploaded)') : '',
+                            ssl_key: data.ssl_key_exists ? (t('keyPresentPlaceholder') || '(private key uploaded)') : '',
                             acme_enabled: data.acme_enabled || false,
                             acme_provider: data.acme_provider || 'letsencrypt',
                             acme_email: data.acme_email || '',

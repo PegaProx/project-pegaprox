@@ -8,6 +8,9 @@ venv/
 # SSL / Secrets
 cert.pem
 key.pem
+ssl/*.key
+ssl/*.crt
+ssl/*.pem
 *.p12
 *.pfx
 

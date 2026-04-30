@@ -215,6 +215,7 @@ def export_cluster_config(cluster_id):
         'balance_local_disks': getattr(c, 'balance_local_disks', False),
         'dry_run': c.dry_run,
         'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
+        'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
         # secrets intentionally omitted: pass, ssh_key, api_token_secret
     })
 
@@ -588,6 +589,7 @@ ALLOWED_CONFIG_FIELDS = {
     'predictive_balancing', 'predictive_threshold',
     'balance_cpu_weight', 'balance_mem_weight', 'balance_io_weight',
     'cpu_baseline',
+    'vnc_tunnel',  # MK Apr 2026 — SSH-tunnel-mode for VNC console
 }
 
 @bp.route('/api/clusters/<cluster_id>', methods=['PUT'])

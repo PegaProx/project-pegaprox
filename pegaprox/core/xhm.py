@@ -1711,31 +1711,58 @@ def _run_esxi_to_pve(task):
                 ssh_pve = _connect_ssh(pve_host, pve_user, pve_pass,
                                        key_path=pve_key, port=pve_port)
 
+                # MK Apr 2026 (#359) — VMware datastore folders / VM-name folders can
+                # legitimately contain spaces (and parens). Every shell interpolation
+                # below has to be `shlex.quote`'d both for the LOCAL command (run on
+                # the PVE node) and ALSO single-quoted for the REMOTE SCP/SSH side
+                # because scp passes the remote arg through a remote shell.
+                import shlex as _shlex
+                def _q_local(s): return _shlex.quote(str(s))
+                def _q_remote(s):
+                    # safest cross-shell quoting for the remote side: single-quote
+                    # and escape any embedded apostrophes by closing+reopening.
+                    return "'" + str(s).replace("'", "'\"'\"'") + "'"
+
+                vm_folder = vmdk_rel_path.split('/')[0]
+
                 # create SSHFS mount on PVE node to ESXi datastore
                 mount_dir = f"{mount_base}-{idx}"
                 mount_cmds = [
-                    f"mkdir -p {mount_dir}",
+                    f"mkdir -p {_q_local(mount_dir)}",
                     f"sshfs -o StrictHostKeyChecking=no,password_stdin "
-                    f"{esxi_user}@{esxi_host}:/vmfs/volumes/{datastore_name} "
-                    f"{mount_dir} <<< '{esxi_pass}'",
+                    f"{_q_local(esxi_user + '@' + esxi_host + ':/vmfs/volumes/' + datastore_name)} "
+                    f"{_q_local(mount_dir)} <<< {_q_local(esxi_pass)}",
                 ]
                 for cmd in mount_cmds:
                     _, out, err = ssh_pve.exec_command(cmd, timeout=30)
                     out.channel.recv_exit_status()
 
                 # check mount worked
-                _, chk_out, _ = ssh_pve.exec_command(f"ls {mount_dir}/{vmdk_rel_path.split('/')[0]}/ 2>/dev/null | head -3", timeout=10)
+                _, chk_out, _ = ssh_pve.exec_command(
+                    f"ls {_q_local(mount_dir + '/' + vm_folder + '/')} 2>/dev/null | head -3",
+                    timeout=10,
+                )
                 chk_out.channel.recv_exit_status()
                 if not chk_out.read().decode().strip():
                     # sshfs might not work, try NFS or direct copy fallback
                     task.log(f"  SSHFS mount failed, trying scp fallback")
                     # cleanup failed mount
-                    ssh_pve.exec_command(f"fusermount -u {mount_dir} 2>/dev/null; rmdir {mount_dir} 2>/dev/null", timeout=10)
+                    ssh_pve.exec_command(
+                        f"fusermount -u {_q_local(mount_dir)} 2>/dev/null; "
+                        f"rmdir {_q_local(mount_dir)} 2>/dev/null",
+                        timeout=10,
+                    )
 
                     # fallback: scp the flat vmdk to temp, then import
-                    # TODO: this uses /tmp space like the old approach
+                    # remote source path needs single-quoting on top of local
+                    # quoting because scp invokes a remote shell.
                     tmp_path = f"/tmp/xhm-{task.id}-disk{idx}.vmdk"
-                    scp_cmd = f"sshpass -p '{esxi_pass}' scp -o StrictHostKeyChecking=no {esxi_user}@{esxi_host}:/vmfs/volumes/{datastore_name}/{flat_path} {tmp_path}"
+                    remote_src = f"{esxi_user}@{esxi_host}:" + _q_remote('/vmfs/volumes/' + datastore_name + '/' + flat_path)
+                    scp_cmd = (
+                        f"sshpass -p {_q_local(esxi_pass)} "
+                        f"scp -o StrictHostKeyChecking=no "
+                        f"{_q_local(remote_src)} {_q_local(tmp_path)}"
+                    )
                     _, scp_out, scp_err = ssh_pve.exec_command(scp_cmd, timeout=7200)
                     scp_exit = scp_out.channel.recv_exit_status()
                     if scp_exit != 0:
@@ -2038,10 +2065,17 @@ def _run_esxi_to_xcpng(task):
             try:
                 # SCP from ESXi
                 task.log(f"  Downloading VMDK from ESXi...")
+                # MK Apr 2026 (#359) — VMware datastore / VM-name folders can have
+                # spaces. Even though we use argv-list invocation here (no LOCAL
+                # shell to escape), scp passes the remote path through the REMOTE
+                # ssh shell, so the path itself must be single-quoted inside the
+                # argv string.
+                _remote_path = '/vmfs/volumes/' + datastore_name + '/' + flat_path
+                _q_remote_path = "'" + _remote_path.replace("'", "'\"'\"'") + "'"
                 scp_cmd = [
                     'sshpass', '-p', esxi_pass,
                     'scp', '-o', 'StrictHostKeyChecking=no',
-                    f'{esxi_user}@{esxi_host}:/vmfs/volumes/{datastore_name}/{flat_path}',
+                    f'{esxi_user}@{esxi_host}:{_q_remote_path}',
                     tmp_vmdk
                 ]
                 proc = subprocess.run(scp_cmd, capture_output=True, timeout=7200)

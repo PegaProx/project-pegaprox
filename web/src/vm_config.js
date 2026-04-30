@@ -5367,22 +5367,61 @@
         // LW: ZFS RAID level is set at pool creation, not per-disk. Type shown in selector.
         function AddDiskModal({ isQemu, storageList, hardwareOptions, getNextDiskId, onAdd, onClose }) {
             const { t } = useTranslation();
+
+            // MK Apr 2026 — explicit format-per-storage matrix. PVE 9.1 added qcow2
+            // support on LVM and LVM-thin (was raw-only before). ZFS/Ceph RBD remain
+            // raw-only because they're block-level. We expose the format choice in the
+            // UI rather than silently defaulting it (#user-feedback).
+            const formatsForStorageType = (st) => {
+                if (!st) return ['raw', 'qcow2'];
+                switch (st) {
+                    case 'dir': case 'nfs': case 'cifs': case 'glusterfs':
+                        return ['qcow2', 'raw', 'vmdk'];
+                    case 'btrfs':
+                        return ['raw', 'qcow2'];
+                    case 'lvm': case 'lvmthin':
+                        // PVE 9.1+ added qcow2 on LVM(-thin) — list it first so it's the
+                        // default for snapshot-friendly setups.
+                        return ['qcow2', 'raw'];
+                    case 'zfspool': case 'zfs': case 'rbd': case 'iscsi': case 'iscsidirect':
+                        return ['raw'];
+                    default:
+                        return ['raw', 'qcow2'];
+                }
+            };
+            const initialStorage = storageList[0]?.storage || 'local-lvm';
+            const initialFmt = formatsForStorageType(storageList[0]?.type)[0] || 'raw';
+
             const [diskConfig, setDiskConfig] = useState({
                 disk_id: 'scsi1',
-                storage: storageList[0]?.storage || 'local-lvm',
+                storage: initialStorage,
+                format: initialFmt,
                 size: 32,
                 cache: '',
                 iothread: true,
                 ssd: false,
                 discard: true,
             });
-            
+
             // MK: Get current bus type from disk_id (e.g. "scsi0" -> "scsi")
             const currentBus = diskConfig.disk_id.replace(/[0-9]/g, '');
             // LW: iothread needs virtio-scsi-pci controller, won't work with IDE/SATA
             const supportsIothread = ['scsi', 'virtio'].includes(currentBus);
             // MK: ssd emulation for TRIM support - IDE doesn't support it at all
             const supportsSsd = ['scsi', 'virtio', 'sata'].includes(currentBus);
+
+            // Available formats for the currently-selected storage
+            const selectedStorageEntry = storageList.find(s => s.storage === diskConfig.storage);
+            const availableFormats = formatsForStorageType(selectedStorageEntry?.type);
+
+            // When the user picks a different storage, snap the format to the first
+            // valid choice for that storage type — but keep their existing pick if
+            // it's still valid.
+            useEffect(() => {
+                if (!availableFormats.includes(diskConfig.format)) {
+                    setDiskConfig(prev => ({...prev, format: availableFormats[0]}));
+                }
+            }, [diskConfig.storage]);
 
             useEffect(() => {
                 if (getNextDiskId) {
@@ -5405,11 +5444,13 @@
             
             // NS: Filter out unsupported options before sending to API
             const handleAdd = () => {
-                const configToSend = { 
+                const configToSend = {
                     disk_id: diskConfig.disk_id,
                     storage: diskConfig.storage,
                     size: diskConfig.size,
-                    discard: diskConfig.discard
+                    discard: diskConfig.discard,
+                    // MK Apr 2026 — pass selected format through to PVE.
+                    format: diskConfig.format || availableFormats[0] || 'raw',
                 };
                 // Only add cache if set
                 if (diskConfig.cache) {
@@ -5518,6 +5559,36 @@
                                     />
                                 </div>
                             </div>
+                            {/* MK Apr 2026 — explicit format selector. Defaults follow the
+                                storage type (raw for ZFS/RBD, qcow2 for files / LVM since 9.1). */}
+                            {isQemu && (
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">
+                                        {t('diskFormat') || 'Format'}
+                                        {selectedStorageEntry?.type && (
+                                            <span className="ml-2 text-gray-500">({selectedStorageEntry.type})</span>
+                                        )}
+                                    </label>
+                                    <select
+                                        value={diskConfig.format}
+                                        onChange={(e) => setDiskConfig({...diskConfig, format: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    >
+                                        {availableFormats.map(f => (
+                                            <option key={f} value={f}>
+                                                {f === 'qcow2' ? 'qcow2 — supports snapshots, thin provisioning' :
+                                                 f === 'raw'   ? 'raw — best performance, fixed size' :
+                                                 f === 'vmdk'  ? 'vmdk — VMware compatibility' : f}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    {availableFormats.length === 1 && (
+                                        <p className="text-xs text-gray-500 mt-1">
+                                            {t('diskFormatLockedHint') || 'This storage type only supports one format.'}
+                                        </p>
+                                    )}
+                                </div>
+                            )}
                             {isQemu && hardwareOptions && (
                                 <React.Fragment>
                                     <div>

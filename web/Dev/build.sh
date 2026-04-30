@@ -57,6 +57,7 @@ SRC_FILES=(
     tables.js
     vm_modals.js
     vm_config.js
+    vnc_secure_socket.js
     node_modals.js
     create_modals.js
     settings_modal.js

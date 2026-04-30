@@ -176,7 +176,31 @@ def ldap_authenticate(username: str, password: str) -> dict:
         member_of = []
         if 'memberOf' in user_entry:
             member_of = [str(g) for g in user_entry['memberOf']]
-        
+
+        # MK Apr 2026 (#353) — AD's `memberOf` only returns DIRECT group memberships.
+        # Users inheriting Built-in/Users via nested groups (Domain Users → Builtin/Users)
+        # don't show up here, so role mappings to those groups silently fall back to
+        # the default role. AD supports LDAP_MATCHING_RULE_IN_CHAIN (OID 1.2.840.113556.1.4.1941)
+        # which walks the membership chain. We try it best-effort; on non-AD LDAP the
+        # filter is rejected with operationsError and we keep the direct list.
+        try:
+            base_for_groups = ldap_config.get('group_base_dn') or ldap_config.get('base_dn')
+            if base_for_groups and user_dn:
+                chain_filter = f'(&(objectClass=group)(member:1.2.840.113556.1.4.1941:={escape_filter_chars(user_dn)}))'
+                conn.search(search_base=base_for_groups, search_filter=chain_filter,
+                            search_scope=SUBTREE, attributes=['cn'])
+                nested = [str(e.entry_dn) for e in conn.entries]
+                if nested:
+                    seen = {g.lower() for g in member_of}
+                    for g in nested:
+                        if g.lower() not in seen:
+                            member_of.append(g)
+                            seen.add(g.lower())
+                    logging.info(f"[LDAP] AD nested-group expansion added {len(nested)} group(s) for '{username}'")
+        except Exception as _chain_err:
+            # OpenLDAP doesn't implement the IN_CHAIN matching rule — that's fine.
+            logging.debug(f"[LDAP] nested group search unsupported (OK on non-AD): {_chain_err}")
+
         conn.unbind()
         
         # Step 3: Verify user's password by binding with their credentials

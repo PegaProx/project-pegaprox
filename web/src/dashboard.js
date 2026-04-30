@@ -2646,6 +2646,40 @@
                 // ──────────────────────────────────────────────────────────
                 // 3. Scope of Assessment
                 // ──────────────────────────────────────────────────────────
+                // MK Apr 2026 (#user-feedback) — richer scoping:
+                //  • Count UNIQUE framework refs across all checks (not just our controls)
+                //  • Group refs by family (A.5/A.7/A.8 for ISO; AC/AU/IA/SI/CM/SC for NIST etc.)
+                //  • Mark controls that have NO direct mapping for this framework
+                //    (these are reported as "no direct mapping" instead of being silently dropped)
+                const allRefsForFw = new Set();
+                const refsByFamily = {};
+                const unmappedControls = [];
+                fw.controls.forEach(cid => {
+                    const refs = mapping[cid] || [];
+                    if (refs.length === 0) {
+                        unmappedControls.push(cid);
+                        return;
+                    }
+                    refs.forEach(r => {
+                        allRefsForFw.add(r.ref);
+                        if (!refsByFamily[r.family]) refsByFamily[r.family] = new Set();
+                        refsByFamily[r.family].add(r.ref);
+                    });
+                });
+                const familySummary = Object.keys(refsByFamily)
+                    .sort()
+                    .map(fam => {
+                        const refs = Array.from(refsByFamily[fam]).sort();
+                        const label = familyLabels[fam] || fam;
+                        return `${fam} ${label}: ${refs.length} ref${refs.length !== 1 ? 's' : ''}`;
+                    })
+                    .join(' · ');
+                const controlSetSizeText =
+                    `${fw.controls.length} PegaProx control${fw.controls.length !== 1 ? 's' : ''} in profile, ` +
+                    `mapped to ${allRefsForFw.size} ${fw.name} reference${allRefsForFw.size !== 1 ? 's' : ''}` +
+                    (familySummary ? ` (${familySummary})` : '') +
+                    `; ${overallChecked} data point${overallChecked !== 1 ? 's' : ''} evaluated across ${nodes.length} node${nodes.length !== 1 ? 's' : ''}`;
+
                 blocks.push({
                     type: 'table',
                     title: t('scopeOfAssessment') || 'Scope of Assessment',
@@ -2656,12 +2690,63 @@
                         [t('frameworkSource') || 'Framework source', fwMeta.source_url || '—'],
                         [t('frameworkNote') || 'Framework note',     fwMeta.note || '—'],
                         [t('hardeningProfile') || 'Hardening profile', profileLabel],
-                        [t('controlSetSize') || 'Control set size',  `${fw.controls.length} controls in profile, ${overallChecked} evaluated`],
+                        [t('controlSetSize') || 'Control set size',  controlSetSizeText],
                         [t('sampling') || 'Sampling',                methodology.sampling || '100% of in-scope nodes evaluated.'],
                         [t('outOfScope') || 'Out of scope',          t('outOfScopeText') || 'Administrative policies, personnel security, physical security, incident response, supply chain risk, and cryptographic module validation (FIPS 140-3) are NOT assessed by this report.'],
                     ],
                 });
                 blocks.push({ type: 'spacer', height: 4 });
+
+                // 3b. Framework families / Annex coverage breakdown — answers "which
+                // refs and how many?" at a glance. ISO 27001 has 4 themes (A.5/A.6/
+                // A.7/A.8); NIST 800-53 has 20 control families (AC/AU/CM/IA/SC/SI…).
+                if (Object.keys(refsByFamily).length > 0) {
+                    blocks.push({
+                        type: 'table',
+                        title: (t('frameworkCoverageByFamily') || 'Framework coverage — by family / theme'),
+                        columns: [
+                            t('family') || 'Family',
+                            t('familyName') || 'Name',
+                            t('refsCovered') || 'References covered',
+                            t('pegaproxControls') || 'PegaProx controls',
+                        ],
+                        rows: Object.keys(refsByFamily).sort().map(fam => {
+                            const refs = Array.from(refsByFamily[fam]).sort();
+                            const ctrlsInFamily = fw.controls.filter(cid =>
+                                (mapping[cid] || []).some(r => r.family === fam)
+                            );
+                            return [
+                                fam,
+                                familyLabels[fam] || '—',
+                                `${refs.length} (${refs.slice(0, 8).join(', ')}${refs.length > 8 ? ', …' : ''})`,
+                                String(ctrlsInFamily.length),
+                            ];
+                        }),
+                    });
+                    blocks.push({ type: 'spacer', height: 4 });
+                }
+
+                // 3c. Controls WITHOUT a direct framework mapping — auditors need to
+                // see this explicitly so they understand which checks were run for
+                // hardening hygiene but DON'T satisfy any specific framework ref.
+                if (unmappedControls.length > 0) {
+                    blocks.push({
+                        type: 'table',
+                        title: (t('unmappedControls') || 'Controls without a direct framework mapping (informational)'),
+                        columns: [
+                            t('pegaproxControl') || 'PegaProx control',
+                            t('description') || 'Description',
+                            t('rationale') || 'Note',
+                        ],
+                        rows: unmappedControls.map(cid => [
+                            cid,
+                            allTitles[cid] || cid,
+                            t('noDirectMappingNote') ||
+                              `No direct ${fw.name} reference for this check. Run as defence-in-depth hygiene; not counted toward framework coverage.`
+                        ]),
+                    });
+                    blocks.push({ type: 'spacer', height: 4 });
+                }
 
                 // ──────────────────────────────────────────────────────────
                 // 4. Methodology

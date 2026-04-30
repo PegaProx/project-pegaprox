@@ -202,36 +202,50 @@ def add_pool_member(cluster_id, pool_id):
         # Add VM to pool - Proxmox uses 'vms' parameter
         host = manager.host
         url = f"https://{host}:8006/api2/json/pools/{pool_id}"
-        
+
         logging.info(f"Adding VM {vmid} to pool {pool_id} on {host}")
-        
-        # Proxmox expects form data with string values
+
+        # Proxmox expects form data with string values.
+        # MK Apr 2026 (#349) — `allow-move=1` lets us re-pool a VM that's already
+        # a member of another pool (PVE 8+ rejects without it). Without that flag
+        # the call fails AFTER the second toggle and the previous toggle's
+        # success line has already fired in cache, leading the UI to believe a
+        # silent fail when it actually worked.
         response = manager._api_put(url, data={
-            'vms': str(vmid)
+            'vms': str(vmid),
+            'allow-move': '1',
         })
-        
+
         logging.info(f"Proxmox response: {response.status_code} - {response.text[:200] if response.text else 'empty'}")
-        
+
         if response.status_code != 200:
-            error_text = response.text
-            # Try to parse JSON error
+            error_text = response.text or ''
             try:
                 error_json = response.json()
-                error_text = error_json.get('errors', {}).get('vms', error_text)
-            except:
+                error_text = (error_json.get('errors', {}) or {}).get('vms') or error_json.get('message') or error_text
+            except Exception:
                 pass
+
+            # NS Apr 2026 — idempotency: PVE returns "already a pool member" when
+            # the same VM is added twice. From the user's point of view the
+            # post-condition holds (VM is in the pool), so report success and
+            # let the caller move on instead of forcing a UI error.
+            if 'already a pool member' in (error_text or '').lower():
+                invalidate_pool_cache(cluster_id)
+                return jsonify({'success': True, 'message': f'VM {vmid} already in pool "{pool_id}"', 'idempotent': True})
+
             return jsonify({'error': f'Proxmox API error: {error_text}'}), 500
-        
-        # Invalidate cache
+
         invalidate_pool_cache(cluster_id)
-        
-        audit_log(request.session.get('user'), 'pool.member.add', f'Added VM {vmid} to pool {pool_id}', 
+        audit_log(request.session.get('user'), 'pool.member.add', f'Added VM {vmid} to pool {pool_id}',
                   {'cluster': cluster_id, 'poolid': pool_id, 'vmid': vmid})
-        
         return jsonify({'success': True, 'message': f'VM {vmid} added to pool "{pool_id}"'})
     except Exception as e:
-        logging.error(f"[API] Failed to add VM to pool: {e}")
-        return jsonify({'error': 'Failed to add VM to pool'}), 500
+        # Surface the actual exception class/message so the UI doesn't have to
+        # guess. The previous flat "Failed to add VM to pool" hid PVE-side
+        # rejections behind a generic 500 (issue #349).
+        logging.error(f"[API] add VM to pool failed: {type(e).__name__}: {e}")
+        return jsonify({'error': f'Failed to add VM to pool: {type(e).__name__}: {e}'}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/pools/<pool_id>/members/<int:vmid>', methods=['DELETE'])

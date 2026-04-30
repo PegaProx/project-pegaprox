@@ -4821,6 +4821,15 @@
                                                 </h3>
                                             </div>
                                             <div className="p-4 space-y-4">
+                                                {/* MK Apr 2026 (#320) — make it explicit up-front that this dialog
+                                                    only does intra-cluster replication. The previous wording
+                                                    only fired AFTER you'd selected a VM and the dropdown happened to
+                                                    be empty; users with multi-node clusters who actually wanted
+                                                    cross-cluster replication never saw it. */}
+                                                <div className="bg-blue-500/10 border border-blue-500/30 text-blue-200 text-xs p-2 rounded">
+                                                    {t('intraClusterReplOnlyHint') ||
+                                                        'This dialog creates replication within the current cluster. For replication across clusters, open the VM → Configure → Replication → Cross-Cluster tab.'}
+                                                </div>
                                                 {/* VM select */}
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">VM / CT</label>

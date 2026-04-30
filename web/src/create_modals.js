@@ -278,15 +278,23 @@
                     ? [t('general'), t('os'), t('hardware'), t('disk'), t('network'), t('advanced')]
                     : [t('general'), t('template'), t('resources'), t('disk'), t('network'), t('options')];
 
+            // MK Apr 2026 (#358) — match PVE 9.1's full ostype list + labels
+            // (we were missing w2k/w2k3/w2k8/wvista/solaris and the labels
+            // didn't line up with what PVE shows in its own UI).
             const osTypes = [
-                { value: 'l26', label: 'Linux 2.6+ Kernel' },
+                { value: 'l26', label: 'Linux 2.6 - 6.x Kernel' },
                 { value: 'l24', label: 'Linux 2.4 Kernel' },
-                { value: 'win11', label: 'Windows 11/2022' },
-                { value: 'win10', label: 'Windows 10/2016/2019' },
-                { value: 'win8', label: 'Windows 8/2012' },
-                { value: 'win7', label: 'Windows 7/2008' },
-                { value: 'wxp', label: 'Windows XP/2003' },
-                { value: 'other', label: 'Other' },
+                { value: 'win11', label: 'Microsoft Windows 11/2022/2025' },
+                { value: 'win10', label: 'Microsoft Windows 10/2016/2019' },
+                { value: 'win8', label: 'Microsoft Windows 8.x/2012/2012r2' },
+                { value: 'win7', label: 'Microsoft Windows 7/2008r2' },
+                { value: 'wvista', label: 'Microsoft Windows Vista' },
+                { value: 'w2k8', label: 'Microsoft Windows 2008' },
+                { value: 'w2k3', label: 'Microsoft Windows 2003' },
+                { value: 'w2k', label: 'Microsoft Windows 2000' },
+                { value: 'wxp', label: 'Microsoft Windows XP' },
+                { value: 'solaris', label: 'Solaris Kernel' },
+                { value: 'other', label: 'Other OS types' },
             ];
 
             const cpuTypes = [
@@ -2169,6 +2177,16 @@
                 require_numbers: true,
                 require_special: false
             });
+
+            // MK Apr 2026 — Stable VNC Mode toggle was reading localStorage on
+            // each render but had no React state, so flipping it didn't trigger
+            // a re-render and the knob/colour stayed on the previous value
+            // until the modal was reopened. Mirror localStorage in state.
+            const [stableVncOn, setStableVncOn] = useState(
+                typeof window !== 'undefined' &&
+                window.localStorage &&
+                window.localStorage.getItem('pegaprox-vnc-stable-mode') === '1'
+            );
             
             // Generate password policy hint text
             const getPasswordPolicyHint = () => {
@@ -2828,6 +2846,40 @@
                                             >
                                                 <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
                                                     localStorage.getItem('pegaprox-noise') === 'off' ? 'left-7' : 'left-1'
+                                                }`} />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* MK Apr 2026 — Stable VNC Mode (D). Adds an inner AES-256-GCM layer
+                                        that survives middlebox TLS-inspection / EDR byte-mangling. Off by
+                                        default (small CPU overhead) — opt-in for environments where the
+                                        VNC console fails with "Authentication failed" or randomly disconnects. */}
+                                    <div className="pt-4 border-t border-proxmox-border">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-3">
+                                                <Icons.Lock className="w-5 h-5 text-gray-400" />
+                                                <div>
+                                                    <p className="text-sm font-medium text-white">{t('stableVncMode') || 'Stable VNC Mode'}</p>
+                                                    <p className="text-xs text-gray-500">{t('stableVncModeDesc') || 'Wraps VNC frames in AES-256-GCM. Use if your network has HTTPS inspection (CrowdStrike, Palo Alto, Zscaler, …) interfering with the VNC console.'}</p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={() => {
+                                                    const next = !stableVncOn;
+                                                    setStableVncOn(next);
+                                                    localStorage.setItem('pegaprox-vnc-stable-mode', next ? '1' : '0');
+                                                    addToast((t('settingsSaved') || 'Saved') + (next ? ' — ' + (t('stableVncModeNote') || 'next VNC connect uses encrypted tunnel') : ''), 'success');
+                                                }}
+                                                // MK Apr 2026 — flex-shrink-0 + ml-4: long description text was
+                                                // squeezing the toggle; the knob looked off-position because the
+                                                // button itself was being compressed below 48×24.
+                                                className={`flex-shrink-0 ml-4 relative w-12 h-6 rounded-full transition-colors ${
+                                                    stableVncOn ? 'bg-emerald-500' : 'bg-proxmox-dark border border-proxmox-border'
+                                                }`}
+                                            >
+                                                <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                                                    stableVncOn ? 'left-7' : 'left-1'
                                                 }`} />
                                             </button>
                                         </div>

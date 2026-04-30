@@ -9038,21 +9038,64 @@ echo "AGENT_INSTALLED_OK"
     # ==================== REPLICATION METHODS ====================
     
     def get_replication_jobs(self, vmid: int = None) -> List[Dict]:
-        
+
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return []
-        
+
         try:
             url = f"https://{self.host}:8006/api2/json/cluster/replication"
             response = self._api_get(url)
-            
-            if response.status_code == 200:
-                jobs = response.json()['data']
-                if vmid:
-                    jobs = [j for j in jobs if j.get('guest') == vmid]
-                return jobs
-            return []
+
+            if response.status_code != 200:
+                return []
+            jobs = response.json()['data']
+            if vmid:
+                jobs = [j for j in jobs if j.get('guest') == vmid]
+
+            # MK Apr 2026 (#333) — /cluster/replication only carries the job
+            # DEFINITION (id, target, schedule, …); runtime fields like
+            # last_sync / last_try / duration / state / error / fail_count
+            # only come back from the per-node /nodes/{node}/replication
+            # endpoint. Fetch that for the source node(s) and merge in by
+            # job id so the UI's "Last sync" stops showing "Never" for jobs
+            # that have actually been running.
+            try:
+                source_nodes = {j.get('source') for j in jobs if j.get('source')}
+                # PVE typically only fills `source` after first run; fall back to
+                # iterating all online nodes if the field is missing.
+                if not source_nodes:
+                    nodes_url = f"https://{self.host}:8006/api2/json/nodes"
+                    nr = self._api_get(nodes_url)
+                    if nr.status_code == 200:
+                        source_nodes = {n['node'] for n in nr.json().get('data', [])
+                                        if n.get('status') == 'online'}
+                runtime_by_id = {}
+                for nname in source_nodes:
+                    try:
+                        nu = f"https://{self.host}:8006/api2/json/nodes/{nname}/replication"
+                        rr = self._api_get(nu)
+                        if rr.status_code == 200:
+                            for entry in rr.json().get('data', []) or []:
+                                jid = entry.get('id')
+                                if not jid:
+                                    continue
+                                # Take the freshest record across nodes (last_sync wins)
+                                prev = runtime_by_id.get(jid)
+                                if not prev or (entry.get('last_sync') or 0) > (prev.get('last_sync') or 0):
+                                    runtime_by_id[jid] = entry
+                    except Exception:
+                        continue
+                for j in jobs:
+                    rt = runtime_by_id.get(j.get('id'))
+                    if rt:
+                        for k in ('last_sync', 'last_try', 'duration', 'state', 'error', 'fail_count', 'pid'):
+                            if k in rt and rt[k] is not None:
+                                j.setdefault(k, rt[k])
+            except Exception as _enrich_err:
+                self.logger.debug(f"Replication runtime enrichment failed: {_enrich_err}")
+
+            return jobs
         except Exception as e:
             self.logger.error(f"Error getting replication jobs: {e}")
             return []
@@ -10575,10 +10618,19 @@ echo "AGENT_INSTALLED_OK"
             
             if vm_type == 'qemu':
                 url = f"https://{self.host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
-                
+
                 # Build disk string - format is storage:size (size in GB without unit)
                 disk_str = f"{storage}:{size}"
-                
+
+                # MK Apr 2026 — pass through explicit disk format. PVE 9.1 added
+                # qcow2 support on LVM/LVM-thin in addition to file storages, so we
+                # let the caller pick. Block-only stores (zfs/rbd/iscsi) only accept
+                # 'raw' but PVE returns a clear error on mismatch — we don't need
+                # to guard it here.
+                disk_format = (disk_config.get('format') or '').strip().lower()
+                if disk_format and disk_format != 'auto':
+                    disk_str += f",format={disk_format}"
+
                 # Add optional parameters (only if supported by bus type)
                 if disk_config.get('cache'):
                     disk_str += f",cache={disk_config['cache']}"
@@ -10592,7 +10644,7 @@ echo "AGENT_INSTALLED_OK"
                     disk_str += ",discard=on"
                 if disk_config.get('backup') == False:
                     disk_str += ",backup=0"
-                
+
                 data = {disk_id: disk_str}
                 
             else:  # LXC

@@ -2330,10 +2330,51 @@ def update_backup_job(cluster_id, job_id):
     try:
         host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/backup/{job_id}"
-        data = request.json or {}
-        
+        data = dict(request.json or {})
+
+        # MK Apr 2026 (#338) — sanitise the payload before bouncing back to PVE.
+        # When a job was created in PVE itself, GETing it returns fields that
+        # PVE then rejects on PUT (server-managed / read-only / wrong shape).
+        # The user just edited the VMID list, so the rest of the dict is "load
+        # → save round-trip" leftovers we shouldn't be sending.
+        READONLY = ('id', 'type', 'subtype', 'next-run', 'last-run-status',
+                    'duration', 'errors', 'state', 'starttime-display')
+        for k in READONLY:
+            data.pop(k, None)
+        # Drop empty / null values — PVE 8+ rejects "" for some optional fields
+        # (e.g. it complains about `mailto: ""` on jobs that never had it set).
+        for k in [k for k, v in list(data.items()) if v in (None, '')]:
+            data.pop(k, None)
+
+        # `prune-backups` and `fleecing` come back from GET as either a dict
+        # or a string. PVE's PUT only accepts the property-string form
+        # (`keep-last=3,keep-daily=7` / `enabled=1,storage=local`). Normalise.
+        def _to_pve_propstring(v):
+            if isinstance(v, dict):
+                parts = []
+                for kk, vv in v.items():
+                    if isinstance(vv, bool): vv = '1' if vv else '0'
+                    if vv is None or vv == '': continue
+                    parts.append(f"{kk}={vv}")
+                return ','.join(parts)
+            return v
+        if 'prune-backups' in data:
+            data['prune-backups'] = _to_pve_propstring(data['prune-backups'])
+            if not data['prune-backups']:
+                data.pop('prune-backups')
+        if 'fleecing' in data:
+            data['fleecing'] = _to_pve_propstring(data['fleecing'])
+            if not data['fleecing']:
+                data.pop('fleecing')
+        # Same shape applies to performance and notification-mode-specific
+        # fields that PVE 8+ also returns as dicts.
+        for k in ('performance', 'notification-policy'):
+            if k in data and isinstance(data[k], dict):
+                data[k] = _to_pve_propstring(data[k])
+                if not data[k]: data.pop(k)
+
         r = manager._create_session().put(url, data=data, timeout=10)
-        
+
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'backup.job_updated', f"Updated backup job {job_id}", cluster=manager.config.name)

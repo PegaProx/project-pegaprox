@@ -160,6 +160,7 @@ def save_config():
                     'api_token_user': getattr(manager.config, 'api_token_user', ''),
                     'api_token_secret': getattr(manager.config, 'api_token_secret', ''),
                     'cluster_type': getattr(manager, 'cluster_type', 'proxmox'),
+                    'vnc_tunnel': bool(getattr(manager.config, 'vnc_tunnel', False)),  # MK Apr 2026
                 }
 
                 db.save_cluster(cluster_id, cluster_data)
