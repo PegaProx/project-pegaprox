@@ -243,8 +243,13 @@ def validate_password_policy(password: str) -> tuple:
     return True, None
 
 
-def load_users() -> dict:
-    """load users from db"""
+def load_users(readonly: bool = False) -> dict:
+    """Load users from db.
+
+    When readonly=True, never bootstrap the default admin user. This is for
+    observer-only paths such as metrics scrapes where reading auth state must not
+    mutate auth state.
+    """
     # MK: migrated from json files, was a pain
     try:
         db = get_db()
@@ -261,6 +266,9 @@ def load_users() -> dict:
         return _load_users_legacy()  # fallback to old format
     
     # no users found
+    if readonly:
+        return {}
+
     if os.path.exists(ADMIN_INITIALIZED_FILE):
         # dont recreate admin if it was deleted on purpose
         logging.error("users missing but admin was initialized - wont recreate")
@@ -821,4 +829,3 @@ def cleanup_expired_sessions():
             active_sessions.pop(sid, None)
     if expired:
         logging.debug(f"Cleaned up {len(expired)} expired sessions")
-
