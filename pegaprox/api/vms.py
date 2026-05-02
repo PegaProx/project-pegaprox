@@ -1341,22 +1341,20 @@ def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):
 @bp.route('/api/clusters/<cluster_id>/datacenter/replication', methods=['GET'])
 @require_auth(perms=["cluster.view"])
 def get_replication_jobs(cluster_id):
-    """Get all replication jobs"""
+    """Get all replication jobs (datacenter-level view)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+    # MK May 2026 (#333) — go through manager.get_replication_jobs() which merges
+    # per-node runtime data (last_sync/last_try/state/error/fail_count) onto the
+    # cluster-level job definitions. The plain /cluster/replication endpoint
+    # only returns config so the datacenter view used to show "Last sync = Never"
+    # for jobs that were running fine.
     try:
-        host = manager.host
-        url = f"https://{host}:8006/api2/json/cluster/replication"
-        response = manager._create_session().get(url, timeout=5)
-        
-        if response.status_code == 200:
-            return jsonify(response.json().get('data', []))
-        return jsonify([])
+        return jsonify(manager.get_replication_jobs())
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get replication jobs')}), 500
 

@@ -9186,25 +9186,50 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': str(e)}
     
     def run_replication_now(self, job_id: str) -> Dict[str, Any]:
-        
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
-        
+        # MK May 2026 (#333) — `nodes/localhost/replication/.../schedule_now` only
+        # works if the API endpoint we're talking to happens to be on the same
+        # node where the replication source VM lives. In any real cluster the
+        # cluster-host (self.host) and the source-node usually differ, so the
+        # request silently no-ops and the customer sees a green toast with no
+        # actual replication. Resolve the real source node first.
         try:
-            # Extract vmid and job number from job_id (format: vmid-jobnumber)
-            parts = job_id.split('-')
-            vmid = parts[0]
-            
-            url = f"https://{self.host}:8006/api2/json/nodes/localhost/replication/{job_id}/schedule_now"
-            
-            self.logger.info(f"Triggering immediate replication for job {job_id}")
+            source_node = None
+            # 1. Cheapest: ask /cluster/replication, find the job, read .source
+            try:
+                rj = self._api_get(f"https://{self.host}:8006/api2/json/cluster/replication")
+                if rj.status_code == 200:
+                    for j in rj.json().get('data', []) or []:
+                        if j.get('id') == job_id and j.get('source'):
+                            source_node = j['source']
+                            break
+            except Exception:
+                pass
+            # 2. Fallback: derive from the VM's current node via /cluster/resources
+            if not source_node:
+                try:
+                    vmid = job_id.split('-', 1)[0]
+                    rr = self._api_get(f"https://{self.host}:8006/api2/json/cluster/resources?type=vm")
+                    if rr.status_code == 200:
+                        for r in rr.json().get('data', []) or []:
+                            if str(r.get('vmid')) == str(vmid):
+                                source_node = r.get('node')
+                                break
+                except Exception:
+                    pass
+            if not source_node:
+                return {'success': False,
+                        'error': f"Could not resolve source node for job '{job_id}' — job not found in /cluster/replication and VM not in /cluster/resources"}
+
+            url = f"https://{self.host}:8006/api2/json/nodes/{source_node}/replication/{job_id}/schedule_now"
+            self.logger.info(f"Triggering immediate replication for job {job_id} on node {source_node}")
             response = self._create_session().post(url, timeout=15)
-            
             if response.status_code == 200:
-                return {'success': True}
+                return {'success': True, 'node': source_node}
             else:
-                return {'success': False, 'error': response.text}
+                return {'success': False, 'error': response.text or f'PVE returned {response.status_code}'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
