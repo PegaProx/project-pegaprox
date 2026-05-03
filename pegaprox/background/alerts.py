@@ -201,6 +201,74 @@ def check_and_send_alerts():
                         total = sum(n.get('disk_total', 0) for n in online)
                         if total > 0:
                             current_value = used / total * 100
+                    elif metric in ('backup_sla_breached_pct', 'backup_sla_compliance_pct'):
+                        # MK May 2026 — Backup SLA-aware alerts. Run the same
+                        # eval as the /backup-sla endpoint and feed the % into
+                        # the alerting pipeline. Threshold direction depends on
+                        # which metric: breached_pct >= X (warn when too many
+                        # behind), compliance_pct <= Y (warn when below floor).
+                        try:
+                            from pegaprox.api.clusters import get_backup_sla as _ignored  # ensure import resolves
+                            # We can't call the Flask endpoint directly from a thread.
+                            # Inline the same evaluation: threshold + storage scan.
+                            import time as _t
+                            max_age = int(getattr(manager.config, 'backup_sla_max_age_hours', 0) or 0)
+                            if max_age > 0:
+                                _now = int(_t.time())
+                                _max_s = max_age * 3600
+                                vms = manager.get_vm_resources() or []
+                                last_bk = {}
+                                try:
+                                    sess = manager._create_session()
+                                    nr = sess.get(f"https://{manager.host}:8006/api2/json/nodes", timeout=10)
+                                    nodes = [n['node'] for n in (nr.json().get('data') or [])
+                                             if n.get('status') == 'online'] if nr.status_code == 200 else []
+                                    seen = set()
+                                    for nd in nodes:
+                                        sr = sess.get(f"https://{manager.host}:8006/api2/json/nodes/{nd}/storage", timeout=10)
+                                        if sr.status_code != 200: continue
+                                        for st in sr.json().get('data') or []:
+                                            if 'backup' not in (st.get('content') or ''): continue
+                                            sname = st.get('storage')
+                                            if not sname or (nd, sname) in seen: continue
+                                            seen.add((nd, sname))
+                                            try:
+                                                cr = sess.get(f"https://{manager.host}:8006/api2/json/nodes/{nd}/storage/{sname}/content",
+                                                              params={'content': 'backup'}, timeout=(5, 30))
+                                            except Exception:
+                                                continue
+                                            if cr.status_code != 200: continue
+                                            for it in cr.json().get('data') or []:
+                                                ts = int(it.get('ctime') or 0)
+                                                vmid = str(it.get('vmid') or '')
+                                                if not ts or not vmid: continue
+                                                volid = it.get('volid') or ''
+                                                vt = 'qemu' if 'qemu' in volid or '/vm/' in volid else \
+                                                     'lxc' if 'lxc' in volid or '/ct/' in volid else ''
+                                                if not vt: continue
+                                                k = (vt, vmid)
+                                                if k not in last_bk or ts > last_bk[k]:
+                                                    last_bk[k] = ts
+                                except Exception:
+                                    pass
+                                breached = 0
+                                ok_cnt = 0
+                                total = 0
+                                for r in vms:
+                                    if r.get('type') not in ('qemu', 'lxc'): continue
+                                    total += 1
+                                    ts = last_bk.get((r.get('type'), str(r.get('vmid', ''))), 0)
+                                    if not ts or (_now - ts) >= _max_s:
+                                        breached += 1
+                                    else:
+                                        ok_cnt += 1
+                                if total > 0:
+                                    if metric == 'backup_sla_breached_pct':
+                                        current_value = round(100 * breached / total, 1)
+                                    else:
+                                        current_value = round(100 * ok_cnt / total, 1)
+                        except Exception as _e:
+                            logging.debug(f"[AlertCheck] backup_sla eval failed: {_e}")
                     try:
                         target_name = manager.config.name
                     except Exception:

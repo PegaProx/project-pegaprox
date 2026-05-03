@@ -13,11 +13,61 @@
             const [storageContent, setStorageContent] = useState([]);
             const [contentLoading, setContentLoading] = useState(false);
             const [expandedNodes, setExpandedNodes] = useState({});
-            const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync
+            const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync, sla
             const [syncStatus, setSyncStatus] = useState(null);
             const [syncLoading, setSyncLoading] = useState(false);
             const [syncContentType, setSyncContentType] = useState('iso');
             const [syncingFiles, setSyncingFiles] = useState({});  // {filename: true} while syncing
+            // MK May 2026 — Backup SLA tracking sub-tab
+            const [slaData, setSlaData] = useState(null);
+            const [slaLoading, setSlaLoading] = useState(false);
+            const [slaSaving, setSlaSaving] = useState(false);
+            const [slaDraftHours, setSlaDraftHours] = useState(0);
+            const [slaFilter, setSlaFilter] = useState('all'); // all, breached, no-backup, warning, ok
+
+            const refreshSla = () => {
+                setSlaLoading(true);
+                authFetch(`${API_URL}/clusters/${clusterId}/backup-sla`)
+                    .then(r => r?.json())
+                    .then(d => {
+                        if (d && !d.error) {
+                            setSlaData(d);
+                            setSlaDraftHours(d.max_age_hours || 0);
+                        }
+                    })
+                    .catch(() => {})
+                    .finally(() => setSlaLoading(false));
+            };
+
+            const saveSlaConfig = async () => {
+                setSlaSaving(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/backup-sla/config`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ max_age_hours: parseInt(slaDraftHours) || 0 })
+                    });
+                    if (r && r.ok) {
+                        addToast(t('slaConfigSaved') || 'Backup SLA target saved', 'success');
+                        refreshSla();
+                    } else {
+                        const err = await r?.json().catch(() => ({}));
+                        addToast(err.error || (t('slaConfigSaveFailed') || 'Save failed'), 'error');
+                    }
+                } catch (e) {
+                    addToast(t('connectionError') || 'Connection error', 'error');
+                } finally {
+                    setSlaSaving(false);
+                }
+            };
+
+            const fmtAgeHours = (h) => {
+                if (h === null || h === undefined) return '—';
+                if (h < 24) return `${h.toFixed(1)} h`;
+                const d = Math.floor(h / 24);
+                const rem = (h - d * 24).toFixed(0);
+                return `${d}d ${rem}h`;
+            };
 
             const refreshSyncStatus = () => {
                 setSyncLoading(true);
@@ -1001,6 +1051,12 @@
                                 <Icons.RefreshCw style={{width: 14, height: 14, flexShrink: 0}} />
                                 <span>{t('isoSync') || 'ISO Sync'}</span>
                             </button>
+                            <button onClick={() => {
+                                setActiveTab('sla'); refreshSla();
+                            }} className={activeTab === 'sla' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
+                                <Icons.Shield style={{width: 14, height: 14, flexShrink: 0}} />
+                                <span>{t('backupSla') || 'Backup SLA'}</span>
+                            </button>
                         </div>
                     ) : (
                     <div className="flex gap-2">
@@ -1032,6 +1088,15 @@
                         >
                             <Icons.RefreshCw className="inline mr-2" />
                             {t('isoSync') || 'ISO Sync'}
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('sla'); refreshSla(); }}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                activeTab === 'sla' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-card text-gray-400 hover:text-white'
+                            }`}
+                        >
+                            <Icons.Shield className="inline mr-2" />
+                            {t('backupSla') || 'Backup SLA'}
                         </button>
                     </div>
                     )}
@@ -1130,6 +1195,128 @@
                                 <div className="text-center py-12 text-gray-500">
                                     <Icons.Folder className="w-12 h-12 mx-auto mb-3 opacity-30" />
                                     <p>{t('noFilesFound') || 'No ISOs or templates found on any node.'}</p>
+                                </div>
+                            )}
+                        </div>
+                    ) : activeTab === 'sla' ? (
+                        /* MK May 2026 — Backup SLA Tracking sub-tab.
+                           Configure max-age threshold + see compliance per VM/CT.
+                           Pulls from /backup-sla endpoint which aggregates vzdump
+                           + PBS snapshots across all backup-capable storages. */
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                            <div className="flex items-start justify-between mb-4">
+                                <div>
+                                    <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                                        <Icons.Shield className="w-5 h-5" />
+                                        {t('backupSla') || 'Backup SLA'}
+                                    </h3>
+                                    <p className="text-sm text-gray-500 mt-1">
+                                        {t('backupSlaDesc') || 'Define how recent each VM\'s backup must be. Aggregates across local vzdumps + PBS snapshots and flags VMs that fall behind.'}
+                                    </p>
+                                </div>
+                                <button onClick={refreshSla} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh') || 'Refresh'}>
+                                    <Icons.RefreshCw className={`w-4 h-4 ${slaLoading ? 'animate-spin' : ''}`} />
+                                </button>
+                            </div>
+
+                            {/* Config row */}
+                            <div className="flex items-center gap-3 p-4 bg-proxmox-dark border border-proxmox-border rounded-lg mb-4">
+                                <Icons.Clock className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                                <label className="text-sm text-gray-300">{t('maxBackupAge') || 'Max backup age (hours)'}</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    max="8760"
+                                    value={slaDraftHours}
+                                    onChange={e => setSlaDraftHours(e.target.value)}
+                                    className="w-24 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-sm"
+                                />
+                                <span className="text-xs text-gray-500">{t('zeroDisables') || '0 = disabled'}</span>
+                                <div className="flex-1" />
+                                <button onClick={saveSlaConfig} disabled={slaSaving || !isAdmin}
+                                    className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded text-sm font-medium disabled:opacity-50 flex items-center gap-1.5">
+                                    {slaSaving && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
+                                    {t('save') || 'Save'}
+                                </button>
+                            </div>
+
+                            {/* Summary tiles */}
+                            {slaData && (
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+                                    {[
+                                        { key: 'compliance_pct', label: t('compliance') || 'Compliance', val: slaData.summary?.compliance_pct === null ? '—' : `${slaData.summary?.compliance_pct ?? 0}%`, color: 'text-blue-400', bg: 'bg-blue-500/10', filter: 'all' },
+                                        { key: 'ok', label: t('compliant') || 'Compliant', val: slaData.summary?.ok ?? 0, color: 'text-green-400', bg: 'bg-green-500/10', filter: 'ok' },
+                                        { key: 'warning', label: t('warning') || 'Warning', val: slaData.summary?.warning ?? 0, color: 'text-yellow-400', bg: 'bg-yellow-500/10', filter: 'warning' },
+                                        { key: 'breached', label: t('breached') || 'Breached', val: slaData.summary?.breached ?? 0, color: 'text-red-400', bg: 'bg-red-500/10', filter: 'breached' },
+                                        { key: 'no_backup', label: t('noBackup') || 'No backup', val: slaData.summary?.no_backup ?? 0, color: 'text-orange-400', bg: 'bg-orange-500/10', filter: 'no-backup' },
+                                    ].map(tile => (
+                                        <button
+                                            key={tile.key}
+                                            onClick={() => setSlaFilter(tile.filter)}
+                                            className={`p-3 rounded-lg border ${slaFilter === tile.filter ? 'border-proxmox-orange' : 'border-proxmox-border'} ${tile.bg} text-left hover:border-proxmox-orange transition-colors`}
+                                        >
+                                            <div className={`text-2xl font-bold ${tile.color}`}>{tile.val}</div>
+                                            <div className="text-xs text-gray-400 mt-1">{tile.label}</div>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+
+                            {/* Disabled / no data state */}
+                            {!slaData && !slaLoading && (
+                                <div className="text-center py-12 text-gray-500">
+                                    <Icons.Shield className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                                    <p>{t('slaLoadingPrompt') || 'Click refresh to load Backup SLA data.'}</p>
+                                </div>
+                            )}
+                            {slaData && !slaData.enabled && (
+                                <div className="p-4 bg-yellow-500/5 border border-yellow-500/20 rounded-lg mb-4 text-sm text-yellow-300">
+                                    {t('slaDisabledHint') || 'SLA tracking is disabled. Set a max backup age above to start evaluating.'}
+                                </div>
+                            )}
+
+                            {/* VM table */}
+                            {slaData && slaData.vms && slaData.vms.length > 0 && (
+                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg overflow-hidden">
+                                    <table className="w-full text-sm">
+                                        <thead className="bg-proxmox-card border-b border-proxmox-border">
+                                            <tr className="text-left text-xs uppercase text-gray-400">
+                                                <th className="px-3 py-2">{t('vmid') || 'VMID'}</th>
+                                                <th className="px-3 py-2">{t('name') || 'Name'}</th>
+                                                <th className="px-3 py-2">{t('node') || 'Node'}</th>
+                                                <th className="px-3 py-2">{t('lastBackup') || 'Last backup'}</th>
+                                                <th className="px-3 py-2">{t('age') || 'Age'}</th>
+                                                <th className="px-3 py-2">{t('source') || 'Source'}</th>
+                                                <th className="px-3 py-2">{t('status') || 'Status'}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {slaData.vms
+                                                .filter(v => slaFilter === 'all' || v.sla_status === slaFilter)
+                                                .map(v => {
+                                                    const statusColor = {
+                                                        'ok': 'bg-green-500/15 text-green-400',
+                                                        'warning': 'bg-yellow-500/15 text-yellow-400',
+                                                        'breached': 'bg-red-500/15 text-red-400',
+                                                        'no-backup': 'bg-orange-500/15 text-orange-400',
+                                                        'disabled': 'bg-gray-500/15 text-gray-400',
+                                                    }[v.sla_status] || 'bg-gray-500/15 text-gray-400';
+                                                    return (
+                                                        <tr key={`${v.type}-${v.vmid}`} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover">
+                                                            <td className="px-3 py-2 text-gray-300">{v.vmid}</td>
+                                                            <td className="px-3 py-2 text-white">{v.name || '-'}</td>
+                                                            <td className="px-3 py-2 text-gray-400 text-xs">{v.node || '-'}</td>
+                                                            <td className="px-3 py-2 text-gray-400 text-xs">{v.last_backup_ts ? new Date(v.last_backup_ts * 1000).toLocaleString() : '—'}</td>
+                                                            <td className="px-3 py-2 text-gray-300">{fmtAgeHours(v.age_hours)}</td>
+                                                            <td className="px-3 py-2 text-xs text-gray-500">{v.backup_source || '-'}</td>
+                                                            <td className="px-3 py-2">
+                                                                <span className={`px-2 py-0.5 rounded text-xs ${statusColor}`}>{v.sla_status}</span>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                        </tbody>
+                                    </table>
                                 </div>
                             )}
                         </div>

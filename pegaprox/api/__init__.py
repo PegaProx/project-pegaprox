@@ -2,6 +2,7 @@
 """
 PegaProx API Blueprint Registration
 """
+import logging
 
 
 def register_blueprints(app):
@@ -30,6 +31,17 @@ def register_blueprints(app):
     from pegaprox.api.plugins import bp as plugins_bp
     from pegaprox.api.webauthn import bp as webauthn_bp
     from pegaprox.api.metrics_exporter import bp as metrics_exporter_bp
+    from pegaprox.api.insights import bp as insights_bp
+    from pegaprox.api.templates_lib import bp as templates_lib_bp
+    from pegaprox.api.push import bp as push_bp, register_alert_handler
+    from pegaprox.api.costs import bp as costs_bp
+    from pegaprox.api.drift import bp as drift_bp, start_scanner as start_drift_scanner
+    from pegaprox.api.audit_search import bp as audit_search_bp
+    from pegaprox.api.siem import bp as siem_bp, start_worker as start_siem_worker
+    from pegaprox.api.snapshots import bp as snapshots_bp, start_scheduler as start_snap_scheduler
+    from pegaprox.api.topology import bp as topology_bp
+    from pegaprox.api.power import bp as power_bp
+    from pegaprox.api.dr_drill import bp as dr_drill_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -55,7 +67,42 @@ def register_blueprints(app):
     app.register_blueprint(plugins_bp)
     app.register_blueprint(webauthn_bp)
     app.register_blueprint(metrics_exporter_bp)
+    app.register_blueprint(insights_bp)
+    app.register_blueprint(templates_lib_bp)
+    app.register_blueprint(push_bp)
+    app.register_blueprint(costs_bp)
+    app.register_blueprint(drift_bp)
+    app.register_blueprint(audit_search_bp)
+    app.register_blueprint(siem_bp)
+    app.register_blueprint(snapshots_bp)
+    app.register_blueprint(topology_bp)
+    app.register_blueprint(power_bp)
+    app.register_blueprint(dr_drill_bp)
 
     # Initialize WebSocket support for realtime blueprint
     from pegaprox.api.realtime import sock
     sock.init_app(app)
+
+    # MK May 2026 — wire push handler into the alerts pipeline
+    try:
+        register_alert_handler()
+    except Exception:
+        pass
+
+    # NS May 2026 — drift scanner thread (6h cadence; harmless if mgrs not yet up)
+    try:
+        start_drift_scanner()
+    except Exception as e:
+        logging.warning(f"drift scanner start failed: {e}")
+
+    # MK May 2026 — SIEM forwarder worker
+    try:
+        start_siem_worker()
+    except Exception as e:
+        logging.warning(f"siem worker start failed: {e}")
+
+    # NS May 2026 — snapshot scheduler (60s tick, idempotent)
+    try:
+        start_snap_scheduler()
+    except Exception as e:
+        logging.warning(f"snapshot scheduler start failed: {e}")

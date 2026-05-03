@@ -495,6 +495,7 @@ class PegaProxManager:
             self.last_successful_request = datetime.now()
             self.connection_error = None
             self._consecutive_failures = 0
+            self._auto_capture_upid(resp)  # MK May 2026 — bind PVE task to PegaProx user
             return resp
         except requests.exceptions.Timeout as e:
             # MK: Timeout does NOT mean cluster is offline
@@ -516,6 +517,7 @@ class PegaProxManager:
             self.last_successful_request = datetime.now()
             self.connection_error = None
             self._consecutive_failures = 0
+            self._auto_capture_upid(response)
             return response
         except requests.exceptions.Timeout as e:
             # MK: Timeout does NOT mean cluster is offline - operation might have succeeded
@@ -540,6 +542,7 @@ class PegaProxManager:
             self.last_successful_request = datetime.now()
             self.connection_error = None
             self._consecutive_failures = 0
+            self._auto_capture_upid(r)
             return r
         except requests.exceptions.Timeout as e:
             # MK: Timeout does NOT mean cluster is offline
@@ -553,7 +556,41 @@ class PegaProxManager:
                 self.is_connected = False
                 self.connection_error = str(e)
             raise
-    
+
+    def _auto_capture_upid(self, response):
+        """MK May 2026 — every PVE write call that creates an async task returns
+        a UPID in `data` (e.g. `UPID:pve1:000ABC:0123:...:qmstart:100:root@pam!tok:`).
+        Sniff it on the way back, look up the calling PegaProx user from the Flask
+        request context, persist the binding. Catches every endpoint that doesn't
+        manually call register_task_user — which is the long tail (snapshots,
+        config edits, migrations, replication runs, …). Any failure here MUST
+        be silent — never break the API call itself.
+        """
+        try:
+            if response is None or response.status_code >= 300:
+                return
+            ct = response.headers.get('Content-Type', '') if hasattr(response, 'headers') else ''
+            if 'json' not in ct.lower():
+                return
+            body = response.json()
+            if not isinstance(body, dict):
+                return
+            data = body.get('data')
+            # PVE tasks: data is a UPID string starting with "UPID:"
+            if not isinstance(data, str) or not data.startswith('UPID:'):
+                return
+            from flask import has_request_context, request
+            if not has_request_context():
+                return
+            sess = getattr(request, 'session', None) or {}
+            username = sess.get('user') if isinstance(sess, dict) else None
+            if not username:
+                return
+            from pegaprox.api.helpers import register_task_user
+            register_task_user(data, username, self.id)
+        except Exception:
+            pass
+
     def api_request(self, method: str, endpoint: str, data: dict = None):
         """generic api request wrapper - NS Jan 2026"""
         url = f'https://{self.host}:8006/api2/json{endpoint}'
@@ -6269,24 +6306,61 @@ echo "AGENT_INSTALLED_OK"
                     if pegaprox_user:
                         task_info['pegaprox_user'] = pegaprox_user
 
-                    # NS: Apr 2026 - match vncproxy tasks with audit log to find who opened the console
-                    if not pegaprox_user and task_info['type'] == 'vncproxy' and task_info.get('id'):
+                    # MK May 2026 — generalized audit-log fallback. Many endpoints don't
+                    # call register_task_user (snapshots, migrations, config updates, …)
+                    # so the explicit upid→user map only covers ~30% of tasks. For the
+                    # rest we infer from audit_log by matching task type → known action,
+                    # vmid in details, and a tight time window around the task starttime.
+                    # Survives F5 because audit_log is persistent.
+                    if not pegaprox_user:
                         try:
                             from pegaprox.core.db import get_db
                             _db = get_db()
                             _c = _db.conn.cursor()
-                            # match by /vmid in details (format: "VNC console opened: qemu/100 on node")
-                            # use task starttime for time window since sqlite datetime() is UTC
-                            _cutoff = (datetime.now() - timedelta(seconds=120)).isoformat()
-                            _c.execute(
-                                "SELECT user FROM audit_log WHERE action = 'vm.console' "
-                                "AND (details LIKE ? OR details LIKE ?) "
-                                "AND timestamp > ? ORDER BY timestamp DESC LIMIT 1",
-                                (f"%/{task_info['id']} %", f"%VM {task_info['id']}%", _cutoff)
-                            )
-                            _row = _c.fetchone()
-                            if _row:
-                                task_info['pegaprox_user'] = _row[0]
+                            # Wider window for slower operations (migrations, backups)
+                            _slow_types = {'qmigrate','vzmigrate','vzdump','qmrestore','vzrestore',
+                                           'snapshot','qmsnapshot','qmclone'}
+                            _window = 600 if task_info['type'] in _slow_types else 90
+                            # task.starttime is a unix timestamp; audit_log.timestamp is ISO local
+                            _start_ts = task_info.get('starttime') or 0
+                            if _start_ts:
+                                _from = (datetime.fromtimestamp(_start_ts) - timedelta(seconds=_window)).isoformat()
+                                _to = (datetime.fromtimestamp(_start_ts) + timedelta(seconds=30)).isoformat()
+                            else:
+                                _from = (datetime.now() - timedelta(seconds=_window)).isoformat()
+                                _to = datetime.now().isoformat()
+                            vmid = task_info.get('id') or ''
+                            if vmid:
+                                # any audit entry referencing this VMID in the time window
+                                _c.execute(
+                                    "SELECT user FROM audit_log WHERE "
+                                    "(details LIKE ? OR details LIKE ? OR details LIKE ?) "
+                                    "AND timestamp BETWEEN ? AND ? "
+                                    "ORDER BY timestamp DESC LIMIT 1",
+                                    (f"%/{vmid} %", f"%/{vmid}\n%", f"%VM {vmid}%", _from, _to)
+                                )
+                                _row = _c.fetchone()
+                                if _row:
+                                    task_info['pegaprox_user'] = _row[0]
+                            else:
+                                # cluster-level task (no vmid) — match by node + action timing
+                                _c.execute(
+                                    "SELECT user FROM audit_log WHERE "
+                                    "details LIKE ? AND timestamp BETWEEN ? AND ? "
+                                    "ORDER BY timestamp DESC LIMIT 1",
+                                    (f"%{task_info.get('node','')}%", _from, _to)
+                                )
+                                _row = _c.fetchone()
+                                if _row:
+                                    task_info['pegaprox_user'] = _row[0]
+                            # Promote audit-log match into task_users so future calls
+                            # hit the fast path instead of re-running the LIKE query.
+                            if task_info.get('pegaprox_user') and task_info['upid']:
+                                try:
+                                    from pegaprox.api.helpers import register_task_user
+                                    register_task_user(task_info['upid'], task_info['pegaprox_user'], self.id)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
 

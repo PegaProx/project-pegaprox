@@ -55,10 +55,14 @@ class V2PMigrationTask:
         self.network_bridge = self.config.get('network_bridge', 'vmbr0')
         self.start_after = self.config.get('start_after', True)
         self.remove_source = self.config.get('remove_source', False)
-        # ESXi SSH credentials (required for SSHFS)
+        # ESXi SSH credentials (required for SSHFS).
+        # MK May 2026 (audit fix M-10) — password gets popped out of self.config
+        # immediately so it doesn't sit in the serializable config dict for the
+        # whole migration lifetime. It lives only on self.esxi_password until
+        # _scrub_credentials() wipes it during the cleanup/failed phase.
         self.esxi_host = self.config.get('esxi_host', '')
         self.esxi_user = self.config.get('esxi_user', 'root')
-        self.esxi_password = self.config.get('esxi_password', '')
+        self.esxi_password = self.config.pop('esxi_password', '')
         self.esxi_datastore = self.config.get('esxi_datastore', '')
         self.esxi_vm_dir = self.config.get('esxi_vm_dir', '')
         # Advanced options
@@ -120,6 +124,17 @@ class V2PMigrationTask:
                 })
         except: pass
     
+    def _scrub_credentials(self):
+        """Wipe sensitive fields from the task object once they're no longer
+        needed. Called from set_phase() on completed/failed."""
+        try:
+            self.esxi_password = ''
+            # ensure no leftover copy in config either
+            if isinstance(self.config, dict):
+                self.config.pop('esxi_password', None)
+        except Exception:
+            pass
+
     def set_phase(self, phase, error=None):
         if self.phase in self.phase_times:
             start = datetime.fromisoformat(self.phase_times[self.phase]['start'])
@@ -139,6 +154,10 @@ class V2PMigrationTask:
             self.status = 'completed'; self.completed_at = datetime.now(); self.progress = 100
         elif phase == 'failed':
             self.status = 'failed'; self.completed_at = datetime.now()
+        # MK May 2026 (audit fix M-10) — wipe ESXi password from memory once we
+        # hit a terminal phase. No more SSH calls happen after these phases.
+        if phase in ('completed', 'failed'):
+            self._scrub_credentials()
         self.log(f"Phase: {phase}")
         # Broadcast migration status change via SSE
         try:
@@ -567,9 +586,12 @@ def _run_v2p_migration(task):
                  f"{ostype}, disk={disk_bus}, net={net_driver}")
         
         try:
+            # NS May 2026 (#222): manager default api_timeout is 10s, but VM
+            # creation on shared LVM / cluster-aware storage routinely needs
+            # 30-60s for the lock + config-replicate roundtrip. Bump explicitly.
             cr = pve_mgr._api_post(
                 f"https://{pve_mgr.host}:8006/api2/json/nodes/{task.target_node}/qemu",
-                data=pve_config)
+                data=pve_config, timeout=120)
             if cr.status_code not in (200, 201):
                 task.set_phase('failed', f'VM creation failed: {cr.text[:300]}'); return
             pve_task_id = cr.json().get('data', '')
@@ -775,9 +797,15 @@ def _run_v2p_migration(task):
                 flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
                 esxi_flat = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}"
                 presync_volumes.append((vol_id, vol_path, esxi_flat, disk_size))
-                # attach to Proxmox VM shell
-                _pve_node_exec(pve_mgr, task.target_node,
+                # attach to Proxmox VM shell — NS May 2026 (#222): rc-check
+                rc_a2, out_a2, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id} 2>&1", timeout=30)
+                if rc_a2 != 0:
+                    err = str(out_a2 or '').strip()[:200]
+                    task.log(f"  ✗ qm set --{disk_bus}{i} failed: {err}")
+                    task.set_phase('failed', f'qm set --{disk_bus}{i} {vol_id} → {err}')
+                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                    return
                 task.log(f"  Disk {i} attached as {disk_bus}{i}")
                 task.update_progress(dk, disk_size, disk_size)
             task.log("=== PRE-SYNC COMPLETE — entering snapshot-iterative delta loop ===")
@@ -970,12 +998,20 @@ def _run_v2p_migration(task):
                     _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
                     return
                 
-                # Attach disk
+                # Attach disk — NS May 2026 (#222): rc-check; silent failure used
+                # to leave the volume orphaned on storage and force users to run
+                # `qm rescan` to discover it.
                 attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id} 2>&1"
-                _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
+                rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
+                if rc_a != 0:
+                    err = str(out_a or '').strip()[:200]
+                    task.log(f"  ✗ qm set --{disk_bus}{i} failed: {err}")
+                    task.set_phase('failed', f'qm set --{disk_bus}{i} {vol_id} → {err}')
+                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                    return
                 task.log(f"  Disk {i} attached as {disk_bus}{i}")
                 task.update_progress(dk, disk_size, disk_size)
-            
+
             # Set boot order and start
             _pve_node_exec(pve_mgr, task.target_node,
                 f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=10)
@@ -1019,6 +1055,19 @@ def _run_v2p_migration(task):
         # AUTO MODE: Try pre-sync while VM runs, fallback to sshfs_boot
         # ================================================================
         task.log(f"=== TRANSFER MODE: Auto (pre-sync + delta) ===")
+        # NS May 2026 — if the VM is already offline at start of migration,
+        # skip the entire delta_sync step. Source disks aren't changing →
+        # the pre-sync copy is already final. Without this, we waste 20+
+        # min on dual-side md5sum loops + a hung snapshot deletion (the
+        # snapshot was never actually created on a stopped VM).
+        vm_pre_state = vmware_mgr.get_vm(task.vm_id)
+        vm_offline_from_start = (
+            'data' in vm_pre_state and
+            vm_pre_state['data'].get('power_state') == 'POWERED_OFF'
+        )
+        if vm_offline_from_start:
+            task.log("VM is already offline — pre-sync = final copy, delta_sync will be skipped")
+
         # IMPORTANT: Create snapshot first so base VMDK becomes read-only
         # VM continues running, writing to a delta VMDK
         task.log("Creating VMware snapshot for safe pre-sync copy...")
@@ -1030,7 +1079,8 @@ def _run_v2p_migration(task):
             task.log("Migration snapshot created - base VMDKs are now read-only")
         
         presync_volumes = []  # Track (vol_id, vol_path, flat_path, flat_size) for delta sync
-        stopped_for_presync = False  # Flag: if we had to stop VM, skip delta-sync
+        # If VM was offline before we started, treat same as if we'd stopped it: skip delta-sync.
+        stopped_for_presync = vm_offline_from_start
         
         for i, desc_file in enumerate(descriptor_files):
             dk = f'disk{i}'
@@ -1089,8 +1139,14 @@ def _run_v2p_migration(task):
             if rc_at == 0:
                 task.log(f"  Disk {i} attached as {disk_bus}{i} ({vol_id})")
             else:
-                task.log(f"  WARNING: attach failed: {str(out_at or '')[:150]}")
-            
+                # NS May 2026 (#222): used to just warn — silent failure left the
+                # disk orphaned in storage so users had to `qm rescan` after.
+                err = str(out_at or '').strip()[:200]
+                task.log(f"  ✗ qm set --{disk_bus}{i} failed: {err}")
+                task.set_phase('failed', f'qm set --{disk_bus}{i} {vol_id} → {err}')
+                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                return
+
             task.log(f"Pre-sync disk {i}: complete")
             task.update_progress(dk, disk_size, disk_size)
         
@@ -1728,22 +1784,49 @@ def _inject_virtio_drivers(pve_mgr, task):
         ")\n"
         "echo \"VER_NAME=$VER_NAME\"\n"
         "echo \"VER_BUILD=$VER_BUILD\"\n"
-        # Pick driver subdir — DEFAULTS, real mapping done Python-side and passed via env
-        "SUBDIR=\"${VIRTIO_SUBDIR:-w11/amd64}\"\n"
+        # NS May 2026 (#222) — pick subdir from actual VER_BUILD; some isos
+        # ship Server 2025 vioscsi only under 2k25/, w11/ might be missing it.
+        # Try multiple subdirs per driver; first hit wins.
+        "case \"$VER_BUILD\" in\n"
+        "  26100|26200|26300|26400|26500) PRIMARY=\"2k25/amd64\"; FALLBACKS=\"w11/amd64\" ;;\n"
+        "  20348)                          PRIMARY=\"2k22/amd64\"; FALLBACKS=\"w11/amd64\" ;;\n"
+        "  17763)                          PRIMARY=\"2k19/amd64\"; FALLBACKS=\"w10/amd64\" ;;\n"
+        "  14393)                          PRIMARY=\"2k16/amd64\"; FALLBACKS=\"w10/amd64\" ;;\n"
+        "  9600)                           PRIMARY=\"2k12R2/amd64\"; FALLBACKS=\"w8.1/amd64\" ;;\n"
+        "  *)\n"
+        "    # consume Win-build hints when no Server match\n"
+        "    if [ \"$VER_BUILD\" -ge 22000 ] 2>/dev/null; then\n"
+        "      PRIMARY=\"w11/amd64\"; FALLBACKS=\"2k25/amd64 2k22/amd64\"\n"
+        "    elif [ \"$VER_BUILD\" -ge 10240 ] 2>/dev/null; then\n"
+        "      PRIMARY=\"w10/amd64\"; FALLBACKS=\"2k19/amd64 w11/amd64\"\n"
+        "    else\n"
+        "      PRIMARY=\"${VIRTIO_SUBDIR:-w11/amd64}\"; FALLBACKS=\"\"\n"
+        "    fi\n"
+        "    ;;\n"
+        "esac\n"
+        # Allow operator override (use :- to be safe under nounset/strict mode)
+        "[ -n \"${VIRTIO_SUBDIR:-}\" ] && PRIMARY=\"$VIRTIO_SUBDIR\"\n"
+        "echo \"SUBDIR_PRIMARY=$PRIMARY\"; echo \"SUBDIR_FALLBACKS=$FALLBACKS\"\n"
+        # For backwards-compat with downstream log parsing
+        "SUBDIR=\"$PRIMARY\"\n"
         "echo \"SUBDIR=$SUBDIR\"\n"
-        # Copy SYS / INF / CAT for each driver
+        # Copy SYS / INF / CAT for each driver — try PRIMARY first, then FALLBACKS
         "DRV_DEST=\"$WIN_MNT/$WDIR/System32/drivers\"\n"
         "INF_DEST=\"$WIN_MNT/$WDIR/INF\"\n"
         "mkdir -p \"$INF_DEST\" 2>/dev/null||true\n"
         "COPIED=0\n"
         "for D in $DRIVERS; do "
-        "SRC=\"$ISO_MNT/$D/$SUBDIR\"; "
-        "[ -d \"$SRC\" ] || { echo \"SKIP $D (no $SRC)\"; continue; }; "
+        "SRC=\"\"; "
+        "for SUB in \"$PRIMARY\" $FALLBACKS; do "
+        "  CAND=\"$ISO_MNT/$D/$SUB\"; "
+        "  [ -d \"$CAND\" ] && [ -n \"$(ls $CAND/*.sys 2>/dev/null)\" ] && { SRC=\"$CAND\"; break; }; "
+        "done; "
+        "[ -n \"$SRC\" ] || { echo \"SKIP $D (none of: $PRIMARY $FALLBACKS)\"; continue; }; "
         "if cp -f \"$SRC\"/*.sys \"$DRV_DEST/\" 2>/dev/null; then "
         "  cp -f \"$SRC\"/*.inf \"$INF_DEST/\" 2>/dev/null||true; "
         "  cp -f \"$SRC\"/*.cat \"$DRV_DEST/\" 2>/dev/null||true; "
         "  COPIED=$((COPIED+1)); "
-        "  echo \"COPIED $D\"; "
+        "  echo \"COPIED $D ($SRC)\"; "
         "else "
         "  echo \"COPY_FAILED $D (mount RO?)\"; "
         "fi; "
@@ -1775,13 +1858,24 @@ def _inject_virtio_drivers(pve_mgr, task):
         "def set_expand_sz(node, key, val):\n"
         "    h.node_set_value(node, {'key': key, 't': REG_EXPAND_SZ,\n"
         "        'value': (val + '\\u0000').encode('utf-16-le')})\n"
+        # NS May 2026 — only register drivers whose .sys actually got copied.
+        # Setting Start=0 for a missing miniport bricks Windows boot
+        # (BSOD INACCESSIBLE_BOOT_DEVICE before usermode), so we skip any
+        # service whose backing file isn't present on the target FS.
+        "import os\n"
+        "drv_root = os.path.dirname(sys.argv[1]) + '/../drivers'\n"
+        "have_viostor = os.path.exists(drv_root + '/viostor.sys')\n"
+        "have_vioscsi = os.path.exists(drv_root + '/vioscsi.sys')\n"
+        "print(f'HIVEX have_viostor={have_viostor} have_vioscsi={have_vioscsi}')\n"
         "root = h.root()\n"
         "cs = navigate(root, ['ControlSet001'])\n"
         "services = navigate(cs, ['Services'])\n"
         "control = navigate(cs, ['Control'])\n"
         "cdb = navigate(control, ['CriticalDeviceDatabase'])\n"
-        "for svc, tag, img in [('viostor', 0x58, 'system32\\\\drivers\\\\viostor.sys'),\n"
-        "                     ('vioscsi', 0x59, 'system32\\\\drivers\\\\vioscsi.sys')]:\n"
+        "_svcs = []\n"
+        "if have_viostor: _svcs.append(('viostor', 0x58, 'system32\\\\drivers\\\\viostor.sys'))\n"
+        "if have_vioscsi: _svcs.append(('vioscsi', 0x59, 'system32\\\\drivers\\\\vioscsi.sys'))\n"
+        "for svc, tag, img in _svcs:\n"
         "    svc_node = navigate(services, [svc])\n"
         "    set_expand_sz(svc_node, 'ImagePath', img)\n"
         "    set_dword(svc_node, 'Type', 1)\n"
@@ -1794,17 +1888,100 @@ def _inject_virtio_drivers(pve_mgr, task):
         "    pnp = navigate(params, ['PnpInterface'])\n"
         "    set_dword(pnp, '5', 1)\n"
         "GUID = '{4D36E97B-E325-11CE-BFC1-08002BE10318}'\n"
-        "for pci_id, svc in [('pci#ven_1af4&dev_1001', 'viostor'),\n"
-        "                    ('pci#ven_1af4&dev_1001&subsys_00021af4&rev_00', 'viostor'),\n"
-        "                    ('pci#ven_1af4&dev_1004', 'vioscsi'),\n"
-        "                    ('pci#ven_1af4&dev_1004&subsys_00081af4', 'vioscsi'),\n"
-        "                    ('pci#ven_1af4&dev_1041', 'vioscsi')]:\n"
+        "_pci = []\n"
+        "if have_viostor:\n"
+        "    _pci += [('pci#ven_1af4&dev_1001', 'viostor'),\n"
+        "             ('pci#ven_1af4&dev_1001&subsys_00021af4&rev_00', 'viostor')]\n"
+        "if have_vioscsi:\n"
+        "    _pci += [('pci#ven_1af4&dev_1004', 'vioscsi'),\n"
+        "             ('pci#ven_1af4&dev_1004&subsys_00081af4', 'vioscsi'),\n"
+        "             ('pci#ven_1af4&dev_1041', 'vioscsi')]\n"
+        "for pci_id, svc in _pci:\n"
         "    cd = navigate(cdb, [pci_id])\n"
         "    set_sz(cd, 'ClassGUID', GUID)\n"
         "    set_sz(cd, 'Service', svc)\n"
         "h.commit(None)\n"
         "print('hivex commit OK')\n"
         "PYEOF\n"
+        # NS May 2026 — Bulk install via virtio-win-gt-x64.msi.
+        # Cleanest approach: stage the official 4.4 MB MSI, register a
+        # one-shot SYSTEM service that runs msiexec /quiet at first boot.
+        # The MSI itself handles cert import, ALL driver installs, qemu-ga,
+        # balloon service. Earlier we tried offline pnputil + RunOnce — that
+        # ran into "registry corrupt" because RunOnce executes with the
+        # logged-in user's standard token (no elevation), even for admins.
+        # SYSTEM service has full token, no UAC.
+        "PEGADIR=\"$WIN_MNT/$WDIR/../PegaProx\"\n"
+        "mkdir -p \"$PEGADIR\"\n"
+        "MSI_OK=0\n"
+        # Pick the right MSI by host arch — almost always x64 these days
+        "for cand in virtio-win-gt-x64.msi virtio-win-gt-x86.msi; do "
+        "  if [ -f \"$ISO_MNT/$cand\" ]; then "
+        "    cp -f \"$ISO_MNT/$cand\" \"$PEGADIR/$cand\"; "
+        "    echo \"MSI_STAGED $cand\"; "
+        "    MSI_OK=1; "
+        "    break; "
+        "  fi; "
+        "done\n"
+        "[ \"$MSI_OK\" -eq 1 ] || echo 'MSI_MISSING (skipping bulk install)'\n"
+        # Register the one-shot service in the SYSTEM hive.
+        # ImagePath runs as LocalSystem at next boot; cmd /c chains:
+        #   msiexec /quiet → sc delete self → del MSI
+        # Service stays disabled-by-failure if msiexec doesn't exit 0,
+        # so user can investigate via msi.log. Self-deletion needs the
+        # service to have already returned, hence the trailing & chain.
+        "SYSTEM_HIVE=\"$WIN_MNT/$WDIR/System32/config/SYSTEM\"\n"
+        "python3 - \"$SYSTEM_HIVE\" \"$MSI_OK\" << 'PYSV' || { echo 'SVC_FAILED (non-fatal)'; }\n"
+        "import sys, hivex\n"
+        "from hivex.hive_types import REG_DWORD, REG_SZ, REG_EXPAND_SZ\n"
+        "h = hivex.Hivex(sys.argv[1], write=True)\n"
+        "msi_ok = int(sys.argv[2])\n"
+        "if msi_ok == 0:\n"
+        "    print('skipping service — no MSI'); sys.exit(0)\n"
+        "def fc(p, n): return h.node_get_child(p, n)\n"
+        "def navigate(parent, parts):\n"
+        "    n = parent\n"
+        "    for p in parts:\n"
+        "        ch = h.node_get_child(n, p)\n"
+        "        if ch is None: ch = h.node_add_child(n, p)\n"
+        "        n = ch\n"
+        "    return n\n"
+        "def set_dword(node, k, v):\n"
+        "    h.node_set_value(node, {'key': k, 't': REG_DWORD, 'value': v.to_bytes(4, 'little')})\n"
+        "def set_sz(node, k, v):\n"
+        "    h.node_set_value(node, {'key': k, 't': REG_SZ, 'value': (v + chr(0)).encode('utf-16-le')})\n"
+        "def set_exp(node, k, v):\n"
+        "    h.node_set_value(node, {'key': k, 't': REG_EXPAND_SZ, 'value': (v + chr(0)).encode('utf-16-le')})\n"
+        # NS May 2026 — after MSI install, also flip vioscsi/viostor to Start=0
+        # (boot-critical). MSI registers them as Start=3 (manual), which means
+        # if the user later switches scsihw to virtio-scsi-*, Windows boot
+        # loader can't find a boot-time storage driver → INACCESSIBLE_BOOT_DEVICE.
+        # Pre-arming Start=0 means the controller switch "just works" without
+        # any manual `sc config` step on the customer side.
+        "cmdline = (\n"
+        "    'cmd.exe /c '\n"
+        "    '(msiexec /i \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" '\n"
+        "    'ADDLOCAL=ALL /quiet /norestart /l*v \"C:\\\\PegaProx\\\\msi.log\") & '\n"
+        "    '(sc config vioscsi start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
+        "    '(sc config viostor start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
+        "    '(sc delete PegaProxFirstBoot >> \"C:\\\\PegaProx\\\\service.log\" 2>&1) & '\n"
+        "    '(del \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" 2>nul)'\n"
+        ")\n"
+        "for cs_name in ['ControlSet001','ControlSet002']:\n"
+        "    cs = fc(h.root(), cs_name)\n"
+        "    if cs is None: continue\n"
+        "    services = fc(cs, 'Services')\n"
+        "    if services is None: continue\n"
+        "    svc = navigate(services, ['PegaProxFirstBoot'])\n"
+        "    set_sz(svc, 'DisplayName', 'PegaProx First-Boot Driver Install')\n"
+        "    set_dword(svc, 'Type', 0x10)\n"
+        "    set_dword(svc, 'Start', 2)\n"
+        "    set_dword(svc, 'ErrorControl', 0)\n"
+        "    set_exp(svc, 'ImagePath', cmdline)\n"
+        "    set_sz(svc, 'ObjectName', 'LocalSystem')\n"
+        "h.commit(None)\n"
+        "print('SVC_REGISTERED')\n"
+        "PYSV\n"
         "echo 'INJECTION_OK'\n"
     )
 
@@ -1843,15 +2020,41 @@ def _inject_virtio_drivers(pve_mgr, task):
         f"{env_prefix}bash {sf} 2>&1; rc=$?; rm -f {sf}; exit $rc",
         timeout=300)
     out_str = str(out or '')
-    # Surface the interesting lines — keep the log compact
-    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'INJECTION_OK']:
+    # Surface the interesting lines — keep the log compact.
+    # Most markers are once-per-run; COPIED/SKIP/COPY_FAILED are per-driver
+    # so we log all of them (otherwise we'd hide which drivers actually staged).
+    _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ')
+    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
         for line in out_str.splitlines():
             if marker in line:
                 task.log(f"[VirtIO] {line.strip()}")
-                break
+                if marker not in _multi:
+                    break
 
     if rc == 0 and 'INJECTION_OK' in out_str:
-        task.log("[VirtIO] ✓ Drivers staged + registry merged. Switch scsihw to virtio-scsi-pci to activate.")
+        task.log("[VirtIO] ✓ Drivers staged + registry merged.")
+        # NS May 2026 — log which drivers actually got staged (per-driver bash output)
+        copied_drivers = set()
+        for line in out_str.splitlines():
+            s = line.strip()
+            if s.startswith('COPIED '):
+                parts = s.split(None, 2)
+                if len(parts) >= 2:
+                    copied_drivers.add(parts[1].lower())
+        task.log(f"[VirtIO]   Copied drivers: {sorted(copied_drivers) or '(none parsed)'}")
+
+        # NS May 2026 — Auto-switch DEACTIVATED.
+        # We previously flipped scsihw to virtio-scsi-single after a successful
+        # injection, but that BSODs Server 2025 (INACCESSIBLE_BOOT_DEVICE) even
+        # with vioscsi.sys correctly staged + registry merged + CDB entries —
+        # something in the modern Win11/Server25 boot path doesn't bind vioscsi
+        # reliably during early boot when the source OS was installed under
+        # VMware pvscsi. Migration now ends with the same controller the source
+        # had (typically pvscsi → pvscsi). Drivers are still copied + registered
+        # so user can switch manually after a successful first boot.
+        # If we ever want to re-enable: gate behind explicit task.config opt-in
+        # AND verify the OS isn't Win11/Server2025-class.
+        task.log("[VirtIO]   scsihw left untouched — switch manually after first boot if desired")
         return True
     task.log(f"[VirtIO] ✗ Injection failed (rc={rc}). Last 400 chars of output:")
     task.log(out_str[-400:])
@@ -2026,6 +2229,57 @@ def _snapshot_zero_v2p_delta_loop(pve_mgr, task, vmware_mgr, esxi_host, esxi_use
     return True, len(snapshot_chain), snapshot_chain
 
 
+def _rebuild_sector_args(pve_mgr, node, vmid):
+    """Read VM config, regenerate -set device.<bus><idx>.{logical,physical}_block_size=512
+    for the currently-attached disks, write back via qm set. Use this whenever the user
+    changes disk bus (scsi0→sata0 etc.) and the static args reference a device that no
+    longer exists ("there is no device 'scsi0' defined" at qemu-start).
+
+    Returns (changed: bool, new_args: str, error: str|None).
+    """
+    try:
+        rc, out, _ = _pve_node_exec(pve_mgr, node,
+            f"cat /etc/pve/qemu-server/{int(vmid)}.conf 2>/dev/null", timeout=10)
+        if rc != 0 or not out:
+            return False, '', f'cannot read VM {vmid} config'
+        cfg_text = str(out)
+        disks = []
+        cur_args = ''
+        for line in cfg_text.splitlines():
+            line_s = line.strip()
+            if line_s.startswith('#') or not line_s:
+                continue
+            if line_s.startswith('args:'):
+                cur_args = line_s[5:].strip()
+                continue
+            m = re.match(r'^(scsi|sata|virtio|ide)(\d+):\s*([^,\n]+)(.*)$', line_s)
+            if not m:
+                continue
+            bus, idx, vol, rest = m.group(1), m.group(2), m.group(3), m.group(4)
+            # Skip CD-ROMs / ISOs — they're not the boot disk and don't need sector emul
+            if vol.lower().endswith('.iso') or 'media=cdrom' in rest.lower():
+                continue
+            disks.append((bus, int(idx)))
+        if not disks:
+            return False, cur_args, 'no disk attachments found'
+        # Sort for deterministic output (bus then index)
+        disks.sort()
+        parts = []
+        for bus, idx in disks:
+            parts.append(f"-set device.{bus}{idx}.logical_block_size=512")
+            parts.append(f"-set device.{bus}{idx}.physical_block_size=512")
+        new_args = ' '.join(parts)
+        if new_args == cur_args:
+            return False, cur_args, None
+        rc_s, out_s, _ = _pve_node_exec(pve_mgr, node,
+            f"qm set {int(vmid)} --args {shlex.quote(new_args)} 2>&1", timeout=15)
+        if rc_s != 0:
+            return False, new_args, f'qm set failed: {str(out_s or "")[:200]}'
+        return True, new_args, None
+    except Exception as e:
+        return False, '', f'{type(e).__name__}: {e}'
+
+
 def _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, disk_count):
     try:
         # pvesm path returns the host-side path for the first disk
@@ -2054,6 +2308,10 @@ def _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, disk_count):
         _pve_node_exec(pve_mgr, task.target_node,
             f"qm set {task.proxmox_vmid} --args {shlex.quote(args_str)} 2>&1", timeout=10)
         task.log(f"Applied 512b sector emulation ({disk_count} disk(s)): {args_str}")
+        # If the customer later swaps scsi0 → sata0 via the Proxmox UI, these
+        # static args break ("no device 'scsi0' defined"). They can recover via
+        # the "Fix QEMU args" action in the PegaProx VM context menu — we
+        # explicitly do NOT install anything on the node side for this.
     except Exception as e:
         task.log(f"Sector-size pre-check failed (non-fatal, VM may still boot): {e}")
 
@@ -2441,7 +2699,11 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes):
     
     last_error = ''
     for attempt_cmd in alloc_attempts:
-        rc, out, _ = _pve_node_exec(pve_mgr, node, attempt_cmd, timeout=30)
+        # NS May 2026 — bumped from 30s; shared LVM (Proxmox cluster) takes
+        # longer to acquire metadata lock when a sibling disk on the same
+        # storage was just allocated/attached. 30s caused false-negative
+        # "allocation failed" on disk 1 of multi-disk migrations.
+        rc, out, _ = _pve_node_exec(pve_mgr, node, attempt_cmd, timeout=90)
         out_str = str(out or '').strip()
         
         if rc == 0 and '400' not in out_str and 'error' not in out_str.lower() and 'failed' not in out_str.lower():
@@ -2819,7 +3081,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     import time, re, math, random
     
     BS_MB = 4
-    esxi_pass = task.config.get('esxi_password', '')
+    esxi_pass = task.esxi_password
     safe_pass = shlex.quote(esxi_pass)
 
     # Build SSH command prefix -- works with key or password
@@ -2856,7 +3118,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     # ================================================================
     # TOOL DETECTION (run once, reuse for all disks)
     # ================================================================
-    esxi_pass = task.config.get('esxi_password', '')
+    esxi_pass = task.esxi_password
     
     # Proxmox IP
     rc_ip, out_ip, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -3842,7 +4104,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         f"ip route get {esxi_host} 2>/dev/null | grep -oP 'src \\K[0-9.]+'", timeout=5)
     bg_pve_ip = str(out_ip2 or '').strip()
     
-    bg_pass = task.config.get('esxi_password', '')
+    bg_pass = task.esxi_password
     rc_t, t_out, _ = _ssh_exec(esxi_host, esxi_user, bg_pass,
         "echo NC=$(which nc 2>/dev/null || echo NO);"
         "echo GZIP=$(which gzip 2>/dev/null || echo NO);"
@@ -5009,6 +5271,24 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     _mon_t = threading.Thread(target=_monitor_disk_write, daemon=True,
         args=(pve_mgr, task.target_node, vol_path, flat_size, task, dk, _stop_mon))
     _mon_t.start()
+
+    # NS May 2026 (#222): HTTPS /folder endpoint on ESXi 7/8 with iSCSI VMFS
+    # consistently throttles bulk downloads to ~3 MB/s in our lab — at that
+    # rate a 150 GB disk would take 14h. SSH dd pipe is 30x faster on the same
+    # link. So unless the VM is RUNNING (HTTPS is the only safe path while
+    # VMDK is locked) we skip HTTPS entirely. `prefer_ssh_pipe` config flag
+    # can also force-skip when the operator already knows their environment.
+    src_running = False
+    try:
+        vstate = task._vmware_mgr_ref.get_vm(task.vm_id) if hasattr(task, '_vmware_mgr_ref') else {}
+        src_running = (vstate.get('data', {}).get('power_state') == 'POWERED_ON')
+    except Exception:
+        pass
+    prefer_ssh = bool(task.config.get('prefer_ssh_pipe', False)) if hasattr(task, 'config') else False
+    if (not src_running) or prefer_ssh:
+        if test_bytes > 0:
+            task.log(f"  HTTPS test OK but VM is offline — using direct SSH dd pipe (faster).")
+        test_bytes = 0  # force METHOD 2
 
     try:
         # ================================================================

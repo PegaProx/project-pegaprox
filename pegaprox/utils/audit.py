@@ -128,7 +128,8 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
             user=user,
             action=action,
             details=f"{details}" + (f" [{cluster}]" if cluster else ""),
-            ip=ip_address or get_client_ip()
+            ip=ip_address or get_client_ip(),
+            cluster=cluster or '',
         )
     except Exception as e:
         logging.error(f"Failed to save audit entry to database: {e}")

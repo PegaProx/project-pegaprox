@@ -60,31 +60,30 @@ def save_metrics_history(history):
 
 
 def save_metrics_snapshot(snapshot):
-    """Save a single metrics snapshot to SQLite
-    
-    new SQLite function
+    """Save a single metrics snapshot to SQLite — MK May 2026:
+    retention bumped from 1000 (3.5d) to 8640 (30d at 5min interval)
+    so right-sizing + capacity forecast have enough history to chew on.
     """
     try:
         db = get_db()
         cursor = db.conn.cursor()
-        
+
         timestamp = snapshot.get('timestamp', datetime.now().isoformat())
         data = json.dumps({k: v for k, v in snapshot.items() if k != 'timestamp'})
-        
+
         cursor.execute('''
             INSERT INTO metrics_history (timestamp, data)
             VALUES (?, ?)
         ''', (timestamp, data))
-        
-        # Cleanup old entries (keep last 1000)
+
         cursor.execute('''
-            DELETE FROM metrics_history 
+            DELETE FROM metrics_history
             WHERE id NOT IN (
-                SELECT id FROM metrics_history 
-                ORDER BY timestamp DESC LIMIT 1000
+                SELECT id FROM metrics_history
+                ORDER BY timestamp DESC LIMIT 8640
             )
         ''')
-        
+
         db.conn.commit()
     except Exception as e:
         logging.error(f"Error saving metrics snapshot: {e}")
@@ -137,23 +136,57 @@ def collect_metrics_snapshot():
                 cluster_data['totals']['mem_total'] += node_data.get('maxmem', 0)
                 cluster_data['totals']['mem_used'] += node_data.get('mem', 0)
             
-            # Count VMs
+            # Count VMs + per-VM samples for right-sizing (MK May 2026)
+            cluster_data['vms'] = {}  # vmid -> {cpu_pct, mem_pct, maxmem, maxcpu, status}
             try:
                 resources = mgr.get_vm_resources()
                 for r in resources:
-                    if r.get('type') == 'qemu':
-                        if r.get('status') == 'running':
-                            cluster_data['totals']['vms_running'] += 1
-                        else:
-                            cluster_data['totals']['vms_stopped'] += 1
+                    rtype = r.get('type')
+                    if rtype not in ('qemu', 'lxc'):
+                        continue
+                    running = r.get('status') == 'running'
+                    if rtype == 'qemu':
+                        if running: cluster_data['totals']['vms_running'] += 1
+                        else: cluster_data['totals']['vms_stopped'] += 1
                     else:
-                        if r.get('status') == 'running':
-                            cluster_data['totals']['cts_running'] += 1
-                        else:
-                            cluster_data['totals']['cts_stopped'] += 1
-            except:
+                        if running: cluster_data['totals']['cts_running'] += 1
+                        else: cluster_data['totals']['cts_stopped'] += 1
+                    vmid = str(r.get('vmid', ''))
+                    if not vmid:
+                        continue
+                    maxmem = int(r.get('maxmem', 0) or 0)
+                    maxcpu = int(r.get('maxcpu', 0) or 0)
+                    cpu_pct = round((r.get('cpu', 0) or 0) * 100, 1) if running else None
+                    mem_pct = round((r.get('mem', 0) or 0) / maxmem * 100, 1) if (running and maxmem > 0) else None
+                    cluster_data['vms'][vmid] = {
+                        't': rtype, 'r': running, 'cpu': cpu_pct, 'mem': mem_pct,
+                        'maxmem': maxmem, 'maxcpu': maxcpu,
+                    }
+            except Exception:
                 pass
-            
+
+            # Storage totals for capacity forecasting (MK May 2026)
+            cluster_data['storage'] = {}
+            try:
+                host = mgr.host
+                ss = mgr._create_session()
+                sresp = ss.get(f"https://{host}:8006/api2/json/cluster/resources?type=storage", timeout=8)
+                if sresp.status_code == 200:
+                    seen = set()
+                    for s in sresp.json().get('data') or []:
+                        sid = s.get('storage') or s.get('id', '')
+                        if not sid or sid in seen: continue
+                        seen.add(sid)
+                        total = int(s.get('maxdisk', 0) or 0)
+                        used = int(s.get('disk', 0) or 0)
+                        if total > 0:
+                            cluster_data['storage'][sid] = {
+                                'used': used, 'total': total,
+                                'pct': round(used / total * 100, 1),
+                            }
+            except Exception:
+                pass
+
             snapshot['clusters'][cluster_id] = cluster_data
             
         except Exception as e:

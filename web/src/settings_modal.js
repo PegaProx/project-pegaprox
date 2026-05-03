@@ -314,6 +314,257 @@
             );
         }
 
+        // MK May 2026 — SIEM Forwarder admin panel inside the Settings modal.
+        // Lists configured targets, lets you add/edit/delete/test them.
+        function SIEMTab({ addToast, t, getAuthHeaders }) {
+            const [targets, setTargets] = React.useState([]);
+            const [types, setTypes] = React.useState([]);
+            const [loading, setLoading] = React.useState(false);
+            const [editing, setEditing] = React.useState(null); // null | {id?, ...form}
+            const [saving, setSaving] = React.useState(false);
+
+            const refresh = async () => {
+                setLoading(true);
+                try {
+                    const [tg, tp] = await Promise.all([
+                        fetch(`${API_URL}/siem/targets`, { credentials: 'include', headers: getAuthHeaders() }).then(r => r.ok ? r.json() : { targets: [] }),
+                        fetch(`${API_URL}/siem/types`, { credentials: 'include', headers: getAuthHeaders() }).then(r => r.ok ? r.json() : { types: [] }),
+                    ]);
+                    setTargets(tg.targets || []);
+                    setTypes(tp.types || []);
+                } finally { setLoading(false); }
+            };
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, []);
+
+            const newTarget = () => setEditing({
+                name: '', type: 'syslog_udp', endpoint: '', enabled: true, settings: {},
+            });
+
+            const save = async () => {
+                if (!editing.name?.trim() || !editing.endpoint?.trim()) {
+                    addToast(t('siemRequiredFields') || 'name and endpoint are required', 'error');
+                    return;
+                }
+                setSaving(true);
+                try {
+                    const isUpdate = !!editing.id;
+                    const url = isUpdate ? `${API_URL}/siem/targets/${editing.id}` : `${API_URL}/siem/targets`;
+                    const r = await fetch(url, {
+                        method: isUpdate ? 'PUT' : 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                        body: JSON.stringify({
+                            name: editing.name.trim(),
+                            type: editing.type,
+                            endpoint: editing.endpoint.trim(),
+                            enabled: !!editing.enabled,
+                            settings: editing.settings || {},
+                        }),
+                    });
+                    if (r.ok) {
+                        addToast(t('siemSaved') || 'Target saved', 'success');
+                        setEditing(null);
+                        await refresh();
+                    } else {
+                        const d = await r.json().catch(() => ({}));
+                        addToast(d.error || (t('siemSaveFailed') || 'save failed'), 'error');
+                    }
+                } finally { setSaving(false); }
+            };
+
+            const remove = async (tid) => {
+                if (!confirm(t('siemDeleteConfirm') || 'Delete this SIEM target?')) return;
+                const r = await fetch(`${API_URL}/siem/targets/${tid}`, {
+                    method: 'DELETE', credentials: 'include', headers: getAuthHeaders(),
+                });
+                if (r.ok) { addToast(t('siemDeleted') || 'Deleted', 'success'); refresh(); }
+            };
+
+            const testTarget = async (tid) => {
+                const r = await fetch(`${API_URL}/siem/targets/${tid}/test`, {
+                    method: 'POST', credentials: 'include', headers: getAuthHeaders(),
+                });
+                if (r.ok) {
+                    const d = await r.json();
+                    addToast(d.ok ? (t('siemTestOk') || 'Test event delivered') : (t('siemTestFailed') || 'Test failed'),
+                             d.ok ? 'success' : 'error');
+                    refresh();
+                } else {
+                    addToast(t('siemTestFailed') || 'Test failed', 'error');
+                }
+            };
+
+            const currentTypeMeta = types.find(tt => tt.id === editing?.type) || {};
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h3 className="text-lg font-semibold text-white">{t('siemTitle') || 'SIEM Forwarder'}</h3>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('siemDesc') || 'Forward audit events to syslog / Splunk / Elastic / Loki / generic webhooks. Multiple targets supported.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={refresh} disabled={loading}
+                                className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5">
+                                <Icons.RefreshCw className="w-3.5 h-3.5" />
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                            <button onClick={newTarget}
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5">
+                                <Icons.Plus className="w-3.5 h-3.5" />
+                                {t('siemAddTarget') || 'Add target'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {targets.length === 0 ? (
+                        <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-8 text-center text-sm text-gray-500">
+                            {t('siemNoTargets') || 'No targets configured yet. Audit events stay in the database only.'}
+                        </div>
+                    ) : (
+                        <div className="space-y-2">
+                            {targets.map(tg => (
+                                <div key={tg.id} className="bg-proxmox-dark border border-proxmox-border rounded-xl p-3">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                                                    !tg.enabled ? 'bg-gray-500' :
+                                                    tg.last_status === 'error' ? 'bg-red-500' :
+                                                    tg.last_status === 'ok' ? 'bg-green-500' : 'bg-yellow-500'
+                                                }`}></span>
+                                                <span className="text-sm font-medium text-white">{tg.name}</span>
+                                                <span className="text-[10px] px-1.5 py-0.5 bg-proxmox-darker border border-proxmox-border rounded text-gray-400 uppercase">{tg.type}</span>
+                                                {!tg.enabled && (
+                                                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-500/15 text-gray-400 rounded">{t('disabled') || 'disabled'}</span>
+                                                )}
+                                            </div>
+                                            <div className="text-[11px] text-gray-500 font-mono mt-1 truncate">{tg.endpoint}</div>
+                                            <div className="text-[10px] text-gray-600 mt-1">
+                                                {tg.sent_count} {t('siemSent') || 'sent'}, {tg.error_count} {t('siemErrors') || 'errors'}
+                                                {tg.last_ok_at && ` · ${t('siemLastOk') || 'last ok'} ${(tg.last_ok_at || '').replace('T', ' ').slice(0, 16)}`}
+                                                {tg.last_error && ` · ${t('siemLastError') || 'last err'}: `}
+                                                {tg.last_error && <span className="text-red-400">{tg.last_error.slice(0, 80)}</span>}
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                                            <button onClick={() => testTarget(tg.id)}
+                                                className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-xs text-gray-300 hover:text-white">
+                                                {t('test') || 'Test'}
+                                            </button>
+                                            <button onClick={() => setEditing({ ...tg, enabled: !!tg.enabled })}
+                                                className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-xs text-gray-300 hover:text-white">
+                                                {t('edit') || 'Edit'}
+                                            </button>
+                                            <button onClick={() => remove(tg.id)}
+                                                className="px-2 py-1 bg-red-500/15 border border-red-500/30 rounded text-xs text-red-400 hover:bg-red-500/25">
+                                                <Icons.Trash className="w-3 h-3" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {editing && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !saving && setEditing(null)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold text-white mb-3 flex items-center gap-2">
+                                    <Icons.Send className="w-4 h-4 text-proxmox-orange" />
+                                    {editing.id ? (t('siemEditTarget') || 'Edit SIEM target') : (t('siemAddTarget') || 'Add SIEM target')}
+                                </h3>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('name') || 'Name'} *</label>
+                                        <input type="text" value={editing.name || ''}
+                                            onChange={e => setEditing({...editing, name: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('siemType') || 'Type'}</label>
+                                        <select value={editing.type}
+                                            onChange={e => setEditing({...editing, type: e.target.value, settings: {}})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white">
+                                            {types.map(tt => <option key={tt.id} value={tt.id}>{tt.label}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">
+                                            {t('siemEndpoint') || 'Endpoint'} *
+                                            <span className="text-gray-600 ml-2">{currentTypeMeta.endpoint_hint}</span>
+                                        </label>
+                                        <input type="text" value={editing.endpoint || ''}
+                                            onChange={e => setEditing({...editing, endpoint: e.target.value})}
+                                            placeholder={currentTypeMeta.endpoint_hint || ''}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white font-mono" />
+                                    </div>
+
+                                    {/* per-type settings */}
+                                    {(currentTypeMeta.settings_fields || []).map(field => (
+                                        <div key={field}>
+                                            {field === 'verify_tls' ? (
+                                                <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                    <input type="checkbox"
+                                                        checked={editing.settings?.verify_tls !== false}
+                                                        onChange={e => setEditing({...editing, settings: {...editing.settings, verify_tls: e.target.checked}})} />
+                                                    {t('siemVerifyTls') || 'Verify TLS certificate'}
+                                                    <span className="text-xs text-gray-500 ml-2">{t('siemVerifyTlsHint') || '(disable only for self-signed SIEMs you trust)'}</span>
+                                                </label>
+                                            ) : field === 'headers' ? (
+                                                <>
+                                                <label className="text-xs text-gray-400 block mb-1">{field}</label>
+                                                <textarea
+                                                    value={JSON.stringify(editing.settings?.headers || {}, null, 2)}
+                                                    onChange={e => {
+                                                        try {
+                                                            const v = JSON.parse(e.target.value || '{}');
+                                                            setEditing({...editing, settings: {...editing.settings, headers: v}});
+                                                        } catch (_) { /* swallow until valid JSON */ }
+                                                    }}
+                                                    rows={3}
+                                                    placeholder='{"Authorization": "Bearer ..."}'
+                                                    className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-xs text-white font-mono"
+                                                />
+                                                </>
+                                            ) : (
+                                                <>
+                                                <label className="text-xs text-gray-400 block mb-1">{field}</label>
+                                                <input type={field === 'password' || field === 'token' ? 'password' : 'text'}
+                                                    value={editing.settings?.[field] || ''}
+                                                    onChange={e => setEditing({...editing, settings: {...editing.settings, [field]: e.target.value}})}
+                                                    className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
+                                                </>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    <label className="flex items-center gap-2 text-sm text-gray-300">
+                                        <input type="checkbox" checked={!!editing.enabled}
+                                            onChange={e => setEditing({...editing, enabled: e.target.checked})} />
+                                        {t('enabled') || 'Enabled'}
+                                    </label>
+                                </div>
+                                <div className="flex justify-end gap-2 mt-5">
+                                    <button onClick={() => setEditing(null)} disabled={saving}
+                                        className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button onClick={save} disabled={saving}
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        {saving ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {t('save') || 'Save'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         // ═══════════════════════════════════════════════
         // PegaProx - Settings Modal
         // PegaProxSettingsModal (Server, SSL, SMTP, RBAC, Audit, Tenants)
@@ -1713,13 +1964,45 @@
                 } catch(e) {}
             };
             
-            const fetchAuditLogs = async () => {
+            // MK May 2026 — server-side filters via /api/audit/search
+            const [auditFrom, setAuditFrom] = useState('');
+            const [auditTo, setAuditTo] = useState('');
+            const [auditQuery, setAuditQuery] = useState('');
+            const [auditSev, setAuditSev] = useState('');
+            const [auditClusterFilter, setAuditClusterFilter] = useState('');
+            const [auditIp, setAuditIp] = useState('');
+            const [auditOffset, setAuditOffset] = useState(0);
+            const [auditTotal, setAuditTotal] = useState(0);
+            const auditPageSize = 100;
+
+            const fetchAuditLogs = async (offsetOverride = null) => {
                 try {
-                    const response = await fetch(`${API_URL}/audit`, { credentials: 'include', headers: getAuthHeaders()
+                    const off = offsetOverride !== null ? offsetOverride : auditOffset;
+                    const params = new URLSearchParams();
+                    if (auditQuery) params.set('q', auditQuery);
+                    if (auditSev) params.set('severity', auditSev);
+                    if (auditClusterFilter) params.set('cluster', auditClusterFilter);
+                    if (auditIp) params.set('ip', auditIp);
+                    if (auditFrom) params.set('date_from', auditFrom);
+                    if (auditTo) params.set('date_to', auditTo);
+                    params.set('offset', String(off));
+                    params.set('limit', String(auditPageSize));
+                    const response = await fetch(`${API_URL}/audit/search?${params.toString()}`, {
+                        credentials: 'include', headers: getAuthHeaders(),
                     });
                     if (response && response.ok) {
                         const data = await response.json();
-                        setAuditLogs(data);
+                        setAuditLogs(data.entries || []);
+                        setAuditTotal(data.total || 0);
+                        setAuditOffset(data.offset || 0);
+                    } else if (response && response.status === 404) {
+                        // backend without /audit/search — fall back to legacy /audit
+                        const legacy = await fetch(`${API_URL}/audit`, { credentials: 'include', headers: getAuthHeaders() });
+                        if (legacy && legacy.ok) {
+                            const list = await legacy.json();
+                            setAuditLogs(list);
+                            setAuditTotal(list.length);
+                        }
                     }
                 } catch (err) {
                     console.error('fetching audit logs:', err);
@@ -2161,6 +2444,17 @@
                                 <Icons.ClipboardList className="w-4 h-4" />
                                 <span className="hidden sm:inline">{t('auditLog')}</span>
                                 <span className="sm:hidden">Audit</span>
+                            </button>
+                            <button
+                                onClick={() => setActiveTab('siem')}
+                                className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
+                                    activeTab === 'siem'
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
+                                }`}
+                            >
+                                <Icons.Send className="w-4 h-4" />
+                                <span>SIEM</span>
                             </button>
                             <button
                                 onClick={() => { setActiveTab('updates'); checkForUpdates(); }}
@@ -5882,6 +6176,64 @@
 
                             {activeTab === 'audit' && (
                                 <div className="space-y-4">
+                                    {/* MK May 2026 — server-side rich search */}
+                                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-3 space-y-2">
+                                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                                            <input
+                                                type="text" value={auditQuery}
+                                                onChange={e => setAuditQuery(e.target.value)}
+                                                onKeyDown={e => { if (e.key === 'Enter') fetchAuditLogs(0); }}
+                                                placeholder={t('auditSearchQuery') || 'Search…'}
+                                                className="col-span-2 px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-sm text-white"
+                                            />
+                                            <input
+                                                type="datetime-local" value={auditFrom}
+                                                onChange={e => setAuditFrom(e.target.value)}
+                                                title={t('auditDateFrom') || 'From'}
+                                                className="px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-sm text-white"
+                                            />
+                                            <input
+                                                type="datetime-local" value={auditTo}
+                                                onChange={e => setAuditTo(e.target.value)}
+                                                title={t('auditDateTo') || 'To'}
+                                                className="px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-sm text-white"
+                                            />
+                                            <select
+                                                value={auditSev}
+                                                onChange={e => setAuditSev(e.target.value)}
+                                                className="px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-sm text-white">
+                                                <option value="">{t('auditAnySeverity') || 'any severity'}</option>
+                                                <option value="info">info</option>
+                                                <option value="warning">warning</option>
+                                                <option value="critical">critical</option>
+                                            </select>
+                                            <input
+                                                type="text" value={auditIp}
+                                                onChange={e => setAuditIp(e.target.value)}
+                                                onKeyDown={e => { if (e.key === 'Enter') fetchAuditLogs(0); }}
+                                                placeholder="IP"
+                                                className="px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-sm text-white"
+                                            />
+                                        </div>
+                                        <div className="flex items-center justify-between">
+                                            <div className="text-xs text-gray-500">
+                                                {auditTotal > 0
+                                                    ? `${auditOffset + 1}–${Math.min(auditOffset + auditLogs.length, auditTotal)} ${t('of') || 'of'} ${auditTotal}`
+                                                    : (t('noAuditLogs') || 'no entries')}
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => { setAuditQuery(''); setAuditFrom(''); setAuditTo(''); setAuditSev(''); setAuditIp(''); setAuditClusterFilter(''); setAuditOffset(0); setTimeout(() => fetchAuditLogs(0), 0); }}
+                                                    className="px-3 py-1 text-xs text-gray-400 hover:text-white">
+                                                    {t('clearFilters') || 'clear'}
+                                                </button>
+                                                <button onClick={() => fetchAuditLogs(0)}
+                                                    className="px-3 py-1 bg-proxmox-orange hover:bg-orange-600 text-white text-xs rounded">
+                                                    {t('search') || 'Search'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
                                     {/* Filters and Export */}
                                     <div className="flex items-center justify-between gap-4">
                                         <div className="flex items-center gap-3">
@@ -6000,9 +6352,33 @@
                                             </table>
                                         </div>
                                     </div>
+
+                                    {/* MK May 2026 — pagination */}
+                                    {auditTotal > auditPageSize && (
+                                        <div className="flex items-center justify-between text-xs text-gray-400">
+                                            <span>{auditOffset + 1}–{Math.min(auditOffset + auditLogs.length, auditTotal)} {t('of') || 'of'} {auditTotal}</span>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => fetchAuditLogs(Math.max(0, auditOffset - auditPageSize))}
+                                                    disabled={auditOffset <= 0}
+                                                    className="px-3 py-1 bg-proxmox-dark border border-proxmox-border rounded disabled:opacity-50 hover:text-white">
+                                                    ← {t('prev') || 'Prev'}
+                                                </button>
+                                                <button onClick={() => fetchAuditLogs(auditOffset + auditPageSize)}
+                                                    disabled={(auditOffset + auditLogs.length) >= auditTotal}
+                                                    className="px-3 py-1 bg-proxmox-dark border border-proxmox-border rounded disabled:opacity-50 hover:text-white">
+                                                    {t('next') || 'Next'} →
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
-                            
+
+                            {/* MK May 2026 — SIEM Forwarder Tab */}
+                            {activeTab === 'siem' && (
+                                <SIEMTab addToast={addToast} t={t} getAuthHeaders={getAuthHeaders} />
+                            )}
+
                             {/* Updates Tab */}
                             {activeTab === 'updates' && (
                                 <div className="space-y-6">

@@ -58,8 +58,6 @@
                 { code: 'es', flag: '🇪🇸', label: 'ES', title: 'Español (LATAM)' },
                 { code: 'pt', flag: '🇧🇷', label: 'PT', title: 'Português' },
                 { code: 'ko', flag: '🇰🇷', label: 'KO', title: '한국어' },
-                // LW: IT contributed by @fabriziosalmi — PR #332
-                { code: 'it', flag: '🇮🇹', label: 'IT', title: 'Italiano' },
             ];
             const activeLanguage = langs.find(l => l.code === language) || langs[0];
 
@@ -150,6 +148,12 @@
                     if (r && r.ok) {
                         const d = await r.json();
                         // NS: removed session response log (leaked session_id to console)
+                        // LW May 2026 — persist air-gap flag for the next page
+                        // load so the boot script knows to skip CDN/font fetches.
+                        try {
+                            if (d.air_gap_mode) localStorage.setItem('pegaprox-air-gap', '1');
+                            else localStorage.removeItem('pegaprox-air-gap');
+                        } catch (_) {}
                         if (d.authenticated) {
                             // NS: portal_only users must not access main dashboard
                             if (d.user?.portal_only && !window.location.pathname.startsWith('/portal')) {
@@ -178,7 +182,18 @@
                                 applyLanguage(d.user.language);
                             }
                             // NS: Apply user's theme or default
-                            const userTheme = d.user?.theme || d.default_theme || 'proxmoxDark';
+                            // MK May 2026 — when user is in corporate layout, the local
+                            // corp-theme toggle is the source of truth for that session.
+                            // Without this, a stale server.user.theme=corporateLight would
+                            // override an active corporateDark toggle on F5 → taskbar
+                            // bg-proxmox-dark/50 etc. would render with light CSS vars.
+                            let userTheme = d.user?.theme || d.default_theme || 'proxmoxDark';
+                            try {
+                                if (d.user?.ui_layout === 'corporate') {
+                                    const isLight = localStorage.getItem('corp-theme') === 'light';
+                                    userTheme = isLight ? 'corporateLight' : 'corporateDark';
+                                }
+                            } catch (_) {}
                             console.log('[Theme] checkSession - Server theme:', d.user?.theme, 'Default:', d.default_theme, 'Using:', userTheme);
                             if (userTheme && PEGAPROX_THEMES[userTheme]) {
                                 applyTheme(userTheme);
@@ -266,7 +281,13 @@
                             applyLanguage(data.user.language);
                         }
                         // NS: Apply user's theme (with fallback to default)
-                        const userTheme = data.user?.theme || data.default_theme || 'proxmoxDark';
+                        let userTheme = data.user?.theme || data.default_theme || 'proxmoxDark';
+                        try {
+                            if (data.user?.ui_layout === 'corporate') {
+                                const isLight = localStorage.getItem('corp-theme') === 'light';
+                                userTheme = isLight ? 'corporateLight' : 'corporateDark';
+                            }
+                        } catch (_) {}
                         console.log('[Theme] Login - Server theme:', data.user?.theme, 'Default:', data.default_theme, 'Using:', userTheme);
                         if (userTheme && PEGAPROX_THEMES[userTheme]) {
                             applyTheme(userTheme);
@@ -397,7 +418,15 @@
                 document.body.setAttribute('data-layout', layout);
                 if (isCorporate) {
                     const isLight = localStorage.getItem('corp-theme') === 'light';
+                    // MK May 2026 (#296): the data-corp-theme attribute gates ALL light-mode
+                    // CSS overrides. The header toggle sets this on click, but on a fresh
+                    // page load only applyTheme() ran — so light variables got applied but
+                    // body still had no data-corp-theme, leaving every component in dark.
+                    document.body.dataset.corpTheme = isLight ? 'light' : '';
                     applyTheme(isLight ? 'corporateLight' : 'corporateDark');
+                } else {
+                    // leaving corporate -> clear so no stale attribute lingers
+                    delete document.body.dataset.corpTheme;
                 }
             }, [layout]);
 

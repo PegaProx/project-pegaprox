@@ -111,3 +111,16 @@ class PegaProxConfig:
         # https://pve:8006. Defeats TLS-inspection middleboxes that re-encrypt
         # the second leg and modify binary RFB bytes. Customer-side opt-in.
         self.vnc_tunnel = cluster_data.get('vnc_tunnel', False)
+        # NS May 2026 (#364) — load-balancer settings finally hydrated from db.
+        # Were API-settable but never persisted before, so users saw "saved"
+        # toasts that reverted within seconds.
+        self.predictive_balancing = cluster_data.get('predictive_balancing', False)
+        self.predictive_threshold = cluster_data.get('predictive_threshold', 0.0)
+        self.balance_cpu_weight = cluster_data.get('balance_cpu_weight', 1.0)
+        self.balance_mem_weight = cluster_data.get('balance_mem_weight', 1.0)
+        self.balance_io_weight = cluster_data.get('balance_io_weight', 1.0)
+        self.cpu_baseline = cluster_data.get('cpu_baseline', '')
+        # MK May 2026 — backup SLA tracking. Hours since last backup beyond which
+        # a VM is flagged as breached. 0 = SLA tracking disabled. Warning band is
+        # 80% of the limit (hardcoded for now, could be its own setting later).
+        self.backup_sla_max_age_hours = int(cluster_data.get('backup_sla_max_age_hours', 0) or 0)

@@ -65,23 +65,35 @@
 
                 const loadTerminal = async () => {
                     try {
-                        // Load xterm CSS - try local first
+                        // LW May 2026 — local-first xterm assets; CDN fallback only when air-gap is off
+                        const _airGap = (() => {
+                            try { return localStorage.getItem('pegaprox-air-gap') === '1'; }
+                            catch (_) { return false; }
+                        })();
+
                         if (!document.getElementById('xterm-css')) {
                             const link = document.createElement('link');
                             link.id = 'xterm-css';
                             link.rel = 'stylesheet';
                             link.href = '/static/css/xterm.min.css';
-                            link.onerror = () => { link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css'; };
+                            link.onerror = () => {
+                                if (_airGap) { console.error('[air-gap] xterm css missing; refusing CDN'); return; }
+                                link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css';
+                            };
                             document.head.appendChild(link);
                         }
 
-                        // Load xterm.js - try local first, with SRI for CDN
                         if (!window.Terminal) {
                             await new Promise((resolve, reject) => {
                                 const script = document.createElement('script');
                                 script.src = '/static/js/xterm.min.js';
                                 script.onload = resolve;
                                 script.onerror = () => {
+                                    if (_airGap) {
+                                        console.error('[air-gap] xterm.js missing; refusing CDN');
+                                        reject(new Error('xterm missing in air-gap mode'));
+                                        return;
+                                    }
                                     script.src = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js';
                                     if (SRI_HASHES['xterm@5.3.0']) {
                                         script.integrity = SRI_HASHES['xterm@5.3.0'];
@@ -94,13 +106,17 @@
                             });
                         }
 
-                        // Load fit addon - try local first
                         if (!window.FitAddon) {
                             await new Promise((resolve, reject) => {
                                 const script = document.createElement('script');
                                 script.src = '/static/js/xterm-addon-fit.min.js';
                                 script.onload = resolve;
                                 script.onerror = () => {
+                                    if (_airGap) {
+                                        console.error('[air-gap] xterm-addon-fit missing; refusing CDN');
+                                        reject(new Error('xterm-addon-fit missing in air-gap mode'));
+                                        return;
+                                    }
                                     script.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js';
                                     if (SRI_HASHES['xterm-addon-fit@0.8.0']) {
                                         script.integrity = SRI_HASHES['xterm-addon-fit@0.8.0'];
@@ -2885,7 +2901,7 @@
                         
                         // LW: Mar 2026 - removed wsUrl log (session leak)
                         
-                        // Load noVNC - try local first (if downloaded), then CDN
+                        // Load noVNC - try local first (if downloaded), then CDN unless air-gapped
                         if(!window.RFB) {
                             console.log('VNC: Loading noVNC...');
                             await new Promise((resolve, reject) => {
@@ -2894,8 +2910,10 @@
                                 script.type = 'module';
                                 const localPath = '/static/js/novnc/rfb.min.js';
                                 const cdnPath = 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
+                                const airGap = (() => { try { return localStorage.getItem('pegaprox-air-gap') === '1'; } catch(_) { return false; } })();
                                 script.textContent = `
                                     let RFB;
+                                    const _airGap = ${JSON.stringify(airGap)};
                                     try {
                                         const resp = await fetch('${localPath}', {method: 'HEAD'});
                                         if (resp.ok) {
@@ -2905,6 +2923,11 @@
                                             throw new Error('local not found');
                                         }
                                     } catch(e) {
+                                        if (_airGap) {
+                                            console.error('[air-gap] noVNC missing locally; refusing CDN fetch');
+                                            window.dispatchEvent(new CustomEvent('novnc-failed'));
+                                            throw e;
+                                        }
                                         RFB = (await import('${cdnPath}')).default;
                                         console.log('VNC: loaded from CDN');
                                     }

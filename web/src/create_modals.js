@@ -3419,7 +3419,7 @@
 
             const revoke = async (s) => {
                 if (s.is_current && !window.confirm(t('confirmRevokeCurrent') || 'Revoking this session will log you out. Continue?')) return;
-                const r = await fetch(`${API_URL}/user/sessions/${encodeURIComponent(s.full_id)}`, {
+                const r = await fetch(`${API_URL}/user/sessions/${encodeURIComponent(s.revoke_token)}`, {
                     method: 'DELETE', credentials: 'include', headers: getAuthHeaders()
                 });
                 const d = await r.json().catch(() => ({}));
@@ -3460,7 +3460,7 @@
                     ) : (
                         <div className="space-y-2">
                             {sessions.map(s => (
-                                <div key={s.full_id} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3 flex items-center gap-3">
+                                <div key={s.revoke_token} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3 flex items-center gap-3">
                                     <div className={`p-2 rounded-lg ${s.is_current ? 'bg-green-500/10' : 'bg-gray-500/10'}`}>
                                         <Icons.Monitor className={`w-5 h-5 ${s.is_current ? 'text-green-400' : 'text-gray-400'}`} />
                                     </div>

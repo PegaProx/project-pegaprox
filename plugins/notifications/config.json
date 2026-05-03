@@ -1,7 +1,7 @@
 {
-    "ntfy_enabled": false,
+    "ntfy_enabled": true,
     "ntfy_url": "https://ntfy.sh",
-    "ntfy_topic": "",
+    "ntfy_topic": "pegaprox-test",
     "ntfy_token": "",
     "ntfy_priority_map": {
         "critical": "max",

@@ -893,6 +893,27 @@ def serve_images(filename):
     """Serve image files (pegaprox logo, sponsor logos, etc.)"""
     return send_from_directory(IMAGES_DIR, filename)
 
+
+# MK May 2026 — PWA: manifest + service worker. SW must live at root scope
+# or it can only control its sub-path; same for the manifest URL.
+@bp.route('/manifest.webmanifest')
+def serve_manifest():
+    resp = send_from_directory(WEB_DIR, 'manifest.webmanifest',
+                               mimetype='application/manifest+json')
+    resp.headers['Cache-Control'] = 'public, max-age=300'
+    return resp
+
+
+@bp.route('/sw.js')
+def serve_sw():
+    """Service worker — never cache aggressively or updates won't roll out."""
+    resp = send_from_directory(WEB_DIR, 'sw.js',
+                               mimetype='application/javascript')
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    # MUST allow root scope; some browsers want this header explicit
+    resp.headers['Service-Worker-Allowed'] = '/'
+    return resp
+
 @bp.route('/api/settings/server', methods=['GET'])
 @require_auth(roles=[ROLE_ADMIN])
 def get_server_settings():
@@ -2770,8 +2791,42 @@ def add_cors_origin():
 # API Routes
 @bp.route('/')
 def index():
-    """Serve the web interface"""
-    return send_from_directory(WEB_DIR, 'index.html')
+    """Serve the web interface
+
+    NS May 2026 — when air-gap mode is on, inject the localStorage flag
+    *before* the boot loader runs. Otherwise the very first page load on
+    a fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting
+    for /auth/check to come back. We rewrite a tiny prelude into <head>
+    so the loader sees the flag synchronously on its first read.
+    """
+    import os as _os
+    air_gap = bool(load_server_settings().get('air_gap_mode', False))
+    index_path = _os.path.join(WEB_DIR, 'index.html')
+    if not air_gap:
+        return send_from_directory(WEB_DIR, 'index.html')
+    try:
+        with open(index_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        prelude = (
+            "<script>"
+            "try{localStorage.setItem('pegaprox-air-gap','1');}catch(_){}"
+            "window.__pegaproxAirGap=true;"
+            "</script>"
+        )
+        # inject right after <head> open tag so it precedes everything
+        if '<head>' in html:
+            html = html.replace('<head>', '<head>' + prelude, 1)
+        else:
+            html = prelude + html
+        resp = make_response(html)
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        # don't let proxies cache an air-gapped response — toggling the flag
+        # off must take effect on the next reload, not whenever the cache decides
+        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        return resp
+    except Exception:
+        logging.exception("[index] air-gap prelude injection failed; falling back to plain index.html")
+        return send_from_directory(WEB_DIR, 'index.html')
 
 
 @bp.route('/status')

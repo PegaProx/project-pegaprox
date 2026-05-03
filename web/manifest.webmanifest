@@ -1,0 +1,17 @@
+{
+  "name": "PegaProx",
+  "short_name": "PegaProx",
+  "description": "Multi-cluster Proxmox VE management",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0c1117",
+  "theme_color": "#E57000",
+  "orientation": "any",
+  "lang": "en",
+  "icons": [
+    { "src": "/images/pegaprox.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/images/pegaprox.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "categories": ["productivity", "utilities"]
+}

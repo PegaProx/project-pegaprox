@@ -1086,6 +1086,194 @@ def get_cluster_tasks(cluster_id):
     return jsonify(mgr.get_tasks(limit=limit))
 
 
+# MK May 2026 — Backup SLA tracking. For each VM/CT in the cluster, find the
+# most recent backup across all backup-capable storages (vzdump on local/NFS/etc.
+# + PBS via the matching pbs_managers entry if any). Compare age vs the
+# configured cluster setting `backup_sla_max_age_hours`. Status:
+#   ok        — last backup within 80% of the threshold
+#   warning   — between 80% and 100% (approaching breach)
+#   breached  — past the threshold
+#   no-backup — never backed up
+#   disabled  — SLA tracking is off for this cluster
+@bp.route('/api/clusters/<cluster_id>/backup-sla', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def get_backup_sla(cluster_id):
+    import time
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not mgr.is_connected:
+        return jsonify({'enabled': False, 'error': 'cluster offline'}), 503
+
+    max_age = int(getattr(mgr.config, 'backup_sla_max_age_hours', 0) or 0)
+    # allow override via query for ad-hoc inspection without saving the setting
+    try:
+        override = int(request.args.get('max_age_hours', 0))
+        if override > 0:
+            max_age = override
+    except (TypeError, ValueError):
+        pass
+
+    now = int(time.time())
+    max_age_seconds = max_age * 3600
+    warn_at = int(max_age_seconds * 0.8) if max_age else 0
+
+    # 1) gather VMs from cluster
+    try:
+        vms = mgr.get_vm_resources() or []
+    except Exception as e:
+        return jsonify({'error': f'failed to enumerate VMs: {e}'}), 502
+
+    # 2) most-recent backup ts per (vmtype, vmid) across local backup storages
+    last_backup = {}  # (type, vmid) -> {'ts': int, 'source': 'local|pbs', 'volid': str}
+    try:
+        host = mgr.host
+        sess = mgr._create_session()
+        # discover unique nodes
+        nodes_resp = sess.get(f"https://{host}:8006/api2/json/nodes", timeout=10)
+        nodes = [n['node'] for n in (nodes_resp.json().get('data') or []) if n.get('status') == 'online'] if nodes_resp.status_code == 200 else []
+        seen_storages = set()
+        for node in nodes:
+            try:
+                stor_resp = sess.get(f"https://{host}:8006/api2/json/nodes/{node}/storage", timeout=10)
+                if stor_resp.status_code != 200:
+                    continue
+                for st in stor_resp.json().get('data') or []:
+                    if 'backup' not in (st.get('content') or ''):
+                        continue
+                    sname = st.get('storage')
+                    if not sname or (node, sname) in seen_storages:
+                        continue
+                    seen_storages.add((node, sname))
+                    try:
+                        c_resp = sess.get(
+                            f"https://{host}:8006/api2/json/nodes/{node}/storage/{sname}/content",
+                            params={'content': 'backup'}, timeout=(5, 30))
+                    except Exception:
+                        continue
+                    if c_resp.status_code != 200:
+                        continue
+                    for item in c_resp.json().get('data') or []:
+                        ts = int(item.get('ctime') or 0)
+                        if not ts:
+                            continue
+                        vmid = str(item.get('vmid') or '')
+                        if not vmid:
+                            continue
+                        # vmtype from volid prefix: "vzdump-qemu-100..." or "vzdump-lxc-..."
+                        volid = item.get('volid') or ''
+                        if 'qemu' in volid:
+                            vt = 'qemu'
+                        elif 'lxc' in volid or 'openvz' in volid:
+                            vt = 'lxc'
+                        else:
+                            # PBS volids: "<store>:backup/<type>/<id>/<time>"
+                            after = volid.split('backup/', 1)[1] if 'backup/' in volid else ''
+                            vt = 'qemu' if after.startswith('vm/') else 'lxc' if after.startswith('ct/') else ''
+                        if not vt:
+                            continue
+                        key = (vt, vmid)
+                        prev = last_backup.get(key)
+                        if not prev or ts > prev['ts']:
+                            last_backup[key] = {'ts': ts, 'source': 'pbs' if 'pbs' in (st.get('type') or '').lower() else 'local', 'volid': volid}
+            except Exception:
+                continue
+    except Exception as e:
+        logging.warning(f"[BACKUP_SLA] storage scan failed for {cluster_id}: {e}")
+
+    # 3) evaluate per VM
+    out_vms = []
+    counts = {'ok': 0, 'warning': 0, 'breached': 0, 'no_backup': 0, 'disabled': 0}
+    for r in vms:
+        rtype = r.get('type')
+        if rtype not in ('qemu', 'lxc'):
+            continue
+        vmid = str(r.get('vmid', ''))
+        info = last_backup.get((rtype, vmid))
+        ts = info['ts'] if info else 0
+        age_h = round((now - ts) / 3600, 1) if ts else None
+
+        if max_age == 0:
+            status = 'disabled'
+        elif not ts:
+            status = 'no-backup'
+        else:
+            age_s = now - ts
+            if age_s >= max_age_seconds:
+                status = 'breached'
+            elif age_s >= warn_at:
+                status = 'warning'
+            else:
+                status = 'ok'
+        counts[status.replace('-', '_')] = counts.get(status.replace('-', '_'), 0) + 1
+        out_vms.append({
+            'vmid': vmid,
+            'type': 'vm' if rtype == 'qemu' else 'ct',
+            'name': r.get('name', ''),
+            'node': r.get('node', ''),
+            'status': r.get('status', ''),
+            'last_backup_ts': ts,
+            'age_hours': age_h,
+            'sla_status': status,
+            'backup_source': info['source'] if info else None,
+        })
+
+    # sort: breached > no-backup > warning > ok > disabled, then by age desc
+    rank = {'breached': 0, 'no-backup': 1, 'warning': 2, 'ok': 3, 'disabled': 4}
+    out_vms.sort(key=lambda v: (rank.get(v['sla_status'], 5), -(v['age_hours'] or 0)))
+
+    total = len(out_vms)
+    measurable = total - counts.get('disabled', 0)
+    pct = round(100 * counts.get('ok', 0) / measurable, 1) if measurable else None
+
+    return jsonify({
+        'enabled': max_age > 0,
+        'max_age_hours': max_age,
+        'now': now,
+        'cluster_id': cluster_id,
+        'summary': {
+            'total': total,
+            'ok': counts.get('ok', 0),
+            'warning': counts.get('warning', 0),
+            'breached': counts.get('breached', 0),
+            'no_backup': counts.get('no_backup', 0),
+            'disabled': counts.get('disabled', 0),
+            'compliance_pct': pct,
+        },
+        'vms': out_vms,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/backup-sla/config', methods=['PUT'])
+@require_auth(perms=['cluster.config'])
+def set_backup_sla_config(cluster_id):
+    """Update the cluster-level Backup SLA target. Body: {max_age_hours: int}."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        v = int(data.get('max_age_hours', 0) or 0)
+        if v < 0 or v > 24 * 365:
+            return jsonify({'error': 'max_age_hours must be 0..8760'}), 400
+    except (TypeError, ValueError):
+        return jsonify({'error': 'max_age_hours must be int'}), 400
+    mgr = cluster_managers[cluster_id]
+    mgr.config.backup_sla_max_age_hours = v
+    try:
+        from pegaprox.core.config import save_config
+        save_config()
+    except Exception as e:
+        return jsonify({'error': f'persist failed: {e}'}), 500
+    log_audit(request.session.get('user', 'admin'),
+              'cluster.backup_sla_set',
+              f'cluster={cluster_id} max_age_hours={v}')
+    return jsonify({'ok': True, 'max_age_hours': v})
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/tasks/<path:upid>', methods=['DELETE'])
 @require_auth(perms=['vm.stop'])  # cancelling task is like stopping
 def cancel_task(cluster_id, node, upid):

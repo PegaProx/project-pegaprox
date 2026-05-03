@@ -602,6 +602,59 @@ def _unmount_iso():
         return {'error': str(e)}, 500
 
 
+def _portal_snapshot_policies():
+    """Read-only list of snapshot policies that touch the caller's VMs.
+    Filters: returns only policies whose target_value matches a VM the
+    caller has access to (via VM-ACL / pool / tenant). NS May 2026."""
+    from pegaprox.core.db import get_db
+    username = request.session.get('user', '')
+    users = load_users()
+    user = users.get(username, {})
+    user['username'] = username
+
+    # collect (cluster_id, vmid, tags) the caller can reach via _get_my_vms logic
+    # Re-use the existing helper to avoid duplicating ACL/permission code.
+    try:
+        my_vms_data = _get_my_vms()
+    except Exception:
+        my_vms_data = {'vms': []}
+
+    by_cluster = {}
+    for vm in (my_vms_data.get('vms') or []):
+        cid = vm.get('cluster_id') or vm.get('clusterId')
+        if not cid: continue
+        d = by_cluster.setdefault(cid, {'vmids': set(), 'tags': set()})
+        if vm.get('vmid') is not None:
+            d['vmids'].add(str(vm['vmid']))
+        for t in (vm.get('tags') or '').split(';'):
+            t = t.strip()
+            if t: d['tags'].add(t.lower())
+
+    policies_out = []
+    try:
+        c = get_db().conn.cursor()
+        for cid, ctx in by_cluster.items():
+            c.execute('''SELECT id, cluster_id, name, target_type, target_value,
+                         schedule, schedule_at, retention_count, retention_days,
+                         enabled, last_run_at, last_run_status
+                         FROM snapshot_policies WHERE cluster_id = ? AND enabled = 1''', (cid,))
+            for row in c.fetchall():
+                pol = dict(row)
+                applies = False
+                if pol['target_type'] == 'vm':
+                    wanted = {x.strip() for x in (pol['target_value'] or '').split(',') if x.strip()}
+                    applies = bool(wanted & ctx['vmids'])
+                elif pol['target_type'] == 'tag':
+                    applies = (pol['target_value'] or '').strip().lower() in ctx['tags']
+                if applies:
+                    policies_out.append(pol)
+    except Exception:
+        logging.exception('[client_portal] snapshot-policies failed')
+        return {'error': 'internal error'}, 500
+
+    return {'policies': policies_out}
+
+
 def register(app):
     """Register plugin routes"""
     register_plugin_route('client_portal', 'config', _get_portal_config)
@@ -616,5 +669,9 @@ def register(app):
     register_plugin_route('client_portal', 'vm/isos', _list_allowed_isos)
     register_plugin_route('client_portal', 'vm/iso-mount', _mount_iso)
     register_plugin_route('client_portal', 'vm/iso-unmount', _unmount_iso)
+    # NS May 2026 — read-only view of snapshot policies that affect the
+    # caller's VMs, plus latest run history. Lets customers see "yes my DB
+    # gets snapshotted hourly" without any management surface.
+    register_plugin_route('client_portal', 'snapshot-policies', _portal_snapshot_policies)
 
     logging.info("[PLUGINS] Client Portal plugin registered")

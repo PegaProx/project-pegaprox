@@ -961,6 +961,27 @@ class PegaProxDB:
                 except Exception:
                     pass
 
+            # NS May 2026 (#364) — these load-balancer settings were settable via
+            # the API but never persisted to the DB, so they reverted to default
+            # within seconds of a save. Adding the columns + including them in
+            # save_cluster / get_all_clusters fixes the revert behaviour.
+            for col_name, col_def in [
+                ('predictive_balancing', "INTEGER DEFAULT 0"),
+                ('predictive_threshold', "REAL DEFAULT 0.0"),
+                ('balance_cpu_weight', "REAL DEFAULT 1.0"),
+                ('balance_mem_weight', "REAL DEFAULT 1.0"),
+                ('balance_io_weight', "REAL DEFAULT 1.0"),
+                ('cpu_baseline', "TEXT DEFAULT ''"),
+                ('vnc_tunnel', "INTEGER DEFAULT 0"),
+                ('backup_sla_max_age_hours', "INTEGER DEFAULT 0"),
+            ]:
+                if col_name not in cluster_columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE clusters ADD COLUMN {col_name} {col_def}")
+                        logging.info(f"Added {col_name} column to clusters table")
+                    except Exception as e:
+                        logging.error(f"Failed to add {col_name} column: {e}")
+
         except Exception as e:
             logging.error(f"Error checking clusters schema: {e}")
 
@@ -1389,6 +1410,277 @@ class PegaProxDB:
                 cursor.execute("ALTER TABLE users ADD COLUMN user_folder TEXT DEFAULT ''")
                 logging.info("Added user_folder column to users table")
         except: pass
+
+        # NS May 2026 — cloud-init template library deployments
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cloud_init_deployments (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    template_id TEXT NOT NULL,
+                    template_name TEXT,
+                    vmid INTEGER,
+                    storage TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress INTEGER DEFAULT 0,
+                    log TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    started_by TEXT DEFAULT '',
+                    started_at TEXT,
+                    finished_at TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ci_dep_cluster ON cloud_init_deployments(cluster_id, started_at DESC)')
+            logging.info("Ensured cloud_init_deployments table exists")
+        except Exception as e:
+            logging.error(f"Error creating cloud_init_deployments table: {e}")
+
+        # NS May 2026 — user-defined cloud-init templates added on top of the
+        # curated catalog in api/templates_lib.py
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS custom_cloud_templates (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    distro TEXT DEFAULT 'custom',
+                    version TEXT DEFAULT '',
+                    image_url TEXT NOT NULL,
+                    default_user TEXT DEFAULT 'root',
+                    cores INTEGER DEFAULT 2,
+                    memory INTEGER DEFAULT 2048,
+                    disk_gb INTEGER DEFAULT 10,
+                    tags TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_custom_tpl_created ON custom_cloud_templates(created_at DESC)')
+            logging.info("Ensured custom_cloud_templates table exists")
+        except Exception as e:
+            logging.error(f"Error creating custom_cloud_templates table: {e}")
+
+        # MK May 2026 — extend audit_log with cluster + severity columns for richer filtering
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(audit_log)").fetchall()]
+            if 'cluster' not in cols:
+                cursor.execute("ALTER TABLE audit_log ADD COLUMN cluster TEXT DEFAULT ''")
+                logging.info("Added cluster column to audit_log")
+            if 'severity' not in cols:
+                cursor.execute("ALTER TABLE audit_log ADD COLUMN severity TEXT DEFAULT 'info'")
+                logging.info("Added severity column to audit_log")
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cluster ON audit_log(cluster)')
+        except Exception as e:
+            logging.error(f"Error extending audit_log schema: {e}")
+
+        # MK May 2026 — SIEM forwarder targets
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS siem_targets (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    format TEXT DEFAULT 'json',
+                    enabled INTEGER DEFAULT 1,
+                    settings TEXT DEFAULT '{}',
+                    last_status TEXT DEFAULT '',
+                    last_ok_at TEXT,
+                    last_error_at TEXT,
+                    last_error TEXT DEFAULT '',
+                    sent_count INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT DEFAULT ''
+                )
+            ''')
+            logging.info("Ensured siem_targets table exists")
+        except Exception as e:
+            logging.error(f"Error creating siem_targets table: {e}")
+
+        # NS May 2026 — DR Drill: structured dry-run of a Site Recovery plan,
+        # produces compliance-ready evidence.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dr_drills (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    plan_name TEXT DEFAULT '',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    summary TEXT DEFAULT '',
+                    started_by TEXT DEFAULT '',
+                    pass_count INTEGER DEFAULT 0,
+                    warn_count INTEGER DEFAULT 0,
+                    fail_count INTEGER DEFAULT 0,
+                    rpo_breach_seconds INTEGER DEFAULT 0,
+                    estimated_rto_seconds INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dr_drills_plan ON dr_drills(plan_id, started_at DESC)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dr_drill_checks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    drill_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message TEXT DEFAULT '',
+                    detail TEXT DEFAULT '',
+                    duration_ms INTEGER DEFAULT 0,
+                    sequence INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dr_drill_checks_drill ON dr_drill_checks(drill_id, sequence)')
+            logging.info("Ensured dr_drills + dr_drill_checks tables exist")
+        except Exception as e:
+            logging.error(f"Error creating dr_drills tables: {e}")
+
+        # NS May 2026 — Snapshot scheduling policies
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS snapshot_policies (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    target_type TEXT NOT NULL DEFAULT 'tag',
+                    target_value TEXT NOT NULL,
+                    schedule TEXT NOT NULL DEFAULT 'daily',
+                    schedule_at TEXT DEFAULT '03:00',
+                    retention_count INTEGER DEFAULT 7,
+                    retention_days INTEGER DEFAULT 0,
+                    include_ram INTEGER DEFAULT 0,
+                    enabled INTEGER DEFAULT 1,
+                    last_run_at TEXT,
+                    last_run_status TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_snap_pol_cluster ON snapshot_policies(cluster_id)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS snapshot_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    policy_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    summary TEXT DEFAULT '',
+                    log TEXT DEFAULT '',
+                    snapshots_created INTEGER DEFAULT 0,
+                    snapshots_failed INTEGER DEFAULT 0,
+                    snapshots_pruned INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_snap_runs_policy ON snapshot_runs(policy_id, started_at DESC)')
+            logging.info("Ensured snapshot_policies + snapshot_runs tables exist")
+        except Exception as e:
+            logging.error(f"Error creating snapshot_policies tables: {e}")
+
+        # MK May 2026 — Power & Carbon tracking rates
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS power_rates (
+                    cluster_id TEXT PRIMARY KEY,
+                    node_idle_w REAL DEFAULT 80,
+                    node_max_w REAL DEFAULT 300,
+                    mem_w_per_gb REAL DEFAULT 0.3,
+                    pue REAL DEFAULT 1.5,
+                    kwh_price REAL DEFAULT 0.30,
+                    kg_co2_per_kwh REAL DEFAULT 0.4,
+                    currency TEXT DEFAULT 'EUR',
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT,
+                    updated_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('''
+                INSERT OR IGNORE INTO power_rates (cluster_id, updated_at) VALUES ('__default__', ?)
+            ''', (datetime.now().isoformat(),))
+            logging.info("Ensured power_rates table exists")
+        except Exception as e:
+            logging.error(f"Error creating power_rates table: {e}")
+
+        # MK May 2026 — Cost dashboard rates (global default + optional per-cluster overrides)
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cost_rates (
+                    cluster_id TEXT PRIMARY KEY,
+                    cpu_per_core_h REAL DEFAULT 0.012,
+                    mem_per_gb_h REAL DEFAULT 0.0035,
+                    storage_per_gb_month REAL DEFAULT 0.10,
+                    currency TEXT DEFAULT 'EUR',
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT,
+                    updated_by TEXT DEFAULT ''
+                )
+            ''')
+            # ensure a global default row exists (cluster_id = '__default__')
+            cursor.execute('''
+                INSERT OR IGNORE INTO cost_rates (cluster_id, updated_at) VALUES ('__default__', ?)
+            ''', (datetime.now().isoformat(),))
+            logging.info("Ensured cost_rates table exists")
+        except Exception as e:
+            logging.error(f"Error creating cost_rates table: {e}")
+
+        # NS May 2026 — Config drift detection: store baselines + change events
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS drift_baselines (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drift_baseline_lookup ON drift_baselines(cluster_id, kind, scope)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS drift_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    severity TEXT DEFAULT 'info',
+                    summary TEXT DEFAULT '',
+                    diff TEXT NOT NULL,
+                    detected_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    acknowledged_at TEXT,
+                    acknowledged_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drift_events_cluster ON drift_events(cluster_id, detected_at DESC)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drift_events_status ON drift_events(status, cluster_id)')
+            logging.info("Ensured drift_baselines + drift_events tables exist")
+        except Exception as e:
+            logging.error(f"Error creating drift tables: {e}")
+
+        # MK May 2026 — Web Push subscriptions for browser notifications
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    endpoint TEXT NOT NULL UNIQUE,
+                    p256dh TEXT NOT NULL,
+                    auth TEXT NOT NULL,
+                    user_agent TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    failures INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(username)')
+            logging.info("Ensured push_subscriptions table exists")
+        except Exception as e:
+            logging.error(f"Error creating push_subscriptions table: {e}")
 
         conn.commit()
         logging.info("DB schema initialized")
@@ -2319,6 +2611,14 @@ class PegaProxDB:
                 'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
                 'api_token_secret': self._decrypt(row['api_token_secret_encrypted']) if 'api_token_secret_encrypted' in row.keys() and row['api_token_secret_encrypted'] else '',
                 'cluster_type': row['cluster_type'] if 'cluster_type' in row.keys() else 'proxmox',
+                'predictive_balancing': bool(row['predictive_balancing']) if 'predictive_balancing' in row.keys() else False,
+                'predictive_threshold': row['predictive_threshold'] if 'predictive_threshold' in row.keys() else 0.0,
+                'balance_cpu_weight': row['balance_cpu_weight'] if 'balance_cpu_weight' in row.keys() else 1.0,
+                'balance_mem_weight': row['balance_mem_weight'] if 'balance_mem_weight' in row.keys() else 1.0,
+                'balance_io_weight': row['balance_io_weight'] if 'balance_io_weight' in row.keys() else 1.0,
+                'cpu_baseline': row['cpu_baseline'] if 'cpu_baseline' in row.keys() else '',
+                'vnc_tunnel': bool(row['vnc_tunnel']) if 'vnc_tunnel' in row.keys() else False,
+                'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
             }
 
         return clusters
@@ -2391,6 +2691,14 @@ class PegaProxDB:
             'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
             'api_token_secret': self._decrypt(row['api_token_secret_encrypted']) if 'api_token_secret_encrypted' in row.keys() and row['api_token_secret_encrypted'] else '',
             'cluster_type': row['cluster_type'] if 'cluster_type' in row.keys() else 'proxmox',
+            'predictive_balancing': bool(row['predictive_balancing']) if 'predictive_balancing' in row.keys() else False,
+            'predictive_threshold': row['predictive_threshold'] if 'predictive_threshold' in row.keys() else 0.0,
+            'balance_cpu_weight': row['balance_cpu_weight'] if 'balance_cpu_weight' in row.keys() else 1.0,
+            'balance_mem_weight': row['balance_mem_weight'] if 'balance_mem_weight' in row.keys() else 1.0,
+            'balance_io_weight': row['balance_io_weight'] if 'balance_io_weight' in row.keys() else 1.0,
+            'cpu_baseline': row['cpu_baseline'] if 'cpu_baseline' in row.keys() else '',
+            'vnc_tunnel': bool(row['vnc_tunnel']) if 'vnc_tunnel' in row.keys() else False,
+            'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
         }
 
     def save_cluster(self, cluster_id: str, data: dict):
@@ -2412,9 +2720,13 @@ class PegaProxDB:
              api_token_user, api_token_secret_encrypted,
              group_id, display_name, sort_order,
              cluster_type,
+             predictive_balancing, predictive_threshold,
+             balance_cpu_weight, balance_mem_weight, balance_io_weight,
+             cpu_baseline, vnc_tunnel,
+             backup_sla_max_age_hours,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -2444,6 +2756,14 @@ class PegaProxDB:
             data.get('display_name', existing['display_name'] if existing else None),
             data.get('sort_order', existing['sort_order'] if existing else None),
             data.get('cluster_type', 'proxmox'),
+            1 if data.get('predictive_balancing', False) else 0,
+            float(data.get('predictive_threshold', 0.0) or 0.0),
+            float(data.get('balance_cpu_weight', 1.0) or 1.0),
+            float(data.get('balance_mem_weight', 1.0) or 1.0),
+            float(data.get('balance_io_weight', 1.0) or 1.0),
+            data.get('cpu_baseline', '') or '',
+            1 if data.get('vnc_tunnel', False) else 0,
+            int(data.get('backup_sla_max_age_hours', 0) or 0),
             existing['created_at'] if existing else now,
             now
         ))
@@ -2806,57 +3126,164 @@ class PegaProxDB:
     # AUDIT LOG OPERATIONS (with HMAC Integrity)
     # ========================================
     
-    def _generate_audit_hmac(self, timestamp: str, user: str, action: str, details: str, ip: str) -> str:
-        """Generate HMAC signature for audit entry (tamper detection)"""
+    def _generate_audit_hmac(self, timestamp: str, user: str, action: str, details: str,
+                             ip: str, cluster: str = '', severity: str = '') -> str:
+        """Generate HMAC signature for audit entry (tamper detection).
+
+        MK May 2026 (audit fix M-2) — added cluster + severity to the canonical
+        string. Old entries (signed before May 2026) won't have those fields
+        in their HMAC; the verify path tries the new format first, then
+        falls back to the legacy format for backward compat.
+        """
         if not self.aes_key:
             return ''
-        
-        # Create canonical string for signing
-        data = f"{timestamp}|{user or ''}|{action}|{details or ''}|{ip or ''}"
-        
-        # Use HMAC-SHA256 with AES key as secret
-        signature = hmac.new(
-            self.aes_key,
-            data.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
+        # Canonical: timestamp|user|action|details|ip|cluster|severity
+        data = f"{timestamp}|{user or ''}|{action}|{details or ''}|{ip or ''}|{cluster or ''}|{severity or ''}"
+        signature = hmac.new(self.aes_key, data.encode('utf-8'), hashlib.sha256).hexdigest()
         return signature
-    
+
     def _verify_audit_hmac(self, entry: dict) -> bool:
-        """Verify HMAC signature of an audit entry"""
+        """Verify HMAC signature of an audit entry. MK May 2026 — fail-closed:
+        if there's no key we cannot trust the entry, so report unverified
+        rather than 'OK'."""
         if not self.aes_key:
-            return True  # Can't verify without key
-        
+            return False  # fail-closed (was: True / fail-open)
+
         stored_sig = entry.get('hmac_signature', '')
         if not stored_sig:
             return False  # No signature = potentially tampered or old entry
-        
-        # Regenerate signature
-        expected_sig = self._generate_audit_hmac(
+
+        # Try new format (with cluster + severity).
+        expected_new = self._generate_audit_hmac(
             entry.get('timestamp', ''),
             entry.get('user', ''),
             entry.get('action', ''),
             entry.get('details', ''),
-            entry.get('ip_address', '')
+            entry.get('ip_address', ''),
+            entry.get('cluster', ''),
+            entry.get('severity', ''),
         )
-        
-        # Constant-time comparison to prevent timing attacks
-        return hmac.compare_digest(stored_sig, expected_sig)
+        if hmac.compare_digest(stored_sig, expected_new):
+            return True
+
+        # Backward-compat: pre-May-2026 entries didn't include cluster/severity
+        # in the canonical string. Try the legacy 5-field form.
+        legacy_data = (
+            f"{entry.get('timestamp','')}|{entry.get('user','') or ''}|"
+            f"{entry.get('action','')}|{entry.get('details','') or ''}|"
+            f"{entry.get('ip_address','') or ''}"
+        )
+        legacy_sig = hmac.new(self.aes_key, legacy_data.encode('utf-8'), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(stored_sig, legacy_sig)
     
-    def add_audit_entry(self, user: str, action: str, details: str = '', ip: str = ''):
-        """Add audit log entry with HMAC signature for integrity verification"""
+    def add_audit_entry(self, user: str, action: str, details: str = '', ip: str = '',
+                        cluster: str = '', severity: str = None):
+        """Add audit log entry with HMAC signature for integrity verification.
+
+        cluster/severity added MK May 2026 — keep optional so existing callers
+        keep working unchanged.
+        """
         cursor = self.conn.cursor()
         timestamp = datetime.now().isoformat()
-        
-        # Generate HMAC signature for tamper detection
-        signature = self._generate_audit_hmac(timestamp, user, action, details, ip)
-        
+
+        # Auto-derive severity from action prefix when caller didn't pass one
+        if severity is None:
+            a = (action or '').lower()
+            if 'delete' in a or 'remove' in a or 'destroy' in a:
+                severity = 'warning'
+            elif 'fail' in a or 'denied' in a or 'tampered' in a or 'security' in a:
+                severity = 'critical'
+            elif 'login' in a or 'logout' in a:
+                severity = 'info'
+            else:
+                severity = 'info'
+
+        signature = self._generate_audit_hmac(timestamp, user, action, details, ip,
+                                               cluster or '', severity)
+
         cursor.execute('''
-            INSERT INTO audit_log (timestamp, user, action, details, ip_address, hmac_signature)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (timestamp, user, action, details, ip, signature))
+            INSERT INTO audit_log (timestamp, user, action, details, ip_address,
+                                   hmac_signature, cluster, severity)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (timestamp, user, action, details, ip, signature, cluster or '', severity))
+        last_id = cursor.lastrowid
         self.conn.commit()
+
+        # Hand off to SIEM forwarder if anyone has plugged into the queue.
+        # Late import to avoid import cycles at module load.
+        try:
+            from pegaprox.api import siem as _siem_mod
+            _siem_mod.enqueue({
+                'id': last_id, 'timestamp': timestamp, 'user': user,
+                'action': action, 'details': details, 'ip_address': ip,
+                'cluster': cluster or '', 'severity': severity,
+            })
+        except Exception:
+            # silently swallow — SIEM is optional and shouldn't break audit writes
+            pass
+
+    def search_audit_log(self, q='', user='', action='', cluster='', severity='',
+                         ip='', date_from='', date_to='', offset=0, limit=100):
+        """Search audit log with rich filters + pagination.
+        Returns (entries, total) where total is the un-paginated row count."""
+        cursor = self.conn.cursor()
+        conds = []
+        params = []
+        if q:
+            # search across user, action, details, cluster
+            conds.append('(user LIKE ? OR action LIKE ? OR details LIKE ? OR cluster LIKE ?)')
+            wild = f'%{q}%'
+            params.extend([wild, wild, wild, wild])
+        if user:
+            conds.append('user = ?')
+            params.append(user)
+        if action:
+            conds.append('action LIKE ?')
+            params.append(f'%{action}%')
+        if cluster:
+            conds.append('cluster = ?')
+            params.append(cluster)
+        if severity:
+            conds.append('severity = ?')
+            params.append(severity)
+        if ip:
+            conds.append('ip_address LIKE ?')
+            params.append(f'%{ip}%')
+        if date_from:
+            conds.append('timestamp >= ?')
+            params.append(date_from)
+        if date_to:
+            conds.append('timestamp <= ?')
+            params.append(date_to)
+        where = (' WHERE ' + ' AND '.join(conds)) if conds else ''
+
+        # total
+        cursor.execute(f'SELECT COUNT(*) AS n FROM audit_log{where}', params)
+        total = cursor.fetchone()['n']
+
+        # page
+        cursor.execute(
+            f'SELECT * FROM audit_log{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?',
+            params + [int(limit), int(offset)]
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        return rows, total
+
+    def audit_facets(self, days=7):
+        """Return top users/actions for the audit search UI dropdowns."""
+        cursor = self.conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        out = {'users': [], 'actions': [], 'clusters': []}
+        try:
+            cursor.execute('SELECT user, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND user != "" GROUP BY user ORDER BY n DESC LIMIT 30', (cutoff,))
+            out['users'] = [{'user': r['user'], 'count': r['n']} for r in cursor.fetchall()]
+            cursor.execute('SELECT action, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? GROUP BY action ORDER BY n DESC LIMIT 50', (cutoff,))
+            out['actions'] = [{'action': r['action'], 'count': r['n']} for r in cursor.fetchall()]
+            cursor.execute('SELECT cluster, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND cluster != "" GROUP BY cluster ORDER BY n DESC LIMIT 30', (cutoff,))
+            out['clusters'] = [{'cluster': r['cluster'], 'count': r['n']} for r in cursor.fetchall()]
+        except Exception as e:
+            logging.warning(f"audit_facets failed: {e}")
+        return out
     
     def get_audit_log(self, limit: int = 1000, user: str = None, action: str = None, verify_integrity: bool = False) -> list:
         """Get audit log entries, optionally verifying HMAC integrity"""

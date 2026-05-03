@@ -735,6 +735,18 @@ def auth_login():
 # already, but regular users had no way to find "where am I still logged in" or revoke
 # a lost browser. These two endpoints scope strictly to the caller's own username.
 
+def _revocation_token_for(sess):
+    """Stable per-session opaque token used in /api/user/sessions and DELETE.
+    Generated lazily and stored on the session itself so subsequent listings
+    return the same token. MK May 2026 (audit fix M-5) — replaces returning
+    the full session id as 'full_id', which let JS read otherwise-HttpOnly
+    credentials and would have been a privilege-escalation vector via XSS."""
+    import secrets
+    if not sess.get('revocation_token'):
+        sess['revocation_token'] = secrets.token_urlsafe(24)
+    return sess['revocation_token']
+
+
 @bp.route('/api/user/sessions', methods=['GET'])
 def list_own_sessions():
     """Return the caller's active sessions, newest first."""
@@ -750,9 +762,11 @@ def list_own_sessions():
             if sess.get('user') != username:
                 continue
             out.append({
-                # show a short prefix only — full sid is a credential
+                # show a short prefix for display only — full sid never leaves
+                # the cookie. revoke_token is the opaque handle the UI passes
+                # back to DELETE /api/user/sessions/<token>.
                 'id': sid[:8] + '…',
-                'full_id': sid,
+                'revoke_token': _revocation_token_for(sess),
                 'ip': sess.get('ip'),
                 'user_agent': sess.get('user_agent'),
                 'created_at': sess.get('created_at'),
@@ -764,29 +778,35 @@ def list_own_sessions():
     return jsonify({'sessions': out, 'total': len(out)})
 
 
-@bp.route('/api/user/sessions/<sid>', methods=['DELETE'])
-def revoke_own_session(sid):
-    """Revoke one of the caller's own sessions. sid = full session id."""
+@bp.route('/api/user/sessions/<token>', methods=['DELETE'])
+def revoke_own_session(token):
+    """Revoke a session by its opaque revocation token.
+    MK May 2026 — was previously by-full-sid; now by token (M-5 fix)."""
     session_id = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
     current = validate_session(session_id)
     if not current:
         return jsonify({'error': 'not authenticated'}), 401
     from pegaprox.utils.auth import active_sessions, sessions_lock
+    import hmac as _hmac
     username = current['user']
+
+    target_sid = None
     with sessions_lock:
-        target = active_sessions.get(sid)
-        if not target:
-            return jsonify({'error': 'session not found'}), 404
-        if target.get('user') != username:
-            # MK: deliberate 404, not 403 — don't leak whether a sid belongs to someone else
-            return jsonify({'error': 'session not found'}), 404
-    invalidate_session(sid)
+        for sid, sess in active_sessions.items():
+            tok = sess.get('revocation_token') or ''
+            if tok and _hmac.compare_digest(tok, token) and sess.get('user') == username:
+                target_sid = sid
+                break
+    if not target_sid:
+        return jsonify({'error': 'session not found'}), 404
+    invalidate_session(target_sid)
     try:
-        log_audit(username, 'user.session_revoke', f"revoked session {sid[:8]}…")
+        log_audit(username, 'user.session_revoke', f"revoked session {target_sid[:8]}…")
     except Exception:
         pass
-    resp = jsonify({'success': True, 'revoked': sid[:8] + '…', 'self_logout': sid == session_id})
-    if sid == session_id:
+    is_self = target_sid == session_id
+    resp = jsonify({'success': True, 'revoked': target_sid[:8] + '…', 'self_logout': is_self})
+    if is_self:
         resp.delete_cookie('session_id')
     return resp
 

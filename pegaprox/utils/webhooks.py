@@ -20,6 +20,7 @@ Short timeout + per-channel try/except so one dead webhook can't block the rest.
 """
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 
@@ -32,6 +33,36 @@ except ImportError:
 def _severity_color(sev):
     """Returns hex color for Slack/Discord embed side-stripe."""
     return {'critical': '#f54f47', 'warning': '#efc006'}.get((sev or '').lower(), '#60b515')
+
+
+# MK May 2026 (audit fix M-11) — Slack/Discord/Teams/HEC webhook URLs embed
+# their secret as part of the path. `requests` exceptions render either the
+# full URL or just the path-only fragment (e.g. "with url: /services/..."),
+# both of which end up in our log file. Redact both shapes.
+_WEBHOOK_URL_RE = re.compile(
+    r'https?://[A-Za-z0-9_.\-:]+/('
+    r'services/[A-Za-z0-9/_=?&.-]+'
+    r'|api/webhooks/[A-Za-z0-9/_=?&.-]+'
+    r'|webhook[A-Za-z0-9/_=?&.-]+'
+    r'|services/collector[A-Za-z0-9/_=?&.-]*'
+    r')',
+    re.IGNORECASE,
+)
+# detached path-only patterns: appear when requests stringifies certain
+# exceptions as "...url: /services/T01.../B02.../SECRET..." without the
+# leading scheme/host. Three or more slash-separated segments → secret token.
+_WEBHOOK_PATH_ONLY_RE = re.compile(
+    r'(/(?:services|api/webhooks|webhook[^\s/]*|services/collector)/[A-Za-z0-9/_.=?&-]+)',
+    re.IGNORECASE,
+)
+
+
+def _redact_webhook_url(s):
+    """Strip secret-bearing webhook URL paths from a string before logging."""
+    if not s: return s
+    s = _WEBHOOK_URL_RE.sub('[REDACTED-WEBHOOK-URL]', str(s))
+    s = _WEBHOOK_PATH_ONLY_RE.sub('[REDACTED-WEBHOOK-PATH]', s)
+    return s
 
 
 def _ntfy_priority(sev):
@@ -126,7 +157,7 @@ def _post_ntfy(channel, alert):
         r = requests.post(url, data=body.encode('utf-8'), headers=headers, timeout=6)
         return 200 <= r.status_code < 300, f'HTTP {r.status_code}'
     except Exception as e:
-        return False, str(e)
+        return False, _redact_webhook_url(str(e))
 
 
 def send_to_channel(channel, alert):
@@ -157,7 +188,7 @@ def send_to_channel(channel, alert):
         r = requests.post(url, json=body, timeout=6)
         return 200 <= r.status_code < 400, f'HTTP {r.status_code}'
     except Exception as e:
-        return False, str(e)
+        return False, _redact_webhook_url(str(e))
 
 
 def send_to_channels(alert, channel_ids=None):
@@ -179,12 +210,14 @@ def send_to_channels(alert, channel_ids=None):
     for ch in channels:
         try:
             ok, detail = send_to_channel(ch, alert)
+            # MK May 2026 (M-11) — detail comes from send_to_channel which already
+            # redacts; redact again on outer dispatch-error to be defensive.
             if ok:
                 logging.info(f"[webhooks] → {ch.get('name', ch.get('id'))}: {detail}")
             else:
                 logging.warning(f"[webhooks] → {ch.get('name', ch.get('id'))}: FAILED ({detail})")
         except Exception as e:
-            logging.debug(f"[webhooks] channel {ch.get('id')} dispatch error: {e}")
+            logging.debug(f"[webhooks] channel {ch.get('id')} dispatch error: {_redact_webhook_url(str(e))}")
 
 
 def new_channel(payload):

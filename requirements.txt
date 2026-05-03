@@ -6,12 +6,16 @@ flask>=2.3.0
 flask-cors>=4.0.0
 flask-sock>=0.6.0
 flask-compress>=1.14
-requests>=2.28.0
-urllib3>=1.26.0
+# MK May 2026 — bumped requests + urllib3 floors to dodge CVE-2026-25645
+# and friends. Older versions still work in a pinch but pip-audit flags them.
+requests>=2.33.0
+urllib3>=2.0.0
 
 # === Encryption & Security ===
-cryptography>=41.0.0
-pyopenssl>=23.0.0
+# NS May 2026 — cryptography 46.0.6/.0.7 patches CVE-2026-34073 + -39892,
+# pyopenssl 26.x patches CVE-2026-27448 + -27459. argon2-cffi unchanged.
+cryptography>=46.0.7
+pyopenssl>=26.0.0
 argon2-cffi>=23.0.0
 
 # === SSH & Console ===
@@ -25,7 +29,9 @@ gevent-websocket>=0.10.0
 
 # === Two-Factor Auth ===
 pyotp>=2.9.0
+# qrcode[pil] pulls Pillow; bump floor so CVE-2026-40192 is dodged.
 qrcode[pil]>=7.4.0
+pillow>=12.2.0
 # WebAuthn / FIDO2 hardware tokens (YubiKey, Nitrokey, Touch ID, Windows Hello).
 # Optional at runtime — feature is auto-disabled if import fails.
 fido2>=1.1.0
@@ -34,7 +40,8 @@ fido2>=1.1.0
 ldap3>=2.9.0
 
 # === OIDC JWT Verification ===
-PyJWT[crypto]>=2.8.0
+# >=2.12 patches CVE-2026-32597
+PyJWT[crypto]>=2.12.0
 
 # === ESXi Migration (Optional) ===
 pyvmomi>=8.0.0

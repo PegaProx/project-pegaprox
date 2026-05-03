@@ -3872,6 +3872,38 @@ def get_node_usb_devices(cluster_id, node):
         return jsonify({'error': safe_error(e, 'Failed to get USB devices')}), 500
 
 
+# MK May 2026 — Recover the QEMU --args after the user changed disk bus type
+# (scsi0 → sata0 etc.) via the Proxmox UI. The static sector-size args we wrote
+# at V2P-migration time reference the original bus, so QEMU refuses to start
+# ("there is no device 'scsi0' defined"). This endpoint reads the current VM
+# config, regenerates the matching -set device.<bus><idx>.{logical,physical}_block_size
+# from the actual disk attachments, and writes them back via `qm set --args`.
+# No node-side artifacts (deliberately not a hookscript), one-shot recovery.
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/fix-args', methods=['POST'])
+@require_auth(perms=['vm.config'])
+def fix_vm_qemu_args(cluster_id, node, vmid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+    try:
+        from pegaprox.core.v2p import _rebuild_sector_args
+        changed, new_args, problem = _rebuild_sector_args(manager, node, vmid)
+        if problem:
+            return jsonify({'ok': False, 'error': problem, 'args': new_args}), 400
+        log_audit(request.session.get('user', 'admin'), 'vm.fix_args',
+                  f'vmid={vmid} node={node} cluster={cluster_id} changed={changed}')
+        return jsonify({
+            'ok': True,
+            'changed': changed,
+            'args': new_args,
+            'message': 'args updated' if changed else 'args already match current disks'
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/passthrough', methods=['GET'])
 @require_auth(perms=['vm.view'])
 def get_vm_passthrough_devices(cluster_id, node, vmid):

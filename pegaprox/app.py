@@ -144,25 +144,64 @@ def create_app():
                 if request.content_length > 0:
                     return jsonify({'error': 'Invalid Content-Type'}), 415
 
-        # NS: Mar 2026 - CSRF check for multipart uploads (JSON reqs already need Content-Type: application/json which triggers preflight)
-        if request.method in ['POST', 'PUT', 'DELETE'] and request.path.startswith('/api/'):
+        # NS: Mar 2026 — CSRF check for multipart uploads.
+        # MK May 2026 (audit fix H-1) — also enforced for application/json
+        # POST/PUT/PATCH/DELETE. Earlier the assumption was "JSON triggers
+        # CORS preflight which blocks cross-origin", which is true for the
+        # browser path but doesn't help against subdomain takeover, mis-
+        # configured trusted-proxy reflecting Origin, or non-browser tools
+        # that already have a session cookie. So now: every state-changing
+        # /api/* request must come with X-Requested-With or a matching Origin.
+        # Exempt: unauth flows (login, OIDC redirects) where we have no
+        # session yet to protect.
+        _CSRF_EXEMPT = (
+            '/api/auth/login',
+            '/api/auth/oidc/authorize',
+            '/api/auth/oidc/callback',
+            '/api/auth/oidc/config',
+            '/api/auth/check',
+            '/api/auth/validate',
+            '/api/auth/logout',  # logout is idempotent + harmless
+            '/api/health',
+            '/api/webauthn/auth/begin',
+            '/api/webauthn/auth/finish',
+        )
+        if (request.method in ('POST', 'PUT', 'PATCH', 'DELETE')
+                and request.path.startswith('/api/')
+                and request.path not in _CSRF_EXEMPT):
             content_type = request.content_type or ''
-            if 'multipart/form-data' in content_type:
-                # form uploads must have X-Requested-With or matching Origin
+            sensitive = ('multipart/form-data' in content_type
+                         or 'application/json' in content_type
+                         or 'application/x-www-form-urlencoded' in content_type)
+            if sensitive:
                 has_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
                 origin = request.headers.get('Origin', '')
+                referer = request.headers.get('Referer', '')
                 allowed_origins = get_allowed_origins() or []
-                # #210: also check X-Forwarded-Proto/Host for reverse proxy setups
                 fwd_host = request.headers.get('X-Forwarded-Host', '')
                 fwd_proto = request.headers.get('X-Forwarded-Proto', request.scheme)
-                has_valid_origin = origin and (
-                    origin in allowed_origins or
-                    origin.startswith(f"{request.scheme}://{request.host}") or
-                    origin.startswith(f"{fwd_proto}://{request.host}") or  # #210: proxy sends Host but not X-Forwarded-Host
-                    (fwd_host and origin.startswith(f"{fwd_proto}://{fwd_host}"))
-                )
-                if not has_xhr and not has_valid_origin:
-                    return jsonify({'error': 'CSRF validation failed'}), 403
+
+                def _origin_ok(value):
+                    if not value: return False
+                    return (
+                        value in allowed_origins or
+                        value.startswith(f"{request.scheme}://{request.host}") or
+                        value.startswith(f"{fwd_proto}://{request.host}") or
+                        (fwd_host and value.startswith(f"{fwd_proto}://{fwd_host}"))
+                    )
+
+                # accept either a same-origin Origin/Referer OR XHR + same-origin
+                # (XHR alone is not enough — fetch() lets attacker set X-R-W on
+                # same-origin, but cross-origin requests can also set it freely
+                # in non-browser contexts).
+                ok_origin = _origin_ok(origin) or _origin_ok(referer.rstrip('/').rsplit('/', 1)[0] if referer else '')
+                if not ok_origin:
+                    # If neither Origin nor Referer matches, only allow when XHR
+                    # marker is set AND there's no foreign Origin/Referer.
+                    if not has_xhr:
+                        return jsonify({'error': 'CSRF validation failed'}), 403
+                    if origin and not _origin_ok(origin):
+                        return jsonify({'error': 'CSRF validation failed'}), 403
 
         return None
 

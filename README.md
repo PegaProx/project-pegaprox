@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.8.2--beta-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.9.9--beta-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/python-3.8+-green" alt="Python"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0--License-orange" alt="License"/>
 </p>
@@ -31,6 +31,8 @@ PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng 
 </p>
 
 ## ❤️ Sponsors
+
+> PegaProx is a community-driven open source project that **lives entirely from sponsorships and donations**. Server costs, domains, code-signing certificates and the developer hours behind every release come straight out of our own pockets — and out of the contributions of the wonderful companies and individuals below. If PegaProx saves you time at work, please consider [becoming a sponsor](mailto:sponsor@pegaprox.com) or chipping in on [Open Collective](https://opencollective.com/pegaprox). Every euro keeps the lights on. 💛
 
 ### 💎 Platinum
 
@@ -104,39 +106,68 @@ PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng 
 - 🔑 **SSH Required** - ESXi host must have SSH enabled
 
 ### Security & Access Control
-- 👥 **Multi-User Support** - Role-based access control (Admin, Operator, Viewer)
-- 🛠️ **API Token Management** - Create, list, and revoke Bearer tokens
+- 👥 **Multi-User Support** - Role-based access control (Admin, Operator, Viewer) + custom roles
+- 🛠️ **API Token Management** - Create, list, and revoke Bearer tokens (scoped per role)
 - 🔐 **2FA Authentication** - TOTP-based two-factor authentication (with force option)
-- 🏛️ **LDAP / OIDC** - Active Directory, OpenLDAP, Entra ID, Keycloak, Google Workspace
+- 🔑 **WebAuthn / FIDO2** - Hardware-key login (YubiKey, Nitrokey, Touch ID, Windows Hello) — passwordless or as 2FA factor
+- 🏛️ **LDAP / OIDC** - Active Directory, OpenLDAP, Entra ID, Keycloak, Google Workspace, Authentik (with PKCE)
 - 🛡️ **VM-Level ACLs** - Fine-grained permissions per VM
 - 🏢 **Multi-Tenancy** - Isolate clusters for different customers
 - 🚫 **IP Whitelisting / Blacklisting** - Restrict access by IP or CIDR range
 - 🔒 **AES-256-GCM Encryption** - All stored credentials encrypted at rest
 - 🔍 **CVE Scanner** - Per-node package vulnerability scanning via debsecan
 - 🛡️ **CIS Hardening** - One-click security audit and hardening against CIS benchmarks
+- 🧾 **HMAC-Signed Audit Log** - Tamper-evident integrity verification on every entry
 
 ### Automation & Monitoring
 - ⏰ **Scheduled Tasks** - Automate VM actions (start, stop, snapshot, backup)
+- 📸 **Snapshot Schedules** - Tag-based or VMID-list snapshot policies with retention pruning (hourly / daily / weekly + “keep last N” + “keep N days”)
 - 🔄 **Rolling Node Updates** - Update cluster nodes one by one with automatic evacuation
 - 🚨 **Alerts** - Get notified on high CPU, memory, or disk usage
 - 📜 **Audit Logging** - Track all user actions with IP addresses
+- 🔎 **Audit Search** - Full-text + date-range + severity + IP filter, paginated, CSV export
+- 🛰️ **SIEM Forwarder** - Stream audit events to Syslog (UDP/TCP RFC 5424), Splunk HEC, Elasticsearch, Loki, or generic webhooks. VAPID-style per-target TLS verification.
 - 🔧 **Custom Scripts** - Run scripts across nodes
 - 💿 **Ceph Management** - Monitor and manage Ceph storage pools, RBD mirroring
 - 🔐 **ACME / Let's Encrypt** - Automatic SSL certificate renewal with HTTP-01 challenge (+ custom ACME CAs)
 - 📋 **Integrated Syslog Server** - Receive and view syslog messages (UDP/TCP) with filtering, search, and severity-based coloring
+- 🧬 **Config Drift Detection** - Nightly snapshot of cluster config (VM configs, storage.cfg, network, datacenter options) — alerts on any unauthorized change vs the admin-set baseline. Pairs with the Compliance Dashboard.
+
+### Reports & Analytics
+- 💰 **Cost Dashboard / Chargeback** - €/VM/Month from real metrics (CPU-h × node tariff + RAM-GB-h + Storage-GB-month). Currency-configurable, per-cluster rates, top-spender table, by-node breakdown. CSV + PDF export.
+- ⚡ **Power & Carbon Tracking** - Estimated kWh + €/Month + kg CO₂/Month per VM, based on metrics history × node-power profile × PUE × grid CO₂ intensity. Defaults for DE/EU; admin-tunable for any hardware/grid. CSV + PDF export.
+- 🧠 **Insights** - Right-sizing recommendations (oversized / undersized CPU + RAM, idle VMs) and capacity forecasts (linear regression + ETA to threshold) over 30 days of history. PDF export.
+- 🌐 **Network Topology Visualization** - Interactive SVG graph: Cluster → Nodes → Bridges/Bonds/SDN VNets → VMs. Click to highlight connections.
+- 📊 **Compliance Dashboard** - Read-only BSI Grundschutz / ISO 27001 / NIS2 / SOC 2 mapping per cluster, hardening score, exportable PDF. Visible to ops/auditors without admin rights.
+- 🛡️ **CVE Reporting** - Per-cluster severity counts + per-package detail + historical view of when each CVE first appeared.
+
+### Operations & Deployment
+- ☁️ **Cloud-Init Template Library** - Curated catalog (Ubuntu 22.04/24.04, Debian 11/12, AlmaLinux 9, Rocky 9, Fedora 40, Alpine 3.19) plus admin-defined custom templates. One-click deploy to any cluster (download → import → cloudinit drive → convert to template).
+- 🚑 **Site Recovery** - Configure DR plans (boot order, dependencies, replication mappings) and execute controlled failover with audit trail.
+- 📦 **Backup SLA Tracking** - SLA dashboard per cluster + datastore: last-backup age vs configured RPO, integrated with the Alert pipeline.
+- 🔁 **ZFS / Cross-Cluster Replication** - Native PVE replication monitor + cross-cluster replication for clusters without shared storage.
+- 🛠️ **V2P / ESXi Migration** - Pyvmomi + SSHFS-based, with VirtIO driver pre-staging via MSI bulk-install (Windows guests).
+
+### Notifications
+- 📢 **Webhook Channels** - Slack, Discord, Microsoft Teams, ntfy, generic JSON webhooks (multi-channel, per-alert routing)
+- 🔔 **Web Push Notifications** - Browser push via VAPID, “wake-up” pattern (no payload leaks to push provider). Inbox view in the topbar bell with unread badge.
+- 📲 **PWA / Installable App** - Service Worker shell-cache, offline boot, install prompt, theme-color matching layout.
 
 ### Plugins
-- 🌐 **Client Portal** - Self-service portal for hosting customers with VM power actions, noVNC console, snapshots, 2FA, and password management
+- 🌐 **Client Portal** - Self-service portal for hosting customers with VM power actions, noVNC console, snapshots, ISO mount, snapshot policies (read-only), 2FA, and password management
 - 📊 **Public Status Page** - Cluster health dashboard for monitoring screens with URL-based auth key (no login required)
+- 🔔 **Notifications Plugin** - ntfy + Apprise integration for unified channel routing
+- 🐳 **Docker Swarm Manager** *(Community)* - Manage Swarm services from the same UI
 - 🔌 **Plugin Config Editor** - Edit plugin configuration directly from the UI
 
 ### Advanced Features
-- 🌐 **Offline Mode** - Works without internet (local assets)
-- 🎨 **Themes** - Dark mode, Proxmox theme, and more
+- 🌐 **Offline Mode** - Works without internet (local assets, air-gap mode disables external CVE/sponsor lookups for VS-NfD / classified networks)
+- 🎨 **Themes** - 17 themes including Dark/Light, Proxmox, Corporate (light/dark), Dracula, Nord, Monokai, Solarized, Cyberpunk, etc.
 - 🏢 **Corporate Layout** - Tree-based sidebar with dense tables
 - 🌍 **Multi-Language** - English, German, French, Spanish, Portuguese, Korean, Italian
-- 📱 **Responsive** - Works on desktop and mobile
+- 📱 **Responsive + PWA** - Works on desktop and mobile, installable as native-feeling app
 - 📦 **PBS Integration** - Proxmox Backup Server management with backup verification
+- 🔭 **Prometheus Exporter** - Scrape `/api/metrics` with bearer auth for cluster + VM metrics
 
 ## 📋 Requirements
 

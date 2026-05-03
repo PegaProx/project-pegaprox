@@ -875,14 +875,35 @@
             const snapshotPbs = useRef(null);
             const snapshotMultiCluster = useRef(null);
             const [topoRevision, setTopoRevision] = useState(0); // bump to force refresh
-            if (!snapshotNodes.current && nodes) snapshotNodes.current = nodes;
-            if (!snapshotResources.current && resources) snapshotResources.current = resources;
+
+            // NS May 2026 — only snapshot once we have *real* metrics; using
+            // the very first render snapshotted a zero-percent stub that never
+            // recovered. Once frozen the layout stays put — no live re-flow on
+            // SSE metric ticks. Click the refresh button to re-snapshot.
+            const _hasRealMetrics = (n) => n && (
+                (n.cpu_percent != null && n.cpu_percent > 0) ||
+                (n.cpu != null && n.cpu > 0) ||
+                (n.maxmem != null && n.maxmem > 0) ||
+                (n.mem_total != null && n.mem_total > 0)
+            );
+            if (!snapshotNodes.current && nodes && nodes.length && nodes.some(_hasRealMetrics)) {
+                snapshotNodes.current = nodes;
+            }
+            if (!snapshotResources.current && resources && resources.length) {
+                snapshotResources.current = resources;
+            }
             if (!snapshotPbs.current && pbsServers) snapshotPbs.current = pbsServers;
-            if (!snapshotMultiCluster.current && multiCluster?.length) snapshotMultiCluster.current = multiCluster;
+            if (!snapshotMultiCluster.current && multiCluster?.length) {
+                const ready = multiCluster.every(cl =>
+                    (cl.nodes || []).length === 0 ||
+                    (cl.nodes || []).some(_hasRealMetrics)
+                );
+                if (ready) snapshotMultiCluster.current = multiCluster;
+            }
             const frozenNodes = snapshotNodes.current || nodes || [];
             const frozenResources = snapshotResources.current || resources || [];
             const frozenPbs = snapshotPbs.current || pbsServers || [];
-            const frozenMultiCluster = snapshotMultiCluster.current || multiCluster;
+            const frozenMultiCluster = snapshotMultiCluster.current || multiCluster || [];
             // refresh handler — re-snapshot from live props
             const refreshTopology = useCallback(() => {
                 snapshotNodes.current = nodes;
@@ -1075,9 +1096,11 @@
             // ── diagram layout calculation ──
             const ICON = 40;
             const TIER_Y = { cluster: 85, nodes: 240, vmsStart: 395 };
-            const VM_ROW_H = 58;
+            const VM_ROW_H = 44;
             const VM_COLS = 3;
-            const VM_COL_W = 110;
+            const VM_COL_W = 158;
+            const NODE_CARD_W = 168;
+            const VM_PILL_W = 150;
             // show all VMs — no truncation
 
             const nodeCount = allNodes.length;
@@ -1088,9 +1111,8 @@
             // is ceil-cols × VM_COL_W + optional stagger offset when rows >1.
             const maxVmsAnyNode = Math.max(0, ...Object.values(nodeGroups || {}).map(v => (v || []).length));
             const bandCols = Math.min(VM_COLS, Math.max(1, maxVmsAnyNode));
-            const bandStagger = maxVmsAnyNode > VM_COLS ? VM_COL_W / 2 : 0;
-            const vmBandW = maxVmsAnyNode > 0 ? bandCols * VM_COL_W + bandStagger : 0;
-            const colSpacing = Math.max(160, vmBandW + 30, 900 / (totalCols + 1));
+            const vmBandW = maxVmsAnyNode > 0 ? bandCols * VM_COL_W : 0;
+            const colSpacing = Math.max(NODE_CARD_W + 24, vmBandW + 30, 900 / (totalCols + 1));
             const svgW = Math.max(800, (totalCols + 1) * colSpacing);
 
             // position nodes centered horizontally
@@ -1121,14 +1143,15 @@
                 const hiddenCount = 0;
                 const x = nodeXPositions[i];
 
+                // LW May 2026: dropped the honeycomb stagger — pills got wider
+                // (132px) and the half-column shift (70px) made adjacent rows
+                // overlap by 62px. Clean grid lines up cleanly.
                 const vmPositions = visible.map((vm, vi) => {
                     const cols = 3;
                     const row = Math.floor(vi / cols);
                     const posInRow = vi % cols;
                     const inThisRow = Math.min(visible.length - row * cols, cols);
-                    // honeycomb stagger - offset odd rows by half col width
-                    const staggerX = (row % 2 === 1) ? VM_COL_W / 2 : 0;
-                    const xOff = (posInRow - (inThisRow - 1) / 2) * VM_COL_W + staggerX;
+                    const xOff = (posInRow - (inThisRow - 1) / 2) * VM_COL_W;
                     return { ...vm, x: x + xOff,
                         y: TIER_Y.vmsStart + row * VM_ROW_H };
                 });
@@ -1219,29 +1242,51 @@
             const isLightCorp = isCorporate && (() => {
                 try { return localStorage.getItem('corp-theme') === 'light'; } catch(_) { return false; }
             })();
+            // LW May 2026: brand colour gets its own slot now — Corporate uses Clarity
+            // blue, Modern keeps the orange. Was hardcoded in 7 places previously.
             const topoColor = React.useMemo(() => (isLightCorp ? {
                 text:    '#2d3a48',
                 muted:   '#617280',
                 bg:      '#ffffff',
                 accent:  '#005b8f',
-                edge:    'rgba(0,0,0,0.18)',
+                brand:   '#005b8f',
+                section: 'rgba(0,91,143,0.04)',
+                edge:    'rgba(0,0,0,0.22)',
+                edgeBrand:'rgba(0,91,143,0.55)',
                 barBg:   'rgba(0,0,0,0.08)',
                 nodeIcon:'#2d3a48',
                 vmQemu:  '#005b8f',
                 vmLxc:   '#7c3aed',
                 pbsBg:   'rgba(124,58,237,0.08)',
-            } : {
+            } : isCorporate ? {
                 text:    '#e9ecef',
-                muted:   '#728b9a',
-                bg:      '#12181f',
-                accent:  '#e57000',
-                edge:    'rgba(114,139,154,0.3)',
+                muted:   '#adbbc4',
+                bg:      '#17242b',
+                accent:  '#49afd9',
+                brand:   '#49afd9',
+                section: 'rgba(73,175,217,0.05)',
+                edge:    'rgba(173,187,196,0.35)',
+                edgeBrand:'rgba(73,175,217,0.6)',
                 barBg:   'rgba(255,255,255,0.06)',
                 nodeIcon:'#e9ecef',
                 vmQemu:  '#49afd9',
                 vmLxc:   '#a178d9',
                 pbsBg:   'rgba(164,120,217,0.15)',
-            }), [isLightCorp]);
+            } : {
+                text:    '#e9ecef',
+                muted:   '#728b9a',
+                bg:      '#12181f',
+                accent:  '#e57000',
+                brand:   '#e57000',
+                section: 'rgba(229,112,0,0.04)',
+                edge:    'rgba(114,139,154,0.3)',
+                edgeBrand:'rgba(229,112,0,0.6)',
+                barBg:   'rgba(255,255,255,0.06)',
+                nodeIcon:'#e9ecef',
+                vmQemu:  '#49afd9',
+                vmLxc:   '#a178d9',
+                pbsBg:   'rgba(164,120,217,0.15)',
+            }), [isLightCorp, isCorporate]);
 
             // LW Apr 2026: snap back to a centered/fit view when the topology first renders
             // or when the user switches between cards and diagram (without this, big clusters
@@ -1325,22 +1370,60 @@
                 if (!svg) return;
 
                 // clone + light theme for print/export
+                // NS May 2026 — extended the colour-swap to cover the
+                // Corporate-layout palette (brand pills, section backdrops,
+                // bar tracks, muted text) so the exported PDF doesn't show
+                // dark blobs on a white page.
                 const clone = svg.cloneNode(true);
                 const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
                 bg.setAttribute('width', '100%'); bg.setAttribute('height', '100%');
                 bg.setAttribute('fill', '#ffffff');
                 clone.insertBefore(bg, clone.firstChild);
 
-                // swap dark-mode colors → light
+                const darkBgs = new Set(['#17242b', '#12181f', '#1b2a32', '#22343c']);
+                const mutedTones = new Set(['#728b9a', '#adbbc4', '#617280']);
+                const lightTextOn = new Set(['#e9ecef', '#fff', '#ffffff', 'white', '#2d3a48']);
+
                 clone.querySelectorAll('text').forEach(t => {
-                    const fill = t.getAttribute('fill');
-                    if (fill === '#e9ecef' || fill === '#fff' || fill === 'white') t.setAttribute('fill', '#333');
-                    if (fill === '#728b9a') t.setAttribute('fill', '#666');
+                    const fill = (t.getAttribute('fill') || '').toLowerCase();
+                    if (lightTextOn.has(fill)) t.setAttribute('fill', '#1f2937');
+                    else if (mutedTones.has(fill)) t.setAttribute('fill', '#6b7280');
                 });
-                clone.querySelectorAll('line').forEach(l => {
-                    const c = l.getAttribute('stroke');
-                    if (c && c.startsWith('rgba(114')) l.setAttribute('stroke', '#bbb');
+                clone.querySelectorAll('line, path').forEach(el => {
+                    const stroke = (el.getAttribute('stroke') || '').toLowerCase();
+                    if (!stroke) return;
+                    if (stroke.startsWith('rgba(114') || stroke.startsWith('rgba(173')) {
+                        el.setAttribute('stroke', '#cbd5e0');
+                    }
                 });
+                clone.querySelectorAll('rect').forEach(r => {
+                    const fill = (r.getAttribute('fill') || '').toLowerCase();
+                    const stroke = (r.getAttribute('stroke') || '').toLowerCase();
+                    // dark card backdrops → light fill on white page
+                    if (darkBgs.has(fill)) {
+                        r.setAttribute('fill', '#f8fafc');
+                        r.removeAttribute('fill-opacity');
+                    }
+                    // section tint (rgba(*,0.05)) → very light brand-tinted
+                    if (fill.startsWith('rgba(73,175,217') || fill.startsWith('rgba(229,112,0')) {
+                        r.setAttribute('fill', '#eef6fb');
+                        r.removeAttribute('fill-opacity');
+                    }
+                    // bar BG track (rgba(255,255,255,0.06)) → solid light gray
+                    if (fill.startsWith('rgba(255,255,255')) {
+                        r.setAttribute('fill', '#e5e7eb');
+                        r.removeAttribute('fill-opacity');
+                    }
+                    // edges as rect strokes
+                    if (stroke.startsWith('rgba(173')) r.setAttribute('stroke', '#cbd5e0');
+                });
+                // generic stroke-opacity / fill-opacity reset for high-contrast print
+                clone.querySelectorAll('[stroke-opacity]').forEach(el => {
+                    const op = parseFloat(el.getAttribute('stroke-opacity'));
+                    if (op < 0.6) el.setAttribute('stroke-opacity', '0.6');
+                });
+                // node-icon strokes that were white on dark → dark on light
+                clone.querySelectorAll('path[stroke="#e9ecef"]').forEach(p => p.setAttribute('stroke', '#1f2937'));
 
                 // reset viewBox to full diagram regardless of current pan/zoom
                 const expW = isMultiCluster && mcLayout ? mcLayout.mcW : svgW;
@@ -1376,7 +1459,13 @@
 
             // ── multi-cluster layout (when multiCluster prop given) ──
             const isMultiCluster = frozenMultiCluster && frozenMultiCluster.length > 0;
-            const MC_TIER = { brand: 30, clusters: 100, nodes: 260, vmsStart: 420 };
+            // LW May 2026: show ALL VMs in multi-cluster too. The cap was making
+            // the view feel broken; user wants the full picture. Layout has to
+            // make sure each node's VM band has enough horizontal room not to
+            // collide with the neighbouring node's VMs.
+            const MC_VMS_COLS = 3;
+            const MC_VM_ROW = 30;
+            const MC_TIER = { brand: 30, clusters: 100, nodes: 260, vmsStart: 360 };
             const mcLayout = React.useMemo(() => {
                 if (!isMultiCluster) return null;
                 const layouts = frozenMultiCluster.map(cl => {
@@ -1387,54 +1476,53 @@
                         if (!nodeGrp[r.node]) nodeGrp[r.node] = [];
                         nodeGrp[r.node].push(r);
                     });
-                    // NS: per-cluster spacing based on the biggest node in this cluster
-                    const maxV = Math.max(0, ...Object.values(nodeGrp).map(v => v.length));
-                    const bC = Math.min(VM_COLS, Math.max(1, maxV));
-                    const bS = maxV > VM_COLS ? VM_COL_W / 2 : 0;
-                    const bandW = maxV > 0 ? bC * VM_COL_W + bS : 0;
-                    const clSpacing = Math.max(160, bandW + 30);
-                    const w = Math.max(clNodes.length, 1) * clSpacing;
+                    const bandW = MC_VMS_COLS * VM_COL_W;        // 420 wide
+                    const clSpacing = Math.max(NODE_CARD_W + 24, bandW + 30);
+                    const nc = Math.max(clNodes.length, 1);
+                    // cluster width = sum of per-node bands plus margins on each side
+                    const w = nc * clSpacing + 30;
                     return { ...cl, nodeCount: clNodes.length, width: w, nodeGrp, clRes, clSpacing,
                         totalGuests: clRes.length, connPbs: (cl.pbsServers || []).filter(p => p.status !== 'disconnected') };
                 });
-                const totalW = layouts.reduce((s, c) => s + c.width, 0) + (layouts.length - 1) * 40;
+                const totalW = layouts.reduce((s, c) => s + c.width, 0) + (layouts.length - 1) * 60;
                 const mcW = Math.max(800, totalW + 120);
                 let xOff = (mcW - totalW) / 2;
                 layouts.forEach(cl => {
                     cl.centerX = xOff + cl.width / 2;
                     cl.startX = xOff;
-                    xOff += cl.width + 40;
+                    xOff += cl.width + 60;
                 });
-                // position nodes + VMs per cluster
+                // position nodes + VMs per cluster — nodes spaced by clSpacing
+                // so adjacent VM bands cannot collide horizontally.
                 let mcMaxBottom = MC_TIER.vmsStart;
                 layouts.forEach(cl => {
                     const nc = cl.nodeCount || 1;
+                    const totalNodesW = nc * cl.clSpacing;
+                    const startNX = cl.startX + (cl.width - totalNodesW) / 2 + cl.clSpacing / 2;
+                    let clBottom = MC_TIER.vmsStart;
                     cl.posNodes = (cl.nodes || []).map((node, i) => {
-                        const spacing = cl.width / (nc + 1);
-                        const nx = cl.startX + spacing * (i + 1);
+                        const nx = startNX + i * cl.clSpacing;
                         const vms = cl.nodeGrp[node.name] || [];
                         const isOn = node.status === 'online' || node.cpu !== undefined || node.cpu_percent !== undefined;
                         const cpu = node.cpu_percent != null ? node.cpu_percent : ((node.cpu || 0) * 100);
                         const ram = node.mem_percent != null ? node.mem_percent : (node.maxmem ? (node.mem / node.maxmem) * 100 : 0);
                         const sorted = [...vms].sort((a, b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0) || a.vmid - b.vmid);
-                        const vis = sorted;
-                        const hidden = 0;
-                        const vmPos = vis.map((vm, vi) => {
-                            const cols = 3;
-                            const row = Math.floor(vi / cols);
-                            const posInRow = vi % cols;
-                            const inThisRow = Math.min(vis.length - row * cols, cols);
-                            const staggerX = (row % 2 === 1) ? VM_COL_W / 2 : 0;
-                            const xOff = (posInRow - (inThisRow - 1) / 2) * VM_COL_W + staggerX;
+                        const vmPos = sorted.map((vm, vi) => {
+                            const row = Math.floor(vi / MC_VMS_COLS);
+                            const posInRow = vi % MC_VMS_COLS;
+                            const inThisRow = Math.min(sorted.length - row * MC_VMS_COLS, MC_VMS_COLS);
+                            const xOff = (posInRow - (inThisRow - 1) / 2) * VM_COL_W;
                             return { ...vm, x: nx + xOff,
-                                y: MC_TIER.vmsStart + row * VM_ROW_H, _clusterId: cl.id };
+                                y: MC_TIER.vmsStart + row * MC_VM_ROW, _clusterId: cl.id };
                         });
-                        const vmRows = Math.ceil(vis.length / 3);
-                        const lastY = vmRows > 0 ? MC_TIER.vmsStart + vmRows * VM_ROW_H : MC_TIER.vmsStart;
-                        mcMaxBottom = Math.max(mcMaxBottom, hidden > 0 ? lastY + VM_ROW_H : lastY);
+                        const vmRows = Math.ceil(sorted.length / MC_VMS_COLS);
+                        const lastY = vmRows > 0 ? MC_TIER.vmsStart + vmRows * MC_VM_ROW : MC_TIER.vmsStart;
+                        clBottom = Math.max(clBottom, lastY);
                         return { ...node, x: nx, isOnline: isOn, cpuPct: cpu, ramPct: ram, vms: vmPos,
-                            hiddenCount: hidden, totalVms: vms.length, _clusterId: cl.id };
+                            hiddenCount: 0, totalVms: vms.length, _clusterId: cl.id };
                     });
+                    cl.bottomY = clBottom;
+                    mcMaxBottom = Math.max(mcMaxBottom, clBottom);
                 });
                 const mcH = Math.max(520, mcMaxBottom + 60);
                 return { layouts, mcW, mcH };
@@ -1580,9 +1668,9 @@
                                     }}
                                     style={{
                                         padding: '3px 8px', fontSize: 11, borderRadius: 3,
-                                        background: showAffinity ? 'rgba(229,112,0,0.18)' : 'transparent',
+                                        background: showAffinity ? `${topoColor.brand}2e` : 'transparent',
                                         border: '1px solid rgba(255,255,255,0.1)',
-                                        color: showAffinity ? '#e57000' : '#728b9a', cursor: 'pointer',
+                                        color: showAffinity ? topoColor.brand : '#728b9a', cursor: 'pointer',
                                     }}
                                     title={t('toggleAffinityEdges') || 'Show / hide affinity rule connections'}>
                                     {showAffinity ? '●' : '○'} {t('affinity') || 'Affinity'}
@@ -1591,9 +1679,9 @@
                                     onClick={toggleLegend}
                                     style={{
                                         padding: '3px 8px', fontSize: 11, borderRadius: 3,
-                                        background: showLegend ? 'rgba(229,112,0,0.18)' : 'transparent',
+                                        background: showLegend ? `${topoColor.brand}2e` : 'transparent',
                                         border: '1px solid rgba(255,255,255,0.1)',
-                                        color: showLegend ? '#e57000' : '#728b9a', cursor: 'pointer',
+                                        color: showLegend ? topoColor.brand : '#728b9a', cursor: 'pointer',
                                     }}
                                     title={t('toggleLegend') || 'Show / hide legend'}>
                                     {showLegend ? '●' : '○'} {t('legend') || 'Legend'}
@@ -1617,25 +1705,76 @@
                                 {/* ── Multi-cluster unified diagram ── */}
                                 {isMultiCluster && mcLayout && (
                                     <React.Fragment>
-                                        {/* PegaProx brand at top */}
-                                        <text x={mcLayout.mcW / 2} y={MC_TIER.brand} textAnchor="middle" fill="#e57000" fontSize="16" fontWeight="700" letterSpacing="1.5">PegaProx</text>
-                                        <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 14} textAnchor="middle" fill={topoColor.muted} fontSize="9">Multi-Cluster Topology</text>
+                                        {/* per-cluster section backdrop — sized to its own content height */}
+                                        {mcLayout.layouts.map((cl, ci) => (
+                                            <rect key={`mc-bg-${ci}`}
+                                                x={cl.startX - 10} y={MC_TIER.clusters - 50}
+                                                width={cl.width + 20}
+                                                height={cl.bottomY - MC_TIER.clusters + 80}
+                                                rx={8} ry={8}
+                                                fill={topoColor.bg} fillOpacity={isCorporate ? 0.45 : 0.55}
+                                                stroke={topoColor.brand} strokeOpacity={isCorporate ? 0.35 : 0.25}
+                                                strokeWidth={1.5} />
+                                        ))}
 
-                                        {/* edges: brand center → each cluster */}
+                                        {/* PegaProx brand at top — bigger pill on Corporate */}
+                                        {isCorporate ? (
+                                            <React.Fragment>
+                                                <rect x={mcLayout.mcW / 2 - 110} y={MC_TIER.brand - 22}
+                                                    width={220} height={42} rx={6}
+                                                    fill={topoColor.section} stroke={topoColor.brand} strokeWidth={1.5} />
+                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand - 4} textAnchor="middle"
+                                                    fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="0.5">PegaProx</text>
+                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 12} textAnchor="middle"
+                                                    fill={topoColor.muted} fontSize="9" letterSpacing="1">MULTI-CLUSTER TOPOLOGY</text>
+                                            </React.Fragment>
+                                        ) : (
+                                            <React.Fragment>
+                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">PegaProx</text>
+                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 14} textAnchor="middle" fill={topoColor.muted} fontSize="9">Multi-Cluster Topology</text>
+                                            </React.Fragment>
+                                        )}
+
+                                        {/* edges: brand center → each cluster (smoother, brand-coloured) */}
                                         {mcLayout.layouts.map((cl, ci) => {
                                             const x1 = mcLayout.mcW / 2, y1 = MC_TIER.brand + 22;
                                             const x2 = cl.centerX, y2 = MC_TIER.clusters - 20;
                                             const midY = (y1 + y2) / 2;
                                             return <path key={`mc-edge-${ci}`} d={`M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`}
-                                                fill="none" stroke="#e57000" strokeWidth={1.5} />;
+                                                fill="none" stroke={topoColor.edgeBrand} strokeWidth={2}
+                                                strokeLinecap="round" />;
                                         })}
 
                                         {/* cluster icons + edges to their nodes */}
                                         {mcLayout.layouts.map((cl, ci) => {
                                             const totalN = (cl.posNodes || []).length;
+                                            const clusterIcon = isCorporate ? (
+                                                /* clean stacked-server glyph for corporate */
+                                                <g>
+                                                    <rect x={-16} y={-14} width={32} height={9} rx={2}
+                                                        fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <circle cx={-11} cy={-9.5} r={1.2} fill={topoColor.brand} />
+                                                    <rect x={-16} y={-3.5} width={32} height={9} rx={2}
+                                                        fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <circle cx={-11} cy={1} r={1.2} fill={topoColor.brand} />
+                                                    <rect x={-16} y={7} width={32} height={9} rx={2}
+                                                        fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <circle cx={-11} cy={11.5} r={1.2} fill={topoColor.brand} />
+                                                </g>
+                                            ) : (
+                                                /* legacy router squiggle for Modern layout */
+                                                <g>
+                                                    <ellipse cx={0} cy={0} rx={18} ry={10} fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <line x1={0} y1={-10} x2={0} y2={-18} stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <line x1={-14} y1={-6} x2={-20} y2={-12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <line x1={14} y1={-6} x2={20} y2={-12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <line x1={-14} y1={6} x2={-20} y2={12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <line x1={14} y1={6} x2={20} y2={12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                                    <circle cx={0} cy={0} r={3} fill={topoColor.brand} />
+                                                </g>
+                                            );
                                             return (
                                                 <React.Fragment key={`mc-cl-${ci}`}>
-                                                    {/* cluster router icon */}
                                                     <g transform={`translate(${cl.centerX}, ${MC_TIER.clusters})`}
                                                         style={{cursor: 'pointer'}}
                                                         onMouseEnter={(e) => showTooltip(e, cl.name, [
@@ -1644,20 +1783,14 @@
                                                             cl.connPbs.length > 0 ? `${cl.connPbs.length} PBS` : null
                                                         ].filter(Boolean))}
                                                         onMouseLeave={hideTooltip}>
-                                                        <ellipse cx={0} cy={0} rx={18} ry={10} fill="none" stroke="#e57000" strokeWidth={1.5} />
-                                                        <line x1={0} y1={-10} x2={0} y2={-18} stroke="#e57000" strokeWidth={1.5} />
-                                                        <line x1={-14} y1={-6} x2={-20} y2={-12} stroke="#e57000" strokeWidth={1.5} />
-                                                        <line x1={14} y1={-6} x2={20} y2={-12} stroke="#e57000" strokeWidth={1.5} />
-                                                        <line x1={-14} y1={6} x2={-20} y2={12} stroke="#e57000" strokeWidth={1.5} />
-                                                        <line x1={14} y1={6} x2={20} y2={12} stroke="#e57000" strokeWidth={1.5} />
-                                                        <circle cx={0} cy={0} r={3} fill="#e57000" />
+                                                        {clusterIcon}
                                                         <text y={ICON / 2 + 14} textAnchor="middle" fill={topoColor.text} fontSize="12" fontWeight="600">{cl.name}</text>
                                                         <text y={ICON / 2 + 26} textAnchor="middle" fill={topoColor.muted} fontSize="9">
                                                             {totalN} {totalN === 1 ? 'Node' : 'Nodes'} / {cl.totalGuests} VMs{cl.connPbs.length > 0 ? ` · ${cl.connPbs.length} PBS` : ''}
                                                         </text>
                                                     </g>
 
-                                                    {/* edges: cluster → nodes */}
+                                                    {/* edges: cluster → nodes (smoother) */}
                                                     {(cl.posNodes || []).map((node, ni) => {
                                                         const x1 = cl.centerX, y1 = MC_TIER.clusters + ICON / 2 + 8;
                                                         const x2 = node.x, y2 = MC_TIER.nodes - ICON / 2 - 8;
@@ -1666,10 +1799,11 @@
                                                         const d = straight ? `M ${x1} ${y1} L ${x2} ${y2}`
                                                             : `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
                                                         return <path key={`mc-ne-${ci}-${ni}`} d={d} fill="none"
-                                                            stroke={node.isOnline ? '#60b515' : '#f54f47'} strokeWidth={1.5} />;
+                                                            stroke={node.isOnline ? '#60b515' : '#f54f47'}
+                                                            strokeWidth={2} strokeLinecap="round" opacity={0.85} />;
                                                     })}
 
-                                                    {/* node switch icons */}
+                                                    {/* node cards */}
                                                     {(cl.posNodes || []).map(node => (
                                                         <g key={`mc-n-${cl.id}-${node.name}`} transform={`translate(${node.x}, ${MC_TIER.nodes})`}
                                                             style={{cursor: 'pointer'}}
@@ -1681,26 +1815,36 @@
                                                                 `${node.totalVms} ${node.totalVms === 1 ? 'Guest' : 'Guests'}`
                                                             ].filter(Boolean))}
                                                             onMouseLeave={hideTooltip}>
-                                                            <g transform="translate(-18,-18) scale(1.5)">
+                                                            <rect x={-84} y={-36} width={168} height={96} rx={6}
+                                                                fill={topoColor.bg} fillOpacity={isCorporate ? 0.5 : 0.6}
+                                                                stroke={node.isOnline ? topoColor.brand : '#f54f47'}
+                                                                strokeOpacity={isCorporate ? 0.55 : 0.4} strokeWidth={1} />
+                                                            <g transform="translate(-12,-28) scale(1.0)">
                                                                 <path d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"
                                                                     fill="none" stroke={node.isOnline ? '#e9ecef' : '#f54f47'} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
                                                             </g>
-                                                            <circle cx={22} cy={-16} r={4} fill={node.isOnline ? '#60b515' : '#f54f47'} />
-                                                            <text y={ICON / 2 + 6} textAnchor="middle" fill={topoColor.text} fontSize="11" fontWeight="500">{node.name}</text>
+                                                            <circle cx={16} cy={-28} r={3.5} fill={node.isOnline ? '#60b515' : '#f54f47'} />
+                                                            <text y={9} textAnchor="middle" fill={topoColor.text} fontSize="11" fontWeight="600">
+                                                                <title>{node.name}</title>
+                                                                {node.name.length > 26 ? node.name.substring(0, 25) + "…" : node.name}
+                                                            </text>
                                                             {node.isOnline && (
                                                                 <React.Fragment>
-                                                                    <text x={-26} y={ICON / 2 + 18} fill={topoColor.muted} fontSize="7" textAnchor="end">CPU</text>
-                                                                    <rect x={-24} y={ICON / 2 + 13} width={48} height={3} rx={1.5} fill="rgba(255,255,255,0.06)" />
-                                                                    <rect x={-24} y={ICON / 2 + 13} width={Math.max(1, 48 * node.cpuPct / 100)} height={3} rx={1.5} fill={barColor(node.cpuPct)} />
-                                                                    <text x={27} y={ICON / 2 + 18} fill={barColor(node.cpuPct)} fontSize="8">{node.cpuPct.toFixed(0)}%</text>
-                                                                    <text x={-26} y={ICON / 2 + 27} fill={topoColor.muted} fontSize="7" textAnchor="end">RAM</text>
-                                                                    <rect x={-24} y={ICON / 2 + 22} width={48} height={3} rx={1.5} fill="rgba(255,255,255,0.06)" />
-                                                                    <rect x={-24} y={ICON / 2 + 22} width={Math.max(1, 48 * node.ramPct / 100)} height={3} rx={1.5} fill={barColor(node.ramPct)} />
-                                                                    <text x={27} y={ICON / 2 + 27} fill={barColor(node.ramPct)} fontSize="8">{node.ramPct.toFixed(0)}%</text>
+                                                                    <text x={-76} y={30} fill={topoColor.muted} fontSize="9">CPU</text>
+                                                                    <rect x={-52} y={24} width={104} height={5} rx={2} fill={topoColor.barBg} />
+                                                                    <rect x={-52} y={24} width={Math.max(1, 104 * node.cpuPct / 100)} height={5} rx={2} fill={barColor(node.cpuPct)} />
+                                                                    <text x={74} y={30} fill={barColor(node.cpuPct)} fontSize="9" textAnchor="end">{node.cpuPct.toFixed(0)}%</text>
+                                                                    <text x={-76} y={44} fill={topoColor.muted} fontSize="9">RAM</text>
+                                                                    <rect x={-52} y={38} width={104} height={5} rx={2} fill={topoColor.barBg} />
+                                                                    <rect x={-52} y={38} width={Math.max(1, 104 * node.ramPct / 100)} height={5} rx={2} fill={barColor(node.ramPct)} />
+                                                                    <text x={74} y={44} fill={barColor(node.ramPct)} fontSize="9" textAnchor="end">{node.ramPct.toFixed(0)}%</text>
+                                                                    <text y={54} textAnchor="middle" fill={topoColor.muted} fontSize="9">
+                                                                        {node.totalVms} {node.totalVms === 1 ? 'guest' : 'guests'}
+                                                                    </text>
                                                                 </React.Fragment>
                                                             )}
                                                             {!node.isOnline && (
-                                                                <text y={ICON / 2 + 19} textAnchor="middle" fill="#f54f47" fontSize="10">OFFLINE</text>
+                                                                <text y={26} textAnchor="middle" fill="#f54f47" fontSize="10" fontWeight="600" letterSpacing="0.4">OFFLINE</text>
                                                             )}
                                                         </g>
                                                     ))}
@@ -1719,37 +1863,68 @@
                                                                 return <path key={`mc-vl-${vm.vmid}`} d={d}
                                                                     fill="none" stroke="rgba(114,139,154,0.25)" strokeWidth={1} />;
                                                             })}
-                                                            {node.vms.map(vm => (
+                                                            {node.vms.map(vm => {
+                                                                const isQemu = vm.type === 'qemu';
+                                                                const isRunning = vm.status === 'running';
+                                                                const stroke = isQemu ? topoColor.vmQemu : topoColor.vmLxc;
+                                                                const label = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
+                                                                return (
                                                                 <g key={`mc-vm-${vm.vmid}-${vm.node}`} transform={`translate(${vm.x}, ${vm.y})`}
                                                                     style={{cursor: onVmClick ? 'pointer' : 'default'}}
                                                                     onClick={onVmClick ? () => onVmClick({...vm, _clusterId: cl.id}) : undefined}
-                                                                    onMouseEnter={(e) => showTooltip(e,
-                                                                        vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`,
+                                                                    onMouseEnter={(e) => showTooltip(e, label,
                                                                         [`Cluster: ${cl.name}`, `VMID: ${vm.vmid}`,
-                                                                            `Type: ${vm.type === 'qemu' ? 'QEMU' : 'LXC'}`,
+                                                                            `Type: ${isQemu ? 'QEMU' : 'LXC'}`,
                                                                             `Status: ${vm.status}`].filter(Boolean)
                                                                     )}
                                                                     onMouseLeave={hideTooltip}>
-                                                                    {vm.type === 'qemu' ? (
-                                                                        <g transform="translate(-12,-12) scale(1.0)">
+                                                                    <rect x={-75} y={-14} width={150} height={28} rx={4}
+                                                                        fill={topoColor.bg} fillOpacity={isCorporate ? 0.55 : 0.65}
+                                                                        stroke={stroke} strokeOpacity={isCorporate ? 0.5 : 0.45} strokeWidth={1} />
+                                                                    {isQemu ? (
+                                                                        <g transform="translate(-65,-7) scale(0.6)">
                                                                             <path d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-                                                                                fill="none" stroke="#49afd9" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+                                                                                fill="none" stroke={stroke} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
                                                                         </g>
                                                                     ) : (
-                                                                        <g transform="translate(-12,-12) scale(1.0)">
+                                                                        <g transform="translate(-65,-7) scale(0.6)">
                                                                             <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
-                                                                                fill="none" stroke="#a178d9" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+                                                                                fill="none" stroke={stroke} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
                                                                         </g>
                                                                     )}
-                                                                    <circle cx={vm.type === 'qemu' ? 16 : 16} cy={-10} r={3}
-                                                                        fill={vm.status === 'running' ? '#60b515' : '#728b9a'} />
-                                                                    <text y={22} textAnchor="middle" fill={topoColor.text} fontSize="10">
-                                                                        <title>{vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}</title>
-                                                                        {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 16)}{(vm.name || '').length > 16 ? '…' : ''}
+                                                                    <circle cx={67} cy={0} r={3.5}
+                                                                        fill={isRunning ? '#60b515' : '#728b9a'} />
+                                                                    <text x={-39} y={4} fill={topoColor.text} fontSize="11" fontWeight="500">
+                                                                        <title>{label}</title>
+                                                                        {label.length > 17 ? label.substring(0, 16) + "…" : label}
                                                                     </text>
-                                                                    <text y={33} textAnchor="middle" fill={topoColor.muted} fontSize="9">{vm.vmid}</text>
                                                                 </g>
-                                                            ))}
+                                                                );
+                                                            })}
+                                                            {/* +N more overflow pill — clicking drills into the cluster */}
+                                                            {node.hiddenCount > 0 && (
+                                                                <g transform={`translate(${node.x}, ${node.hiddenY + MC_VM_ROW})`}
+                                                                    style={{cursor: 'pointer'}}
+                                                                    onClick={() => {
+                                                                        const real = clusters.find(c => c.id === cl.id);
+                                                                        if (real) {
+                                                                            setSelectedCluster(real);
+                                                                            setSidebarTopology(false);
+                                                                        }
+                                                                    }}
+                                                                    onMouseEnter={(e) => showTooltip(e, `+${node.hiddenCount} more on ${node.name}`,
+                                                                        [`${node.totalVms} guests total`, `Click to open the cluster topology`])}
+                                                                    onMouseLeave={hideTooltip}>
+                                                                    <rect x={-50} y={-10} width={100} height={20} rx={4}
+                                                                        fill={topoColor.section}
+                                                                        stroke={topoColor.brand} strokeOpacity={0.6} strokeWidth={1}
+                                                                        strokeDasharray="3 3" />
+                                                                    <text y={4} textAnchor="middle" fill={topoColor.brand}
+                                                                        fontSize="10" fontWeight="500">
+                                                                        + {node.hiddenCount} more
+                                                                    </text>
+                                                                </g>
+                                                            )}
                                                         </React.Fragment>
                                                     ))}
                                                 </React.Fragment>
@@ -1782,11 +1957,24 @@
                                     );
                                 })}
 
-                                {/* PegaProx branding */}
-                                <text x={clusterX} y={28} textAnchor="middle" fill="#e57000" fontSize="16" fontWeight="700" letterSpacing="1.5">PegaProx</text>
-                                <text x={clusterX} y={42} textAnchor="middle" fill={topoColor.muted} fontSize="9">Cluster Topology</text>
+                                {/* PegaProx branding — Corporate gets the pill style, Modern keeps the bold orange */}
+                                {isCorporate ? (
+                                    <React.Fragment>
+                                        <rect x={clusterX - 80} y={10} width={160} height={34} rx={4}
+                                            fill={topoColor.section} stroke={topoColor.brand} strokeWidth={1} />
+                                        <text x={clusterX} y={26} textAnchor="middle"
+                                            fill={topoColor.brand} fontSize="14" fontWeight="600" letterSpacing="0.4">PegaProx</text>
+                                        <text x={clusterX} y={39} textAnchor="middle"
+                                            fill={topoColor.muted} fontSize="9" letterSpacing="0.3">CLUSTER TOPOLOGY</text>
+                                    </React.Fragment>
+                                ) : (
+                                    <React.Fragment>
+                                        <text x={clusterX} y={28} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">PegaProx</text>
+                                        <text x={clusterX} y={42} textAnchor="middle" fill={topoColor.muted} fontSize="9">Cluster Topology</text>
+                                    </React.Fragment>
+                                )}
 
-                                {/* cluster root - router icon */}
+                                {/* cluster root */}
                                 <g transform={`translate(${clusterX}, ${TIER_Y.cluster})`}
                                     style={{cursor: 'pointer'}}
                                     onMouseEnter={(e) => showTooltip(e, clusterName, [
@@ -1795,13 +1983,30 @@
                                         connectedPbs.length > 0 ? `${connectedPbs.length} PBS` : null
                                     ].filter(Boolean))}
                                     onMouseLeave={hideTooltip}>
-                                    <ellipse cx={0} cy={0} rx={18} ry={10} fill="none" stroke="#e57000" strokeWidth={1.5} />
-                                    <line x1={0} y1={-10} x2={0} y2={-18} stroke="#e57000" strokeWidth={1.5} />
-                                    <line x1={-14} y1={-6} x2={-20} y2={-12} stroke="#e57000" strokeWidth={1.5} />
-                                    <line x1={14} y1={-6} x2={20} y2={-12} stroke="#e57000" strokeWidth={1.5} />
-                                    <line x1={-14} y1={6} x2={-20} y2={12} stroke="#e57000" strokeWidth={1.5} />
-                                    <line x1={14} y1={6} x2={20} y2={12} stroke="#e57000" strokeWidth={1.5} />
-                                    <circle cx={0} cy={0} r={3} fill="#e57000" />
+                                    {isCorporate ? (
+                                        /* clean stacked-server glyph */
+                                        <g>
+                                            <rect x={-16} y={-14} width={32} height={9} rx={2}
+                                                fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <circle cx={-11} cy={-9.5} r={1.2} fill={topoColor.brand} />
+                                            <rect x={-16} y={-3.5} width={32} height={9} rx={2}
+                                                fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <circle cx={-11} cy={1} r={1.2} fill={topoColor.brand} />
+                                            <rect x={-16} y={7} width={32} height={9} rx={2}
+                                                fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <circle cx={-11} cy={11.5} r={1.2} fill={topoColor.brand} />
+                                        </g>
+                                    ) : (
+                                        <g>
+                                            <ellipse cx={0} cy={0} rx={18} ry={10} fill="none" stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <line x1={0} y1={-10} x2={0} y2={-18} stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <line x1={-14} y1={-6} x2={-20} y2={-12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <line x1={14} y1={-6} x2={20} y2={-12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <line x1={-14} y1={6} x2={-20} y2={12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <line x1={14} y1={6} x2={20} y2={12} stroke={topoColor.brand} strokeWidth={1.5} />
+                                            <circle cx={0} cy={0} r={3} fill={topoColor.brand} />
+                                        </g>
+                                    )}
                                     <text y={ICON / 2 + 14} textAnchor="middle" fill={topoColor.text} fontSize="13" fontWeight="600">{clusterName}</text>
                                     <text y={ICON / 2 + 28} textAnchor="middle" fill="#60b515" fontSize="10">ONLINE</text>
                                 </g>
@@ -1817,33 +2022,39 @@
                                             `${node.totalVms} ${node.totalVms === 1 ? 'Guest' : 'Guests'}`
                                         ].filter(Boolean))}
                                         onMouseLeave={hideTooltip}>
+                                        {/* LW May 2026: node "card" backdrop — used to look like a floating icon */}
+                                        <rect x={-84} y={-36} width={168} height={96} rx={6}
+                                            fill={topoColor.bg} fillOpacity={isCorporate ? 0.5 : 0.6}
+                                            stroke={node.isOnline ? topoColor.brand : '#f54f47'}
+                                            strokeOpacity={isCorporate ? 0.55 : 0.4} strokeWidth={1} />
                                         {/* server rack icon */}
-                                        <g transform="translate(-18,-18) scale(1.5)">
+                                        <g transform="translate(-12,-28) scale(1.0)">
                                             <path d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"
                                                 fill="none" stroke={node.isOnline ? '#e9ecef' : '#f54f47'} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
                                         </g>
-                                        <circle cx={22} cy={-16} r={4} fill={node.isOnline ? '#60b515' : '#f54f47'} />
-                                        <text y={ICON / 2 + 6} textAnchor="middle" fill={topoColor.text} fontSize="12" fontWeight="500">{node.name}</text>
+                                        <circle cx={16} cy={-28} r={3.5} fill={node.isOnline ? '#60b515' : '#f54f47'} />
+                                        <text y={9} textAnchor="middle" fill={topoColor.text} fontSize="11" fontWeight="600">
+                                            <title>{node.name}</title>
+                                            {node.name.length > 26 ? node.name.substring(0, 25) + "…" : node.name}
+                                        </text>
                                         {/* CPU/RAM utilization bars */}
                                         {node.isOnline && (
                                             <React.Fragment>
-                                                <text x={-26} y={ICON / 2 + 18} fill={topoColor.muted} fontSize="7" textAnchor="end">CPU</text>
-                                                <rect x={-24} y={ICON / 2 + 13} width={48} height={3} rx={1.5} fill="rgba(255,255,255,0.06)" />
-                                                <rect x={-24} y={ICON / 2 + 13} width={Math.max(1, 48 * node.cpuPct / 100)} height={3} rx={1.5} fill={barColor(node.cpuPct)} />
-                                                <text x={27} y={ICON / 2 + 18} fill={barColor(node.cpuPct)} fontSize="8">{node.cpuPct.toFixed(0)}%</text>
-                                                <text x={-26} y={ICON / 2 + 27} fill={topoColor.muted} fontSize="7" textAnchor="end">RAM</text>
-                                                <rect x={-24} y={ICON / 2 + 22} width={48} height={3} rx={1.5} fill="rgba(255,255,255,0.06)" />
-                                                <rect x={-24} y={ICON / 2 + 22} width={Math.max(1, 48 * node.ramPct / 100)} height={3} rx={1.5} fill={barColor(node.ramPct)} />
-                                                <text x={27} y={ICON / 2 + 27} fill={barColor(node.ramPct)} fontSize="8">{node.ramPct.toFixed(0)}%</text>
+                                                <text x={-76} y={30} fill={topoColor.muted} fontSize="9">CPU</text>
+                                                <rect x={-52} y={24} width={104} height={5} rx={2} fill={topoColor.barBg} />
+                                                <rect x={-52} y={24} width={Math.max(1, 104 * node.cpuPct / 100)} height={5} rx={2} fill={barColor(node.cpuPct)} />
+                                                <text x={74} y={30} fill={barColor(node.cpuPct)} fontSize="9" textAnchor="end">{node.cpuPct.toFixed(0)}%</text>
+                                                <text x={-76} y={44} fill={topoColor.muted} fontSize="9">RAM</text>
+                                                <rect x={-52} y={38} width={104} height={5} rx={2} fill={topoColor.barBg} />
+                                                <rect x={-52} y={38} width={Math.max(1, 104 * node.ramPct / 100)} height={5} rx={2} fill={barColor(node.ramPct)} />
+                                                <text x={74} y={44} fill={barColor(node.ramPct)} fontSize="9" textAnchor="end">{node.ramPct.toFixed(0)}%</text>
+                                                <text y={54} textAnchor="middle" fill={topoColor.muted} fontSize="9">
+                                                    {node.totalVms} {node.totalVms === 1 ? 'guest' : 'guests'}
+                                                </text>
                                             </React.Fragment>
                                         )}
                                         {!node.isOnline && (
-                                            <text y={ICON / 2 + 19} textAnchor="middle" fill="#f54f47" fontSize="10">OFFLINE</text>
-                                        )}
-                                        {node.totalVms === 0 && (
-                                            <text y={ICON / 2 + 38} textAnchor="middle" fill={topoColor.muted} fontSize="9" fontStyle="italic">
-                                                {t('noGuests') || 'no guests'}
-                                            </text>
+                                            <text y={26} textAnchor="middle" fill="#f54f47" fontSize="10" fontWeight="600" letterSpacing="0.4">OFFLINE</text>
                                         )}
                                     </g>
                                 ))}
@@ -1878,8 +2089,13 @@
                                     ));
                                 })()}
 
-                                {/* VM/CT icons grouped under their node */}
-                                {diagramNodes.map(node => node.vms.map(vm => (
+                                {/* VM/CT pills grouped under their node — LW May 2026 redesign */}
+                                {diagramNodes.map(node => node.vms.map(vm => {
+                                    const isQemu = vm.type === 'qemu';
+                                    const isRunning = vm.status === 'running';
+                                    const stroke = isQemu ? topoColor.vmQemu : topoColor.vmLxc;
+                                    const label = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
+                                    return (
                                     <g key={`vm-${vm.vmid}-${vm.node}`} transform={`translate(${vm.x}, ${vm.y})`}
                                         style={{
                                             cursor: onVmClick ? 'pointer' : 'default',
@@ -1887,37 +2103,42 @@
                                             transition: 'opacity 0.2s',
                                         }}
                                         onClick={onVmClick ? () => onVmClick(vm) : undefined}
-                                        onMouseEnter={(e) => showTooltip(e,
-                                            vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`,
-                                            [
-                                                `VMID: ${vm.vmid}`,
-                                                `Type: ${vm.type === 'qemu' ? 'QEMU' : 'LXC'}`,
-                                                `Status: ${vm.status}`,
-                                                vm.status === 'running' ? `CPU: ${((vm.cpu || 0) * 100).toFixed(0)}%` : null,
-                                                vm.status === 'running' ? `RAM: ${fmtMem(vm.mem)}` : null,
-                                                vmBridgeMap[String(vm.vmid)] ? `Bridge: ${vmBridgeMap[String(vm.vmid)]}` : null
-                                            ].filter(Boolean)
-                                        )}
+                                        onMouseEnter={(e) => showTooltip(e, label, [
+                                            `VMID: ${vm.vmid}`,
+                                            `Type: ${isQemu ? 'QEMU' : 'LXC'}`,
+                                            `Status: ${vm.status}`,
+                                            isRunning ? `CPU: ${((vm.cpu || 0) * 100).toFixed(0)}%` : null,
+                                            isRunning ? `RAM: ${fmtMem(vm.mem)}` : null,
+                                            vmBridgeMap[String(vm.vmid)] ? `Bridge: ${vmBridgeMap[String(vm.vmid)]}` : null
+                                        ].filter(Boolean))}
                                         onMouseLeave={hideTooltip}>
-                                        {vm.type === 'qemu' ? (
-                                            <g transform="translate(-12,-12) scale(1.0)">
+                                        {/* pill backdrop */}
+                                        <rect x={-75} y={-14} width={150} height={28} rx={4}
+                                            fill={topoColor.bg} fillOpacity={isCorporate ? 0.55 : 0.65}
+                                            stroke={stroke} strokeOpacity={isCorporate ? 0.5 : 0.45} strokeWidth={1} />
+                                        {/* type icon left */}
+                                        {isQemu ? (
+                                            <g transform="translate(-65,-7) scale(0.6)">
                                                 <path d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-                                                    fill="none" stroke="#49afd9" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+                                                    fill="none" stroke={stroke} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
                                             </g>
                                         ) : (
-                                            <g transform="translate(-12,-12) scale(1.0)">
+                                            <g transform="translate(-65,-7) scale(0.6)">
                                                 <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
-                                                    fill="none" stroke="#a178d9" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+                                                    fill="none" stroke={stroke} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
                                             </g>
                                         )}
-                                        <circle cx={16} cy={-10} r={3}
-                                            fill={vm.status === 'running' ? '#60b515' : '#728b9a'} />
-                                        <text y={22} textAnchor="middle" fill={topoColor.text} fontSize="10">
-                                            <title>{vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}</title>
-                                            {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 16)}{(vm.name || '').length > 16 ? '…' : ''}
+                                        {/* status dot far-right */}
+                                        <circle cx={67} cy={0} r={3.5}
+                                            fill={isRunning ? '#60b515' : '#728b9a'} />
+                                        {/* name centered */}
+                                        <text x={-39} y={4} fill={topoColor.text} fontSize="11" fontWeight="500">
+                                            <title>{label}</title>
+                                            {label.length > 17 ? label.substring(0, 16) + "…" : label}
                                         </text>
-                                        <text y={33} textAnchor="middle" fill={topoColor.muted} fontSize="9">{vm.vmid}</text>
                                     </g>
+                                    );
+                                }))}
                                 )))}
 
 
@@ -2230,11 +2451,2565 @@
             );
         }
 
+        // MK May 2026 — Cost Dashboard / Chargeback.
+        // Pulls /api/clusters/<id>/costs/summary + per-vm and /api/cost/rates.
+        // Admins can edit per-cluster + global default rates.
+        // NS May 2026 — Snapshot Scheduling. Tag-based or VMID-based policies
+        // with cron-like schedules + retention. The scheduler thread server-
+        // side wakes every minute.
+        function SnapshotPoliciesTab({ clusterId, authFetch, addToast, t, isAdmin }) {
+            const [policies, setPolicies] = React.useState([]);
+            const [loading, setLoading] = React.useState(false);
+            const [editing, setEditing] = React.useState(null);
+            const [saving, setSaving] = React.useState(false);
+            const [runs, setRuns] = React.useState({}); // policyId -> list
+
+            const refresh = async () => {
+                if (!clusterId) return;
+                setLoading(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/snapshot-policies`).then(x => x?.json()).catch(() => null);
+                    if (r?.policies) setPolicies(r.policies);
+                } finally { setLoading(false); }
+            };
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId]);
+
+            const newPolicy = () => setEditing({
+                name: '', target_type: 'tag', target_value: '',
+                schedule: 'daily', schedule_at: '03:00',
+                retention_count: 7, retention_days: 0,
+                include_ram: false, enabled: true, notes: '',
+            });
+
+            const save = async () => {
+                if (!editing.name?.trim() || !editing.target_value?.trim()) {
+                    addToast(t('snapPolicyRequired') || 'name and target are required', 'error');
+                    return;
+                }
+                setSaving(true);
+                try {
+                    const isUpdate = !!editing.id;
+                    const url = isUpdate
+                        ? `${API_URL}/clusters/${clusterId}/snapshot-policies/${editing.id}`
+                        : `${API_URL}/clusters/${clusterId}/snapshot-policies`;
+                    const r = await authFetch(url, {
+                        method: isUpdate ? 'PUT' : 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: editing.name.trim(),
+                            target_type: editing.target_type,
+                            target_value: editing.target_value.trim(),
+                            schedule: editing.schedule,
+                            schedule_at: editing.schedule_at,
+                            retention_count: parseInt(editing.retention_count) || 0,
+                            retention_days: parseInt(editing.retention_days) || 0,
+                            include_ram: !!editing.include_ram,
+                            enabled: !!editing.enabled,
+                            notes: editing.notes || '',
+                        }),
+                    });
+                    if (r?.ok) {
+                        addToast(t('snapPolicySaved') || 'Policy saved', 'success');
+                        setEditing(null);
+                        await refresh();
+                    } else {
+                        const d = r ? await r.json().catch(() => ({})) : {};
+                        addToast(d.error || (t('snapPolicySaveFailed') || 'Save failed'), 'error');
+                    }
+                } finally { setSaving(false); }
+            };
+
+            const remove = async (pid) => {
+                if (!confirm(t('snapPolicyDeleteConfirm') || 'Delete this snapshot policy?')) return;
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/snapshot-policies/${pid}`, { method: 'DELETE' });
+                if (r?.ok) { addToast(t('snapPolicyDeleted') || 'Deleted', 'success'); refresh(); }
+            };
+
+            const runNow = async (pid) => {
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/snapshot-policies/${pid}/run`, { method: 'POST' });
+                if (r?.ok) {
+                    addToast(t('snapPolicyRunStarted') || 'Run started — refresh in a few seconds', 'success');
+                    setTimeout(() => loadRuns(pid), 5000);
+                }
+            };
+
+            const loadRuns = async (pid) => {
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/snapshot-policies/${pid}/runs`).then(x => x?.json()).catch(() => null);
+                if (r?.runs) setRuns({ ...runs, [pid]: r.runs });
+            };
+
+            const statusColor = (s) => ({
+                'running': 'bg-blue-500/15 text-blue-400',
+                'completed': 'bg-green-500/15 text-green-400',
+                'partial': 'bg-yellow-500/15 text-yellow-400',
+                'failed': 'bg-red-500/15 text-red-400',
+            }[s] || 'bg-gray-500/15 text-gray-400');
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.Camera className="w-5 h-5 text-blue-400" />
+                                {t('snapPoliciesTitle') || 'Snapshot Schedules'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('snapPoliciesDesc') || 'Auto-snapshot VMs/CTs by tag or VMID list, with retention pruning. Cheaper than PBS for rapid rollback windows.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={refresh} disabled={loading}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                {loading ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                            {isAdmin && (
+                                <button onClick={newPolicy}
+                                    className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5">
+                                    <Icons.Plus className="w-3.5 h-3.5" />
+                                    {t('snapPolicyNew') || 'New policy'}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {policies.length === 0 ? (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center text-sm text-gray-500">
+                            {t('snapPolicyNone') || 'No snapshot policies configured yet.'}
+                        </div>
+                    ) : (
+                        <div className="space-y-2">
+                            {policies.map(p => (
+                                <div key={p.id} className="bg-proxmox-card border border-proxmox-border rounded-xl p-3">
+                                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className={`w-2 h-2 rounded-full ${p.enabled ? 'bg-green-500' : 'bg-gray-500'}`} />
+                                            <span className="text-sm font-medium text-white">{p.name}</span>
+                                            <span className="text-[10px] px-1.5 py-0.5 bg-proxmox-darker border border-proxmox-border rounded text-gray-400 uppercase">
+                                                {p.target_type}: {p.target_value}
+                                            </span>
+                                            <span className="text-[10px] px-1.5 py-0.5 bg-proxmox-darker border border-proxmox-border rounded text-gray-400">
+                                                {p.schedule} {p.schedule !== 'hourly' ? `@ ${p.schedule_at}` : ''}
+                                            </span>
+                                            <span className="text-[10px] text-gray-500">
+                                                keep {p.retention_count}{p.retention_days ? ` / ${p.retention_days}d` : ''}
+                                            </span>
+                                            {p.include_ram && (
+                                                <span className="text-[10px] px-1.5 py-0.5 bg-purple-500/15 text-purple-400 rounded">+RAM</span>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
+                                            {p.last_run_at && (
+                                                <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusColor(p.last_run_status)}`}>
+                                                    {p.last_run_status} · {(p.last_run_at || '').replace('T', ' ').slice(11, 16)}
+                                                </span>
+                                            )}
+                                            {isAdmin && (
+                                                <>
+                                                    <button onClick={() => runNow(p.id)}
+                                                        className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-xs text-gray-300 hover:text-white">
+                                                        {t('runNow') || 'Run now'}
+                                                    </button>
+                                                    <button onClick={() => loadRuns(p.id)}
+                                                        className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-xs text-gray-300 hover:text-white">
+                                                        {t('history') || 'History'}
+                                                    </button>
+                                                    <button onClick={() => setEditing({ ...p })}
+                                                        className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-xs text-gray-300 hover:text-white">
+                                                        {t('edit') || 'Edit'}
+                                                    </button>
+                                                    <button onClick={() => remove(p.id)}
+                                                        className="px-2 py-1 bg-red-500/15 border border-red-500/30 rounded text-xs text-red-400 hover:bg-red-500/25">
+                                                        <Icons.Trash className="w-3 h-3" />
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                    {runs[p.id] && (
+                                        <div className="mt-2 pl-3 border-l-2 border-proxmox-border space-y-0.5 text-[11px]">
+                                            {runs[p.id].slice(0, 5).map(r => (
+                                                <div key={r.id} className="flex items-center gap-2">
+                                                    <span className={`px-1 rounded ${statusColor(r.status)}`}>{r.status}</span>
+                                                    <span className="text-gray-500">{(r.started_at || '').replace('T', ' ').slice(0, 16)}</span>
+                                                    <span className="text-gray-300">{r.summary}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {editing && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !saving && setEditing(null)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold text-white mb-3">
+                                    {editing.id ? (t('snapPolicyEdit') || 'Edit Policy') : (t('snapPolicyNew') || 'New Policy')}
+                                </h3>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('name') || 'Name'} *</label>
+                                        <input type="text" value={editing.name || ''}
+                                            onChange={e => setEditing({...editing, name: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('snapTargetType') || 'Target type'}</label>
+                                            <select value={editing.target_type}
+                                                onChange={e => setEditing({...editing, target_type: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white">
+                                                <option value="tag">{t('snapTargetTag') || 'tag'}</option>
+                                                <option value="vm">{t('snapTargetVm') || 'vmids'}</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">
+                                                {editing.target_type === 'tag' ? (t('snapTargetTagLabel') || 'Tag name') : (t('snapTargetVmidsLabel') || 'VMIDs (comma-sep)')}
+                                            </label>
+                                            <input type="text" value={editing.target_value || ''}
+                                                onChange={e => setEditing({...editing, target_value: e.target.value})}
+                                                placeholder={editing.target_type === 'tag' ? 'prod' : '101, 102, 103'}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white font-mono" />
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('snapSchedule') || 'Schedule'}</label>
+                                            <select value={editing.schedule}
+                                                onChange={e => setEditing({...editing, schedule: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white">
+                                                <option value="hourly">{t('snapSchedHourly') || 'hourly'}</option>
+                                                <option value="daily">{t('snapSchedDaily') || 'daily'}</option>
+                                                <option value="weekly">{t('snapSchedWeekly') || 'weekly (Sun)'}</option>
+                                            </select>
+                                        </div>
+                                        {editing.schedule !== 'hourly' && (
+                                            <div>
+                                                <label className="text-xs text-gray-400 block mb-1">{t('snapAt') || 'At (HH:MM)'}</label>
+                                                <input type="text" value={editing.schedule_at || '03:00'}
+                                                    onChange={e => setEditing({...editing, schedule_at: e.target.value})}
+                                                    placeholder="03:00"
+                                                    className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white font-mono" />
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('snapKeepCount') || 'Keep last N'}</label>
+                                            <input type="number" min="0" value={editing.retention_count}
+                                                onChange={e => setEditing({...editing, retention_count: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('snapKeepDays') || 'Or N days (0=off)'}</label>
+                                            <input type="number" min="0" value={editing.retention_days}
+                                                onChange={e => setEditing({...editing, retention_days: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
+                                        </div>
+                                    </div>
+                                    <label className="flex items-center gap-2 text-sm text-gray-300">
+                                        <input type="checkbox" checked={!!editing.include_ram}
+                                            onChange={e => setEditing({...editing, include_ram: e.target.checked})} />
+                                        {t('snapIncludeRam') || 'Include RAM (qemu only — slower, but consistent)'}
+                                    </label>
+                                    <label className="flex items-center gap-2 text-sm text-gray-300">
+                                        <input type="checkbox" checked={!!editing.enabled}
+                                            onChange={e => setEditing({...editing, enabled: e.target.checked})} />
+                                        {t('enabled') || 'Enabled'}
+                                    </label>
+                                </div>
+                                <div className="flex justify-end gap-2 mt-5">
+                                    <button onClick={() => setEditing(null)} disabled={saving}
+                                        className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button onClick={save} disabled={saving}
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        {saving ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {t('save') || 'Save'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // MK May 2026 — Network Topology Visualization. Plain SVG, no D3 dep.
+        // Three rows: cluster → nodes → bridges → VMs (grouped under bridge).
+        function TopologyTab({ clusterId, authFetch, addToast, t }) {
+            const [graph, setGraph] = React.useState(null);
+            const [loading, setLoading] = React.useState(false);
+            const [highlight, setHighlight] = React.useState(null);
+
+            const refresh = async () => {
+                if (!clusterId) return;
+                setLoading(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/topology`).then(x => x?.json()).catch(() => null);
+                    if (r && r.nodes) setGraph(r);
+                } finally { setLoading(false); }
+            };
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId]);
+
+            // Hierarchical layout — 4 rows.
+            // row 0: cluster (1)
+            // row 1: nodes (N) and SDN VNets (M)
+            // row 2: bridges (per-node)
+            // row 3: VMs/CTs
+            const layout = React.useMemo(() => {
+                if (!graph) return null;
+                const W = 1200, H = 600, padX = 40;
+                const positions = {};
+                const byKind = { cluster: [], node: [], sdn_vnet: [], bridge: [], bond: [], vm: [], ct: [] };
+                for (const n of graph.nodes) {
+                    if (byKind[n.kind]) byKind[n.kind].push(n);
+                }
+                const place = (arr, y) => {
+                    const n = arr.length;
+                    if (!n) return;
+                    const span = W - padX * 2;
+                    const step = n > 1 ? span / (n - 1) : 0;
+                    arr.forEach((node, i) => {
+                        positions[node.id] = { x: padX + (n > 1 ? i * step : span / 2), y };
+                    });
+                };
+                place(byKind.cluster, 40);
+                place([...byKind.node, ...byKind.sdn_vnet], 130);
+                place([...byKind.bridge, ...byKind.bond], 280);
+                place([...byKind.vm, ...byKind.ct], 480);
+                return { positions, W, H };
+            }, [graph]);
+
+            const nodeColor = (kind) => ({
+                cluster: '#E57000',
+                node: '#3b82f6',
+                bridge: '#10b981',
+                bond: '#a855f7',
+                sdn_vnet: '#f59e0b',
+                vm: '#6b7280',
+                ct: '#9ca3af',
+            }[kind] || '#888');
+
+            const isLinked = (id) => {
+                if (!highlight || !graph) return false;
+                if (id === highlight) return true;
+                return graph.links.some(l =>
+                    (l.source === highlight && l.target === id) ||
+                    (l.target === highlight && l.source === id)
+                );
+            };
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.Network className="w-5 h-5 text-blue-400" />
+                                {t('topologyTitle') || 'Network Topology'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('topologyDesc') || 'Cluster → Nodes → Bridges/Bonds/SDN → VMs. Click any element to highlight its connections.'}
+                            </p>
+                        </div>
+                        <button onClick={refresh} disabled={loading}
+                            className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50">
+                            {loading ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                            {t('refresh') || 'Refresh'}
+                        </button>
+                    </div>
+
+                    {graph && layout && (
+                        <>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-center">
+                                    <div className="text-2xl font-bold text-white">{graph.counts?.nodes || 0}</div>
+                                    <div className="text-gray-500">{t('nodes') || 'nodes'}</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-center">
+                                    <div className="text-2xl font-bold text-white">{graph.counts?.bridges || 0}</div>
+                                    <div className="text-gray-500">{t('bridges') || 'bridges'}</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-center">
+                                    <div className="text-2xl font-bold text-white">{graph.counts?.vms || 0}</div>
+                                    <div className="text-gray-500">VMs</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-center">
+                                    <div className="text-2xl font-bold text-white">{graph.counts?.cts || 0}</div>
+                                    <div className="text-gray-500">CTs</div>
+                                </div>
+                            </div>
+
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-3 overflow-x-auto">
+                                <svg viewBox={`0 0 ${layout.W} ${layout.H}`} style={{ width: '100%', height: 600 }}>
+                                    {/* links */}
+                                    {graph.links.map((l, i) => {
+                                        const a = layout.positions[l.source];
+                                        const b = layout.positions[l.target];
+                                        if (!a || !b) return null;
+                                        const dim = highlight && !(l.source === highlight || l.target === highlight);
+                                        return (
+                                            <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                                                stroke={dim ? '#2a3441' : '#4a5563'}
+                                                strokeWidth={dim ? 0.5 : 1}
+                                                strokeDasharray={l.kind === 'sdn' ? '4 2' : ''} />
+                                        );
+                                    })}
+                                    {/* nodes */}
+                                    {graph.nodes.map(n => {
+                                        const p = layout.positions[n.id];
+                                        if (!p) return null;
+                                        const linked = isLinked(n.id);
+                                        const dim = highlight && !linked;
+                                        const r = n.kind === 'cluster' ? 22 :
+                                                  (n.kind === 'node' || n.kind === 'sdn_vnet') ? 16 :
+                                                  (n.kind === 'bridge' || n.kind === 'bond') ? 12 : 8;
+                                        return (
+                                            <g key={n.id} onClick={() => setHighlight(highlight === n.id ? null : n.id)}
+                                               style={{ cursor: 'pointer', opacity: dim ? 0.3 : 1 }}>
+                                                <circle cx={p.x} cy={p.y} r={r} fill={nodeColor(n.kind)}
+                                                    stroke={highlight === n.id ? '#fff' : 'none'} strokeWidth={2} />
+                                                <text x={p.x} y={p.y + r + 12} textAnchor="middle"
+                                                    fontSize={n.kind === 'cluster' ? 13 : 10}
+                                                    fill="#d1d5db" fontFamily="sans-serif">{n.label}</text>
+                                            </g>
+                                        );
+                                    })}
+                                </svg>
+                            </div>
+
+                            {highlight && (
+                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3 text-xs">
+                                    <div className="text-gray-400 mb-1">{t('topologyDetails') || 'Selected'}: <code className="text-white">{highlight}</code></div>
+                                    {(() => {
+                                        const n = graph.nodes.find(x => x.id === highlight);
+                                        if (!n) return null;
+                                        return (
+                                            <pre className="text-gray-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(n.meta || {}, null, 2)}</pre>
+                                        );
+                                    })()}
+                                </div>
+                            )}
+
+                            {/* Legend */}
+                            <div className="flex flex-wrap gap-3 text-xs text-gray-400">
+                                {[['cluster','Cluster'],['node','Node'],['bridge','Bridge'],['bond','Bond'],['sdn_vnet','SDN VNet'],['vm','VM'],['ct','CT']].map(([k, lbl]) => (
+                                    <div key={k} className="flex items-center gap-1">
+                                        <span className="w-3 h-3 rounded-full" style={{ background: nodeColor(k) }}></span>
+                                        {lbl}
+                                    </div>
+                                ))}
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        // MK May 2026 — Power & Carbon Tracking. Same shape as Cost Dashboard
+        // (rates editor + summary + per-VM table) but in kWh / kg CO₂.
+        function PowerCarbonTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+            const [summary, setSummary] = React.useState(null);
+            const [rows, setRows] = React.useState([]);
+            const [loading, setLoading] = React.useState(false);
+            const [days, setDays] = React.useState(30);
+            const [showRates, setShowRates] = React.useState(false);
+            const [rateForm, setRateForm] = React.useState(null);
+            const [savingRates, setSavingRates] = React.useState(false);
+
+            const refresh = async () => {
+                if (!clusterId) return;
+                setLoading(true);
+                try {
+                    const [s, p] = await Promise.all([
+                        authFetch(`${API_URL}/clusters/${clusterId}/power/summary?days=${days}`).then(r => r?.json()).catch(() => null),
+                        authFetch(`${API_URL}/clusters/${clusterId}/power/per-vm?days=${days}`).then(r => r?.json()).catch(() => null),
+                    ]);
+                    if (s && !s.error) setSummary(s);
+                    if (p && p.rows) setRows(p.rows);
+                } finally { setLoading(false); }
+            };
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId, days]);
+
+            const openRates = async () => {
+                const r = await authFetch(`${API_URL}/power/rates/${clusterId}`).then(x => x?.json()).catch(() => null);
+                setRateForm(r || { node_idle_w: 80, node_max_w: 300, mem_w_per_gb: 0.3, pue: 1.5, kwh_price: 0.30, kg_co2_per_kwh: 0.40, currency: 'EUR', notes: '' });
+                setShowRates(true);
+            };
+            const saveRates = async () => {
+                setSavingRates(true);
+                try {
+                    const r = await authFetch(`${API_URL}/power/rates/${clusterId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            node_idle_w: parseFloat(rateForm.node_idle_w) || 0,
+                            node_max_w: parseFloat(rateForm.node_max_w) || 0,
+                            mem_w_per_gb: parseFloat(rateForm.mem_w_per_gb) || 0,
+                            pue: parseFloat(rateForm.pue) || 1,
+                            kwh_price: parseFloat(rateForm.kwh_price) || 0,
+                            kg_co2_per_kwh: parseFloat(rateForm.kg_co2_per_kwh) || 0,
+                            currency: rateForm.currency || 'EUR',
+                            notes: rateForm.notes || '',
+                        }),
+                    });
+                    if (r?.ok) {
+                        addToast(t('powerRatesSaved') || 'Power rates saved', 'success');
+                        setShowRates(false);
+                        await refresh();
+                    }
+                } finally { setSavingRates(false); }
+            };
+
+            const cur = summary?.rates?.currency || 'EUR';
+            const sym = ({ EUR: '€', USD: '$', GBP: '£' }[cur] || cur);
+            const fmtCost = (n) => `${sym} ${(n || 0).toFixed(2)}`;
+            const fmtKwh = (n) => `${(n || 0).toFixed(1)} kWh`;
+            const fmtCo2 = (n) => `${(n || 0).toFixed(1)} kg`;
+
+            // ── Export helpers (same WinAnsi-safe pattern as Cost / Insights) ──
+            const safe = (s) => {
+                if (s == null) return '';
+                return String(s)
+                    .replace(/[≥]/g, '>=').replace(/[≤]/g, '<=')
+                    .replace(/[→]/g, '->').replace(/[←]/g, '<-')
+                    .replace(/[·]/g, '*')
+                    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');
+            };
+
+            const exportCsv = () => {
+                if (!rows.length) {
+                    addToast(t('powerNoData') || 'No data', 'warning');
+                    return;
+                }
+                const cols = [
+                    'vmid', 'name', 'node', 'type',
+                    'avg_cpu_pct', 'avg_mem_pct', 'cores', 'memory_gb', 'running_h',
+                    'kwh', 'monthly_kwh',
+                    `cost_${cur}`, `monthly_cost_${cur}`,
+                    'kg_co2', 'monthly_kg_co2',
+                ];
+                const esc = (v) => {
+                    const s = String(v ?? '');
+                    return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                };
+                const lines = [cols.join(',')];
+                for (const r of rows) {
+                    lines.push([
+                        r.vmid, r.name, r.node, r.type,
+                        r.avg_cpu_pct, r.avg_mem_pct, r.cores, r.memory_gb, r.running_h,
+                        r.kwh, r.monthly_kwh,
+                        r.cost, r.monthly_cost,
+                        r.kg_co2, r.monthly_co2,
+                    ].map(esc).join(','));
+                }
+                const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const dt = new Date().toISOString().slice(0, 10);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `pegaprox-power-${clusterId || 'cluster'}-${dt}.csv`;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            };
+
+            const exportPdf = async () => {
+                if (typeof generatePegaProxPDF !== 'function') {
+                    addToast('PDF library not loaded', 'error');
+                    return;
+                }
+                if (!summary || !summary.enough_data) {
+                    addToast(t('powerNoData') || 'No data', 'warning');
+                    return;
+                }
+                const symX = ({ EUR: 'EUR', USD: 'USD', GBP: 'GBP', CHF: 'CHF', JPY: 'JPY' }[cur] || cur);
+                const pf = (n) => `${symX} ${(n || 0).toFixed(2)}`;
+                const kwh = (n) => `${(n || 0).toFixed(1)} kWh`;
+                const co2 = (n) => `${(n || 0).toFixed(1)} kg`;
+
+                const blocks = [];
+                blocks.push({
+                    type: 'stats',
+                    data: [
+                        { value: kwh(summary.monthly?.kwh), label: safe(t('powerMonthlyKwh') || 'Monthly kWh'), color: '#eab308' },
+                        { value: pf(summary.monthly?.cost), label: safe(t('powerMonthlyCost') || 'Monthly cost'), color: '#16a34a' },
+                        { value: co2(summary.monthly?.kg_co2), label: safe(t('powerMonthlyCo2') || 'Monthly CO2'), color: '#10b981' },
+                        { value: String(summary.vm_count || 0), label: safe(t('powerVmCount') || 'VMs counted'), color: '#3b82f6' },
+                    ],
+                });
+                blocks.push({ type: 'spacer', height: 4 });
+                blocks.push({
+                    type: 'text',
+                    value: safe(`Window: ${summary.days} days * ${summary.snapshots_count} snapshots * `
+                                + `Rates: ${summary.rates.node_idle_w}W idle, ${summary.rates.node_max_w}W max, `
+                                + `${summary.rates.mem_w_per_gb} W/GB, PUE ${summary.rates.pue}, `
+                                + `${summary.rates.kwh_price.toFixed(2)} ${cur}/kWh, `
+                                + `${summary.rates.kg_co2_per_kwh.toFixed(2)} kg CO2/kWh`),
+                });
+
+                if (summary.by_node && Object.keys(summary.by_node).length) {
+                    blocks.push({ type: 'spacer', height: 4 });
+                    blocks.push({
+                        type: 'table',
+                        title: safe(t('powerByNode') || 'Per node'),
+                        columns: [
+                            safe(t('node') || 'Node'),
+                            'kWh', safe(t('costMonthly') || 'Monthly'), 'CO2',
+                        ],
+                        rows: Object.entries(summary.by_node).map(([n, v]) => [
+                            safe(n), kwh(v.kwh), pf(v.cost), co2(v.kg_co2),
+                        ]),
+                    });
+                }
+
+                blocks.push({ type: 'spacer', height: 4 });
+                blocks.push({
+                    type: 'table',
+                    title: safe(`${t('powerPerVm') || 'Per VM'} (${rows.length})`),
+                    columns: [
+                        'VMID',
+                        safe(t('name') || 'Name'),
+                        safe(t('node') || 'Node'),
+                        'CPU %', 'RAM %',
+                        safe(t('powerHoursRunning') || 'Running h'),
+                        'kWh',
+                        safe(t('powerMonthlyKwh') || 'Monthly kWh'),
+                        safe(t('powerMonthlyCost') || 'Monthly cost'),
+                        safe(t('powerMonthlyCo2') || 'Monthly CO2'),
+                    ],
+                    rows: rows.map(r => [
+                        String(r.vmid),
+                        safe(r.name),
+                        safe(r.node),
+                        `${r.avg_cpu_pct}%`,
+                        `${r.avg_mem_pct}%`,
+                        String(r.running_h),
+                        String(r.kwh),
+                        String(r.monthly_kwh),
+                        pf(r.monthly_cost),
+                        co2(r.monthly_co2),
+                    ]),
+                });
+
+                const dt = new Date().toISOString().slice(0, 10);
+                try {
+                    await generatePegaProxPDF({
+                        title: safe(t('powerTitle') || 'Power & Carbon'),
+                        subtitle: safe(`${days}d * ${rows.length} VMs * PUE ${summary.rates.pue}`),
+                        clusterName: safe(clusterName || ''),
+                        filename: `pegaprox-power-${clusterId || 'cluster'}-${dt}.pdf`,
+                        content: blocks,
+                        orientation: 'landscape',
+                    });
+                } catch (e) {
+                    console.error('[Power PDF]', e);
+                    addToast('PDF export failed', 'error');
+                }
+            };
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.Zap className="w-5 h-5 text-yellow-400" />
+                                {t('powerTitle') || 'Power & Carbon'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('powerDesc') || 'Estimated electricity + CO₂ per VM, based on metrics history × node-power profile × PUE × grid CO₂ intensity.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            <select value={days} onChange={e => setDays(parseInt(e.target.value, 10))}
+                                className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                <option value={1}>{t('lastDay') || 'last 24h'}</option>
+                                <option value={7}>{t('last7Days') || 'last 7 days'}</option>
+                                <option value={30}>{t('last30Days') || 'last 30 days'}</option>
+                            </select>
+                            {isAdmin && (
+                                <button onClick={openRates}
+                                    className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5">
+                                    <Icons.Settings className="w-3.5 h-3.5" />
+                                    {t('powerRates') || 'Rates'}
+                                </button>
+                            )}
+                            <button onClick={exportCsv} disabled={!rows.length}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                <Icons.Download className="w-3.5 h-3.5" />
+                                {t('exportCsv') || 'CSV'}
+                            </button>
+                            <button onClick={exportPdf} disabled={!summary || !summary.enough_data}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                <Icons.Download className="w-3.5 h-3.5" />
+                                {t('exportPdf') || 'PDF'}
+                            </button>
+                            <button onClick={refresh} disabled={loading}
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50">
+                                {loading ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {summary && !summary.enough_data && (
+                        <div className="text-sm text-yellow-400 bg-yellow-500/5 border border-yellow-500/20 rounded p-3">
+                            {t('powerNoData') || 'No metrics history yet for this cluster.'}
+                        </div>
+                    )}
+
+                    {summary && summary.enough_data && (
+                        <>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <div className="bg-proxmox-card border border-yellow-500/30 rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('powerMonthlyKwh') || 'Monthly kWh'}</div>
+                                    <div className="text-2xl font-bold text-yellow-400 mt-1">{fmtKwh(summary.monthly?.kwh)}</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-green-500/30 rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('powerMonthlyCost') || 'Monthly cost'}</div>
+                                    <div className="text-2xl font-bold text-green-400 mt-1">{fmtCost(summary.monthly?.cost)}</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-emerald-500/30 rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('powerMonthlyCo2') || 'Monthly CO₂'}</div>
+                                    <div className="text-2xl font-bold text-emerald-400 mt-1">{fmtCo2(summary.monthly?.kg_co2)}</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('powerVmCount') || 'VMs counted'}</div>
+                                    <div className="text-2xl font-bold text-white mt-1">{summary.vm_count || 0}</div>
+                                </div>
+                            </div>
+
+                            {summary.by_node && Object.keys(summary.by_node).length > 0 && (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <h3 className="text-sm font-semibold text-white mb-2">{t('powerByNode') || 'Per node'}</h3>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                                        {Object.entries(summary.by_node).map(([n, v]) => (
+                                            <div key={n} className="bg-proxmox-dark rounded p-2">
+                                                <div className="text-gray-500">{n}</div>
+                                                <div className="text-white">{fmtKwh(v.kwh)} · {fmtCost(v.cost)}</div>
+                                                <div className="text-emerald-400">{fmtCo2(v.kg_co2)}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 overflow-x-auto">
+                                <h3 className="text-sm font-semibold text-white mb-2">{t('powerPerVm') || 'Per VM'} <span className="text-xs text-gray-500 font-normal">({rows.length})</span></h3>
+                                <table className="w-full text-xs">
+                                    <thead className="text-gray-400 uppercase text-[10px]">
+                                        <tr className="border-b border-proxmox-border">
+                                            <th className="text-left py-2">{t('name') || 'Name'}</th>
+                                            <th className="text-left">VMID</th>
+                                            <th className="text-left">{t('node') || 'Node'}</th>
+                                            <th className="text-right">CPU%</th>
+                                            <th className="text-right">RAM%</th>
+                                            <th className="text-right">{t('powerHoursRunning') || 'Running h'}</th>
+                                            <th className="text-right">kWh</th>
+                                            <th className="text-right">{t('powerMonthlyKwh') || 'Monthly kWh'}</th>
+                                            <th className="text-right">{t('powerMonthlyCost') || 'Monthly cost'}</th>
+                                            <th className="text-right">{t('powerMonthlyCo2') || 'Monthly CO₂'}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rows.map(r => (
+                                            <tr key={r.vmid} className="border-b border-proxmox-border/30 hover:bg-proxmox-dark/40">
+                                                <td className="py-1.5 text-white">{r.name}{r.low_data && <span className="ml-1 text-yellow-500" title={t('lowDataWarning') || 'limited samples'}>⚠</span>}</td>
+                                                <td className="text-gray-400">{r.vmid}</td>
+                                                <td className="text-gray-400">{r.node}</td>
+                                                <td className="text-right text-gray-300">{r.avg_cpu_pct}%</td>
+                                                <td className="text-right text-gray-300">{r.avg_mem_pct}%</td>
+                                                <td className="text-right text-gray-400">{r.running_h}</td>
+                                                <td className="text-right text-yellow-400">{r.kwh}</td>
+                                                <td className="text-right text-yellow-400">{r.monthly_kwh}</td>
+                                                <td className="text-right font-semibold text-green-400">{fmtCost(r.monthly_cost)}</td>
+                                                <td className="text-right text-emerald-400">{fmtCo2(r.monthly_co2)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                {rows.length === 0 && <div className="text-center text-gray-500 py-4 text-sm">{t('noVmsFound') || 'No VMs in scope'}</div>}
+                            </div>
+                        </>
+                    )}
+
+                    {showRates && rateForm && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !savingRates && setShowRates(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold text-white mb-3">{t('powerRatesTitle') || 'Power & Carbon Rates'}</h3>
+                                <div className="space-y-3">
+                                    {[
+                                        ['node_idle_w', t('powerNodeIdleW') || 'Node idle (W)', 'number', 1],
+                                        ['node_max_w', t('powerNodeMaxW') || 'Node max (W)', 'number', 1],
+                                        ['mem_w_per_gb', t('powerMemWPerGb') || 'Memory W per GB', 'number', 0.1],
+                                        ['pue', t('powerPue') || 'PUE (1.0–2.5)', 'number', 0.05],
+                                        ['kwh_price', t('powerKwhPrice') || 'Price per kWh', 'number', 0.01],
+                                        ['kg_co2_per_kwh', t('powerCo2PerKwh') || 'kg CO₂ / kWh (grid)', 'number', 0.01],
+                                    ].map(([k, label, type, step]) => (
+                                        <div key={k}>
+                                            <label className="text-xs text-gray-400 block mb-1">{label}</label>
+                                            <input type={type} step={step} value={rateForm[k]}
+                                                onChange={e => setRateForm({...rateForm, [k]: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                    ))}
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('currency') || 'Currency'}</label>
+                                        <select value={rateForm.currency} onChange={e => setRateForm({...rateForm, currency: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                            <option value="EUR">EUR (€)</option>
+                                            <option value="USD">USD ($)</option>
+                                            <option value="GBP">GBP (£)</option>
+                                            <option value="CHF">CHF</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className="text-xs text-gray-500 mt-3 bg-yellow-500/5 border border-yellow-500/20 rounded p-2">
+                                    {t('powerRatesHint') || 'Defaults: 80W idle / 300W max per node, 0.3 W/GB RAM, PUE 1.5, €0.30/kWh, 0.4 kg CO₂/kWh (DE 2024 grid). Adjust to your hardware + supplier.'}
+                                </div>
+                                <div className="flex justify-end gap-2 mt-5">
+                                    <button onClick={() => setShowRates(false)} disabled={savingRates}
+                                        className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button onClick={saveRates} disabled={savingRates}
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        {savingRates ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {t('save') || 'Save'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function CostDashboardTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+            const [summary, setSummary] = React.useState(null);
+            const [rows, setRows] = React.useState([]);
+            const [loading, setLoading] = React.useState(false);
+            const [days, setDays] = React.useState(30);
+            const [showRates, setShowRates] = React.useState(false);
+            const [rateForm, setRateForm] = React.useState(null);
+            const [savingRates, setSavingRates] = React.useState(false);
+            const [sortBy, setSortBy] = React.useState('cost_total');
+
+            const refresh = async () => {
+                if (!clusterId) return;
+                setLoading(true);
+                try {
+                    const [s, p] = await Promise.all([
+                        authFetch(`${API_URL}/clusters/${clusterId}/costs/summary?days=${days}`).then(r => r?.json()).catch(() => null),
+                        authFetch(`${API_URL}/clusters/${clusterId}/costs/per-vm?days=${days}`).then(r => r?.json()).catch(() => null),
+                    ]);
+                    if (s && !s.error) setSummary(s);
+                    if (p && p.rows) setRows(p.rows);
+                } finally { setLoading(false); }
+            };
+
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId, days]);
+
+            const openRates = async () => {
+                const r = await authFetch(`${API_URL}/cost/rates/${clusterId}`).then(r => r?.json()).catch(() => null);
+                setRateForm(r || {
+                    cpu_per_core_h: 0.012,
+                    mem_per_gb_h: 0.0035,
+                    storage_per_gb_month: 0.10,
+                    currency: 'EUR',
+                    notes: '',
+                });
+                setShowRates(true);
+            };
+
+            const saveRates = async () => {
+                setSavingRates(true);
+                try {
+                    const r = await authFetch(`${API_URL}/cost/rates/${clusterId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            cpu_per_core_h: parseFloat(rateForm.cpu_per_core_h) || 0,
+                            mem_per_gb_h: parseFloat(rateForm.mem_per_gb_h) || 0,
+                            storage_per_gb_month: parseFloat(rateForm.storage_per_gb_month) || 0,
+                            currency: rateForm.currency || 'EUR',
+                            notes: rateForm.notes || '',
+                        }),
+                    });
+                    if (r?.ok) {
+                        addToast(t('costRatesSaved') || 'Rates saved', 'success');
+                        setShowRates(false);
+                        await refresh();
+                    } else {
+                        addToast(t('costRatesSaveFailed') || 'Save failed', 'error');
+                    }
+                } finally { setSavingRates(false); }
+            };
+
+            const fmt = (n) => {
+                const cur = summary?.rates?.currency || 'EUR';
+                const sym = ({ EUR: '€', USD: '$', GBP: '£', CHF: 'CHF', JPY: '¥' }[cur] || cur);
+                return `${sym} ${(n || 0).toFixed(2)}`;
+            };
+
+            const sorted = [...rows].sort((a, b) => {
+                if (sortBy === 'name') return (a.name || '').localeCompare(b.name || '');
+                return (b[sortBy] || 0) - (a[sortBy] || 0);
+            });
+
+            // ── Export helpers ──
+            // jsPDF Helvetica is WinAnsi only — strip non-Latin-1 chars to ASCII
+            const safe = (s) => {
+                if (s == null) return '';
+                return String(s)
+                    .replace(/[≥]/g, '>=').replace(/[≤]/g, '<=')
+                    .replace(/[→]/g, '->').replace(/[←]/g, '<-')
+                    .replace(/[·]/g, '*')
+                    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');
+            };
+
+            const exportCsv = () => {
+                if (!rows.length) {
+                    addToast(t('costNoData') || 'No data', 'warning');
+                    return;
+                }
+                const cur = summary?.rates?.currency || 'EUR';
+                const cols = [
+                    'vmid', 'name', 'node', 'type',
+                    'avg_cpu_pct', 'avg_mem_pct', 'running_ratio',
+                    'cores', 'memory_gb', 'disk_gb',
+                    `cost_cpu_${cur}`, `cost_memory_${cur}`, `cost_storage_${cur}`,
+                    `cost_total_${cur}`, `monthly_total_${cur}`,
+                ];
+                const esc = (v) => {
+                    const s = String(v ?? '');
+                    return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                };
+                const lines = [cols.join(',')];
+                for (const r of sorted) {
+                    lines.push([
+                        r.vmid, r.name, r.node, r.type,
+                        r.avg_cpu_pct, r.avg_mem_pct, r.running_ratio,
+                        r.cores, r.memory_gb, r.disk_gb,
+                        r.cost_cpu, r.cost_memory, r.cost_storage,
+                        r.cost_total, r.monthly_total,
+                    ].map(esc).join(','));
+                }
+                // BOM so Excel auto-detects UTF-8
+                const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const dt = new Date().toISOString().slice(0, 10);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `pegaprox-costs-${clusterId || 'cluster'}-${dt}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            };
+
+            const exportPdf = async () => {
+                if (typeof generatePegaProxPDF !== 'function') {
+                    addToast('PDF library not loaded', 'error');
+                    return;
+                }
+                if (!summary || !summary.enough_data) {
+                    addToast(t('costNoData') || 'No data', 'warning');
+                    return;
+                }
+                const cur = summary.rates.currency || 'EUR';
+                const sym = ({ EUR: 'EUR', USD: 'USD', GBP: 'GBP', CHF: 'CHF', JPY: 'JPY' }[cur] || cur);
+                const pf = (n) => `${sym} ${(n || 0).toFixed(2)}`;
+
+                const blocks = [];
+
+                // Top stats
+                blocks.push({
+                    type: 'stats',
+                    data: [
+                        { value: pf(summary.monthly_total), label: safe(t('costMonthlyTotal') || 'Monthly total'), color: '#16a34a' },
+                        { value: pf(summary.monthly_breakdown?.cpu), label: 'CPU', color: '#3b82f6' },
+                        { value: pf(summary.monthly_breakdown?.memory), label: safe(t('costMemory') || 'Memory'), color: '#a855f7' },
+                        { value: pf(summary.monthly_breakdown?.storage), label: safe(t('costStorage') || 'Storage'), color: '#f59e0b' },
+                    ],
+                });
+
+                blocks.push({ type: 'spacer', height: 4 });
+                blocks.push({
+                    type: 'text',
+                    value: safe(`Window: ${summary.days} days · ${summary.snapshots_count} snapshots · ` +
+                                `Rates: ${summary.rates.cpu_per_core_h.toFixed(4)} ${cur}/core*h, ` +
+                                `${summary.rates.mem_per_gb_h.toFixed(4)} ${cur}/GB*h, ` +
+                                `${summary.rates.storage_per_gb_month.toFixed(2)} ${cur}/GB*month`),
+                });
+
+                // by-node table
+                if (summary.by_node && Object.keys(summary.by_node).length) {
+                    blocks.push({ type: 'spacer', height: 4 });
+                    blocks.push({
+                        type: 'table',
+                        title: safe(t('costByNode') || 'Cost by Node'),
+                        columns: [safe(t('node') || 'Node'), safe(t('costMonthly') || 'Monthly')],
+                        rows: Object.entries(summary.by_node).map(([n, v]) => [safe(n), pf(v)]),
+                    });
+                }
+
+                // per-VM table
+                blocks.push({ type: 'spacer', height: 4 });
+                blocks.push({
+                    type: 'table',
+                    title: safe(`${t('costPerVm') || 'Per VM'} (${rows.length})`),
+                    columns: [
+                        'VMID', safe(t('name') || 'Name'), safe(t('node') || 'Node'),
+                        'CPU %', 'RAM %',
+                        safe('CPU ' + cur), safe('RAM ' + cur), safe(t('costStorage') || 'Storage'),
+                        safe(t('costMonthly') || 'Monthly'),
+                    ],
+                    rows: sorted.map(r => [
+                        String(r.vmid),
+                        safe(r.name),
+                        safe(r.node),
+                        `${r.avg_cpu_pct}%`,
+                        `${r.avg_mem_pct}%`,
+                        pf(r.cost_cpu),
+                        pf(r.cost_memory),
+                        pf(r.cost_storage),
+                        pf(r.monthly_total),
+                    ]),
+                });
+
+                const dt = new Date().toISOString().slice(0, 10);
+                try {
+                    await generatePegaProxPDF({
+                        title: safe(t('costDashboard') || 'Cost Dashboard'),
+                        subtitle: safe(`${days}d · ${rows.length} VMs`),
+                        clusterName: safe(clusterName || ''),
+                        filename: `pegaprox-costs-${clusterId || 'cluster'}-${dt}.pdf`,
+                        content: blocks,
+                        orientation: 'landscape',
+                    });
+                } catch (e) {
+                    console.error('[Costs PDF]', e);
+                    addToast('PDF export failed', 'error');
+                }
+            };
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.DollarSign className="w-5 h-5 text-green-400" />
+                                {t('costDashboard') || 'Cost Dashboard'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('costDashboardDesc') || 'Estimated chargeback per VM/CT based on metrics history × configured rates.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            <select value={days} onChange={e => setDays(parseInt(e.target.value, 10))}
+                                className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                <option value={1}>{t('lastDay') || 'last 24h'}</option>
+                                <option value={7}>{t('last7Days') || 'last 7 days'}</option>
+                                <option value={14}>{t('last14Days') || 'last 14 days'}</option>
+                                <option value={30}>{t('last30Days') || 'last 30 days'}</option>
+                            </select>
+                            {isAdmin && (
+                                <button onClick={openRates}
+                                    className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5">
+                                    <Icons.Settings className="w-3.5 h-3.5" />
+                                    {t('costRates') || 'Rates'}
+                                </button>
+                            )}
+                            <button onClick={exportCsv} disabled={!rows.length}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                <Icons.Download className="w-3.5 h-3.5" />
+                                {t('exportCsv') || 'CSV'}
+                            </button>
+                            <button onClick={exportPdf} disabled={!summary || !summary.enough_data}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                <Icons.Download className="w-3.5 h-3.5" />
+                                {t('exportPdf') || 'PDF'}
+                            </button>
+                            <button onClick={refresh} disabled={loading}
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50">
+                                {loading ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {summary && !summary.enough_data && (
+                        <div className="text-sm text-yellow-400 bg-yellow-500/5 border border-yellow-500/20 rounded p-3">
+                            {t('costNoData') || 'No metrics history yet for this cluster — collector samples every 5 minutes.'}
+                        </div>
+                    )}
+
+                    {summary && summary.enough_data && (
+                        <>
+                            {/* Top tiles */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <div className="bg-proxmox-card border border-green-500/30 rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('costMonthlyTotal') || 'Monthly total'}</div>
+                                    <div className="text-2xl font-bold text-green-400 mt-1">{fmt(summary.monthly_total)}</div>
+                                    <div className="text-[10px] text-gray-500 mt-1">{t('windowExtrapolated') || 'extrapolated from'} {summary.days}d</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('costCpu') || 'CPU'}</div>
+                                    <div className="text-xl font-semibold text-white mt-1">{fmt(summary.monthly_breakdown?.cpu)}</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('costMemory') || 'Memory'}</div>
+                                    <div className="text-xl font-semibold text-white mt-1">{fmt(summary.monthly_breakdown?.memory)}</div>
+                                </div>
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <div className="text-xs text-gray-500">{t('costStorage') || 'Storage'}</div>
+                                    <div className="text-xl font-semibold text-white mt-1">{fmt(summary.monthly_breakdown?.storage)}</div>
+                                </div>
+                            </div>
+
+                            {/* By node */}
+                            {summary.by_node && Object.keys(summary.by_node).length > 0 && (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <h3 className="text-sm font-semibold text-white mb-2">{t('costByNode') || 'Cost by Node'}</h3>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                        {Object.entries(summary.by_node).map(([n, v]) => (
+                                            <div key={n} className="bg-proxmox-dark rounded p-2">
+                                                <div className="text-xs text-gray-500">{n}</div>
+                                                <div className="text-sm font-medium text-white">{fmt(v)}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Per-VM table */}
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 overflow-x-auto">
+                                <div className="flex items-center justify-between mb-2">
+                                    <h3 className="text-sm font-semibold text-white">
+                                        {t('costPerVm') || 'Per VM'} <span className="text-xs text-gray-500 font-normal">({rows.length})</span>
+                                    </h3>
+                                    <div className="text-[10px] text-gray-500">
+                                        {summary.rates.cpu_per_core_h.toFixed(4)} {summary.rates.currency}/core·h ·
+                                        {' '}{summary.rates.mem_per_gb_h.toFixed(4)} {summary.rates.currency}/GB·h ·
+                                        {' '}{summary.rates.storage_per_gb_month.toFixed(2)} {summary.rates.currency}/GB·month
+                                    </div>
+                                </div>
+                                <table className="w-full text-xs">
+                                    <thead className="text-gray-400 uppercase text-[10px]">
+                                        <tr className="border-b border-proxmox-border">
+                                            <th className="text-left py-2 cursor-pointer hover:text-white" onClick={() => setSortBy('name')}>{t('name') || 'Name'}</th>
+                                            <th className="text-left">VMID</th>
+                                            <th className="text-left">{t('node') || 'Node'}</th>
+                                            <th className="text-right cursor-pointer hover:text-white" onClick={() => setSortBy('avg_cpu_pct')}>CPU %</th>
+                                            <th className="text-right cursor-pointer hover:text-white" onClick={() => setSortBy('avg_mem_pct')}>RAM %</th>
+                                            <th className="text-right">{t('costCpu') || 'CPU'}</th>
+                                            <th className="text-right">{t('costMemory') || 'RAM'}</th>
+                                            <th className="text-right">{t('costStorage') || 'Storage'}</th>
+                                            <th className="text-right cursor-pointer hover:text-white" onClick={() => setSortBy('cost_total')}>
+                                                {t('costMonthly') || 'Monthly'}
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {sorted.map(r => (
+                                            <tr key={r.vmid} className="border-b border-proxmox-border/30 hover:bg-proxmox-dark/40">
+                                                <td className="py-1.5 text-white">
+                                                    {r.name}
+                                                    {r.low_data && <span className="ml-1 text-[10px] text-yellow-500" title={t('lowDataWarning') || 'limited samples'}>⚠</span>}
+                                                </td>
+                                                <td className="text-gray-400">{r.vmid}</td>
+                                                <td className="text-gray-400">{r.node}</td>
+                                                <td className="text-right text-gray-300">{r.avg_cpu_pct}%</td>
+                                                <td className="text-right text-gray-300">{r.avg_mem_pct}%</td>
+                                                <td className="text-right text-gray-400">{fmt(r.cost_cpu)}</td>
+                                                <td className="text-right text-gray-400">{fmt(r.cost_memory)}</td>
+                                                <td className="text-right text-gray-400">{fmt(r.cost_storage)}</td>
+                                                <td className="text-right font-semibold text-green-400">{fmt(r.monthly_total)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                {rows.length === 0 && <div className="text-center text-gray-500 py-4 text-sm">{t('noVmsFound') || 'No VMs in scope'}</div>}
+                            </div>
+                        </>
+                    )}
+
+                    {/* Rates modal */}
+                    {showRates && rateForm && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !savingRates && setShowRates(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-md" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold text-white mb-1 flex items-center gap-2">
+                                    <Icons.DollarSign className="w-4 h-4 text-green-400" />
+                                    {t('costRatesTitle') || 'Cost Rates for'} {clusterName || clusterId}
+                                </h3>
+                                <p className="text-xs text-gray-500 mb-4">{t('costRatesHint') || 'Rates are per cluster. Leave at default to use the global fallback. Numbers in your chosen currency.'}</p>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('costCpuRate') || 'CPU per core·hour'}</label>
+                                        <input type="number" step="0.0001" value={rateForm.cpu_per_core_h}
+                                            onChange={e => setRateForm({...rateForm, cpu_per_core_h: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('costMemRate') || 'Memory per GB·hour'}</label>
+                                        <input type="number" step="0.0001" value={rateForm.mem_per_gb_h}
+                                            onChange={e => setRateForm({...rateForm, mem_per_gb_h: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('costStorageRate') || 'Storage per GB·month'}</label>
+                                        <input type="number" step="0.01" value={rateForm.storage_per_gb_month}
+                                            onChange={e => setRateForm({...rateForm, storage_per_gb_month: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('currency') || 'Currency'}</label>
+                                        <select value={rateForm.currency} onChange={e => setRateForm({...rateForm, currency: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                            <option value="EUR">EUR (€)</option>
+                                            <option value="USD">USD ($)</option>
+                                            <option value="GBP">GBP (£)</option>
+                                            <option value="CHF">CHF</option>
+                                            <option value="JPY">JPY (¥)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('notes') || 'Notes'}</label>
+                                        <input type="text" value={rateForm.notes}
+                                            onChange={e => setRateForm({...rateForm, notes: e.target.value})}
+                                            placeholder={t('optional') || 'optional'}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                </div>
+                                <div className="flex justify-end gap-2 mt-4">
+                                    <button onClick={() => setShowRates(false)} disabled={savingRates}
+                                        className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button onClick={saveRates} disabled={savingRates}
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        {savingRates ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {t('save') || 'Save'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // NS May 2026 — Config Drift Detection.
+        // Tracks open events grouped by kind (vm_config, storage, network, cluster_options).
+        // Admin can rescan, set baseline, acknowledge/promote events.
+        function DriftTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+            const [status, setStatus] = React.useState(null);
+            const [events, setEvents] = React.useState([]);
+            const [filter, setFilter] = React.useState('open');
+            const [busy, setBusy] = React.useState(false);
+            const [scanning, setScanning] = React.useState(false);
+            const [expanded, setExpanded] = React.useState({});
+
+            const refresh = async () => {
+                if (!clusterId) return;
+                setBusy(true);
+                try {
+                    const [s, e] = await Promise.all([
+                        authFetch(`${API_URL}/clusters/${clusterId}/drift/status`).then(r => r?.json()).catch(() => null),
+                        authFetch(`${API_URL}/clusters/${clusterId}/drift/events?status=${filter}&limit=200`).then(r => r?.json()).catch(() => null),
+                    ]);
+                    if (s && !s.error) setStatus(s);
+                    if (e && e.events) setEvents(e.events);
+                } finally { setBusy(false); }
+            };
+
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId, filter]);
+
+            const scan = async () => {
+                setScanning(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/drift/scan`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ seed: status && status.baselines === 0 }),
+                    });
+                    if (r?.ok) {
+                        const j = await r.json();
+                        const m = j.seeded_baselines > 0
+                            ? `${t('driftSeeded') || 'baseline seeded'}: ${j.seeded_baselines}`
+                            : `${j.events_count || 0} ${t('driftEvents') || 'events'}`;
+                        addToast(`${t('driftScanned') || 'Scan complete'} — ${m}`, 'success');
+                        await refresh();
+                    } else {
+                        addToast(t('driftScanFailed') || 'Scan failed', 'error');
+                    }
+                } finally { setScanning(false); }
+            };
+
+            const setBaseline = async () => {
+                if (!confirm(t('driftBaselineConfirm') || 'Reset baseline from current cluster state? Outstanding open events will be marked as superseded.')) return;
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/drift/baseline`, { method: 'POST' });
+                    if (r?.ok) {
+                        addToast(t('driftBaselineDone') || 'Baseline reset', 'success');
+                        await refresh();
+                    } else {
+                        addToast(t('driftBaselineFailed') || 'Baseline failed', 'error');
+                    }
+                } finally { setBusy(false); }
+            };
+
+            const ack = async (eid, promote = false) => {
+                try {
+                    const r = await authFetch(`${API_URL}/drift/events/${eid}/acknowledge`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ promote }),
+                    });
+                    if (r?.ok) {
+                        addToast(promote ? (t('driftPromoted') || 'Promoted to baseline') : (t('driftAcknowledged') || 'Acknowledged'), 'success');
+                        await refresh();
+                    }
+                } catch (e) { /* ignore */ }
+            };
+
+            const sevColor = (s) => ({
+                'critical': 'bg-red-500/15 text-red-400',
+                'warning': 'bg-yellow-500/15 text-yellow-400',
+                'info': 'bg-blue-500/15 text-blue-400',
+            }[s] || 'bg-gray-500/15 text-gray-400');
+
+            const kindLabel = (k) => ({
+                'vm_config': t('driftKindVm') || 'VM Config',
+                'storage': t('driftKindStorage') || 'Storage',
+                'network': t('driftKindNetwork') || 'Network',
+                'cluster_options': t('driftKindCluster') || 'Cluster Options',
+            }[k] || k);
+
+            const opLabel = (op) => ({
+                'added': t('driftOpAdded') || 'added',
+                'removed': t('driftOpRemoved') || 'removed',
+                'changed': t('driftOpChanged') || 'changed',
+            }[op] || op);
+
+            const fmtVal = (v) => {
+                if (v === null || v === undefined) return '—';
+                if (typeof v === 'object') return JSON.stringify(v).slice(0, 200);
+                return String(v).slice(0, 200);
+            };
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.Shield className="w-5 h-5 text-orange-400" />
+                                {t('driftDetection') || 'Config Drift Detection'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('driftDetectionDesc') || 'Snapshots cluster config nightly. Flags any change vs the admin-set baseline.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            <select value={filter} onChange={e => setFilter(e.target.value)}
+                                className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                <option value="open">{t('driftOpen') || 'open'}</option>
+                                <option value="acknowledged">{t('driftAcknowledged2') || 'acknowledged'}</option>
+                                <option value="all">{t('all') || 'all'}</option>
+                            </select>
+                            {isAdmin && (
+                                <>
+                                    <button onClick={setBaseline} disabled={busy}
+                                        className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                        <Icons.Database className="w-3.5 h-3.5" />
+                                        {t('driftSetBaseline') || 'Reset baseline'}
+                                    </button>
+                                    <button onClick={scan} disabled={scanning}
+                                        className="px-3 py-1.5 bg-orange-500 hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50">
+                                        {scanning ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Search className="w-3.5 h-3.5" />}
+                                        {t('driftScan') || 'Scan now'}
+                                    </button>
+                                </>
+                            )}
+                            <button onClick={refresh} disabled={busy}
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50">
+                                {busy ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {status && status.baselines === 0 && (
+                        <div className="text-sm text-yellow-400 bg-yellow-500/5 border border-yellow-500/20 rounded p-3">
+                            {t('driftNoBaseline') || 'No baseline set yet. Hit "Scan now" to capture the current state as the starting point.'}
+                        </div>
+                    )}
+
+                    {status && (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {[
+                                { k: 'vm_config', l: kindLabel('vm_config'), c: 'border-blue-500/30' },
+                                { k: 'storage', l: kindLabel('storage'), c: 'border-purple-500/30' },
+                                { k: 'network', l: kindLabel('network'), c: 'border-red-500/30' },
+                                { k: 'cluster_options', l: kindLabel('cluster_options'), c: 'border-orange-500/30' },
+                            ].map(it => {
+                                const counts = (status.by_kind || {})[it.k] || {};
+                                const total = (counts.critical || 0) + (counts.warning || 0) + (counts.info || 0);
+                                return (
+                                    <div key={it.k} className={`bg-proxmox-card border ${it.c} rounded-xl p-3`}>
+                                        <div className="text-xs text-gray-500">{it.l}</div>
+                                        <div className="text-2xl font-bold text-white mt-1">{total}</div>
+                                        <div className="text-[10px] text-gray-500 mt-1">
+                                            {counts.critical ? <span className="text-red-400">{counts.critical} crit · </span> : null}
+                                            {counts.warning ? <span className="text-yellow-400">{counts.warning} warn · </span> : null}
+                                            {counts.info ? <span className="text-blue-400">{counts.info} info</span> : null}
+                                            {!total && <span>—</span>}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {events.length === 0 ? (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {filter === 'open' ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
+                                              : (t('driftNoEvents') || 'No events for this filter.')}
+                        </div>
+                    ) : (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl divide-y divide-proxmox-border/40">
+                            {events.map(ev => {
+                                const open = expanded[ev.id];
+                                return (
+                                    <div key={ev.id} className="p-3">
+                                        <div className="flex items-start justify-between gap-2 cursor-pointer"
+                                             onClick={() => setExpanded({ ...expanded, [ev.id]: !open })}>
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <span className={`px-1.5 py-0.5 text-[10px] rounded ${sevColor(ev.severity)} flex-shrink-0`}>{ev.severity}</span>
+                                                <span className="text-xs text-gray-300 truncate">
+                                                    <span className="text-gray-400">{kindLabel(ev.kind)}:</span> {ev.scope}
+                                                </span>
+                                                <span className="text-[10px] text-gray-500 flex-shrink-0">
+                                                    {(ev.detected_at || '').replace('T', ' ').slice(0, 16)}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center gap-2 flex-shrink-0">
+                                                {isAdmin && ev.status === 'open' && (
+                                                    <>
+                                                        <button onClick={e => { e.stopPropagation(); ack(ev.id, false); }}
+                                                            className="text-[11px] px-2 py-0.5 bg-proxmox-darker border border-proxmox-border rounded text-gray-300 hover:text-white">
+                                                            {t('driftAck') || 'Ack'}
+                                                        </button>
+                                                        <button onClick={e => { e.stopPropagation(); ack(ev.id, true); }}
+                                                            className="text-[11px] px-2 py-0.5 bg-orange-500/80 hover:bg-orange-600 rounded text-white">
+                                                            {t('driftPromote') || 'Promote'}
+                                                        </button>
+                                                    </>
+                                                )}
+                                                <Icons.ChevronDown className={`w-3.5 h-3.5 text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} />
+                                            </div>
+                                        </div>
+                                        {open && (
+                                            <div className="mt-2 pl-3 border-l-2 border-proxmox-border space-y-1 text-[11px]">
+                                                {(ev.diff || []).map((d, i) => (
+                                                    <div key={i} className="grid grid-cols-12 gap-2">
+                                                        <div className="col-span-3 text-gray-400 font-mono">{d.path}</div>
+                                                        <div className="col-span-1 text-gray-500">{opLabel(d.op)}</div>
+                                                        <div className="col-span-4 text-red-400 font-mono break-all line-through opacity-60">{fmtVal(d.before)}</div>
+                                                        <div className="col-span-4 text-green-400 font-mono break-all">{fmtVal(d.after)}</div>
+                                                    </div>
+                                                ))}
+                                                {ev.acknowledged_at && (
+                                                    <div className="text-gray-500 mt-2">
+                                                        {t('driftAcknowledgedBy') || 'Acknowledged by'} {ev.acknowledged_by} {t('at') || 'at'} {(ev.acknowledged_at || '').replace('T', ' ').slice(0, 16)}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // MK May 2026 — Web Push (browser notifications).
+        // Topbar bell button: shows unread count + popover (enable/disable, test,
+        // recent inbox). Subscribes via SW + VAPID, persists subscription on the
+        // server. Wake-up pushes hit the SW, which fetches /api/push/inbox.
+        function PushBellButton({ authFetch, addToast, t }) {
+            const [open, setOpen] = React.useState(false);
+            const [supported, setSupported] = React.useState(true);
+            const [permission, setPermission] = React.useState(typeof Notification !== 'undefined' ? Notification.permission : 'default');
+            const [subscribed, setSubscribed] = React.useState(false);
+            const [items, setItems] = React.useState([]);
+            const [unread, setUnread] = React.useState(0);
+            const [busy, setBusy] = React.useState(false);
+
+            const checkSubState = async () => {
+                if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+                    setSupported(false); return;
+                }
+                try {
+                    const reg = await navigator.serviceWorker.ready;
+                    const sub = await reg.pushManager.getSubscription();
+                    setSubscribed(!!sub);
+                } catch (e) { /* SW not ready yet */ }
+            };
+
+            const refreshInbox = async () => {
+                try {
+                    const r = await authFetch(`${API_URL}/push/inbox`);
+                    if (r?.ok) {
+                        const d = await r.json();
+                        const list = d.items || [];
+                        setItems(list.slice(0, 8));
+                        setUnread(list.filter(x => !x.read_at).length);
+                    }
+                } catch (e) { /* ignore */ }
+            };
+
+            React.useEffect(() => {
+                checkSubState();
+                refreshInbox();
+                const id = setInterval(refreshInbox, 30000);
+                return () => clearInterval(id);
+            }, []); // eslint-disable-line
+
+            // ── helpers ──
+            const urlBase64ToUint8 = (b64) => {
+                const padding = '='.repeat((4 - b64.length % 4) % 4);
+                const std = (b64 + padding).replace(/-/g, '+').replace(/_/g, '/');
+                const raw = atob(std);
+                const out = new Uint8Array(raw.length);
+                for (let i = 0; i < raw.length; ++i) out[i] = raw.charCodeAt(i);
+                return out;
+            };
+
+            const enable = async () => {
+                if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+                    addToast(t('pushNotSupported') || 'Browser push not supported here', 'error');
+                    return;
+                }
+                setBusy(true);
+                try {
+                    const perm = await Notification.requestPermission();
+                    setPermission(perm);
+                    if (perm !== 'granted') {
+                        addToast(t('pushPermissionDenied') || 'Permission denied', 'warning');
+                        return;
+                    }
+                    const reg = await navigator.serviceWorker.ready;
+                    const k = await authFetch(`${API_URL}/push/vapid-key`).then(r => r.json());
+                    if (!k?.public_key) {
+                        addToast('VAPID key missing', 'error'); return;
+                    }
+                    const sub = await reg.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: urlBase64ToUint8(k.public_key),
+                    });
+                    const body = sub.toJSON();
+                    const r = await authFetch(`${API_URL}/push/subscribe`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                    if (r?.ok) {
+                        setSubscribed(true);
+                        addToast(t('pushEnabled') || 'Browser push enabled', 'success');
+                    } else {
+                        addToast('Failed to register subscription', 'error');
+                    }
+                } catch (e) {
+                    console.error('[push] enable failed', e);
+                    addToast('Push setup failed: ' + (e.message || e), 'error');
+                } finally { setBusy(false); }
+            };
+
+            const disable = async () => {
+                setBusy(true);
+                try {
+                    const reg = await navigator.serviceWorker.ready;
+                    const sub = await reg.pushManager.getSubscription();
+                    if (sub) {
+                        await authFetch(`${API_URL}/push/unsubscribe`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ endpoint: sub.endpoint }),
+                        });
+                        await sub.unsubscribe();
+                    }
+                    setSubscribed(false);
+                    addToast(t('pushDisabled') || 'Browser push disabled', 'info');
+                } catch (e) {
+                    addToast('Disable failed: ' + (e.message || e), 'error');
+                } finally { setBusy(false); }
+            };
+
+            const sendTest = async () => {
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/push/test`, { method: 'POST' });
+                    if (r?.ok) {
+                        addToast(t('pushTestSent') || 'Test push sent', 'success');
+                        setTimeout(refreshInbox, 1500);
+                    } else {
+                        addToast('Test failed', 'error');
+                    }
+                } finally { setBusy(false); }
+            };
+
+            const clearInbox = async () => {
+                try {
+                    await authFetch(`${API_URL}/push/inbox/clear`, { method: 'POST' });
+                    refreshInbox();
+                } catch (e) { /* ignore */ }
+            };
+
+            return (
+                <div className="relative">
+                    <button
+                        onClick={() => { setOpen(!open); refreshInbox(); }}
+                        className="p-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors text-gray-400 hover:text-white relative"
+                        title={t('notifications') || 'Notifications'}
+                    >
+                        <Icons.Bell className="w-4 h-4" />
+                        {unread > 0 && (
+                            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 bg-red-500 text-white text-[10px] rounded-full flex items-center justify-center font-medium">
+                                {unread > 9 ? '9+' : unread}
+                            </span>
+                        )}
+                    </button>
+
+                    {open && (
+                        <>
+                            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+                            <div className="absolute right-0 top-full mt-2 w-80 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
+                                <div className="px-3 py-2 border-b border-proxmox-border flex items-center justify-between">
+                                    <div className="text-sm font-semibold text-white">{t('notifications') || 'Notifications'}</div>
+                                    {items.length > 0 && (
+                                        <button onClick={clearInbox} className="text-[10px] text-gray-500 hover:text-white">
+                                            {t('markAllRead') || 'mark read'}
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Push toggle */}
+                                <div className="px-3 py-2 border-b border-proxmox-border bg-proxmox-dark/50">
+                                    {!supported ? (
+                                        <div className="text-xs text-gray-500">{t('pushNotSupported') || 'Browser push not supported'}</div>
+                                    ) : permission === 'denied' ? (
+                                        <div className="text-xs text-yellow-400">{t('pushBlocked') || 'Notifications blocked in browser settings'}</div>
+                                    ) : (
+                                        <div className="flex items-center justify-between gap-2">
+                                            <div className="text-xs">
+                                                <div className="text-gray-300">{t('browserPush') || 'Browser Push'}</div>
+                                                <div className="text-gray-500">
+                                                    {subscribed
+                                                        ? (t('pushActive') || 'enabled — alerts will hit this device')
+                                                        : (t('pushInactive') || 'off')}
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-1">
+                                                {subscribed
+                                                    ? <button onClick={disable} disabled={busy}
+                                                          className="text-[11px] px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded hover:text-white text-gray-300 disabled:opacity-50">
+                                                        {t('disable') || 'Disable'}</button>
+                                                    : <button onClick={enable} disabled={busy}
+                                                          className="text-[11px] px-2 py-1 bg-proxmox-orange hover:bg-orange-600 text-white rounded disabled:opacity-50">
+                                                        {t('enable') || 'Enable'}</button>}
+                                                {subscribed && (
+                                                    <button onClick={sendTest} disabled={busy}
+                                                        className="text-[11px] px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded hover:text-white text-gray-300 disabled:opacity-50">
+                                                        {t('test') || 'Test'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Inbox */}
+                                <div className="max-h-72 overflow-y-auto">
+                                    {items.length === 0 && (
+                                        <div className="px-3 py-6 text-center text-xs text-gray-500">
+                                            {t('inboxEmpty') || 'No notifications yet'}
+                                        </div>
+                                    )}
+                                    {items.map(it => {
+                                        const sevColor = ({
+                                            'critical': 'bg-red-500',
+                                            'warning': 'bg-yellow-500',
+                                            'info': 'bg-blue-500',
+                                        }[it.severity] || 'bg-gray-500');
+                                        return (
+                                            <a key={it.id} href={it.url || '/'}
+                                               onClick={() => setOpen(false)}
+                                               className={`block px-3 py-2 border-b border-proxmox-border/50 hover:bg-proxmox-dark/60 ${!it.read_at ? 'bg-proxmox-dark/30' : ''}`}>
+                                                <div className="flex items-start gap-2">
+                                                    <span className={`w-1.5 h-1.5 rounded-full ${sevColor} mt-1.5 flex-shrink-0`}></span>
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="text-xs font-medium text-white truncate">{it.title}</div>
+                                                        {it.body && <div className="text-[11px] text-gray-400 mt-0.5 line-clamp-2">{it.body}</div>}
+                                                        <div className="text-[10px] text-gray-600 mt-0.5">
+                                                            {(it.created_at || '').replace('T', ' ').slice(0, 16)}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </a>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        // NS May 2026 — Cloud-Init Template Library.
+        // Curated catalog of cloud images. Pick one, target cluster + node + storage,
+        // backend SSHs in and runs the qm pipeline (download → import → cloudinit drive
+        // → template). Live deployment status polled from /api/templates/deployments/<id>.
+        function TemplatesLibraryTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, isCorporate }) {
+            const [catalog, setCatalog] = React.useState([]);
+            const [deployments, setDeployments] = React.useState([]);
+            const [existing, setExisting] = React.useState([]);
+            const [loading, setLoading] = React.useState(false);
+            const [showDeploy, setShowDeploy] = React.useState(null); // template object
+            const [nodes, setNodes] = React.useState([]);
+            const [storages, setStorages] = React.useState([]);
+            const [form, setForm] = React.useState({ node: '', storage: '', vmid: '', name: '' });
+            const [submitting, setSubmitting] = React.useState(false);
+            const [showAdd, setShowAdd] = React.useState(false);
+            const [addForm, setAddForm] = React.useState({
+                name: '', description: '', distro: '', version: '',
+                image_url: '', default_user: 'root',
+                cores: 2, memory: 2048, disk_gb: 10, tags: '',
+            });
+            const [adding, setAdding] = React.useState(false);
+
+            const load = async () => {
+                if (!clusterId) return;
+                setLoading(true);
+                try {
+                    const [c1, c2, c3] = await Promise.all([
+                        authFetch(`${API_URL}/templates/catalog`).then(r => r?.json()).catch(() => null),
+                        authFetch(`${API_URL}/clusters/${clusterId}/templates/deployments`).then(r => r?.json()).catch(() => null),
+                        authFetch(`${API_URL}/clusters/${clusterId}/templates/existing`).then(r => r?.json()).catch(() => null),
+                    ]);
+                    if (c1?.templates) setCatalog(c1.templates);
+                    if (c2?.deployments) setDeployments(c2.deployments);
+                    if (c3?.templates) setExisting(c3.templates);
+                } finally { setLoading(false); }
+            };
+
+            React.useEffect(() => { load(); /* eslint-disable-line */ }, [clusterId]);
+
+            // poll while there are running/queued deployments
+            React.useEffect(() => {
+                const active = deployments.some(d => d.status === 'running' || d.status === 'queued');
+                if (!active) return;
+                const id = setInterval(() => load(), 4000);
+                return () => clearInterval(id);
+            }, [deployments]); // eslint-disable-line
+
+            const fetchStoragesFor = async (node) => {
+                if (!node) { setStorages([]); return; }
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/storage`);
+                    if (!r?.ok) { setStorages([]); return; }
+                    const d = await r.json();
+                    // Proxmox per-node storage list: array with .storage, .type, .content, .active, .enabled
+                    const list = (d?.data || d || []).filter(s => {
+                        if (s.enabled === 0 || s.active === 0) return false;
+                        // need 'images' in the comma-separated content list
+                        return (s.content || '').split(',').includes('images');
+                    }).map(s => s.storage || s.name).filter(Boolean);
+                    const uniq = [...new Set(list)];
+                    setStorages(uniq);
+                    setForm(f => ({ ...f, storage: uniq.includes(f.storage) ? f.storage : (uniq[0] || '') }));
+                } catch (e) { setStorages([]); }
+            };
+
+            const openDeploy = async (tpl) => {
+                setForm({ node: '', storage: '', vmid: '', name: '' });
+                setShowDeploy(tpl);
+                setStorages([]);
+                // fetch nodes for the dropdown; storages depend on the picked node
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/nodes`);
+                    if (r?.ok) {
+                        const d = await r.json();
+                        const list = (d?.data || d || []).map(n => n.node || n.name).filter(Boolean);
+                        setNodes(list);
+                        if (list.length) {
+                            setForm(f => ({ ...f, node: list[0] }));
+                            fetchStoragesFor(list[0]);
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            };
+
+            const submit = async () => {
+                if (!showDeploy) return;
+                setSubmitting(true);
+                try {
+                    const body = {
+                        template_id: showDeploy.id,
+                        node: form.node,
+                        storage: form.storage,
+                    };
+                    if (form.vmid) body.vmid = parseInt(form.vmid, 10);
+                    if (form.name) body.name = form.name;
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/templates/deploy`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                    if (r?.ok) {
+                        addToast(t('templateDeployStarted') || 'Deployment started', 'success');
+                        setShowDeploy(null);
+                        await load();
+                    } else {
+                        const d = r ? await r.json().catch(() => ({})) : {};
+                        addToast((d.error || (t('templateDeployFailed') || 'Deploy failed')), 'error');
+                    }
+                } finally { setSubmitting(false); }
+            };
+
+            const statusColor = (s) => ({
+                'queued': 'bg-gray-500/15 text-gray-400',
+                'running': 'bg-blue-500/15 text-blue-400',
+                'completed': 'bg-green-500/15 text-green-400',
+                'failed': 'bg-red-500/15 text-red-400',
+            }[s] || 'bg-gray-500/15 text-gray-400');
+
+            const distroColor = (d) => ({
+                'ubuntu': 'border-orange-500/40',
+                'debian': 'border-red-500/40',
+                'almalinux': 'border-blue-500/40',
+                'rocky': 'border-green-500/40',
+                'fedora': 'border-blue-400/40',
+                'alpine': 'border-purple-500/40',
+            }[d] || 'border-proxmox-border');
+
+            const submitAdd = async () => {
+                if (!addForm.name.trim() || !addForm.image_url.trim()) {
+                    addToast(t('templateAddRequired') || 'Name and Image URL are required', 'error');
+                    return;
+                }
+                setAdding(true);
+                try {
+                    const body = {
+                        name: addForm.name.trim(),
+                        description: addForm.description.trim(),
+                        distro: addForm.distro.trim() || 'custom',
+                        version: addForm.version.trim(),
+                        image_url: addForm.image_url.trim(),
+                        default_user: addForm.default_user.trim() || 'root',
+                        cores: parseInt(addForm.cores, 10) || 2,
+                        memory: parseInt(addForm.memory, 10) || 2048,
+                        disk_gb: parseInt(addForm.disk_gb, 10) || 10,
+                        tags: addForm.tags.split(',').map(s => s.trim()).filter(Boolean),
+                    };
+                    const r = await authFetch(`${API_URL}/templates/custom`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                    if (r?.ok) {
+                        addToast(t('templateAdded') || 'Template added', 'success');
+                        setShowAdd(false);
+                        setAddForm({
+                            name: '', description: '', distro: '', version: '',
+                            image_url: '', default_user: 'root',
+                            cores: 2, memory: 2048, disk_gb: 10, tags: '',
+                        });
+                        await load();
+                    } else {
+                        const d = r ? await r.json().catch(() => ({})) : {};
+                        addToast(d.error || (t('templateAddFailed') || 'Failed to add'), 'error');
+                    }
+                } finally { setAdding(false); }
+            };
+
+            const deleteCustom = async (tpl) => {
+                if (!confirm((t('templateDeleteConfirm') || 'Delete this custom template?') + '\n\n' + tpl.name)) return;
+                try {
+                    const r = await authFetch(`${API_URL}/templates/custom/${encodeURIComponent(tpl.id)}`, { method: 'DELETE' });
+                    if (r?.ok) {
+                        addToast(t('templateDeleted') || 'Template deleted', 'success');
+                        await load();
+                    } else {
+                        const d = r ? await r.json().catch(() => ({})) : {};
+                        addToast(d.error || 'Delete failed', 'error');
+                    }
+                } catch (e) { addToast('Delete failed', 'error'); }
+            };
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.Package className="w-5 h-5 text-proxmox-orange" />
+                                {t('templateLibrary') || 'Cloud-Init Template Library'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('templateLibraryDesc') || 'Curated catalog of cloud images. One click deploys a ready-to-clone template to your cluster.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            {isAdmin && (
+                                <button onClick={() => setShowAdd(true)}
+                                    className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5">
+                                    <Icons.Plus className="w-3.5 h-3.5" />
+                                    {t('templateAddCustom') || 'Add Custom'}
+                                </button>
+                            )}
+                            <button onClick={load} disabled={loading}
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50">
+                                {loading ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Catalog grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {catalog.map(tpl => {
+                            const dep = deployments.find(d => d.template_id === tpl.id && d.status !== 'failed');
+                            const owned = existing.some(e => (e.name || '').includes(tpl.distro) && (e.name || '').includes(tpl.version.replace(/\./g, '')));
+                            return (
+                                <div key={tpl.id} className={`bg-proxmox-card border ${distroColor(tpl.distro)} rounded-xl p-4 flex flex-col relative`}>
+                                    {tpl.custom && isAdmin && (
+                                        <button
+                                            onClick={() => deleteCustom(tpl)}
+                                            className="absolute top-2 right-2 p-1 text-gray-500 hover:text-red-400 rounded"
+                                            title={t('templateDeleteCustom') || 'Delete custom template'}>
+                                            <Icons.Trash className="w-3.5 h-3.5" />
+                                        </button>
+                                    )}
+                                    <div className="flex items-start justify-between mb-2">
+                                        <div>
+                                            <div className="text-sm font-semibold text-white flex items-center gap-1.5">
+                                                {tpl.name}
+                                                {tpl.custom && (
+                                                    <span className="text-[9px] px-1.5 py-0.5 bg-purple-500/15 text-purple-400 rounded uppercase">
+                                                        {t('templateCustomBadge') || 'custom'}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-xs text-gray-500 mt-0.5">{tpl.description}</div>
+                                        </div>
+                                        {owned && (
+                                            <span className="text-[10px] px-2 py-0.5 bg-green-500/15 text-green-400 rounded mr-6">
+                                                {t('templateAlreadyDeployed') || 'deployed'}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex flex-wrap gap-1 mb-3">
+                                        {(tpl.tags || []).map(tag => (
+                                            <span key={tag} className="text-[10px] px-1.5 py-0.5 bg-proxmox-dark border border-proxmox-border rounded text-gray-400">{tag}</span>
+                                        ))}
+                                    </div>
+                                    <div className="text-xs text-gray-500 mb-3">
+                                        {tpl.cores} cores · {Math.round(tpl.memory / 1024)} GB RAM · ~{tpl.disk_gb} GB disk · user <code className="text-gray-300">{tpl.default_user}</code>
+                                    </div>
+                                    <div className="mt-auto flex items-center gap-2">
+                                        <button
+                                            onClick={() => openDeploy(tpl)}
+                                            disabled={!isAdmin || (dep && dep.status === 'running')}
+                                            className="flex-1 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm rounded flex items-center justify-center gap-1.5">
+                                            {dep && dep.status === 'running'
+                                                ? <><Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> {dep.progress}%</>
+                                                : <><Icons.Download className="w-3.5 h-3.5" /> {t('templateDeploy') || 'Deploy'}</>}
+                                        </button>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+
+                    {/* Recent deployments */}
+                    {deployments.length > 0 && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                            <h3 className="text-sm font-semibold text-white mb-2">{t('templateDeployments') || 'Recent Deployments'}</h3>
+                            <div className="space-y-1.5">
+                                {deployments.slice(0, 10).map(d => (
+                                    <div key={d.id} className="flex items-center justify-between text-xs gap-2 bg-proxmox-dark border border-proxmox-border rounded px-3 py-2">
+                                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                                            <span className={`px-1.5 py-0.5 rounded ${statusColor(d.status)} flex-shrink-0`}>{d.status}</span>
+                                            <span className="text-gray-300 truncate">{d.template_name}</span>
+                                            <span className="text-gray-500 flex-shrink-0">vmid {d.vmid} · {d.node}</span>
+                                            {d.started_by && (
+                                                <span className="text-gray-500 flex-shrink-0 flex items-center gap-1">
+                                                    <Icons.User className="w-3 h-3" />{d.started_by}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {d.status === 'running' && (
+                                            <div className="w-24 h-1 bg-proxmox-darker rounded-full overflow-hidden flex-shrink-0">
+                                                <div className="h-1 bg-blue-500 rounded-full" style={{ width: `${d.progress || 0}%` }} />
+                                            </div>
+                                        )}
+                                        {d.status === 'failed' && d.error && (
+                                            <span className="text-red-400 truncate max-w-[200px]" title={d.error}>{d.error}</span>
+                                        )}
+                                        <span className="text-gray-600 flex-shrink-0">{(d.started_at || '').replace('T', ' ').slice(0, 16)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Add Custom modal */}
+                    {showAdd && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !adding && setShowAdd(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold text-white mb-1 flex items-center gap-2">
+                                    <Icons.Plus className="w-4 h-4 text-proxmox-orange" />
+                                    {t('templateAddCustom') || 'Add Custom Template'}
+                                </h3>
+                                <p className="text-xs text-gray-500 mb-4">
+                                    {t('templateAddDesc') || 'Add your own cloud image to the catalog. Anything Proxmox can wget + qm importdisk works.'}
+                                </p>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('name') || 'Name'} *</label>
+                                        <input type="text" value={addForm.name}
+                                            onChange={e => setAddForm({...addForm, name: e.target.value})}
+                                            placeholder="e.g. Ubuntu 23.10 minimal"
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('templateImageUrl') || 'Image URL'} *</label>
+                                        <input type="url" value={addForm.image_url}
+                                            onChange={e => setAddForm({...addForm, image_url: e.target.value})}
+                                            placeholder="https://cloud-images.example.com/image.qcow2"
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        <div className="text-[10px] text-gray-600 mt-1">
+                                            {t('templateImageUrlHint') || 'Direct URL to a .qcow2 / .img cloud-init image'}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('description') || 'Description'}</label>
+                                        <input type="text" value={addForm.description}
+                                            onChange={e => setAddForm({...addForm, description: e.target.value})}
+                                            placeholder={t('optional') || 'optional'}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('templateDistro') || 'Distro'}</label>
+                                            <input type="text" value={addForm.distro}
+                                                onChange={e => setAddForm({...addForm, distro: e.target.value})}
+                                                placeholder="ubuntu, debian, …"
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('version') || 'Version'}</label>
+                                            <input type="text" value={addForm.version}
+                                                onChange={e => setAddForm({...addForm, version: e.target.value})}
+                                                placeholder="e.g. 23.10"
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('templateDefaultUser') || 'Default user'}</label>
+                                        <input type="text" value={addForm.default_user}
+                                            onChange={e => setAddForm({...addForm, default_user: e.target.value})}
+                                            placeholder="root, ubuntu, debian, …"
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('templateCores') || 'Cores'}</label>
+                                            <input type="number" min="1" value={addForm.cores}
+                                                onChange={e => setAddForm({...addForm, cores: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('templateMemoryMb') || 'RAM (MB)'}</label>
+                                            <input type="number" min="128" step="128" value={addForm.memory}
+                                                onChange={e => setAddForm({...addForm, memory: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('templateDiskGb') || 'Disk (GB)'}</label>
+                                            <input type="number" min="1" value={addForm.disk_gb}
+                                                onChange={e => setAddForm({...addForm, disk_gb: e.target.value})}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('templateTags') || 'Tags'} <span className="text-gray-600">({t('commaSeparated') || 'comma-separated'})</span></label>
+                                        <input type="text" value={addForm.tags}
+                                            onChange={e => setAddForm({...addForm, tags: e.target.value})}
+                                            placeholder="lts, recommended, internal"
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                    </div>
+                                </div>
+                                <div className="flex justify-end gap-2 mt-5">
+                                    <button onClick={() => setShowAdd(false)} disabled={adding}
+                                        className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button onClick={submitAdd} disabled={adding || !addForm.name.trim() || !addForm.image_url.trim()}
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        {adding ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Plus className="w-3.5 h-3.5" />}
+                                        {t('templateAdd') || 'Add'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Deploy modal */}
+                    {showDeploy && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !submitting && setShowDeploy(null)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-md" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold text-white mb-1 flex items-center gap-2">
+                                    <Icons.Download className="w-4 h-4 text-proxmox-orange" />
+                                    {t('templateDeploy') || 'Deploy'}: {showDeploy.name}
+                                </h3>
+                                <p className="text-xs text-gray-500 mb-4">{showDeploy.description}</p>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('node') || 'Node'}</label>
+                                        <select value={form.node} onChange={e => { const n = e.target.value; setForm({...form, node: n}); fetchStoragesFor(n); }}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                            {nodes.map(n => <option key={n} value={n}>{n}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">{t('storage') || 'Storage'}</label>
+                                        <select value={form.storage} onChange={e => setForm({...form, storage: e.target.value})}
+                                            className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                            {storages.length === 0 && <option value="">{t('noStoragesAvailable') || 'no image storages on this node'}</option>}
+                                            {storages.map(s => <option key={s} value={s}>{s}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">VMID <span className="text-gray-600">({t('optional') || 'optional'})</span></label>
+                                            <input type="number" value={form.vmid} onChange={e => setForm({...form, vmid: e.target.value})}
+                                                placeholder={t('autoAssign') || 'auto'}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('name') || 'Name'} <span className="text-gray-600">({t('optional') || 'optional'})</span></label>
+                                            <input type="text" value={form.name} onChange={e => setForm({...form, name: e.target.value})}
+                                                placeholder={`tpl-${showDeploy.distro}-${showDeploy.version.replace(/\./g, '')}`}
+                                                className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="bg-yellow-500/5 border border-yellow-500/20 rounded p-2 mt-4 text-[11px] text-yellow-300">
+                                    {t('templateDeployHint') || 'PegaProx will SSH into the node, download the cloud image, create the VM and convert it to a template. This can take 1-3 minutes.'}
+                                </div>
+                                <div className="flex justify-end gap-2 mt-4">
+                                    <button onClick={() => setShowDeploy(null)} disabled={submitting}
+                                        className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button onClick={submit} disabled={submitting || !form.node || !form.storage}
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        {submitting ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Play className="w-3.5 h-3.5" />}
+                                        {t('templateDeployStart') || 'Start deployment'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         // NS Apr 2026 — Compliance Dashboard (top-level read-only audit view).
         // Aggregates per-cluster hardening scores, BSI/ISO/NIS2 mapping, audit activity.
         // Available to ops/Compliance Officers without admin rights (admin.audit or
         // node.maintenance permission required). Settings → Compliance stays as the
         // admin-side config surface.
+        // MK May 2026 — Right-sizing + Capacity Forecasting tab.
+        // Reads /insights/right-sizing + /insights/forecast endpoints, fed by the
+        // 5-min metrics_history collector. Force-snapshot button is admin-only.
+        function InsightsTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+            const [rs, setRs] = React.useState(null);
+            const [fc, setFc] = React.useState(null);
+            const [loading, setLoading] = React.useState(false);
+            const [forcing, setForcing] = React.useState(false);
+            const [exporting, setExporting] = React.useState(false);
+
+            const refresh = async () => {
+                if (!clusterId) return;
+                setLoading(true);
+                try {
+                    const [r1, r2] = await Promise.all([
+                        authFetch(`${API_URL}/clusters/${clusterId}/insights/right-sizing`).then(r => r?.json()).catch(() => null),
+                        authFetch(`${API_URL}/clusters/${clusterId}/insights/forecast`).then(r => r?.json()).catch(() => null),
+                    ]);
+                    if (r1 && !r1.error) setRs(r1);
+                    if (r2 && !r2.error) setFc(r2);
+                } finally { setLoading(false); }
+            };
+
+            const forceSnap = async () => {
+                setForcing(true);
+                try {
+                    const r = await authFetch(`${API_URL}/insights/force-snapshot`, { method: 'POST' });
+                    if (r && r.ok) {
+                        addToast(t('insightsSnapshotTaken') || 'Snapshot taken', 'success');
+                        await refresh();
+                    } else {
+                        addToast(t('insightsSnapshotFailed') || 'Snapshot failed', 'error');
+                    }
+                } finally { setForcing(false); }
+            };
+
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId]);
+
+            const fcStatusClr = (s) => ({
+                'critical': 'bg-red-500/15 text-red-400',
+                'warning': 'bg-yellow-500/15 text-yellow-400',
+                'trending_up': 'bg-orange-500/15 text-orange-400',
+                'over_threshold': 'bg-red-500/20 text-red-400',
+                'decreasing': 'bg-green-500/15 text-green-400',
+                'stable': 'bg-gray-500/15 text-gray-400',
+            }[s] || 'bg-gray-500/15 text-gray-400');
+
+            const fcStatusLabel = (s) => ({
+                'critical': t('statusCritical') || 'Critical',
+                'warning': t('statusWarning') || 'Warning',
+                'trending_up': t('statusTrendingUp') || 'Trending up',
+                'over_threshold': t('statusOverThreshold') || 'Over threshold',
+                'decreasing': t('statusDecreasing') || 'Decreasing',
+                'stable': t('statusStable') || 'Stable',
+            }[s] || s);
+
+            const metricLabel = (m) => {
+                if (m === 'cluster_cpu') return t('clusterCpu') || 'Cluster CPU';
+                if (m === 'cluster_memory') return t('clusterMemory') || 'Cluster Memory';
+                return m;
+            };
+
+            const kindLabel = (k) => k === 'storage' ? (t('storage') || 'Storage') : (t('cluster') || 'Cluster');
+
+            const flagClr = (kind) => ({
+                'oversized_cpu': 'bg-blue-500/15 text-blue-400',
+                'oversized_mem': 'bg-blue-500/15 text-blue-400',
+                'undersized_cpu': 'bg-red-500/15 text-red-400',
+                'undersized_mem': 'bg-red-500/15 text-red-400',
+                'idle': 'bg-gray-500/20 text-gray-400',
+            }[kind] || 'bg-gray-500/15 text-gray-400');
+
+            const flagLabel = (k) => ({
+                'oversized_cpu': t('oversizedCpu') || 'Oversized CPU',
+                'oversized_mem': t('oversizedMem') || 'Oversized RAM',
+                'undersized_cpu': t('undersizedCpu') || 'Undersized CPU',
+                'undersized_mem': t('undersizedMem') || 'Undersized RAM',
+                'idle': t('idle') || 'Idle',
+            }[k] || k);
+
+            // NS May 2026 — PDF export. Reuses the shared template from ui.js
+            // (generatePegaProxPDF) — same visual language as compliance + topology.
+            // jsPDF's bundled Helvetica is WinAnsi only — strip emoji + map
+            // non-Latin-1 symbols to ASCII so they don't render as "e/?? blobs.
+            const safe = (s) => {
+                if (s == null) return '';
+                return String(s)
+                    .replace(/[≥]/g, '>=')
+                    .replace(/[≤]/g, '<=')
+                    .replace(/[→]/g, '->')
+                    .replace(/[←]/g, '<-')
+                    .replace(/[↑]/g, '^')
+                    .replace(/[↓]/g, 'v')
+                    // strip emoji + other supplementary-plane chars
+                    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
+                    .replace(/\s+$/g, '');
+            };
+            const exportPdf = async () => {
+                if (typeof generatePegaProxPDF !== 'function') {
+                    addToast('PDF library not loaded', 'error');
+                    return;
+                }
+                setExporting(true);
+                try {
+                    const blocks = [];
+
+                    // ── Capacity Forecast section ──
+                    if (fc && fc.enough_data && Array.isArray(fc.forecasts) && fc.forecasts.length) {
+                        const stats = fc.forecasts.slice(0, 4).map(f => {
+                            const pct = f.current_pct ?? 0;
+                            const color = pct > 80 ? '#dc2626' : pct > 60 ? '#d97706' : '#16a34a';
+                            return {
+                                value: `${(pct).toFixed(1)}%`,
+                                label: safe(metricLabel(f.metric)),
+                                color,
+                            };
+                        });
+                        blocks.push({ type: 'stats', data: stats });
+                        blocks.push({ type: 'spacer', height: 4 });
+                        blocks.push({
+                            type: 'table',
+                            title: safe(t('capacityForecast') || 'Capacity Forecast'),
+                            columns: [
+                                safe(t('clusters') || 'Cluster'),
+                                safe(t('metric') || 'Metric'),
+                                safe(t('current') || 'Current'),
+                                safe(t('trend') || 'Trend'),
+                                'ETA',
+                                safe(t('status') || 'Status'),
+                            ],
+                            rows: fc.forecasts.map(f => [
+                                safe(kindLabel(f.kind)),
+                                safe(metricLabel(f.metric)),
+                                f.current_pct != null ? `${f.current_pct.toFixed(1)}%` : '-',
+                                f.slope_per_day_pct != null
+                                    ? `${f.slope_per_day_pct >= 0 ? '+' : ''}${f.slope_per_day_pct.toFixed(2)}%/d`
+                                    : '-',
+                                f.eta_days != null ? `${f.eta_days}d to ${f.threshold_pct}%` : '-',
+                                safe(fcStatusLabel(f.status)),
+                            ]),
+                        });
+                    } else if (fc && !fc.enough_data) {
+                        blocks.push({
+                            type: 'text',
+                            value: safe(t('insightsNotEnoughData') || 'Not enough metrics history yet.'),
+                        });
+                    }
+
+                    // ── Right-sizing section ──
+                    if (rs && rs.summary) {
+                        blocks.push({ type: 'spacer', height: 6 });
+                        const sumStats = [
+                            { value: rs.summary.oversized_cpu ?? 0, label: safe(t('oversizedCpu') || 'Oversized CPU'), color: '#2563eb' },
+                            { value: rs.summary.oversized_mem ?? 0, label: safe(t('oversizedMem') || 'Oversized RAM'), color: '#2563eb' },
+                            { value: rs.summary.undersized_cpu ?? 0, label: safe(t('undersizedCpu') || 'Undersized CPU'), color: '#dc2626' },
+                            { value: rs.summary.undersized_mem ?? 0, label: safe(t('undersizedMem') || 'Undersized RAM'), color: '#dc2626' },
+                            { value: rs.summary.idle ?? 0, label: safe(t('idle') || 'Idle'), color: '#6b7280' },
+                            { value: rs.summary.no_data ?? 0, label: safe(t('noData') || 'No data'), color: '#9ca3af' },
+                        ];
+                        blocks.push({ type: 'stats', data: sumStats });
+                    }
+
+                    if (rs && Array.isArray(rs.recommendations) && rs.recommendations.length) {
+                        const rows = [];
+                        rs.recommendations.forEach(r => {
+                            const flagsTxt = (r.flags || []).map(f => {
+                                let s = flagLabel(f.kind);
+                                if (f.recommended != null) s += ` (${f.current} -> ${f.recommended} cores)`;
+                                if (f.recommended_gb != null) s += ` (${f.current_gb} -> ${f.recommended_gb} GB)`;
+                                return s;
+                            }).join(', ');
+                            rows.push([
+                                String(r.vmid ?? ''),
+                                safe(r.name || String(r.vmid || '')),
+                                safe(r.node || ''),
+                                safe(r.type || ''),
+                                `${r.cpu_avg ?? '-'}% / ${r.cpu_p95 ?? '-'}%`,
+                                `${r.mem_avg ?? '-'}% / ${r.mem_max ?? '-'}%`,
+                                safe(flagsTxt),
+                            ]);
+                        });
+                        blocks.push({ type: 'spacer', height: 4 });
+                        blocks.push({
+                            type: 'table',
+                            title: safe(`${t('rightSizing') || 'Right-sizing Recommendations'} (${rs.recommendations.length})`),
+                            columns: [
+                                'VMID',
+                                safe(t('name') || 'Name'),
+                                safe(t('node') || 'Node'),
+                                safe(t('type') || 'Type'),
+                                'CPU avg/p95',
+                                'RAM avg/max',
+                                safe(t('rightSizingFlags') || 'Flags'),
+                            ],
+                            rows,
+                        });
+                    } else if (rs) {
+                        blocks.push({ type: 'spacer', height: 4 });
+                        blocks.push({
+                            type: 'text',
+                            value: safe(rs.summary?.no_data === rs.total_vms
+                                ? (t('insightsNoData') || 'No recommendations yet - collector still gathering data.')
+                                : (t('insightsAllOk') || 'All VMs look right-sized.')),
+                        });
+                    }
+
+                    if (!blocks.length) {
+                        addToast(t('insightsLoading') || 'Loading…', 'info');
+                        return;
+                    }
+
+                    const dt = new Date().toISOString().slice(0, 10);
+                    await generatePegaProxPDF({
+                        title: safe(t('insights') || 'Insights'),
+                        subtitle: safe(`${t('rightSizing') || 'Right-sizing'} + ${t('capacityForecast') || 'Capacity Forecast'}`),
+                        clusterName: safe(clusterName || ''),
+                        filename: `pegaprox-insights-${(clusterId || 'cluster')}-${dt}.pdf`,
+                        content: blocks,
+                    });
+                } catch (e) {
+                    console.error('[Insights PDF]', e);
+                    addToast('PDF export failed', 'error');
+                } finally {
+                    setExporting(false);
+                }
+            };
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.Zap className="w-5 h-5 text-proxmox-orange" />
+                                {t('insights') || 'Insights'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('insightsDesc') || 'Right-sizing recommendations + capacity forecasts based on 30 days of historical metrics.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            {isAdmin && (
+                                <button onClick={forceSnap} disabled={forcing}
+                                    className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                    {forcing ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                    {t('insightsTakeSnapshot') || 'Snapshot now'}
+                                </button>
+                            )}
+                            <button onClick={exportPdf} disabled={exporting || (!fc && !rs)}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                {exporting ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Download className="w-3.5 h-3.5" />}
+                                {t('exportPdf') || 'Export PDF'}
+                            </button>
+                            <button onClick={refresh} disabled={loading}
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50">
+                                {loading ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Capacity Forecasting */}
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                        <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                            <Icons.BarChart className="w-4 h-4" />
+                            {t('capacityForecast') || 'Capacity Forecast'}
+                        </h3>
+                        {!fc && <div className="text-sm text-gray-500">{t('insightsLoading') || 'Loading…'}</div>}
+                        {fc && !fc.enough_data && (
+                            <div className="text-sm text-yellow-400 bg-yellow-500/5 border border-yellow-500/20 rounded p-3">
+                                {t('insightsNotEnoughData') || 'Not enough metrics history yet. The collector samples every 5 minutes — wait a bit or take a snapshot.'}
+                            </div>
+                        )}
+                        {fc && fc.enough_data && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {fc.forecasts.map(f => (
+                                    <div key={f.metric} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3">
+                                        <div className="flex items-start justify-between mb-2">
+                                            <div>
+                                                <div className="text-sm font-medium text-white">{metricLabel(f.metric)}</div>
+                                                <div className="text-xs text-gray-500">{kindLabel(f.kind)}</div>
+                                            </div>
+                                            <span className={`px-2 py-0.5 text-xs rounded ${fcStatusClr(f.status)}`}>{fcStatusLabel(f.status)}</span>
+                                        </div>
+                                        <div className="text-2xl font-bold text-white">{f.current_pct?.toFixed(1)}%</div>
+                                        <div className="w-full bg-proxmox-darker rounded-full h-2 my-2">
+                                            <div className={`h-2 rounded-full ${f.current_pct > 80 ? 'bg-red-500' : f.current_pct > 60 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                                style={{ width: `${Math.min(100, f.current_pct || 0)}%` }} />
+                                        </div>
+                                        <div className="text-xs text-gray-500 flex justify-between">
+                                            <span>{t('trend') || 'Trend'}: {f.slope_per_day_pct >= 0 ? '+' : ''}{f.slope_per_day_pct?.toFixed(2)}%/d</span>
+                                            <span>
+                                                {f.eta_days != null
+                                                    ? `${t('etaTo') || 'ETA to'} ${f.threshold_pct}%: ${f.eta_days}d`
+                                                    : (t('noEtaCalculable') || '—')}
+                                            </span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Right-sizing */}
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                        <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                            <Icons.Cpu className="w-4 h-4" />
+                            {t('rightSizing') || 'Right-sizing Recommendations'}
+                            {rs && <span className="text-xs text-gray-500 font-normal">
+                                ({rs.recommendations?.length || 0} {t('rightSizingFlags') || 'flags'} / {rs.total_vms || 0} VMs · {rs.snapshots_in_window || 0} {t('snapshots') || 'snapshots'})
+                            </span>}
+                        </h3>
+                        {rs && rs.summary && (
+                            <div className="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4 text-xs">
+                                {[
+                                    { k: 'oversized_cpu', l: t('oversizedCpu') || 'Oversized CPU', c: 'bg-blue-500/10 text-blue-400' },
+                                    { k: 'oversized_mem', l: t('oversizedMem') || 'Oversized RAM', c: 'bg-blue-500/10 text-blue-400' },
+                                    { k: 'undersized_cpu', l: t('undersizedCpu') || 'Undersized CPU', c: 'bg-red-500/10 text-red-400' },
+                                    { k: 'undersized_mem', l: t('undersizedMem') || 'Undersized RAM', c: 'bg-red-500/10 text-red-400' },
+                                    { k: 'idle', l: t('idle') || 'Idle', c: 'bg-gray-500/10 text-gray-400' },
+                                    { k: 'no_data', l: t('noData') || 'No data', c: 'bg-gray-500/5 text-gray-500' },
+                                ].map(it => (
+                                    <div key={it.k} className={`${it.c} rounded p-2 text-center`}>
+                                        <div className="text-base font-bold">{rs.summary[it.k] ?? 0}</div>
+                                        <div>{it.l}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {rs && rs.recommendations && rs.recommendations.length === 0 && (
+                            <div className="text-sm text-gray-500 text-center py-6">
+                                {rs.summary?.no_data === rs.total_vms
+                                    ? (t('insightsNoData') || 'No recommendations yet — collector still gathering data (need ≥2h per VM).')
+                                    : (t('insightsAllOk') || 'All VMs look right-sized 👌')}
+                            </div>
+                        )}
+                        {rs && rs.recommendations && rs.recommendations.length > 0 && (
+                            <div className="space-y-2">
+                                {rs.recommendations.map(r => (
+                                    <div key={`${r.type}-${r.vmid}`} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="text-sm">
+                                                <span className="text-white font-medium">{r.name || r.vmid}</span>
+                                                <span className="text-gray-500 text-xs ml-2">vmid {r.vmid} · {r.type} · {r.node}</span>
+                                            </div>
+                                            <div className="text-xs text-gray-500">
+                                                CPU avg {r.cpu_avg}% / p95 {r.cpu_p95}% · RAM avg {r.mem_avg}% / max {r.mem_max}%
+                                            </div>
+                                        </div>
+                                        <div className="space-y-1">
+                                            {r.flags.map((f, i) => (
+                                                <div key={i} className="flex items-center gap-2 text-xs">
+                                                    <span className={`px-1.5 py-0.5 rounded ${flagClr(f.kind)}`}>{flagLabel(f.kind)}</span>
+                                                    <span className="text-gray-400">{f.detail}</span>
+                                                    {f.recommended != null && (
+                                                        <span className="text-proxmox-orange ml-auto">→ {f.current} → {f.recommended} cores</span>
+                                                    )}
+                                                    {f.recommended_gb != null && (
+                                                        <span className="text-proxmox-orange ml-auto">→ {f.current_gb} → {f.recommended_gb} GB</span>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
         function ComplianceDashboardTab({ clusters, selectedCluster, authFetch, addToast, t, isCorporate, user }) {
             const [profile, setProfile] = useState('cis-l1');
             const [results, setResults] = useState({});  // {clusterId: {nodeName: {controls, score}}}
@@ -3100,6 +5875,10 @@
             const [showReadinessModal, setShowReadinessModal] = useState(null);
             const [editingVm, setEditingVm] = useState(null);
             const [events, setEvents] = useState([]);
+            // NS May 2026 — DR Drill state
+            const [drDrillModal, setDrDrillModal] = useState(null);
+            const [drDrillData, setDrDrillData] = useState(null);
+            const [drDrillPolling, setDrDrillPolling] = useState(false);
             const [expandedEvent, setExpandedEvent] = useState(null);
             const [sourceVms, setSourceVms] = useState([]);
             const [replJobs, setReplJobs] = useState([]);
@@ -3252,6 +6031,120 @@
                     else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Check failed', 'error'); }
                 } catch(e) { addToast('Check failed', 'error'); } finally { setActionRunning(false); }
             };
+
+            // NS May 2026 — DR Drill: structured dry-run + compliance evidence PDF.
+            const startDrDrill = async (plan) => {
+                setDrDrillModal({ plan, drill_id: null });
+                setDrDrillData(null);
+                setActionRunning(true);
+                try {
+                    const r = await authFetch(`${API_URL}/site-recovery/plans/${plan.id}/drill`, { method: 'POST' });
+                    if (!(r && r.ok)) {
+                        const e = r ? await r.json().catch(() => ({})) : {};
+                        addToast(e.error || 'Drill start failed', 'error');
+                        setDrDrillModal(null);
+                        return;
+                    }
+                    const j = await r.json();
+                    setDrDrillModal({ plan, drill_id: j.drill_id });
+                    setDrDrillPolling(true);
+                } finally { setActionRunning(false); }
+            };
+            // poll drill status while open
+            React.useEffect(() => {
+                if (!drDrillModal?.drill_id || !drDrillPolling) return;
+                let cancelled = false;
+                const tick = async () => {
+                    try {
+                        const r = await authFetch(`${API_URL}/dr-drills/${drDrillModal.drill_id}`);
+                        if (r && r.ok) {
+                            const d = await r.json();
+                            if (cancelled) return;
+                            setDrDrillData(d);
+                            if (d.status !== 'running') {
+                                setDrDrillPolling(false);
+                                return;
+                            }
+                        }
+                    } catch (e) { /* keep polling */ }
+                    if (!cancelled) setTimeout(tick, 1500);
+                };
+                tick();
+                return () => { cancelled = true; };
+            }, [drDrillModal?.drill_id, drDrillPolling]);
+
+            const exportDrillPdf = async () => {
+                if (!drDrillData || typeof generatePegaProxPDF !== 'function') {
+                    addToast('PDF library not loaded', 'error');
+                    return;
+                }
+                const safe = (s) => String(s ?? '')
+                    .replace(/[≥]/g, '>=').replace(/[≤]/g, '<=')
+                    .replace(/[→]/g, '->').replace(/[·]/g, '*')
+                    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');
+                const verdict = (s) => ({pass: 'PASS', warn: 'WARN', fail: 'FAIL'}[s] || s);
+                const blocks = [];
+                blocks.push({
+                    type: 'stats',
+                    data: [
+                        { value: String(drDrillData.pass_count), label: 'Pass', color: '#16a34a' },
+                        { value: String(drDrillData.warn_count), label: 'Warn', color: '#eab308' },
+                        { value: String(drDrillData.fail_count), label: 'Fail', color: '#dc2626' },
+                        { value: drDrillData.estimated_rto_seconds ? `${Math.round(drDrillData.estimated_rto_seconds/60)} min` : '—',
+                          label: safe(t('drDrillRto') || 'Est. RTO'), color: '#3b82f6' },
+                    ],
+                });
+                blocks.push({ type: 'spacer', height: 4 });
+                blocks.push({
+                    type: 'text',
+                    value: safe(`Plan: ${drDrillData.plan_name}\n`
+                                + `Started: ${drDrillData.started_at}\n`
+                                + `Finished: ${drDrillData.finished_at || '(running)'}\n`
+                                + `Executor: ${drDrillData.started_by || 'unknown'}\n`
+                                + `Verdict: ${(drDrillData.status || '').toUpperCase()}\n`
+                                + `Summary: ${drDrillData.summary}`),
+                });
+                blocks.push({ type: 'spacer', height: 4 });
+                blocks.push({
+                    type: 'table',
+                    title: safe(t('drDrillChecks') || 'Drill Checks'),
+                    columns: ['#', safe(t('drDrillCategory') || 'Category'),
+                              safe(t('drDrillCheck') || 'Check'),
+                              safe(t('drDrillVerdict') || 'Verdict'),
+                              safe(t('drDrillMessage') || 'Message')],
+                    rows: (drDrillData.checks || []).map(c => [
+                        String(c.sequence),
+                        safe(c.category),
+                        safe(c.name),
+                        verdict(c.status),
+                        safe(c.message),
+                    ]),
+                });
+                if (drDrillData.checks?.some(c => c.detail)) {
+                    blocks.push({ type: 'spacer', height: 4 });
+                    blocks.push({
+                        type: 'text',
+                        value: safe('Check details:\n\n' + (drDrillData.checks || [])
+                            .filter(c => c.detail)
+                            .map(c => `[${c.sequence}] ${c.category}/${c.name}:\n${c.detail}\n`)
+                            .join('\n')),
+                    });
+                }
+                const dt = new Date().toISOString().slice(0, 10);
+                try {
+                    await generatePegaProxPDF({
+                        title: safe(t('drDrillPdfTitle') || 'DR Drill Evidence Report'),
+                        subtitle: safe(`${drDrillData.plan_name} - ${drDrillData.status}`),
+                        clusterName: '',
+                        filename: `pegaprox-dr-drill-${(drDrillModal?.plan?.id || 'plan')}-${dt}.pdf`,
+                        content: blocks,
+                        orientation: 'portrait',
+                    });
+                } catch (e) {
+                    console.error('[DR Drill PDF]', e);
+                    addToast('PDF export failed', 'error');
+                }
+            };
             // add VM
             const handleAddVm = async () => {
                 if (!addVmForm.vmid) { addToast('Select a VM', 'error'); return; }
@@ -3306,6 +6199,7 @@
                             </div>
                             <div className="flex items-center gap-2 flex-wrap">
                                 {canFailover && <button onClick={() => handleReadiness(pd.id)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-gray-600/50 text-gray-300 hover:bg-gray-600 disabled:opacity-40">{t('readinessCheck')}</button>}
+                                {canFailover && <button onClick={() => startDrDrill(pd)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 disabled:opacity-40">{t('drDrillRun') || 'DR Drill'}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'test', t('confirmFailover'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 disabled:opacity-40">{t('testFailover')}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'failover', t('confirmFailover'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-40">{t('plannedFailover')}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'emergency', t('confirmEmergency'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">{t('emergencyFailover')}</button>}
@@ -3541,6 +6435,113 @@
                                     <div className="flex justify-end gap-2">
                                         <button onClick={() => { setShowReadinessModal(null); handleReadiness(pd.id); }} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('retry') || 'Retry'}</button>
                                         <button onClick={() => setShowReadinessModal(null)} className="px-4 py-1.5 text-sm rounded-lg bg-proxmox-orange text-white">{t('close') || 'Close'}</button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* NS May 2026 — DR Drill modal: live progress + results + PDF export */}
+                        {drDrillModal && (
+                            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => { if (!drDrillPolling) { setDrDrillModal(null); setDrDrillData(null); } }}>
+                                <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto space-y-4" onClick={e => e.stopPropagation()}>
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-semibold flex items-center gap-2">
+                                                <Icons.Shield className="w-5 h-5 text-emerald-400" />
+                                                {t('drDrillTitle') || 'DR Drill'} — {drDrillModal.plan?.name}
+                                            </h3>
+                                            <p className="text-xs text-gray-500 mt-1">
+                                                {t('drDrillSubtitle') || 'Structured dry-run validating that this Site Recovery plan would succeed if invoked. Generates compliance evidence (SOC 2 / ISO 22301 / NIS2 BCM).'}
+                                            </p>
+                                        </div>
+                                        {drDrillData?.status && drDrillData.status !== 'running' && (
+                                            <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                                                drDrillData.status === 'passed' ? 'bg-green-500/20 text-green-400' :
+                                                drDrillData.status === 'warned' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                'bg-red-500/20 text-red-400'
+                                            }`}>{drDrillData.status.toUpperCase()}</span>
+                                        )}
+                                    </div>
+
+                                    {(!drDrillData || drDrillData.status === 'running') && (
+                                        <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 flex items-center gap-2">
+                                            <Icons.RotateCw className="w-4 h-4 text-blue-400 animate-spin" />
+                                            <span className="text-sm text-blue-300">
+                                                {t('drDrillRunning') || 'Running checks…'} ({drDrillData?.checks?.length || 0} done)
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {drDrillData && drDrillData.status !== 'running' && (
+                                        <>
+                                            <div className="grid grid-cols-4 gap-2">
+                                                <div className="bg-green-500/10 border border-green-500/30 rounded p-2 text-center">
+                                                    <div className="text-2xl font-bold text-green-400">{drDrillData.pass_count}</div>
+                                                    <div className="text-[10px] text-gray-400">PASS</div>
+                                                </div>
+                                                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-2 text-center">
+                                                    <div className="text-2xl font-bold text-yellow-400">{drDrillData.warn_count}</div>
+                                                    <div className="text-[10px] text-gray-400">WARN</div>
+                                                </div>
+                                                <div className="bg-red-500/10 border border-red-500/30 rounded p-2 text-center">
+                                                    <div className="text-2xl font-bold text-red-400">{drDrillData.fail_count}</div>
+                                                    <div className="text-[10px] text-gray-400">FAIL</div>
+                                                </div>
+                                                <div className="bg-blue-500/10 border border-blue-500/30 rounded p-2 text-center">
+                                                    <div className="text-lg font-bold text-blue-400">{drDrillData.estimated_rto_seconds ? `${Math.round(drDrillData.estimated_rto_seconds/60)}m` : '—'}</div>
+                                                    <div className="text-[10px] text-gray-400">{t('drDrillRto') || 'Est. RTO'}</div>
+                                                </div>
+                                            </div>
+                                            <p className="text-xs text-gray-500">
+                                                {t('drDrillSummary') || 'Summary'}: {drDrillData.summary} ·
+                                                {' '}{t('drDrillExecutor') || 'Executor'}: <code className="text-gray-300">{drDrillData.started_by || 'unknown'}</code>
+                                                {drDrillData.rpo_breach_seconds > 0 && (
+                                                    <> · <span className="text-yellow-400">{t('drDrillRpoBreach') || 'RPO breach'}: {Math.round(drDrillData.rpo_breach_seconds / 60)}m</span></>
+                                                )}
+                                            </p>
+                                        </>
+                                    )}
+
+                                    {/* live + final check list */}
+                                    <div className="space-y-1 max-h-80 overflow-y-auto bg-proxmox-darker border border-proxmox-border rounded-lg p-2">
+                                        {(drDrillData?.checks || []).map(c => (
+                                            <div key={c.id || c.sequence} className="flex items-start gap-2 text-xs py-1 px-2 hover:bg-proxmox-dark/50 rounded">
+                                                {c.status === 'pass' ? <Icons.CheckCircle className="w-3.5 h-3.5 text-green-400 shrink-0 mt-0.5" /> :
+                                                 c.status === 'warn' ? <Icons.AlertTriangle className="w-3.5 h-3.5 text-yellow-400 shrink-0 mt-0.5" /> :
+                                                 <Icons.XCircle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />}
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-baseline gap-2">
+                                                        <span className="text-[10px] uppercase text-gray-500">{c.category}</span>
+                                                        <span className="text-gray-300 font-mono text-[11px]">{c.name}</span>
+                                                        <span className="text-[10px] text-gray-600">{c.duration_ms}ms</span>
+                                                    </div>
+                                                    <div className={`text-[11px] ${c.status === 'pass' ? 'text-green-300' : c.status === 'warn' ? 'text-yellow-300' : 'text-red-300'}`}>
+                                                        {c.message}
+                                                    </div>
+                                                    {c.detail && (
+                                                        <pre className="text-[10px] text-gray-500 mt-0.5 whitespace-pre-wrap break-all">{c.detail}</pre>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {(!drDrillData?.checks || drDrillData.checks.length === 0) && (
+                                            <div className="text-xs text-gray-500 text-center py-3">{t('drDrillWaiting') || 'Waiting for first checks…'}</div>
+                                        )}
+                                    </div>
+
+                                    <div className="flex justify-end gap-2">
+                                        {drDrillData && drDrillData.status !== 'running' && (
+                                            <button onClick={exportDrillPdf}
+                                                className="px-3 py-1.5 text-sm rounded-lg bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white flex items-center gap-1.5">
+                                                <Icons.Download className="w-3.5 h-3.5" />
+                                                {t('drDrillExportPdf') || 'Export evidence PDF'}
+                                            </button>
+                                        )}
+                                        <button onClick={() => { setDrDrillModal(null); setDrDrillData(null); }}
+                                            disabled={drDrillPolling}
+                                            className="px-4 py-1.5 text-sm rounded-lg bg-proxmox-orange text-white disabled:opacity-50">
+                                            {drDrillPolling ? (t('drDrillRunning') || 'Running…') : (t('close') || 'Close')}
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -3827,14 +6828,19 @@
             useEffect(() => { xhmSelectedMigrationRef.current = xhmSelectedMigration; }, [xhmSelectedMigration]);
 
             // fetch node metrics for all clusters when topology view opened
+            // NS May 2026: use fetchClusterMetrics (just /metrics, preserves
+            // existing state) instead of fetchSidebarClusterData which bulk-
+            // overwrites the cluster object — so a slow/failing /pools fetch
+            // could leave metrics at {} and the bars stuck at 0%.
             useEffect(() => {
                 if (!sidebarTopology) return;
                 clusters.filter(c => c.connected).forEach(cluster => {
-                    if (!sidebarClusterDataRef.current[cluster.id]?.metrics) {
-                        fetchSidebarClusterData(cluster.id);
+                    const m = sidebarClusterDataRef.current[cluster.id]?.metrics;
+                    if (!m || Object.keys(m).length === 0) {
+                        fetchClusterMetrics(cluster.id);
                     }
                 });
-            }, [sidebarTopology]);
+            }, [sidebarTopology, clusters.length]);
 
             // LW: Feb 2026 - corporate sidebar inventory tree state
             const [expandedSidebarNodes, setExpandedSidebarNodes] = useState({});
@@ -4082,6 +7088,7 @@
             const [reportLoading, setReportLoading] = useState(false);
             const [topVms, setTopVms] = useState([]);
             const [reportSubTab, setReportSubTab] = useState('summary');
+            const [complianceSubTab, setComplianceSubTab] = useState('hardening');
 
             // MK: CVE Scanner state
             const [cveResults, setCveResults] = useState(null);
@@ -8577,12 +11584,34 @@
                         { separator: true },
                         { label: t('console') || 'Console', icon: <Icons.Terminal className="w-3.5 h-3.5" />, onClick: () => handleOpenConsole(vm), disabled: !isRunning },
                         { label: t('editSettings') || 'Settings', icon: <Icons.Settings className="w-3.5 h-3.5" />, onClick: () => handleOpenConfig(vm) },
+                    ];
+                    // MK May 2026 — recovery action for V2P-migrated VMs whose static
+                    // sector-size args broke after the customer changed disk bus
+                    // (scsi0 → sata0) via the Proxmox UI. Only useful for QEMU.
+                    if (isQemu) {
+                        items.push({
+                            label: t('fixQemuArgs') || 'Fix QEMU args (after disk-bus change)',
+                            icon: <Icons.Wrench className="w-3.5 h-3.5" />,
+                            onClick: async () => {
+                                try {
+                                    const res = await authFetch(`${API_URL}/clusters/${cId}/vms/${vm.node}/qemu/${vm.vmid}/fix-args`, { method: 'POST' });
+                                    const data = await res?.json().catch(() => ({}));
+                                    if (res?.ok) {
+                                        addToast(data.message || 'args updated', data.changed ? 'success' : 'info');
+                                    } else {
+                                        addToast(data.error || 'Fix failed', 'error');
+                                    }
+                                } catch { addToast(t('connectionError'), 'error'); }
+                            }
+                        });
+                    }
+                    items.push(
                         { separator: true },
                         { label: t('migrate') || 'Migrate', icon: <Icons.ArrowRight className="w-3.5 h-3.5" />, onClick: () => {
                             if (isCorporate) { setDashMigrateVm(vm); }
                             else { selectAndNav(); setPendingVmAction({ vm, action: 'migrate' }); }
                         }},
-                    ];
+                    );
 
                     // cross-cluster only if multiple clusters
                     if (clusters.length > 1) {
@@ -8932,6 +11961,15 @@
                                                 localStorage.setItem('corp-theme', next ? 'light' : '');
                                                 applyTheme(next ? 'corporateLight' : 'corporateDark');
                                                 setCorpLight(next);
+                                                // MK May 2026 — also persist on server so checkSession on next
+                                                // F5 doesn't apply a stale user.theme that mismatches the local
+                                                // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
+                                                // light-on-dark when toggle and server preference drifted).
+                                                fetch(`${API_URL}/user/preferences`, {
+                                                    method: 'PUT', credentials: 'include',
+                                                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                                                    body: JSON.stringify({ theme: next ? 'corporateLight' : 'corporateDark' })
+                                                }).catch(() => {});
                                             }}
                                             className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
                                             title={corpLight ? 'Dark Mode' : 'Light Mode'}
@@ -8942,6 +11980,11 @@
 
                                     {/* language switcher + settings */}
                                     <LanguageSwitcher />
+
+                                    {/* MK May 2026 — push notifications bell */}
+                                    {!isCorporate && (
+                                        <PushBellButton authFetch={authFetch} addToast={addToast} t={t} />
+                                    )}
 
                                     {isAdmin && (
                                         <button
@@ -10787,6 +13830,8 @@
                                                         { id: 'alerts', label: t('alerts') || 'Alerts', icon: Icons.Bell },
                                                         { id: 'affinity', label: t('affinityRules') || 'Affinity', icon: Icons.Link },
                                                         { id: 'scripts', label: t('customScripts') || 'Scripts', icon: Icons.Terminal },
+                                                        { id: 'snapshots', label: t('snapPoliciesTitle') || 'Snapshots', icon: Icons.Camera },
+                                                        { id: 'templates', label: t('templateLibrary') || 'Templates', icon: Icons.Package },
                                                         { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield }
                                                     ].map(sub => (
                                                         <button
@@ -11165,6 +14210,30 @@
                                                     </div>
                                                 )}
 
+                                                {/* NS May 2026 — Snapshot Schedules sub-tab */}
+                                                {automationSubTab === 'snapshots' && (
+                                                    <SnapshotPoliciesTab
+                                                        clusterId={selectedCluster?.id}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                        isAdmin={isAdmin}
+                                                    />
+                                                )}
+
+                                                {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
+                                                {automationSubTab === 'templates' && (
+                                                    <TemplatesLibraryTab
+                                                        clusterId={selectedCluster?.id}
+                                                        clusterName={selectedCluster?.name}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                        isAdmin={isAdmin}
+                                                        isCorporate={isCorporate}
+                                                    />
+                                                )}
+
                                                 {/* Harden PVE Node Sub-Tab - MK Mar 2026 */}
                                                 {automationSubTab === 'hardening' && (
                                                     <div className="space-y-4">
@@ -11450,7 +14519,15 @@
                                                                 const s = document.createElement('script');
                                                                 s.src = '/static/js/html2canvas.min.js';
                                                                 s.onload = doCapture;
-                                                                s.onerror = () => { const s2 = document.createElement('script'); s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'; s2.onload = doCapture; document.head.appendChild(s2); };
+                                                                // NS May 2026 — refuse CDN fallback when air-gap is on
+                                                                s.onerror = () => {
+                                                                    const _ag = (() => { try { return localStorage.getItem('pegaprox-air-gap') === '1'; } catch(_) { return false; } })();
+                                                                    if (_ag) { console.error('[air-gap] html2canvas missing locally; PNG export disabled'); return; }
+                                                                    const s2 = document.createElement('script');
+                                                                    s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                                                                    s2.onload = doCapture;
+                                                                    document.head.appendChild(s2);
+                                                                };
                                                                 document.head.appendChild(s);
                                                             };
                                                             const exportHardenPdf = () => {
@@ -11665,7 +14742,11 @@
                                                 <div className="flex gap-2 border-b border-proxmox-border pb-2">
                                                     {[
                                                         { id: 'summary', label: t('summary') || 'Summary', icon: Icons.BarChart },
-                                                        { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: Icons.Shield }
+                                                        { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: Icons.Shield },
+                                                        { id: 'insights', label: t('insights') || 'Insights', icon: Icons.Zap },
+                                                        { id: 'costs', label: t('costDashboard') || 'Costs', icon: Icons.DollarSign },
+                                                        { id: 'power', label: t('powerTitle') || 'Power & Carbon', icon: Icons.Zap },
+                                                        { id: 'topology', label: t('topologyTitle') || 'Topology', icon: Icons.Network },
                                                     ].map(tab => (
                                                         <button
                                                             key={tab.id}
@@ -11741,7 +14822,8 @@
                                                                         s.src = '/static/js/html2canvas.min.js';
                                                                         s.onload = doCapture;
                                                                         s.onerror = () => {
-                                                                            // CDN fallback
+                                                                            const _ag = (() => { try { return localStorage.getItem('pegaprox-air-gap') === '1'; } catch(_) { return false; } })();
+                                                                            if (_ag) { console.error('[air-gap] html2canvas missing locally; PNG export disabled'); return; }
                                                                             const s2 = document.createElement('script');
                                                                             s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
                                                                             s2.onload = doCapture;
@@ -11989,7 +15071,14 @@
                                                                                 const s = document.createElement('script');
                                                                                 s.src = '/static/js/html2canvas.min.js';
                                                                                 s.onload = doCapture;
-                                                                                s.onerror = () => { const s2 = document.createElement('script'); s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'; s2.onload = doCapture; document.head.appendChild(s2); };
+                                                                                s.onerror = () => {
+                                                                                    const _ag = (() => { try { return localStorage.getItem('pegaprox-air-gap') === '1'; } catch(_) { return false; } })();
+                                                                                    if (_ag) { console.error('[air-gap] html2canvas missing locally; PNG export disabled'); return; }
+                                                                                    const s2 = document.createElement('script');
+                                                                                    s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                                                                                    s2.onload = doCapture;
+                                                                                    document.head.appendChild(s2);
+                                                                                };
                                                                                 document.head.appendChild(s);
                                                                             }}
                                                                             className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500"
@@ -12337,6 +15426,52 @@
                                                         )}
                                                     </div>
                                                 )}
+
+                                                {/* MK May 2026 — Insights as Reports sub-tab */}
+                                                {reportSubTab === 'insights' && (
+                                                    <InsightsTab
+                                                        clusterId={selectedCluster?.id}
+                                                        clusterName={selectedCluster?.name}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                        isAdmin={isAdmin}
+                                                    />
+                                                )}
+
+                                                {/* MK May 2026 — Cost Dashboard as Reports sub-tab */}
+                                                {reportSubTab === 'costs' && (
+                                                    <CostDashboardTab
+                                                        clusterId={selectedCluster?.id}
+                                                        clusterName={selectedCluster?.name}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                        isAdmin={isAdmin}
+                                                    />
+                                                )}
+
+                                                {/* MK May 2026 — Power & Carbon as Reports sub-tab */}
+                                                {reportSubTab === 'power' && (
+                                                    <PowerCarbonTab
+                                                        clusterId={selectedCluster?.id}
+                                                        clusterName={selectedCluster?.name}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                        isAdmin={isAdmin}
+                                                    />
+                                                )}
+
+                                                {/* MK May 2026 — Network Topology as Reports sub-tab */}
+                                                {reportSubTab === 'topology' && (
+                                                    <TopologyTab
+                                                        clusterId={selectedCluster?.id}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                    />
+                                                )}
                                             </div>
                                         )}
 
@@ -12346,15 +15481,54 @@
                                             without admin rights. Available with admin.audit OR
                                             node.maintenance permission. */}
                                         {activeTab === 'compliance' && (
-                                            <ComplianceDashboardTab
-                                                clusters={clusters}
-                                                selectedCluster={selectedCluster}
-                                                authFetch={authFetch}
-                                                addToast={addToast}
-                                                t={t}
-                                                isCorporate={isCorporate}
-                                                user={user}
-                                            />
+                                            <div className="space-y-4">
+                                                <div className={isCorporate
+                                                    ? 'corp-tab-strip'
+                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                }>
+                                                    {[
+                                                        { id: 'hardening', label: t('compliance') || 'Compliance', icon: Icons.Lock },
+                                                        { id: 'drift', label: t('driftDetection') || 'Drift Detection', icon: Icons.Shield },
+                                                    ].map(sub => (
+                                                        <button
+                                                            key={sub.id}
+                                                            onClick={() => setComplianceSubTab(sub.id)}
+                                                            className={isCorporate
+                                                                ? `flex items-center gap-1 ${complianceSubTab === sub.id ? 'active' : ''}`
+                                                                : `flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-colors ${
+                                                                    complianceSubTab === sub.id
+                                                                        ? 'bg-proxmox-orange text-white'
+                                                                        : 'text-gray-400 hover:text-white hover:bg-proxmox-hover'
+                                                                  }`
+                                                            }>
+                                                            <sub.icon className={isCorporate ? 'w-3 h-3' : 'w-4 h-4'} />
+                                                            {sub.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+
+                                                {complianceSubTab === 'hardening' && (
+                                                    <ComplianceDashboardTab
+                                                        clusters={clusters}
+                                                        selectedCluster={selectedCluster}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                        isCorporate={isCorporate}
+                                                        user={user}
+                                                    />
+                                                )}
+                                                {complianceSubTab === 'drift' && (
+                                                    <DriftTab
+                                                        clusterId={selectedCluster?.id}
+                                                        clusterName={selectedCluster?.name}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
+                                                        isAdmin={isAdmin}
+                                                    />
+                                                )}
+                                            </div>
                                         )}
 
                                         {/* Site Recovery Tab */}
@@ -13834,7 +17008,11 @@
                                                             });
                                                             if (window.html2canvas) { run(); return; }
                                                             const s = document.createElement('script'); s.src = '/static/js/html2canvas.min.js'; s.onload = run;
-                                                            s.onerror = () => { const s2 = document.createElement('script'); s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'; s2.onload = run; document.head.appendChild(s2); };
+                                                            s.onerror = () => {
+                                                                const _ag = (() => { try { return localStorage.getItem('pegaprox-air-gap') === '1'; } catch(_) { return false; } })();
+                                                                if (_ag) { console.error('[air-gap] html2canvas missing locally; PNG export disabled'); return; }
+                                                                const s2 = document.createElement('script'); s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'; s2.onload = run; document.head.appendChild(s2);
+                                                            };
                                                             document.head.appendChild(s);
                                                         }}
                                                         className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500"
@@ -15470,10 +18648,14 @@
                                                             </div>
                                                             )}
                                                             
-                                                            {/* NS Apr 2026 — VirtIO driver pre-staging (opt-in). Off by default;
-                                                                checks for virtio-win.iso on the Proxmox node and injects storage
-                                                                drivers + registry entries before first boot so the user can switch
-                                                                scsihw to virtio-scsi-pci without BSOD. */}
+                                                            {/* NS Apr 2026, MK May 2026 — VirtIO MSI bulk install (opt-in). Off by default.
+                                                                Checks for virtio-win.iso on the Proxmox node, copies the official
+                                                                virtio-win-gt-x64.msi onto the disk and registers a SYSTEM-context
+                                                                one-shot service that runs msiexec /quiet at first boot. Boot disk
+                                                                STAYS on pvscsi (Win11/Server2025 don't bind vioscsi at early-boot —
+                                                                see memory note v2p_no_auto_scsihw_switch.md). Best-effort fallback
+                                                                only; recommended path is to install virtio-win-guest-tools in the
+                                                                source VM BEFORE migrating. */}
                                                             <div className="mt-3 p-3 rounded-lg border border-proxmox-border" style={{background: 'rgba(30,30,40,0.4)'}}>
                                                                 <label className="flex items-start gap-2 cursor-pointer">
                                                                     <input type="checkbox"
@@ -15485,10 +18667,27 @@
                                                                             {t('installVirtioDrivers') || 'Pre-stage VirtIO drivers (Windows)'}
                                                                         </span>
                                                                         <p className="text-xs text-gray-400 mt-1 leading-snug">
-                                                                            {t('installVirtioDriversDesc') || 'Offline-injects viostor/vioscsi/NetKVM into the Windows install before first boot — lets you swap to virtio-scsi-pci/virtio-net for native paravirt speed without BSOD. Requires virtio-win.iso on the target node.'}
+                                                                            {t('installVirtioDriversDesc') || 'Stages virtio-win-gt-x64.msi onto the disk and installs the full driver stack (storage, network, balloon, qemu-ga) silently as LocalSystem at first boot. Best-effort fallback when the source VM doesn\'t have the drivers yet. Requires virtio-win.iso on the target node.'}
                                                                         </p>
                                                                     </div>
                                                                 </label>
+                                                                {/* MK May 2026 — strong warning: customers should install virtio-win drivers
+                                                                    inside Windows BEFORE running V2P. Modern Win11/Server2025 boot path
+                                                                    won't bind vioscsi at early-boot regardless of staging — Proxmox/QEMU
+                                                                    technical limitation we can't work around. Our injection is best-effort. */}
+                                                                <div className="mt-3 p-3 rounded border border-amber-500/50" style={{background:'rgba(234,179,8,0.10)'}}>
+                                                                    <div className="flex items-start gap-2">
+                                                                        <span className="text-amber-300 text-base leading-none mt-0.5">⚠</span>
+                                                                        <div className="flex-1 min-w-0">
+                                                                            <p className="text-xs text-amber-200 font-semibold mb-1">
+                                                                                {t('virtioPreInstallWarnTitle') || 'Treiber besser VOR der Migration installieren'}
+                                                                            </p>
+                                                                            <p className="text-xs text-amber-100/90 leading-snug">
+                                                                                {t('virtioPreInstallWarnBody') || 'Lade virtio-win.iso in der laufenden Quell-VM auf VMware, mounte sie als CD und führe virtio-win-guest-tools.exe aus — dann migriere. Unsere Inject-Variante ist Best-Effort: Windows 11 / Server 2025 binden vioscsi im Early-Boot nicht zuverlässig (Proxmox/QEMU-Limitation), Boot-Disk muss dann auf pvscsi bleiben. VMs die vor Migration die Treiber installiert haben, lassen sich danach problemlos auf virtio-scsi umstellen.'}
+                                                                            </p>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
                                                                 {vmwareMigrateForm.install_virtio_drivers && (
                                                                     <div className="mt-2 pl-6">
                                                                         <label className="text-xs text-gray-500 mb-1 block">{t('virtioIsoPath') || 'virtio-win.iso path on node'}</label>
@@ -15507,6 +18706,7 @@
                                                                     </div>
                                                                 )}
                                                             </div>
+
 
                                                             {/* NS Apr 2026 — OpenCollective awareness banner. Subtle slate card, kein Popup,
                                                                 kein Disable des Wizards selbst. Nur die finale Start-Migration ist gated bis
@@ -16046,11 +19246,41 @@
                                                 clusterName="PegaProx"
                                                 multiCluster={clusters.filter(c => c.connected).map(cluster => {
                                                     const metrics = sidebarClusterData[cluster.id]?.metrics || {};
-                                                    const nodes = Object.entries(metrics)
+                                                    let nodes = Object.entries(metrics)
                                                         .filter(([k]) => k !== 'error' && k !== 'offline')
                                                         .map(([name, m]) => ({ name, ...m }));
                                                     const resources = sidebarClusterData[cluster.id]?.resources
                                                         || allClusterGuests[cluster.id] || [];
+                                                    // LW May 2026: the topology often opens before sidebarClusterData
+                                                    // finishes loading, so we'd render synthetic "node-1, node-2"
+                                                    // placeholders that don't match the VM `r.node` foreign key →
+                                                    // VMs all looked unassigned. Better: pull distinct node names
+                                                    // out of the VM list itself when no metrics cache is available.
+                                                    if (nodes.length === 0 && resources.length) {
+                                                        const seen = new Set();
+                                                        for (const r of resources) {
+                                                            const n = r.node;
+                                                            if (n && !seen.has(n)) {
+                                                                seen.add(n);
+                                                                nodes.push({
+                                                                    name: n,
+                                                                    status: 'online',  // VMs implies node is up
+                                                                    cpu_percent: 0, mem_percent: 0,
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                    // Last-ditch fallback when neither cache is populated yet —
+                                                    // at least show the right count via datacenter/status totals.
+                                                    if (nodes.length === 0) {
+                                                        const total = allClusterMetrics[cluster.id]?.data?.nodes?.total || 0;
+                                                        const onl = allClusterMetrics[cluster.id]?.data?.nodes?.online || 0;
+                                                        nodes = Array.from({length: total}, (_, i) => ({
+                                                            name: `node-${i + 1}`,
+                                                            status: i < onl ? 'online' : 'offline',
+                                                            cpu_percent: 0, mem_percent: 0,
+                                                        }));
+                                                    }
                                                     const clusterPbs = pbsServers.filter(p =>
                                                         p.linked_clusters?.includes(cluster.id) && p.status !== 'disconnected');
                                                     return {
@@ -17571,6 +20801,8 @@
                                                 <option value="cpu">CPU</option>
                                                 <option value="memory">Memory</option>
                                                 <option value="disk">Disk</option>
+                                                <option value="backup_sla_breached_pct">{t('backupSlaBreachedPct') || 'Backup SLA breached %'}</option>
+                                                <option value="backup_sla_compliance_pct">{t('backupSlaCompliancePct') || 'Backup SLA compliance %'}</option>
                                             </select>
                                         </div>
                                         <div>

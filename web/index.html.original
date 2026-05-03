@@ -78,17 +78,9 @@
     <title>PegaProx • Cluster Management for Proxmox VE</title>
     <meta name="google" content="notranslate">
     
-    <!-- MK: Mar 2026 - conditional preconnect, skip DNS stalls on air-gapped setups (#118) -->
-    <script>
-        if (navigator.onLine) {
-            ['https://cdn.jsdelivr.net','https://fonts.googleapis.com','https://fonts.gstatic.com'].forEach(function(u) {
-                var l = document.createElement('link');
-                l.rel = 'preconnect'; l.href = u;
-                if (u.includes('gstatic')) l.crossOrigin = '';
-                document.head.appendChild(l);
-            });
-        }
-    </script>
+    <!-- LW May 2026 — preconnect removed. We're local-first now (libs are bundled
+         in /static), so the CDN preconnect just stalls DNS on air-gapped networks. -->
+
     
     <!-- NS: Preload removed - was causing credential mode mismatch warnings -->
     <!-- Scripts are loaded via loadScriptWithFallback which handles this better -->
@@ -97,6 +89,23 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/images/favicon-32x32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="/images/favicon-16x16.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">
+
+    <!-- MK May 2026: PWA manifest + theme color for installable web app -->
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" content="#E57000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="PegaProx">
+    <script>
+        // Register service worker as soon as possible. SW handles offline shell + push.
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register('/sw.js', { scope: '/' })
+                    .then(function (reg) { console.log('[PWA] SW registered, scope:', reg.scope); })
+                    .catch(function (err) { console.warn('[PWA] SW registration failed:', err); });
+            });
+        }
+    </script>
     
     <!--
     OFFLINE MODE: For jumphosts / Docker without internet:
@@ -132,31 +141,42 @@
             'dompurify@3.2.4': 'sha384-eEu5CTj3qGvu9PdJuS+YlkNi7d2XxQROAFYOr59zgObtlcux1ae1Il3u7jvdCSWu'
         };
         
+        // LW May 2026 — local-first. Air-gapped customers were watching the
+        // browser hang on CDN timeouts before the offline fallback kicked in,
+        // because navigator.onLine returns true on isolated LANs. Now we
+        // always try /static first; CDN only fires if local 404s AND the
+        // air-gap flag isn't set. The flag is persisted to localStorage by
+        // the auth-check handler in contexts.js.
+        var _isAirGapped = function() {
+            try { return localStorage.getItem('pegaprox-air-gap') === '1'; }
+            catch (_) { return false; }
+        };
         function loadScriptWithFallback(cdnUrl, localUrl, integrityKey) {
             return new Promise(function(resolve) {
-                var script = document.createElement('script');
-                script.src = cdnUrl;
-                
-                // Add SRI hash if available (supply chain protection)
-                if (integrityKey && SRI_HASHES[integrityKey]) {
-                    script.integrity = SRI_HASHES[integrityKey];
-                    script.crossOrigin = 'anonymous';
-                }
-                
-                script.onload = resolve;
-                script.onerror = function() {
-                    // CDN failed (offline or integrity check failed) - try local
-                    console.log('CDN unavailable or integrity check failed, trying local:', localUrl);
-                    var local = document.createElement('script');
-                    local.src = localUrl;
-                    local.onload = resolve;
-                    local.onerror = function() {
-                        console.error('Failed to load from both CDN and local');
+                var local = document.createElement('script');
+                local.src = localUrl;
+                local.onload = resolve;
+                local.onerror = function() {
+                    if (_isAirGapped()) {
+                        console.error('[air-gap] local asset missing, refusing CDN fetch:', localUrl);
+                        resolve();
+                        return;
+                    }
+                    console.warn('Local asset missing, falling back to CDN:', cdnUrl);
+                    var cdn = document.createElement('script');
+                    cdn.src = cdnUrl;
+                    if (integrityKey && SRI_HASHES[integrityKey]) {
+                        cdn.integrity = SRI_HASHES[integrityKey];
+                        cdn.crossOrigin = 'anonymous';
+                    }
+                    cdn.onload = resolve;
+                    cdn.onerror = function() {
+                        console.error('Both local and CDN failed for', localUrl);
                         resolve();
                     };
-                    document.head.appendChild(local);
+                    document.head.appendChild(cdn);
                 };
-                document.head.appendChild(script);
+                document.head.appendChild(local);
             });
         }
         
@@ -219,7 +239,7 @@
     <!-- LW: Mar 2026 - switched to static Tailwind build (#118), CDN JIT broke offline -->
     <link rel="stylesheet" href="/static/css/tailwind.min.css">
     
-    <!-- noVNC - lazy loaded when needed -->
+    <!-- noVNC - lazy loaded when needed (local-first, CDN fallback skipped on air-gap) -->
     <script>
         window.loadNoVNC = function() {
             return new Promise((resolve, reject) => {
@@ -228,6 +248,11 @@
                 script.type = 'module';
                 script.src = '/static/js/rfb.js';
                 script.onerror = function() {
+                    if (_isAirGapped && _isAirGapped()) {
+                        console.error('[air-gap] /static/js/rfb.js missing; not falling back to CDN');
+                        resolve();
+                        return;
+                    }
                     this.src = 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
                     if (SRI_HASHES['novnc@1.4.0']) {
                         this.integrity = SRI_HASHES['novnc@1.4.0'];
@@ -259,10 +284,25 @@
             --color-info-rgb: 88, 166, 255;
         }
     </style>
-    <!-- LW: Mar 2026 - non-blocking fonts, system fallback kicks in instantly offline (#118) -->
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
-          media="print" onload="this.media='all'" onerror="this.remove()">
-    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"></noscript>
+    <!-- LW May 2026 — Google Fonts only attempted when localStorage flag isn't
+         set to air-gap. We persist that flag the moment Settings → Air-gap
+         toggles, so subsequent loads stay 100% local. system-ui fallback in
+         --font-sans handles missing fonts gracefully. -->
+    <script>
+        (function() {
+            try {
+                if (localStorage.getItem('pegaprox-air-gap') === '1') return;
+            } catch (_) {}
+            var fontHref = 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap';
+            var l = document.createElement('link');
+            l.rel = 'stylesheet';
+            l.href = fontHref;
+            l.media = 'print';
+            l.onload = function() { this.media = 'all'; };
+            l.onerror = function() { this.remove(); };
+            document.head.appendChild(l);
+        })();
+    </script>
     
     <script>
         // ============================================
@@ -1106,8 +1146,11 @@
         body[data-corp-theme="light"] .corp-tab-strip button.active { color: #0072a3; border-color: #0072a3; }
         body[data-corp-theme="light"] .corp-sidebar-search { background: #fff; border-color: #cfd8dc; color: #333; }
         body[data-corp-theme="light"] .corp-sidebar-search::placeholder { color: #999; }
-        body[data-corp-theme="light"] .corp-datagrid th { background: #f0f2f5; color: #555; }
-        body[data-corp-theme="light"] .corp-datagrid td { border-color: #e8ecef; color: #333; }
+        body[data-corp-theme="light"] .corp-datagrid th { background: #f0f2f5 !important; color: #555 !important; }
+        body[data-corp-theme="light"] .corp-datagrid td { border-color: #e8ecef !important; color: #333 !important; }
+        /* MK May 2026 (#296): the dark-mode `.corp-datagrid td` rule sits later
+           in the cascade with equal specificity, so without !important the
+           inventory overview rows ended up #e9ecef on white = invisible. */
         body[data-corp-theme="light"] .corp-context-menu { background: #fff; border-color: #ddd; }
         body[data-corp-theme="light"] .corp-ctx-item:hover { background: #e3f2fd; }
         body[data-corp-theme="light"] .corp-node-row:hover { background: #e8f0f4 !important; }
@@ -1177,23 +1220,38 @@
         body[data-corp-theme="light"] [style*="border-color: #37474f"],
         body[data-corp-theme="light"] [style*="border: 1px solid rgb(40, 56, 68)"],
         body[data-corp-theme="light"] [style*="border: 1px solid rgb(52, 73, 85)"] { border-color: #cfd8dc !important; }
-        /* Tailwind arbitrary bg classes */
-        body[data-corp-theme="light"] [class*="bg-\\[\\#17242b\\]"],
-        body[data-corp-theme="light"] [class*="bg-\\[\\#1a2730\\]"],
-        body[data-corp-theme="light"] [class*="bg-\\[\\#1a2e38\\]"],
-        body[data-corp-theme="light"] [class*="bg-\\[\\#1e3340\\]"],
-        body[data-corp-theme="light"] [class*="bg-\\[\\#111a21\\]"],
-        body[data-corp-theme="light"] [class*="bg-\\[\\#141e24\\]"],
-        body[data-corp-theme="light"] [class*="bg-\\[\\#1e2b33\\]"] { background-color: #f5f7f9 !important; }
-        body[data-corp-theme="light"] [class*="bg-\\[\\#324f61\\]"],
-        body[data-corp-theme="light"] [class*="bg-\\[\\#29414e\\]"] { background-color: #e8f0f4 !important; }
-        body[data-corp-theme="light"] [class*="hover\\:bg-\\[\\#324f61\\]"]:hover { background-color: #e8f0f4 !important; }
-        body[data-corp-theme="light"] [class*="border-\\[\\#3a5565\\]"],
-        body[data-corp-theme="light"] [class*="border-\\[\\#3a5060\\]"],
-        body[data-corp-theme="light"] [class*="border-\\[\\#344955\\]"] { border-color: #cfd8dc !important; }
-        body[data-corp-theme="light"] [class*="text-\\[\\#5a7a8a\\]"] { color: #888 !important; }
-        body[data-corp-theme="light"] [class*="text-\\[\\#e9ecef\\]"],
-        body[data-corp-theme="light"] [class*="\\!text-\\[\\#e9ecef\\]"] { color: #333 !important; }
+        /* Tailwind arbitrary bg classes — MK May 2026 (#296) substring matchers
+           on class= attribute hold the LITERAL class string, so brackets/hash
+           don't get escaped. Earlier version had \\[ \\# \\] in the string which
+           CSS parsed as backslash-bracket etc. → never matched the actual
+           "bg-[#17242b]" class → light-mode searchbar etc. stayed dark. */
+        body[data-corp-theme="light"] [class*="bg-[#17242b]"],
+        body[data-corp-theme="light"] [class*="bg-[#1a2730]"],
+        body[data-corp-theme="light"] [class*="bg-[#1a2e38]"],
+        body[data-corp-theme="light"] [class*="bg-[#1e3340]"],
+        body[data-corp-theme="light"] [class*="bg-[#111a21]"],
+        body[data-corp-theme="light"] [class*="bg-[#141e24]"],
+        body[data-corp-theme="light"] [class*="bg-[#1e2b33]"],
+        body[data-corp-theme="light"] [class*="bg-[#0e161b]"],
+        body[data-corp-theme="light"] [class*="bg-[#243542]"],
+        body[data-corp-theme="light"] [class*="bg-[#22343c]"],
+        body[data-corp-theme="light"] [class*="bg-[#12181f]"] { background-color: #f5f7f9 !important; }
+        body[data-corp-theme="light"] [class*="bg-[#324f61]"],
+        body[data-corp-theme="light"] [class*="bg-[#29414e]"],
+        body[data-corp-theme="light"] [class*="bg-[#2c4050]"] { background-color: #e8f0f4 !important; }
+        body[data-corp-theme="light"] [class*="hover:bg-[#324f61]"]:hover,
+        body[data-corp-theme="light"] [class*="hover:bg-[#29414e]"]:hover { background-color: #e8f0f4 !important; }
+        body[data-corp-theme="light"] [class*="border-[#3a5565]"],
+        body[data-corp-theme="light"] [class*="border-[#3a5060]"],
+        body[data-corp-theme="light"] [class*="border-[#344955]"],
+        body[data-corp-theme="light"] [class*="border-[#283844]"],
+        body[data-corp-theme="light"] [class*="border-[#37474f]"] { border-color: #cfd8dc !important; }
+        body[data-corp-theme="light"] [class*="text-[#5a7a8a]"],
+        body[data-corp-theme="light"] [class*="text-[#728b9a]"],
+        body[data-corp-theme="light"] [class*="text-[#adbbc4]"] { color: #666 !important; }
+        body[data-corp-theme="light"] [class*="text-[#e9ecef]"],
+        body[data-corp-theme="light"] [class*="!text-[#e9ecef]"],
+        body[data-corp-theme="light"] [class*="text-[#fff]"]:not(button):not(.corp-view-switcher button.active) { color: #333 !important; }
         /* forms */
         body[data-corp-theme="light"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
         body[data-corp-theme="light"] select,
@@ -1260,17 +1318,43 @@
         body[data-corp-theme="light"] .bg-green-500\/10 { background: rgba(34,197,94,0.08) !important; }
         body[data-corp-theme="light"] .bg-red-500\/10 { background: rgba(239,68,68,0.06) !important; }
         body[data-corp-theme="light"] .bg-yellow-500\/10 { background: rgba(234,179,8,0.08) !important; }
+        body[data-corp-theme="light"] .bg-amber-500\/5,
+        body[data-corp-theme="light"] .bg-amber-500\/10,
+        body[data-corp-theme="light"] .bg-amber-500\/20 { background: rgba(245,158,11,0.10) !important; }
+        body[data-corp-theme="light"] .border-amber-500\/20,
+        body[data-corp-theme="light"] .border-amber-500\/30,
+        body[data-corp-theme="light"] .border-amber-500\/50 { border-color: rgba(245,158,11,0.40) !important; }
         body[data-corp-theme="light"] .bg-blue-500\/10 { background: rgba(59,130,246,0.06) !important; }
         body[data-corp-theme="light"] .bg-proxmox-orange\/10 { background: rgba(229,112,0,0.08) !important; }
         body[data-corp-theme="light"] .bg-proxmox-orange\/20 { background: rgba(229,112,0,0.12) !important; }
         body[data-corp-theme="light"] select option { background: #fff; color: #333; }
         body[data-corp-theme="light"] ::placeholder { color: #aaa !important; }
         body[data-corp-theme="light"] canvas { filter: saturate(0.85); }
-        body[data-corp-theme="light"] .text-green-400 { color: #16a34a !important; }
-        body[data-corp-theme="light"] .text-red-400 { color: #dc2626 !important; }
-        body[data-corp-theme="light"] .text-yellow-400 { color: #ca8a04 !important; }
-        body[data-corp-theme="light"] .text-blue-400 { color: #2563eb !important; }
-        body[data-corp-theme="light"] .text-orange-400 { color: #c2410c !important; }
+        body[data-corp-theme="light"] .text-green-400,
+        body[data-corp-theme="light"] .text-green-400\/80,
+        body[data-corp-theme="light"] .text-green-300 { color: #16a34a !important; }
+        body[data-corp-theme="light"] .text-red-400,
+        body[data-corp-theme="light"] .text-red-400\/80,
+        body[data-corp-theme="light"] .text-red-300 { color: #dc2626 !important; }
+        body[data-corp-theme="light"] .text-yellow-400,
+        body[data-corp-theme="light"] .text-yellow-400\/80,
+        body[data-corp-theme="light"] .text-yellow-300,
+        body[data-corp-theme="light"] .text-yellow-300\/80,
+        body[data-corp-theme="light"] .text-yellow-200,
+        body[data-corp-theme="light"] .text-amber-400,
+        body[data-corp-theme="light"] .text-amber-400\/80,
+        body[data-corp-theme="light"] .text-amber-300 { color: #b45309 !important; }
+        body[data-corp-theme="light"] .text-blue-400,
+        body[data-corp-theme="light"] .text-blue-400\/80,
+        body[data-corp-theme="light"] .text-blue-300,
+        body[data-corp-theme="light"] .text-cyan-400,
+        body[data-corp-theme="light"] .text-cyan-300 { color: #2563eb !important; }
+        body[data-corp-theme="light"] .text-orange-400,
+        body[data-corp-theme="light"] .text-orange-300 { color: #c2410c !important; }
+        body[data-corp-theme="light"] .text-purple-400,
+        body[data-corp-theme="light"] .text-purple-300 { color: #7c3aed !important; }
+        body[data-corp-theme="light"] .text-pink-400,
+        body[data-corp-theme="light"] .text-pink-300 { color: #db2777 !important; }
         body[data-corp-theme="light"] .text-proxmox-orange { color: #c2610a !important; }
         body[data-corp-theme="light"] .bg-black\/50 { background: rgba(0,0,0,0.25) !important; }
         body[data-corp-theme="light"] .bg-black\/60 { background: rgba(0,0,0,0.3) !important; }

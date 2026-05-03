@@ -161,6 +161,16 @@ def save_config():
                     'api_token_secret': getattr(manager.config, 'api_token_secret', ''),
                     'cluster_type': getattr(manager, 'cluster_type', 'proxmox'),
                     'vnc_tunnel': bool(getattr(manager.config, 'vnc_tunnel', False)),  # MK Apr 2026
+                    # NS May 2026 (#364) — load-balancer settings used to be set
+                    # on the in-memory config object but never made it into the
+                    # save dict, so they reverted on the next reload.
+                    'predictive_balancing': bool(getattr(manager.config, 'predictive_balancing', False)),
+                    'predictive_threshold': float(getattr(manager.config, 'predictive_threshold', 0.0) or 0.0),
+                    'balance_cpu_weight': float(getattr(manager.config, 'balance_cpu_weight', 1.0) or 1.0),
+                    'balance_mem_weight': float(getattr(manager.config, 'balance_mem_weight', 1.0) or 1.0),
+                    'balance_io_weight': float(getattr(manager.config, 'balance_io_weight', 1.0) or 1.0),
+                    'cpu_baseline': getattr(manager.config, 'cpu_baseline', '') or '',
+                    'backup_sla_max_age_hours': int(getattr(manager.config, 'backup_sla_max_age_hours', 0) or 0),
                 }
 
                 db.save_cluster(cluster_id, cluster_data)
