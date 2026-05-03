@@ -1,0 +1,375 @@
+{
+  "id": null,
+  "uid": "pegaprox-overview",
+  "title": "PegaProx Cluster Overview",
+  "description": "Author: Florian Paul Azim Hoberg (@gyptazy) | Version: 1.1 | Notes: Added guest resource, network, PegaProx user, and node update metrics",
+  "tags": ["pegaprox", "proxmox"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Connected Clusters",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        { "expr": "sum(pegaprox_cluster_connected)", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Quorum OK",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        { "expr": "min(pegaprox_cluster_quorum_held)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "NO", "color": "red" }, "1": { "text": "YES", "color": "green" } } }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active Sessions",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        { "expr": "pegaprox_sessions_active", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Logged-in Users",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        { "expr": "pegaprox_users_logged_in", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "PegaProx Users",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        { "expr": "pegaprox_users_total", "legendFormat": "Total", "refId": "A" },
+        { "expr": "pegaprox_users_enabled", "legendFormat": "Enabled", "refId": "B" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Nodes With Updates",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        { "expr": "sum(pegaprox_node_apt_updates_available)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "type": "stat",
+      "title": "VM Running Ratio",
+      "gridPos": { "x": 0, "y": 4, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(pegaprox_cluster_vms_running) / sum(pegaprox_cluster_vms_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
+    },
+
+    {
+      "type": "bargauge",
+      "title": "Nodes Online per Cluster",
+      "gridPos": { "x": 8, "y": 4, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "pegaprox_cluster_nodes_online",
+          "legendFormat": "{{cluster}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "VM Count per Cluster",
+      "gridPos": { "x": 16, "y": 4, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "pegaprox_cluster_vms_total",
+          "legendFormat": "{{cluster}}",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "type": "timeseries",
+      "title": "CPU Usage per Node",
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "pegaprox_node_cpu_percent",
+          "legendFormat": "{{cluster}} / {{node}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Usage per Node",
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "pegaprox_node_mem_percent",
+          "legendFormat": "{{cluster}} / {{node}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        }
+      }
+    },
+
+    {
+      "type": "table",
+      "title": "Node Status",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "pegaprox_node_online",
+          "legendFormat": "{{cluster}} / {{node}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Node APT Update Availability",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "pegaprox_node_apt_updates_available",
+          "legendFormat": "{{cluster}} / {{node}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "No updates", "color": "green" }, "1": { "text": "Updates available", "color": "orange" } } }
+          ]
+        }
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "VM Running vs Total",
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(pegaprox_cluster_vms_running)",
+          "legendFormat": "Running",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(pegaprox_cluster_vms_total)",
+          "legendFormat": "Total",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Running Guests by Type",
+      "gridPos": { "x": 0, "y": 32, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum by (type) (pegaprox_guest_running)",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest CPU Usage",
+      "gridPos": { "x": 8, "y": 32, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "topk(10, pegaprox_guest_cpu_percent)",
+          "legendFormat": "{{cluster}} / {{node}} / {{name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest Memory Usage",
+      "gridPos": { "x": 16, "y": 32, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "topk(10, pegaprox_guest_mem_percent)",
+          "legendFormat": "{{cluster}} / {{node}} / {{name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest Disk Usage",
+      "gridPos": { "x": 0, "y": 38, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "topk(10, pegaprox_guest_disk_percent)",
+          "legendFormat": "{{cluster}} / {{node}} / {{name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Guest Resource Inventory",
+      "gridPos": { "x": 12, "y": 38, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "pegaprox_guest_mem_total_bytes",
+          "legendFormat": "{{cluster}} / {{node}} / {{type}} / {{vmid}} / {{name}}",
+          "refId": "A"
+        },
+        {
+          "expr": "pegaprox_guest_disk_total_bytes",
+          "legendFormat": "{{cluster}} / {{node}} / {{type}} / {{vmid}} / {{name}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest Network Receive",
+      "gridPos": { "x": 0, "y": 44, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "topk(10, rate(pegaprox_guest_network_receive_bytes_total[5m]))",
+          "legendFormat": "{{cluster}} / {{node}} / {{name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest Network Transmit",
+      "gridPos": { "x": 12, "y": 44, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "topk(10, rate(pegaprox_guest_network_transmit_bytes_total[5m]))",
+          "legendFormat": "{{cluster}} / {{node}} / {{name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        }
+      }
+    },
+
+    {
+      "type": "stat",
+      "title": "PBS Connectivity",
+      "gridPos": { "x": 0, "y": 50, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "expr": "pegaprox_pbs_connected",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "ESXi Connectivity",
+      "gridPos": { "x": 12, "y": 50, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "expr": "pegaprox_esxi_connected",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(pegaprox_cluster_connected, cluster)",
+        "refresh": 1
+      },
+      {
+        "name": "node",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(pegaprox_node_cpu_percent, node)",
+        "refresh": 1
+      }
+    ]
+  }
+}

@@ -25,12 +25,12 @@ PegaProx exposes its metrics over HTTPS on port 5000 under the path /api/metrics
   metrics_path: /api/metrics
   scheme: https
   authorization:
-  type: Bearer
-  credentials: pgx_token123token123
+    type: Bearer
+    credentials: pgx_token123token123
   tls_config:
-  insecure_skip_verify: true
+    insecure_skip_verify: true
   static_configs:
-  - targets: ['pegaprox01.int.gyptazy.com:5000']
+    - targets: ['pegaprox01.int.gyptazy.com:5000']
 ```
 
 ## Grafana Dashboard
