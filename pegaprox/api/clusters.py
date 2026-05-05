@@ -1493,7 +1493,10 @@ def update_ha_config(cluster_id):
                 _save_ha_config_to_db(cluster_id, manager)
             except Exception as e:
                 manager.logger.error(f"[HA] agent redeploy failed: {e}")
-        import threading
+        # MK May 2026 (#371) — removed local `import threading`, the module-level
+        # one at top of file is enough. Local re-import made `threading` a local
+        # for the whole function and broke the earlier ref in the storage-heartbeat
+        # branch with UnboundLocalError before save_config could even run.
         threading.Thread(target=_reinstall, daemon=True).start()
 
     user = getattr(request, 'session', {}).get('user', 'system')
