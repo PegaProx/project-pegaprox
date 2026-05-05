@@ -7190,6 +7190,7 @@
                 if (idx === -1) return text;
                 return React.createElement(React.Fragment, null, text.slice(0, idx), React.createElement('span', {style: {color: 'var(--corp-accent)', fontWeight: 600}}, text.slice(idx, idx + search.length)), text.slice(idx + search.length));
             };
+            const isSidebarGuestTemplate = (guest = {}) => guest.template === 1 || guest.template === '1' || guest.template === true;
 
             // LW: Feb 2026 - corporate inline inventory tree: nodes + VMs flat under cluster
             const renderInlineNodeTree = (clusterId) => {
@@ -7342,6 +7343,11 @@
                                         }
                                         {vmRunning && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{background: vm.type === 'lxc' ? 'var(--corp-accent)' : 'var(--color-success)'}} />}
                                     </span>
+                                    {isSidebarGuestTemplate(vm) && (
+                                        <span className="flex-shrink-0" title="Template" style={{color: '#e9ecef'}}>
+                                            <Icons.Template className="w-3.5 h-3.5" />
+                                        </span>
+                                    )}
                                     <span className="truncate flex-1">{highlightMatch(vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`, sidebarSearch)}</span>
                                 </div>
                             );
@@ -7429,6 +7435,11 @@
                                 }
                                 {vmRunning && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{background: vm.type === 'lxc' ? '#49afd9' : '#60b515'}} />}
                             </span>
+                            {isSidebarGuestTemplate(vm) && (
+                                <span className="flex-shrink-0" title="Template" style={{color: '#e9ecef'}}>
+                                    <Icons.Template className="w-3 h-3" />
+                                </span>
+                            )}
                             <span className="truncate flex-1">{vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`}</span>
                         </div>
                     );
@@ -7809,7 +7820,7 @@
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
                                                                 if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
-                                                                setSelectedSidebarVm({ vmid: vm.vmid, name: vm.name, node: vm.node, type: vm.type, status: vm.status });
+                                                                setSelectedSidebarVm({...vm, _clusterId: clusterId});
                                                                 setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setSelectedSidebarNetwork(null);
                                                                 setActiveTab('resources');
                                                             }}
@@ -7825,6 +7836,11 @@
                                                                 }
                                                                 {isRunning && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{background: vm.type === 'lxc' ? 'var(--corp-accent)' : 'var(--color-success)'}} />}
                                                             </span>
+                                                            {isSidebarGuestTemplate(vm) && (
+                                                                <span className="flex-shrink-0" title="Template" style={{color: '#e9ecef'}}>
+                                                                    <Icons.Template className="w-3 h-3" />
+                                                                </span>
+                                                            )}
                                                             <span className="truncate">{vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`}</span>
                                                             <span className="text-[10px] ml-auto flex-shrink-0" style={{color: '#5a7a8a'}}>{vm.iface}</span>
                                                         </div>

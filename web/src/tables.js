@@ -47,6 +47,27 @@
             window.open(url, '_blank', 'noopener,noreferrer');
         }
 
+        function isGuestTemplate(resource = {}) {
+            return resource.template === 1 || resource.template === '1' || resource.template === true;
+        }
+
+        function getGuestTypeLabel(resource = {}) {
+            return resource.type === 'qemu' ? 'VM' : 'LXC';
+        }
+
+        function getGuestTypeIcon(resource = {}) {
+            return resource.type === 'qemu' ? <Icons.VM /> : <Icons.Container />;
+        }
+
+        function getTemplateLabel(t) {
+            return t('template') || 'Template';
+        }
+
+        function getGuestTypeTitle(resource = {}, t) {
+            const typeLabel = getGuestTypeLabel(resource);
+            return isGuestTemplate(resource) ? `${typeLabel} (${getTemplateLabel(t)})` : typeLabel;
+        }
+
         // Node Card Component
         function NodeCard({ name, metrics, index, clusterId, onMaintenanceToggle, onStartUpdate, onOpenNodeConfig, onNodeAction, onRemoveNode, onMoveNode }) {
             const { t } = useTranslation();
@@ -1738,8 +1759,11 @@
                                                     onChange={() => toggleSelect(resource)}
                                                     className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark text-proxmox-orange"
                                                 />
-                                                <div className={`p-2 rounded-lg ${resource.type === 'qemu' ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}>
-                                                    {resource.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
+                                                <div
+                                                    className={`p-2 rounded-lg ${isGuestTemplate(resource) ? 'bg-gray-200/60 text-gray-700 border border-gray-300/40' : resource.type === 'qemu' ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}
+                                                    title={getGuestTypeTitle(resource, t)}
+                                                >
+                                                    {getGuestTypeIcon(resource)}
                                                 </div>
                                                 <div>
                                                     <div className={`font-medium truncate ${onVmNavigate ? 'text-blue-400 hover:text-blue-300 hover:underline cursor-pointer' : 'text-white'}`} style={{maxWidth:'min(200px, 20vw)'}} onClick={onVmNavigate ? (e) => { e.stopPropagation(); onVmNavigate(resource); } : undefined}>
@@ -2100,12 +2124,17 @@
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium ${
-                                                        resource.type === 'qemu' 
+                                                        isGuestTemplate(resource)
+                                                            ? 'bg-gray-200/60 text-gray-700 border border-gray-300/40'
+                                                            : resource.type === 'qemu' 
                                                             ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
                                                             : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
-                                                    }`}>
-                                                        {resource.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
-                                                        {resource.type === 'qemu' ? 'VM' : 'LXC'}
+                                                    }`} title={getGuestTypeTitle(resource, t)}>
+                                                        {getGuestTypeIcon(resource)}
+                                                        {getGuestTypeLabel(resource)}
+                                                        {isGuestTemplate(resource) && (
+                                                            <span className="text-amber-300">({getTemplateLabel(t)})</span>
+                                                        )}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3">
@@ -2385,8 +2414,11 @@
                                                     : 'hover:bg-proxmox-dark/50'
                                             }`}
                                         >
-                                            <div className={`p-1.5 rounded ${resource.type === 'qemu' ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}>
-                                                {resource.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
+                                            <div
+                                                className={`p-1.5 rounded ${isGuestTemplate(resource) ? 'bg-gray-300/50 text-gray-800 border border-gray-400/50' : resource.type === 'qemu' ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}
+                                                title={getGuestTypeTitle(resource, t)}
+                                            >
+                                                {getGuestTypeIcon(resource)}
                                             </div>
                                             <div className="flex-1 min-w-0">
                                                 <div className="font-medium text-white text-sm truncate">
