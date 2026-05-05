@@ -765,6 +765,7 @@
                         {clusterIcon}
                         <span className="truncate flex-1 font-medium">{cluster.display_name || cluster.name}</span>
                         {cluster.cluster_type === 'xcpng' && <span className="text-[9px] px-1 py-0 font-medium rounded" style={{background: 'rgba(34,211,238,0.12)', color: '#22d3ee'}}>XCP - Tech Preview</span>}
+                        {cluster.cluster_type === 'sylve' && <span className="text-[9px] px-1 py-0 font-medium rounded" style={{background: 'rgba(45,212,191,0.12)', color: '#2dd4bf'}}>SYLVE - Beta</span>}
                         {cluster.connected === false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
                         {hasOfflineNodes && cluster.connected !== false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(239,192,6,0.15)', color: '#efc006'}}>{offlineNodesCount}&#9888;</span>}
                         <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{background: clrStatusDot}} />
@@ -792,7 +793,7 @@
                                 cluster.connected === false ? 'animate-pulse' : hasOfflineNodes ? 'animate-pulse' : cluster.status === 'running' ? 'status-online' : ''
                             }`} />
                             <div className="min-w-0">
-                                <h3 className="font-medium text-sm truncate">{cluster.display_name || cluster.name}{cluster.cluster_type === 'xcpng' && <span className="ml-1.5 text-[9px] px-1 py-0.5 font-medium rounded bg-cyan-500/10 text-cyan-400">XCP-ng - Tech Preview</span>}</h3>
+                                <h3 className="font-medium text-sm truncate">{cluster.display_name || cluster.name}{cluster.cluster_type === 'xcpng' && <span className="ml-1.5 text-[9px] px-1 py-0.5 font-medium rounded bg-cyan-500/10 text-cyan-400">XCP-ng - Tech Preview</span>}{cluster.cluster_type === 'sylve' && <span className="ml-1.5 text-[9px] px-1 py-0.5 font-medium rounded bg-teal-500/10 text-teal-400">Sylve - Beta</span>}</h3>
                                 <p className="text-xs text-gray-500 truncate">{cluster.host}</p>
                             </div>
                         </div>
@@ -12038,6 +12039,7 @@
                                                         {[
                                                             { id: 'proxmox', label: 'Proxmox VE', desc: t('pveClusterDesc') || 'Virtual machines & containers', icon: Icons.Server, color: 'text-orange-400', bg: 'bg-orange-500/10' },
                                                             { id: 'xcpng', label: 'XCP-ng (Tech Preview)', desc: t('xcpngDesc') || 'XCP-ng / Xen pool management', icon: Icons.Cpu, color: 'text-cyan-400', bg: 'bg-cyan-500/10' },
+                                                            { id: 'sylve', label: 'Sylve (Beta)', desc: t('sylveDesc') || 'Sylve host management', icon: Icons.Server, color: 'text-teal-400', bg: 'bg-teal-500/10' },
                                                             { id: 'pbs', label: 'Proxmox Backup Server', desc: t('pbsDesc') || 'Backup management', icon: Icons.Shield, color: 'text-blue-400', bg: 'bg-blue-500/10' },
                                                             { id: 'vmware', label: 'ESXi', desc: t('vmwareDesc') || 'ESXi infrastructure', icon: Icons.Cloud, color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
                                                         ].map(item => (
