@@ -2011,6 +2011,14 @@
                                                 <span style={{color: '#e9ecef'}}>{vmHwInfo.net}</span>
                                             </div>
                                         )}
+                                        {/* IP (from QEMU guest agent) */}
+                                        {isQemu && isRunning && guestInfo?.ip_addresses?.length > 0 && (
+                                            <div className="flex items-center gap-2 text-[12px]">
+                                                <Icons.Globe className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#49afd9'}} />
+                                                <span style={{color: '#adbbc4', width: '60px'}}>IP</span>
+                                                <span style={{color: '#e9ecef', fontFamily: 'monospace', fontSize: '11px'}}>{guestInfo.ip_addresses.join(', ')}</span>
+                                            </div>
+                                        )}
                                         {/* BIOS/Machine */}
                                         {vmHwInfo && (
                                             <div className="flex items-center gap-2 text-[12px]">
