@@ -24,11 +24,33 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List
+
+
+# MK May 2026 — SQLite has no parameter placeholder for identifiers (table/column
+# names), so they must be embedded into the query text. To stay safe we whitelist
+# the SQL identifier syntax + apply standard double-quote escaping. A table name
+# that doesn't match this pattern is dropped from the row-count sweep (with a
+# warning) instead of being injected verbatim. Aikido SAST flagged the old f-
+# string form as critical SQL-injection even though the source is sqlite_master
+# (not HTTP input) — this hardening makes the trace clean.
+_SAFE_IDENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def _safe_quote_ident(name: str) -> str | None:
+    """Return a double-quoted SQL identifier if `name` matches the standard
+    identifier syntax, else None. SQLite tolerates almost anything inside
+    double quotes (only `"` needs escaping as `""`), but we additionally
+    reject identifiers with non-ASCII / control / punctuation chars to
+    keep the trace boring."""
+    if not isinstance(name, str) or not _SAFE_IDENT_RE.match(name):
+        return None
+    return '"' + name.replace('"', '""') + '"'
 
 
 _LOG = logging.getLogger(__name__)
@@ -187,8 +209,12 @@ def _encrypt_via_sqlcipher_export(plain_path: str, encrypted_path: str, key_raw:
         for (tname,) in enc.execute(
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall():
+            quoted = _safe_quote_ident(tname)
+            if not quoted:
+                _LOG.warning("[MIGRATE] skipping table with unsafe name: %r", tname)
+                continue
             try:
-                total += enc.execute(f"SELECT COUNT(*) FROM \"{tname}\"").fetchone()[0]
+                total += enc.execute("SELECT COUNT(*) FROM " + quoted).fetchone()[0]
             except Exception:
                 pass
         return total
@@ -251,8 +277,13 @@ def _row_counts_encrypted(path: str, key_raw: bytes) -> Dict[str, int]:
         for (t,) in c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name NOT LIKE 'sqlite_%'").fetchall():
+            quoted = _safe_quote_ident(t)
+            if not quoted:
+                _LOG.warning("[MIGRATE] skipping table with unsafe name: %r", t)
+                out[t] = -1
+                continue
             try:
-                out[t] = c.execute(f"SELECT COUNT(*) FROM \"{t}\"").fetchone()[0]
+                out[t] = c.execute("SELECT COUNT(*) FROM " + quoted).fetchone()[0]
             except Exception:
                 out[t] = -1
         return out

@@ -1,8 +1,9 @@
 {
-  "version": "0.9.10",
-  "build": "2026.05.13",
+  "version": "0.9.10.1",
+  "build": "2026.05.13.1",
   "release_date": "2026-05-13",
   "changelog": [
+    "hotfix: v0.9.10.1 — Aikido-driven post-release cleanup. Fixed two critical SAST findings in pegaprox/cli/migrate_db.py — table names from sqlite_master were embedded into SELECT COUNT(*) via f-string; replaced with an identifier whitelist + escaped double-quoting (`_safe_quote_ident()`). Practical exploitability was nil (the table names come from the DB schema, not HTTP input) but the f-string SQL pattern is an unconditional defense-in-depth no-go. Plus dependency floor bumps to clear the rest of the Aikido critical/high CVEs: urllib3 2.5.0→2.7.0 (CVE-2026-44431 critical), werkzeug 3.0.3→3.1.6 (CVE-2024-49767 DOS, CVE-2024-49766 path traversal, CVE-2026-27199, AIKIDO-2024-10410 weak crypto). Open: 12 SAST 'SSRF via constructed URL' findings on Proxmox/ESXi/XAPI passthrough calls — each needs case-by-case review to determine whether the URL component is genuinely attacker-controlled or already constrained server-side; tracked for the next sweep.",
     "release: v0.9.10 — Full-DB SQLCipher encryption, multi-tier master-key loader, LXC dedicated terminal, syslog cluster-scoping, Corporate-layout enhancements, dependency floor bumps (Flask 3 / gevent 25 / werkzeug 3 / urllib3 2.5 / paramiko 4 / sqlcipher3-binary 0.6 / pyasn1 0.6.3 / setuptools 78.1 / zipp 3.19 / h11 0.16), 42-site reflected-content sanitizer on Proxmox-passthrough error paths, Docker HEALTHCHECK retuned for the in-process migration window.",
     "Feature: LXC dedicated text terminal — direct `pct enter` access via the existing SSH-websocket transport, surfaced from both the corporate layout VM modal and the modern dashboard. New backend route `/api/clusters/<cluster_id>/vms/<node>/lxc/<vmid>/termwebsocket` reuses the SSH WS auth path so token / password posture matches the existing node-shell behaviour. Translation key `lxcTerminal` shipped in DE/EN/FR/ES/PT/KO.",
     "Feature: Corporate-layout enhancements across the dashboard / VM modals / config tabs — refined surface tokens, density, and information hierarchy in the vCenter-style chrome (≈1.4k lines of new UI sources). Backwards-compatible with the modern (Proxmox-orange) layout — switch via user prefs.",
