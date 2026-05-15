@@ -326,6 +326,22 @@ def get_cluster_nodes(cluster_id):
 
         if r.status_code == 200:
             nodes = r.json().get('data', [])
+            # MK May 2026 (#415 KowMangler): the cross-cluster-migration target-
+            # node dropdown wants per-node "CPU: X% RAM: Y%" strings, but raw
+            # /api2/json/nodes returns `cpu` as a 0..1 fraction and `mem`/`maxmem`
+            # as bytes. Frontend was reading `.cpu_percent`/`.mem_percent` which
+            # didn't exist → empty text. Cheaper to compute it here once than
+            # to teach every consumer the conversion.
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                cpu = n.get('cpu')
+                if isinstance(cpu, (int, float)):
+                    n['cpu_percent'] = round(cpu * 100, 2)
+                mem = n.get('mem')
+                maxmem = n.get('maxmem')
+                if isinstance(mem, (int, float)) and isinstance(maxmem, (int, float)) and maxmem > 0:
+                    n['mem_percent'] = round((mem / maxmem) * 100, 2)
             # Cache the nodes data
             manager._cached_nodes = nodes
             return jsonify(nodes)
