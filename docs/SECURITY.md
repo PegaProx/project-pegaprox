@@ -25,14 +25,15 @@ the first hit for the lifetime of the process.
 |------|--------|----------|-------|
 | 1 | `PEGAPROX_DB_KEY` env var | Docker secrets, k8s, CI | Accepts urlsafe-base64 (44 chars) **or** hex (64 chars) |
 | 2 | `${CREDENTIALS_DIRECTORY}/db-key` | systemd `LoadCredentialEncrypted=` | TPM2- or host-key-bound. Strongest at-rest option |
-| 3 | `PEGAPROX_KEY_FILE` env var → file | Custom path, e.g. NFS mount | Must be chmod 0600 |
-| 4 | `/etc/pegaprox/secret.key` | **System-service install default** | Must be chmod 0600 root:pegaprox |
-| 5 | `~/.config/pegaprox/secret.key` | Single-user / dev install | Must be chmod 0600 |
+| 3 | `PEGAPROX_KEY_FILE` env var → file | Custom path, e.g. NFS mount | chmod 0600 (or 0640 root:pegaprox) |
+| 4 | `/etc/pegaprox/secret.key` | **System-service install default** | chmod **0640** root:pegaprox — group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
+| 5 | `~/.config/pegaprox/secret.key` | Single-user / dev install | chmod 0600 (owner = user running PegaProx) |
 | 6 | `config/.pegaprox.key` (CONFIG_DIR) | **Legacy** — pre-0.9.9.3 | Triggers deprecation warning on every boot |
 
-The loader **skips** any file-based tier whose permissions have group/other
-read or write bits set — an accidentally chmod-755'd key file never becomes
-the active key silently. The skip is logged.
+The loader **rejects** any file-based tier whose permissions have group-write,
+group-exec, or *any* other-user bits set — an accidentally chmod-755'd key file
+never becomes the active key silently. The rejection is logged. Group-read is
+**allowed** so the system-service install pattern (`root:pegaprox 0640`) works.
 
 ### Why the order matters
 

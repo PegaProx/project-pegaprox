@@ -424,20 +424,35 @@ EOF
     # Fresh installs get the key OUTSIDE $INSTALL_DIR/config so a backup of the
     # config dir doesn't pick up the decryption key. Idempotent: only acts when
     # no key already exists (neither at the new location nor in the legacy spot).
+    #
+    # MK May 2026 (#417 / tgmct) — mode is 0640 (NOT 0600). File is owned by
+    # root:$SERVICE_GROUP; the systemd unit runs as $SERVICE_USER which is in
+    # $SERVICE_GROUP, so group-read is required to load the key at boot.
+    # The previous 0600 root:pegaprox combo made the key unreadable to the
+    # service and pegaprox.service failed to start on every fresh install.
     LEGACY_KEY="$INSTALL_DIR/config/.pegaprox.key"
     SYS_KEY_DIR="/etc/pegaprox"
     SYS_KEY="$SYS_KEY_DIR/secret.key"
 
     if [ -f "$SYS_KEY" ]; then
-        print_info "Master key already at $SYS_KEY — leaving untouched"
+        # Repair-on-upgrade: prior deploy.sh versions wrote 0600. Bump to 0640
+        # so the systemd service can actually read its own key after upgrade.
+        cur_mode=$(stat -c '%a' "$SYS_KEY" 2>/dev/null || echo "")
+        if [ "$cur_mode" = "600" ] || [ "$cur_mode" = "400" ]; then
+            print_info "Found $SYS_KEY at mode $cur_mode — bumping to 0640 (#417 repair)"
+            chmod 640 "$SYS_KEY"
+            chown "root:$SERVICE_GROUP" "$SYS_KEY" 2>/dev/null || true
+        else
+            print_info "Master key already at $SYS_KEY (mode $cur_mode) — leaving untouched"
+        fi
     elif [ -f "$LEGACY_KEY" ]; then
         print_warning "Legacy key at $LEGACY_KEY detected"
         print_info "  PegaProx will keep using it but emit a deprecation warning."
-        print_info "  Migrate with:  sudo mv \"$LEGACY_KEY\" \"$SYS_KEY\" && sudo chmod 600 \"$SYS_KEY\" && sudo chown root:$SERVICE_GROUP \"$SYS_KEY\""
+        print_info "  Migrate with:  sudo mv \"$LEGACY_KEY\" \"$SYS_KEY\" && sudo chmod 640 \"$SYS_KEY\" && sudo chown root:$SERVICE_GROUP \"$SYS_KEY\""
     else
         # No key anywhere — generate the new default at the secure location.
         mkdir -p "$SYS_KEY_DIR"
-        chmod 700 "$SYS_KEY_DIR"
+        chmod 750 "$SYS_KEY_DIR"
         chown "root:$SERVICE_GROUP" "$SYS_KEY_DIR" 2>/dev/null || true
 
         # 32 raw bytes -> urlsafe-base64. Python is already a hard dep at this
@@ -445,16 +460,16 @@ EOF
         if "$INSTALL_DIR/venv/bin/python3" -c "
 import base64, os, secrets, sys
 key = base64.urlsafe_b64encode(secrets.token_bytes(32))
-fd = os.open('$SYS_KEY', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+fd = os.open('$SYS_KEY', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
 try:
     os.write(fd, key)
 finally:
     os.close(fd)
 " 2>/dev/null; then
-            chmod 600 "$SYS_KEY"
+            chmod 640 "$SYS_KEY"
             chown "root:$SERVICE_GROUP" "$SYS_KEY" 2>/dev/null || \
                 chown "root:root" "$SYS_KEY"
-            print_success "Generated master key at $SYS_KEY (0600 root:$SERVICE_GROUP)"
+            print_success "Generated master key at $SYS_KEY (0640 root:$SERVICE_GROUP)"
             print_info "  Loader tier: 4 (system-service default — outside $INSTALL_DIR/config)"
             print_info "  Stronger: wrap with systemd-creds — see docs/SECURITY.md §5"
         else

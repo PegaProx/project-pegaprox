@@ -13,9 +13,11 @@ Order of precedence (highest first):
   5. ~/.config/pegaprox/secret.key — user install default
   6. CONFIG_DIR/secret.key      — legacy fallback (deprecation-warned)
 
-All file-based candidates must be chmod 0600.  A loose-perms file is logged
-and skipped (NOT used) so an accidentally-shared key never becomes the active
-key silently.
+All file-based candidates must be chmod 0600 (owner-only) or 0640 (owner +
+group-read, which is what the system-service install uses so the systemd
+unit can load a root-owned key).  Anything with group-write, group-exec or
+any other-perm bit set is rejected hard — so an accidentally world-readable
+key never becomes the active key silently.
 
 Key format: 32 raw bytes (urlsafe-base64-encoded for Fernet compatibility).
 The loader always returns the **base64 representation** because that's what
@@ -242,15 +244,26 @@ def _legacy_key_path() -> Path:
 def _enforce_perms(path: Path) -> None:
     """Loose-perms files are skipped at load — but `_enforce_perms` raises so
     the caller decides whether to skip or fail.  We're called only by the
-    Tier-3/4/5 paths where strict 0600 is required."""
+    Tier-3/4/5 paths where strict at-rest perms are required.
+
+    Accepted modes:
+      - 0600 / 0400 — key owned by the service user (legacy / single-user installs)
+      - 0640 / 0440 — key owned by root with the service group granted read
+                       (system-service install, default since v0.9.10.3 after
+                       tgmct's #417 install-failure report — the previous 0600
+                       posture meant a root-owned key was unreadable by the
+                       systemd service running as pegaprox)
+    Rejected: anything with group-write, group-exec, or any other-perm bit set.
+    """
     try:
         st = os.stat(path)
     except Exception as e:
         raise RuntimeError(f"[KEYSTORE] cannot stat {path}: {e}")
-    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    forbidden = stat.S_IWGRP | stat.S_IXGRP | stat.S_IRWXO
+    if st.st_mode & forbidden:
         raise RuntimeError(
             f"[KEYSTORE] key at {path} has loose permissions "
-            f"({oct(st.st_mode)[-3:]}) — chmod 0600 required.")
+            f"({oct(st.st_mode)[-3:]}) — must be 0600 or 0640 only.")
 
 
 def _decode_key_string(s) -> bytes:
