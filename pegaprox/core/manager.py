@@ -968,35 +968,51 @@ class PegaProxManager:
                 nodes = response.json()['data']
                 node_status = {}
 
-                # MK: /nodes/{node}/status doesn't have netin/netout, only /cluster/resources does
-                net_by_node = {}
-                try:
-                    res_url = f"https://{host}:{self.api_port}/api2/json/cluster/resources?type=node"
-                    res_r = self._create_session().get(res_url, timeout=10)
-                    if res_r.status_code == 200:
-                        for nr in res_r.json().get('data', []):
-                            net_by_node[nr.get('node', '')] = {
-                                'netin': nr.get('netin', 0),
-                                'netout': nr.get('netout', 0)
-                            }
-                except Exception:
-                    pass
-
+                # MK May 2026 (#419, SpyrosPsarras): previous version queried
+                # /cluster/resources?type=node and read netin/netout off the
+                # returned records — but those keys only exist on type=vm rows,
+                # so the dashboard's Network In/Out columns were always 0.
+                # Real per-node throughput lives in /nodes/{name}/rrddata as a
+                # rate (bytes/sec, AVERAGE over the timeframe step). Fold the
+                # RRD fetch into fetch_node_details() so it rides the same
+                # parallel pool as the status call and walls don't double.
                 api_nodes = set()
 
-                # fetch node details (parallel if gevent available)
                 def fetch_node_details(node):
                     node_name = node['node']
+                    status_data = None
+                    netio = (0, 0)  # (netin, netout) bytes/sec, fall back to 0
+                    sess = self._create_session()
                     try:
                         status_url = f"https://{host}:{self.api_port}/api2/json/nodes/{node_name}/status"
-                        status_response = self._create_session().get(status_url, timeout=10)
-                        if status_response.status_code == 200:
-                            return (node_name, node, status_response.json()['data'])
-                        else:
-                            return (node_name, node, None)
-                    except Exception as e:
-                        # self.logger.debug(f"node {node_name} error: {e}")  # too noisy
-                        return (node_name, node, None)
+                        sr = sess.get(status_url, timeout=10)
+                        if sr.status_code == 200:
+                            status_data = sr.json()['data']
+                    except Exception:
+                        pass
+
+                    # RRD pull — only attempt if status came back (no point
+                    # spending an HTTP roundtrip on a clearly-dead node).
+                    if status_data is not None:
+                        try:
+                            rrd_url = f"https://{host}:{self.api_port}/api2/json/nodes/{node_name}/rrddata"
+                            rr = sess.get(rrd_url, params={'timeframe': 'hour', 'cf': 'AVERAGE'}, timeout=10)
+                            if rr.status_code == 200:
+                                samples = rr.json().get('data', []) or []
+                                # walk back for the most recent sample that has BOTH netin and netout
+                                # populated — RRD step is 60s for the 'hour' timeframe so the last
+                                # 1-2 samples are usually still null while PVE is averaging.
+                                for s in reversed(samples):
+                                    if s is None:
+                                        continue
+                                    ni = s.get('netin')
+                                    no = s.get('netout')
+                                    if ni is not None and no is not None:
+                                        netio = (ni, no)
+                                        break
+                        except Exception:
+                            pass
+                    return (node_name, node, status_data, netio)
                 
                 # parallel if available
                 if GEVENT_AVAILABLE and GEVENT_POOL:
@@ -1046,7 +1062,14 @@ class PegaProxManager:
                     if result is None:
                         continue
 
-                    node_name, node, status_data = result
+                    # MK May 2026: results are now 4-tuples — see #419 fix above.
+                    # Tolerate the old 3-tuple shape briefly in case anything else
+                    # in this code path still returns it.
+                    if len(result) == 4:
+                        node_name, node, status_data, netio = result
+                    else:
+                        node_name, node, status_data = result
+                        netio = (0, 0)
                     api_nodes.add(node_name)
 
                     if status_data:
@@ -1064,10 +1087,9 @@ class PegaProxManager:
                         disk_total = rootfs.get('total', 1)
                         disk_percent = (disk_used / disk_total) * 100 if disk_total > 0 else 0
                         
-                        # Network stats from /cluster/resources (cumulative bytes)
-                        node_net = net_by_node.get(node_name, {})
-                        netin = node_net.get('netin', 0)
-                        netout = node_net.get('netout', 0)
+                        # Network stats — from /nodes/{name}/rrddata (rate, bytes/sec)
+                        # see fetch_node_details() above and #419 for the why.
+                        netin, netout = netio
                         
                         # weighted scoring — configurable via balance_*_weight settings
                         # NS: default weights keep backwards compat with old cpu+mem formula
