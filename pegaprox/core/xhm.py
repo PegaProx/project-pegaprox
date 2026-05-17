@@ -1001,7 +1001,15 @@ def _run_pve_to_xcpng(task):
             if rc == 0 and out.strip():
                 d['path'] = out.strip()
                 # detect format
-                if '/images/' in d['path'] and d['path'].endswith('.qcow2'):
+                # MK May 2026 (#398 mihsu81): qcow2-on-LVM disks live at
+                # /dev/vg_*/vm-*-disk-*.qcow2 which has no `/images/` segment
+                # — the previous check missed them and labeled them raw, then
+                # the export step tried `dd` instead of `qemu-img convert` on
+                # an actual qcow2 stream and the imported VDI was unbootable.
+                # PVE's volume-id convention is reliable: `.qcow2` suffix on
+                # the volid → qcow2 inside. Filesystem-vs-block-device path
+                # shape is irrelevant for format detection.
+                if d['path'].endswith('.qcow2'):
                     d['format'] = 'qcow2'
                 else:
                     d['format'] = 'raw'
@@ -1105,8 +1113,18 @@ def _run_pve_to_xcpng(task):
                     time.sleep(0.5)  # give udev a moment
 
                 # build export command — #272: rbd URIs need qemu-img, dd can't read them
+                # MK May 2026 (#400 mihsu81): qemu-img convert opens its output via
+                # bdrv_open, which on a regular file path (`/dev/stdout` counts)
+                # calls ftruncate(fd, source_size) before streaming. ftruncate on
+                # a pipe returns EINVAL → qemu-img bails with "Could not resize
+                # file: Invalid argument" and the convert never starts. Using `-`
+                # as the output filename routes qemu through its stdout-aware
+                # path that skips the resize step. Same fix on the rbd branch for
+                # symmetry (rbd was working anyway because `qemu-img dd` doesn't
+                # call ftruncate, but `-` is the documented stdout sigil and
+                # keeps both branches consistent).
                 if disk['format'] == 'qcow2':
-                    export_cmd = f"qemu-img convert -f qcow2 -O raw '{disk['path']}' /dev/stdout"
+                    export_cmd = f"qemu-img convert -f qcow2 -O raw '{disk['path']}' -"
                 elif disk['path'].startswith('rbd:'):
                     export_cmd = f"qemu-img dd -f raw -O raw bs=4M if='{disk['path']}' of=/dev/stdout"
                 else:
