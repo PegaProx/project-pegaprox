@@ -3141,12 +3141,37 @@ def generate_support_bundle():
                          '--no-pager', '--output=short'],
                         capture_output=True, text=True, timeout=20, check=False,
                     )
-                    if cp.returncode == 0 and (cp.stdout or '').strip():
+                    stdout = (cp.stdout or '')
+                    stderr = (cp.stderr or '')
+                    # MK May 2026 (v0.9.10.3 follow-up, from blackshocks #413 bundle):
+                    # when the pegaprox service user isn't in `adm` or `systemd-journal`
+                    # group, journalctl exits rc=0 but stdout contains the permission
+                    # hint instead of real journal entries. Detect that pattern and
+                    # treat as a failure so we don't ship hint-text as if it were logs.
+                    permission_sentinels = (
+                        'no journal files were opened',
+                        'insufficient permissions',
+                        'not currently seeing messages from other users',
+                        'users in groups',
+                    )
+                    looks_like_permission_block = any(
+                        s in stdout.lower() for s in permission_sentinels
+                    )
+                    if (cp.returncode == 0
+                            and stdout.strip()
+                            and not looks_like_permission_block):
                         # Cap at last 1000 lines (in case --since-window had more)
-                        lines = (cp.stdout or '').splitlines(keepends=True)[-1000:]
+                        lines = stdout.splitlines(keepends=True)[-1000:]
                         journal_text = ''.join(_redact_log(l) for l in lines)
+                    elif looks_like_permission_block:
+                        journal_err = (
+                            "journalctl reports insufficient permissions — the pegaprox "
+                            "service user is not in the `systemd-journal` (or `adm`) group. "
+                            "Run `sudo usermod -a -G systemd-journal pegaprox && sudo systemctl "
+                            "restart pegaprox` on the host, then re-generate the bundle."
+                        )
                     else:
-                        journal_err = (cp.stderr or '').strip()[:300] or f"rc={cp.returncode}, empty output"
+                        journal_err = stderr.strip()[:300] or f"rc={cp.returncode}, empty output"
                 except FileNotFoundError:
                     journal_err = "journalctl binary not present (not a systemd host)"
                 except subprocess.TimeoutExpired:
