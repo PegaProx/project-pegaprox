@@ -31,6 +31,16 @@ def load_server_settings():
         'acme_enabled': False,
         'acme_email': '',
         'acme_staging': False,  # use LE staging for testing
+        'acme_challenge_type': 'http-01',
+        'acme_dns_provider': 'manual',
+        'acme_dns_rfc2136_nameserver': '',
+        'acme_dns_rfc2136_port': 53,
+        'acme_dns_rfc2136_zone': '',
+        'acme_dns_rfc2136_key_name': '',
+        'acme_dns_rfc2136_secret': '',
+        'acme_dns_rfc2136_algorithm': 'hmac-sha512',
+        'acme_dns_rfc2136_ttl': 60,
+        'acme_dns_propagation_seconds': 30,
         'logo_url': '',
         'app_name': 'PegaProx',
         # HTTP redirect port - NS Jan 2026
