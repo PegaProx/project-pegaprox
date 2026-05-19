@@ -121,7 +121,7 @@
                     };
                     forceUpdate(n => n + 1);
                 }
-            }, [metrics?.cpu_percent, metrics?.mem_percent, metrics?.netin, metrics?.netout]);
+            }, [metrics?.cpu_percent, metrics?.mem_percent, metrics?.disk_percent, metrics?.netin, metrics?.netout]);
             
             const history = historyRef.current;
 
