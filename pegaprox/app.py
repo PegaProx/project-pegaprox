@@ -860,9 +860,24 @@ def main(debug_mode=False):
                         _ssl = str(Path("/var/lib/pegaprox/ssl"))
                     else:
                         _ssl = str(Path(__file__).resolve().parent.parent / 'ssl')
+                    _challenge_type = _settings.get('acme_challenge_type') or 'http-01'
+                    _dns_provider = _settings.get('acme_dns_provider') or 'manual'
                     renewed = check_and_renew(
                         _settings['domain'], _settings.get('acme_email', ''),
-                        _ssl, staging=_settings.get('acme_staging', False)
+                        _ssl, staging=_settings.get('acme_staging', False),
+                        directory_url=_settings.get('acme_directory_url', ''),
+                        challenge_type=_challenge_type,
+                        dns_provider=_dns_provider,
+                        dns_config={
+                            'nameserver': _settings.get('acme_dns_rfc2136_nameserver', ''),
+                            'port': _settings.get('acme_dns_rfc2136_port', 53),
+                            'zone': _settings.get('acme_dns_rfc2136_zone', ''),
+                            'key_name': _settings.get('acme_dns_rfc2136_key_name', ''),
+                            'secret': _settings.get('acme_dns_rfc2136_secret', ''),
+                            'algorithm': _settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512'),
+                            'ttl': _settings.get('acme_dns_rfc2136_ttl', 60),
+                            'propagation_seconds': _settings.get('acme_dns_propagation_seconds', 30),
+                        }
                     )
                     if renewed:
                         logging.info("[ACME] Certificate renewed, restart required for new cert")

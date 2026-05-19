@@ -11,6 +11,7 @@ Package: pegaprox
 Architecture: all
 Depends: ${misc:Depends},
          python3,
+         python3-dnspython,
          python3-flask,
          python3-flask-cors,
          python3-flask-sock,
