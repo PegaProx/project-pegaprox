@@ -2362,6 +2362,28 @@ def _qm_monitor_cmd(pve_mgr, node, vmid, command, timeout=15):
         return False, str(e)
 
 
+# NS May 2026 — PVE 9.2 ships QEMU 11 which dropped HMP `block_job_complete` and
+# `block_job_cancel` in favour of the generic `job_complete` / `job_cancel`. The
+# `block_job_set_speed` HMP still exists in 11, only the two action-completers
+# were renamed. Try the old form first so existing clusters (PVE 9.0/9.1 / QEMU
+# 9.x/10.x) keep their fast path; fall back on "unknown command".
+_QM_JOB_NEW_FORM = {'complete': 'job_complete', 'cancel': 'job_cancel'}
+
+
+def _qm_block_job(pve_mgr, node, vmid, action, drive_id, timeout=15, extra=''):
+    """block_job_<action> HMP with job_<action> fallback for QEMU 11+."""
+    suffix = f" {extra}".rstrip()
+    old_cmd = f"block_job_{action} {drive_id}{suffix}"
+    ok, out = _qm_monitor_cmd(pve_mgr, node, vmid, old_cmd, timeout=timeout)
+    new_form = _QM_JOB_NEW_FORM.get(action)
+    if (not ok) and new_form:
+        low = (out or '').lower()
+        if 'unknown command' in low or "type 'help'" in low or "unrecognized" in low:
+            new_cmd = f"{new_form} {drive_id}{suffix}"
+            return _qm_monitor_cmd(pve_mgr, node, vmid, new_cmd, timeout=timeout)
+    return ok, out
+
+
 def _drive_mirror_to_local(pve_mgr, task, node, vmid, drive_id, target_path, disk_total):
     """Start a single drive-mirror job. Does NOT wait for completion.
     Use _poll_drive_mirrors() to wait for all mirrors to finish.
@@ -2547,13 +2569,12 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                 # Step 3: Pivot all drives
                 pivot_ok = True
                 for drive_id, disk_total, di in mirrors:
-                    ok_p, out_p = _qm_monitor_cmd(pve_mgr, node, vmid,
-                        f"block_job_complete {drive_id}", timeout=30)
+                    ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
+                        'complete', drive_id, timeout=30)
                     if not ok_p and 'not ready' in str(out_p).lower():
                         # Force cancel + resume if pivot fails
                         task.log(f"  {drive_id}: pivot failed (not ready) - cancelling")
-                        _qm_monitor_cmd(pve_mgr, node, vmid,
-                            f"block_job_cancel {drive_id}")
+                        _qm_block_job(pve_mgr, node, vmid, 'cancel', drive_id)
                         pivot_ok = False
                     elif not ok_p:
                         task.log(f"  {drive_id}: pivot issue: {str(out_p)[:100]}")
@@ -2606,16 +2627,16 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
         missing = drive_ids - ready_drives
         task.log(f"  Timed out waiting for: {missing}")
         for d in missing:
-            _qm_monitor_cmd(pve_mgr, node, vmid, f"block_job_cancel {d}")
+            _qm_block_job(pve_mgr, node, vmid, 'cancel', d)
         return False
-    
+
     elapsed = time.time() - start_t
     total_gb = sum(m[1] for m in mirrors) / (1024**3)
     task.log(f"  All {len(mirrors)} disks synced in {elapsed:.0f}s ({total_gb:.1f} GB) - pivoting...")
-    
+
     # Pivot ALL drives atomically
     for drive_id, disk_total, di in mirrors:
-        ok, out = _qm_monitor_cmd(pve_mgr, node, vmid, f"block_job_complete {drive_id}", timeout=30)
+        ok, out = _qm_block_job(pve_mgr, node, vmid, 'complete', drive_id, timeout=30)
         if not ok:
             task.log(f"  WARNING: pivot {drive_id} failed: {out[:150]}")
     
@@ -4250,8 +4271,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         
         if not mirror_success and mirrors:
             for drive_id, _, _ in mirrors:
-                _qm_monitor_cmd(pve_mgr, task.target_node, task.proxmox_vmid,
-                    f"block_job_cancel {drive_id}")
+                _qm_block_job(pve_mgr, task.target_node, task.proxmox_vmid,
+                              'cancel', drive_id)
             task.log("  Cancelled mirror jobs")
     
     # ================================================================
