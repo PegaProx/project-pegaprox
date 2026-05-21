@@ -297,8 +297,6 @@
                 // CRS (complex)
                 crs_ha_rebalance: '',
                 crs_mode: '',
-                crs_imbalance_threshold: '',  // MK May 2026 — PVE 9.2+ only, 0-100 percent
-                crs_min_improvement: '',      // MK May 2026 — PVE 9.2+ only, 0-100 percent
                 // Next ID Range (complex)
                 next_id_lower: 100,
                 next_id_upper: 999999999,
@@ -355,23 +353,19 @@
                     }
                 }
                 
-                // CRS: can be object {ha-rebalance-on-start, scheduling, imbalance-threshold, min-improvement} or string
+                // CRS: can be object {ha-rebalance-on-start, scheduling} or string.
+                // Note: on PVE 9.2+ the `crs` key was retired from /cluster/options
+                // (config moved into /cluster/ha/rules), so this read+write path
+                // only applies to PVE 8.x/9.0/9.1.
                 if (opts.crs) {
                     if (typeof opts.crs === 'object') {
                         parsed.crs_ha_rebalance = opts.crs['ha-rebalance-on-start'] ? '1' : '';
                         parsed.crs_mode = opts.crs.scheduling || '';
-                        // 9.2+ percent fields — empty when absent
-                        if (opts.crs['imbalance-threshold'] !== undefined)
-                            parsed.crs_imbalance_threshold = String(opts.crs['imbalance-threshold']);
-                        if (opts.crs['min-improvement'] !== undefined)
-                            parsed.crs_min_improvement = String(opts.crs['min-improvement']);
                     } else if (typeof opts.crs === 'string') {
                         opts.crs.split(',').forEach(part => {
                             const [k, v] = part.split('=');
                             if (k === 'ha-rebalance-on-start') parsed.crs_ha_rebalance = v === '1' ? '1' : '';
                             if (k === 'scheduling') parsed.crs_mode = v;
-                            if (k === 'imbalance-threshold') parsed.crs_imbalance_threshold = v || '';
-                            if (k === 'min-improvement') parsed.crs_min_improvement = v || '';
                         });
                     }
                 }
@@ -731,24 +725,13 @@
                         payload.ha = `shutdown_policy=${editingOptions.ha_shutdown_policy}`;
                     }
                     
-                    // === CRS Settings ===
+                    // === CRS Settings (pre-9.2 only — PVE 9.2 retired this key) ===
                     const crsParts = [];
                     if (editingOptions.crs_ha_rebalance === '1') {
                         crsParts.push('ha-rebalance-on-start=1');
                     }
                     if (editingOptions.crs_mode && editingOptions.crs_mode !== '') {
                         crsParts.push(`scheduling=${editingOptions.crs_mode}`);
-                    }
-                    // MK May 2026 — PVE 9.2+ percent thresholds. Backend strips
-                    // these silently for pre-9.2 clusters so the rest of the
-                    // crs PUT still goes through.
-                    const imbT = parseInt(editingOptions.crs_imbalance_threshold, 10);
-                    if (!isNaN(imbT) && imbT >= 0 && imbT <= 100) {
-                        crsParts.push(`imbalance-threshold=${imbT}`);
-                    }
-                    const minImp = parseInt(editingOptions.crs_min_improvement, 10);
-                    if (!isNaN(minImp) && minImp >= 0 && minImp <= 100) {
-                        crsParts.push(`min-improvement=${minImp}`);
                     }
                     if (crsParts.length > 0) {
                         payload.crs = crsParts.join(',');
@@ -1634,32 +1617,6 @@
                                                         <option value="basic">Basic - simple load distribution</option>
                                                         <option value="static">Static - consider static resource config</option>
                                                     </select>
-                                                </div>
-                                            </div>
-                                            {/* MK May 2026 — PVE 9.2+ percent thresholds for dynamic rebalancing.
-                                                Pre-9.2 clusters: backend drops these silently from the PUT. */}
-                                            <div className="grid grid-cols-2 gap-4 mt-3">
-                                                <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">
-                                                        Imbalance Threshold (%)
-                                                        <span className="ml-2 text-xs text-gray-500">PVE 9.2+</span>
-                                                    </label>
-                                                    <input type="number" min="0" max="100" placeholder="e.g. 15"
-                                                        value={editingOptions.crs_imbalance_threshold || ''}
-                                                        onChange={e => setEditingOptions({...editingOptions, crs_imbalance_threshold: e.target.value})}
-                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
-                                                    <p className="text-xs text-gray-500 mt-1">CRS only acts when node imbalance exceeds this percent. Leave empty for PVE default.</p>
-                                                </div>
-                                                <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">
-                                                        Min Improvement (%)
-                                                        <span className="ml-2 text-xs text-gray-500">PVE 9.2+</span>
-                                                    </label>
-                                                    <input type="number" min="0" max="100" placeholder="e.g. 5"
-                                                        value={editingOptions.crs_min_improvement || ''}
-                                                        onChange={e => setEditingOptions({...editingOptions, crs_min_improvement: e.target.value})}
-                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
-                                                    <p className="text-xs text-gray-500 mt-1">A move must improve balance by at least this percent to be performed.</p>
                                                 </div>
                                             </div>
                                         </div>

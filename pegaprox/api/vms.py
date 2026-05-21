@@ -446,36 +446,14 @@ def set_datacenter_options(cluster_id):
         raw_data = request.json or {}
         data = {k: v for k, v in raw_data.items() if k in ALLOWED_DC_OPTIONS}
 
-        # MK May 2026 — strip crs imbalance-threshold / min-improvement when the
-        # target cluster runs PVE < 9.2. Those keys only exist on 9.2+ (renamed
-        # from the 0.0-1.0 fraction format); sending them to older PVE makes
-        # the whole `crs=` PUT fail and the user loses *all* their other crs
-        # settings in one go.
-        if 'crs' in data and isinstance(data['crs'], str) and data['crs']:
-            pve_ver = manager.get_pve_version_tuple()
-            if pve_ver is not None and pve_ver < (9, 2):
-                kept = []
-                dropped = []
-                for part in data['crs'].split(','):
-                    key = part.split('=', 1)[0].strip()
-                    if key in ('imbalance-threshold', 'min-improvement'):
-                        dropped.append(key)
-                        continue
-                    kept.append(part)
-                if dropped:
-                    data['crs'] = ','.join(kept)
-                    # also drop the whole crs key if nothing left
-                    if not data['crs']:
-                        data.pop('crs', None)
-                    # log so audit shows which fields didnt make it
-                    try:
-                        from pegaprox.utils.audit import log_audit
-                        log_audit(request.session.get('user', 'system'),
-                                  'datacenter.crs.stripped',
-                                  f"PVE {pve_ver[0]}.{pve_ver[1]} — dropped {dropped}",
-                                  cluster=manager.config.name)
-                    except Exception:
-                        pass
+        # MK May 2026 — earlier I had a strip-filter here for the supposed PVE
+        # 9.2 `imbalance-threshold` / `min-improvement` crs sub-options. Real
+        # 9.2.2 behaviour disproved it: the entire `crs` key was removed from
+        # /cluster/options on 9.2 (schema rejects even `scheduling=basic`
+        # with "property is not defined in schema"). CRS configuration moved
+        # into /cluster/ha/rules. Removed the strip; the legacy crs UI is
+        # only relevant on pre-9.2 clusters and PVE itself will reject it on
+        # 9.2 with a clear schema error.
 
         response = manager._create_session().put(url, data=data, timeout=10)
 

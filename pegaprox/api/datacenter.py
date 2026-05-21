@@ -1213,10 +1213,10 @@ def delete_sdn_subnet(cluster_id, vnet_id, subnet_id):
 def apply_sdn_config(cluster_id):
     """Apply pending SDN configuration changes to all nodes.
 
-    PVE 9.2 added ?dryrun=1 — returns the planned FRR/ifupdown diff without
-    writing. We accept ?dryrun=1 or a JSON body {"dryrun": true}; on pre-9.2
-    clusters we silently drop the flag and do a normal apply, so callers
-    don't break.
+    Note: the `dryrun` flag mentioned in some PVE 9.2 docs is NOT in
+    9.2.2's /cluster/sdn schema (rejected with 400). We accept the param
+    on the wire for forward-compat but silently drop it until PVE adds
+    it for real — that way our caller code doesn't need to change later.
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
@@ -1227,32 +1227,13 @@ def apply_sdn_config(cluster_id):
 
     try:
         host, port = manager.host, manager.api_port
-        body = request.get_json(silent=True) or {}
-        dryrun = (request.args.get('dryrun') in ('1', 'true', 'yes')
-                  or bool(body.get('dryrun')))
-
         url = f"https://{host}:{port}/api2/json/cluster/sdn"
-        params = {}
-        if dryrun:
-            pve_ver = manager.get_pve_version_tuple()
-            if pve_ver is None or pve_ver >= (9, 2):
-                params['dryrun'] = 1
-            else:
-                manager.logger.debug(f"[SDN] dryrun ignored (PVE {pve_ver} < 9.2)")
-        response = manager._create_session().put(url, params=params, timeout=30)
+        response = manager._create_session().put(url, timeout=30)
 
         if response.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
-            if not dryrun:
-                log_audit(user, 'sdn.config_applied', "Applied SDN configuration to cluster", cluster=manager.config.name)
-            out = {'success': True, 'message': 'SDN configuration applied'}
-            if dryrun:
-                try:
-                    out['diff'] = response.json().get('data')
-                    out['message'] = 'SDN dryrun successful (no changes written)'
-                except Exception:
-                    out['diff'] = response.text
-            return jsonify(out)
+            log_audit(user, 'sdn.config_applied', "Applied SDN configuration to cluster", cluster=manager.config.name)
+            return jsonify({'success': True, 'message': 'SDN configuration applied'})
         return jsonify({'error': parse_pve_error(response.text)}), response.status_code
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to apply SDN config')}), 500
@@ -1266,6 +1247,12 @@ def apply_sdn_config(cluster_id):
 # new wireguard + bgp. On pre-9.2 the endpoint 404s and the route returns
 # an empty list / error transparently.
 
+# MK May 2026 — actual fabric records live at /cluster/sdn/fabrics/fabric on
+# 9.2.2; /cluster/sdn/fabrics itself returns three subdir markers
+# (fabric/node/all) for the API index. /fabrics/node is the per-node fabric
+# assignment list. We surface only the actual fabrics; pre-9.2 the endpoint
+# 404s and we return [].
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn/fabrics', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_sdn_fabrics(cluster_id):
@@ -1275,19 +1262,12 @@ def get_sdn_fabrics(cluster_id):
     if error: return error
     try:
         host, port = manager.host, manager.api_port
-        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics"
+        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics/fabric"
         resp = manager._api_get(url)
         if resp.status_code in (404, 501):
-            return jsonify([])  # pre-9.2: feature not available
+            return jsonify([])  # pre-9.2 or feature not enabled
         if resp.status_code == 200:
-            data = resp.json().get('data', []) or []
-            # MK May 2026 — PVE 9.1 returns subdir markers like
-            # [{"subdir":"fabric"}, {"subdir":"node"}, ...] for the empty
-            # index endpoint. 9.2 returns actual fabric records with `fabric`
-            # + `protocol` keys. Filter the directory markers so the UI sees
-            # an empty list on pre-9.2 instead of three pseudo-entries.
-            filtered = [d for d in data if isinstance(d, dict) and 'subdir' not in d]
-            return jsonify(filtered)
+            return jsonify(resp.json().get('data', []) or [])
         return jsonify({'error': parse_pve_error(resp.text)}), resp.status_code
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to list SDN fabrics')}), 500
@@ -1303,10 +1283,9 @@ def create_sdn_fabric(cluster_id):
     try:
         host, port = manager.host, manager.api_port
         body = request.json or {}
-        # Required: fabric (name) + protocol. Optional: per-protocol config.
         if not body.get('fabric') or not body.get('protocol'):
             return jsonify({'error': 'fabric and protocol required'}), 400
-        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics"
+        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics/fabric"
         resp = manager._api_post(url, data=body)
         if resp.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
@@ -1328,7 +1307,7 @@ def update_sdn_fabric(cluster_id, fabric_id):
     if error: return error
     try:
         host, port = manager.host, manager.api_port
-        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics/{fabric_id}"
+        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics/fabric/{fabric_id}"
         resp = manager._api_put(url, data=request.json or {})
         if resp.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
@@ -1348,7 +1327,7 @@ def delete_sdn_fabric(cluster_id, fabric_id):
     if error: return error
     try:
         host, port = manager.host, manager.api_port
-        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics/{fabric_id}"
+        url = f"https://{host}:{port}/api2/json/cluster/sdn/fabrics/fabric/{fabric_id}"
         resp = manager._api_delete(url)
         if resp.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
@@ -1410,7 +1389,7 @@ def _sdn_crud_resource(cluster_id, family, item_id=None):
 def list_sdn_routemaps(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    return _sdn_crud_resource(cluster_id, 'routemaps')
+    return _sdn_crud_resource(cluster_id, 'route-maps')
 
 
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn/routemaps', methods=['POST'])
@@ -1420,7 +1399,7 @@ def create_sdn_routemap(cluster_id):
     if not ok: return err
     user = getattr(request, 'session', {}).get('user', 'system')
     name = (request.json or {}).get('routemap', '?')
-    result = _sdn_crud_resource(cluster_id, 'routemaps')
+    result = _sdn_crud_resource(cluster_id, 'route-maps')
     if result[1] == 200:
         manager, _ = get_connected_manager(cluster_id)
         log_audit(user, 'sdn.routemap_created', f"Created SDN routemap: {name}",
@@ -1433,7 +1412,7 @@ def create_sdn_routemap(cluster_id):
 def update_sdn_routemap(cluster_id, routemap_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    return _sdn_crud_resource(cluster_id, 'routemaps', routemap_id)
+    return _sdn_crud_resource(cluster_id, 'route-maps', routemap_id)
 
 
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn/routemaps/<routemap_id>', methods=['DELETE'])
@@ -1441,7 +1420,7 @@ def update_sdn_routemap(cluster_id, routemap_id):
 def delete_sdn_routemap(cluster_id, routemap_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    return _sdn_crud_resource(cluster_id, 'routemaps', routemap_id)
+    return _sdn_crud_resource(cluster_id, 'route-maps', routemap_id)
 
 
 # --- prefixlists ---
@@ -1450,7 +1429,7 @@ def delete_sdn_routemap(cluster_id, routemap_id):
 def list_sdn_prefixlists(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    return _sdn_crud_resource(cluster_id, 'prefixlists')
+    return _sdn_crud_resource(cluster_id, 'prefix-lists')
 
 
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn/prefixlists', methods=['POST'])
@@ -1460,7 +1439,7 @@ def create_sdn_prefixlist(cluster_id):
     if not ok: return err
     user = getattr(request, 'session', {}).get('user', 'system')
     name = (request.json or {}).get('prefixlist', '?')
-    result = _sdn_crud_resource(cluster_id, 'prefixlists')
+    result = _sdn_crud_resource(cluster_id, 'prefix-lists')
     if result[1] == 200:
         manager, _ = get_connected_manager(cluster_id)
         log_audit(user, 'sdn.prefixlist_created', f"Created SDN prefixlist: {name}",
@@ -1473,7 +1452,7 @@ def create_sdn_prefixlist(cluster_id):
 def update_sdn_prefixlist(cluster_id, prefixlist_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    return _sdn_crud_resource(cluster_id, 'prefixlists', prefixlist_id)
+    return _sdn_crud_resource(cluster_id, 'prefix-lists', prefixlist_id)
 
 
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn/prefixlists/<prefixlist_id>', methods=['DELETE'])
@@ -1481,7 +1460,7 @@ def update_sdn_prefixlist(cluster_id, prefixlist_id):
 def delete_sdn_prefixlist(cluster_id, prefixlist_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    return _sdn_crud_resource(cluster_id, 'prefixlists', prefixlist_id)
+    return _sdn_crud_resource(cluster_id, 'prefix-lists', prefixlist_id)
 
 
 # ============================================

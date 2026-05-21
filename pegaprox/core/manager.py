@@ -6817,9 +6817,14 @@ echo "AGENT_INSTALLED_OK"
         """add VM/CT to Proxmox native HA with restart/relocate limits.
 
         MK May 2026 (PVE 9.2) — auto_rebalance is the per-resource opt-out for
-        dynamic CRS rebalancing introduced in 9.2. Accept None (don't send),
-        True/1, or False/0. Stripped for pre-9.2 clusters so the rest of the
-        request still goes through.
+        dynamic CRS rebalancing. Accept None (don't send), True/1, or False/0.
+        Stripped for pre-9.2 clusters.
+
+        Also: PVE 9.2 retired the `group` resource property — groups migrated
+        to the rules engine, so passing `group=...` returns
+        500 "invalid parameter 'group': ha groups have been migrated to rules".
+        We drop the legacy field on 9.2+ and rely on the caller having set up
+        an equivalent node-affinity rule via /cluster/ha/rules.
         """
         if not self.is_connected:
             if not self.connect_to_proxmox():
@@ -6839,16 +6844,24 @@ echo "AGENT_INSTALLED_OK"
                 'state': state or 'started'
             }
 
+            pve_ver = self.get_pve_version_tuple()
+            ha_supports_groups = (pve_ver is None or pve_ver < (9, 2))
+
             if group:
-                data['group'] = group
+                if ha_supports_groups:
+                    data['group'] = group
+                else:
+                    self.logger.info(
+                        f"[HA] dropping legacy 'group={group}' for PVE {pve_ver} — "
+                        f"groups migrated to /cluster/ha/rules; create a node-affinity rule instead"
+                    )
             if comment:
                 data['comment'] = comment
-            if auto_rebalance is not None:
-                pve_ver = self.get_pve_version_tuple()
-                if pve_ver is None or pve_ver >= (9, 2):
-                    data['auto-rebalance'] = 1 if auto_rebalance else 0
-                else:
-                    self.logger.debug(f"[HA] auto-rebalance skipped (PVE {pve_ver} < 9.2)")
+            if auto_rebalance is not None and not ha_supports_groups:
+                # auto-rebalance only exists on 9.2+; ha_supports_groups inverse = 9.2+
+                data['auto-rebalance'] = 1 if auto_rebalance else 0
+            elif auto_rebalance is not None:
+                self.logger.debug(f"[HA] auto-rebalance skipped (PVE {pve_ver} < 9.2)")
 
             response = self._api_post(url, data=data)
             
