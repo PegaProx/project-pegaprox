@@ -3654,56 +3654,90 @@ class PegaProxDB:
                     stats['errors'].append(f"User {row['username']}: {str(e)}")
             
             # 2. Rotate cluster credentials
-            cursor.execute('SELECT id, password_encrypted FROM clusters WHERE password_encrypted IS NOT NULL AND password_encrypted != ""')
+            # MK May 2026 (#446 @hugobugomugo) — column was named
+            # `password_encrypted` in an early schema, renamed to
+            # `pass_encrypted` later, but this rotation code never got the
+            # memo and 500'd at the first SELECT with
+            # "no such column: password_encrypted". That tanked the entire
+            # rotation. Same story for the API-token-secret column.
+            cursor.execute('SELECT id, pass_encrypted FROM clusters WHERE pass_encrypted IS NOT NULL AND pass_encrypted != ""')
             for row in cursor.fetchall():
                 try:
-                    encrypted = row['password_encrypted']
+                    encrypted = row['pass_encrypted']
                     if encrypted and encrypted.startswith('aes256:'):
                         decrypted = self._decrypt_with_key(encrypted, old_aesgcm)
                         new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
-                        cursor.execute('UPDATE clusters SET password_encrypted = ? WHERE id = ?',
+                        cursor.execute('UPDATE clusters SET pass_encrypted = ? WHERE id = ?',
                                      (new_encrypted, row['id']))
                         stats['clusters_rotated'] += 1
                 except Exception as e:
                     stats['errors'].append(f"Cluster {row['id']}: {str(e)}")
-            
-            # Also rotate SSH keys and API tokens if present
-            cursor.execute('SELECT id, ssh_key_encrypted, api_token_encrypted FROM clusters')
+
+            # Also rotate SSH keys and API token secrets if present.
+            cursor.execute('SELECT id, ssh_key_encrypted, api_token_secret_encrypted FROM clusters')
             for row in cursor.fetchall():
                 try:
-                    updated = False
                     ssh_key = row['ssh_key_encrypted']
-                    api_token = row['api_token_encrypted']
-                    
+                    api_token = row['api_token_secret_encrypted']
+
                     if ssh_key and ssh_key.startswith('aes256:'):
                         decrypted = self._decrypt_with_key(ssh_key, old_aesgcm)
                         new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
                         cursor.execute('UPDATE clusters SET ssh_key_encrypted = ? WHERE id = ?',
                                      (new_encrypted, row['id']))
-                        updated = True
-                    
+
                     if api_token and api_token.startswith('aes256:'):
                         decrypted = self._decrypt_with_key(api_token, old_aesgcm)
                         new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
-                        cursor.execute('UPDATE clusters SET api_token_encrypted = ? WHERE id = ?',
+                        cursor.execute('UPDATE clusters SET api_token_secret_encrypted = ? WHERE id = ?',
                                      (new_encrypted, row['id']))
-                        updated = True
                 except Exception as e:
                     stats['errors'].append(f"Cluster secrets {row['id']}: {str(e)}")
-            
-            # 3. Rotate session data if encrypted
-            cursor.execute('SELECT token, data_encrypted FROM sessions WHERE data_encrypted IS NOT NULL AND data_encrypted != ""')
+
+            # 3. Rotate pending TOTP secrets — mid-enrollment users (clicked
+            # "Setup 2FA" but haven't confirmed) had their column missed by
+            # the original rotation. Same shape as the live secret.
+            cursor.execute('SELECT username, totp_pending_secret_encrypted FROM users WHERE totp_pending_secret_encrypted IS NOT NULL AND totp_pending_secret_encrypted != ""')
             for row in cursor.fetchall():
                 try:
-                    encrypted = row['data_encrypted']
+                    encrypted = row['totp_pending_secret_encrypted']
                     if encrypted and encrypted.startswith('aes256:'):
                         decrypted = self._decrypt_with_key(encrypted, old_aesgcm)
                         new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
-                        cursor.execute('UPDATE sessions SET data_encrypted = ? WHERE token = ?',
-                                     (new_encrypted, row['token']))
-                        stats['sessions_rotated'] += 1
+                        cursor.execute('UPDATE users SET totp_pending_secret_encrypted = ? WHERE username = ?',
+                                     (new_encrypted, row['username']))
+                        stats['users_rotated'] += 1
                 except Exception as e:
-                    stats['errors'].append(f"Session: {str(e)}")
+                    stats['errors'].append(f"User {row['username']} (pending TOTP): {str(e)}")
+
+            # 4. Rotate ESXi storage passwords if any registered. Column on
+            # esxi_storages is in fact named `password_encrypted` (cf. schema
+            # at db.py:619) — that name matches its own table, unlike the
+            # mis-named cluster column above. Table may not exist on older
+            # installs, so swallow the OperationalError quietly.
+            try:
+                cursor.execute('SELECT id, password_encrypted FROM esxi_storages WHERE password_encrypted IS NOT NULL AND password_encrypted != ""')
+                for row in cursor.fetchall():
+                    try:
+                        encrypted = row['password_encrypted']
+                        if encrypted and encrypted.startswith('aes256:'):
+                            decrypted = self._decrypt_with_key(encrypted, old_aesgcm)
+                            new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                            cursor.execute('UPDATE esxi_storages SET password_encrypted = ? WHERE id = ?',
+                                         (new_encrypted, row['id']))
+                    except Exception as e:
+                        stats['errors'].append(f"ESXi storage {row['id']}: {str(e)}")
+            except Exception:
+                # esxi_storages may not exist on older installs
+                pass
+
+            # Sessions block removed — the `sessions` table tracks
+            # (token, username, created_at, expires_at, ip_address, user_agent)
+            # and has no encrypted data column on the current schema. The old
+            # `data_encrypted` SELECT would also have failed with "no such
+            # column" if rotation had ever reached that step (it never did
+            # because clusters failed first). stats['sessions_rotated'] stays
+            # at 0 for backwards-compat with the UI counter.
             
             self.conn.commit()
             
