@@ -3577,10 +3577,7 @@ def get_node_shell_ticket(cluster_id, node):
         return jsonify({'error': result['error']}), 500
 
 
-# VM Config API Routes
-@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/config', methods=['GET'])
-@require_auth(perms=['vm.view'])
-def get_vm_config_api(cluster_id, node, vm_type, vmid):
+def _get_vm_config_response(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     
@@ -3595,9 +3592,93 @@ def get_vm_config_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
 
     if result['success']:
-        return jsonify(result['config'])
+        config = result['config']
+        if isinstance(config, dict) and not config.get('tags') and not config.get('tag'):
+            raw = config.get('raw') if isinstance(config.get('raw'), dict) else {}
+            general = config.get('general') if isinstance(config.get('general'), dict) else {}
+            vm_tags = raw.get('tags') or general.get('tags')
+            if vm_tags:
+                config['tags'] = vm_tags
+        return jsonify(config)
     else:
         return jsonify({'error': result['error']}), 500
+
+
+def _resolve_vm_location(mgr, vmid, requested_node=None, requested_type=None):
+    """Find the current node/type for a VMID so shorthand VM routes can work."""
+    requested_node = (requested_node or '').strip() or None
+    requested_type = (requested_type or '').strip() or None
+    if requested_type == 'ct':
+        requested_type = 'lxc'
+
+    try:
+        if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
+            resources = mgr.get_vms() or []
+        else:
+            resources = mgr.get_vm_resources() or []
+    except Exception as e:
+        logging.warning(f"[API] Failed to resolve VM {vmid} location: {e}")
+        return None, None, jsonify({'error': safe_error(e, 'Failed to resolve VM location')}), 500
+
+    matches = []
+    for item in resources:
+        if str(item.get('vmid')) != str(vmid):
+            continue
+        item_type = item.get('type') or 'qemu'
+        item_node = item.get('node') or requested_node
+        if requested_type and item_type != requested_type:
+            continue
+        if requested_node and item_node != requested_node:
+            continue
+        matches.append((item_node, item_type))
+
+    if not matches:
+        return None, None, jsonify({'error': f'VM {vmid} not found'}), 404
+
+    unique = []
+    for match in matches:
+        if match not in unique:
+            unique.append(match)
+
+    if len(unique) > 1:
+        return None, None, jsonify({
+            'error': f'VM {vmid} is ambiguous; use /vms/<node>/<type>/{vmid}/config',
+            'matches': [{'node': node, 'type': vm_type} for node, vm_type in unique],
+        }), 409
+
+    node, vm_type = unique[0]
+    if not node:
+        node = requested_node or 'xcpng'
+    return node, vm_type, None, None
+
+
+# VM Config API Routes
+@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/config', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_config_by_id_api(cluster_id, vmid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    node, vm_type, error_body, status = _resolve_vm_location(
+        mgr,
+        vmid,
+        requested_node=request.args.get('node'),
+        requested_type=request.args.get('type') or request.args.get('vm_type'),
+    )
+    if error_body is not None:
+        return error_body, status
+
+    return _get_vm_config_response(cluster_id, node, vm_type, vmid)
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/config', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_config_api(cluster_id, node, vm_type, vmid):
+    return _get_vm_config_response(cluster_id, node, vm_type, vmid)
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/lock', methods=['GET'])
@@ -8764,6 +8845,4 @@ def create_container_api(cluster_id, node):
         return jsonify(result)
     else:
         return jsonify(result), 400
-
-
 
