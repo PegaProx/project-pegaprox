@@ -1640,7 +1640,14 @@
                                                             </td>
                                                             <td className="p-2 text-sm text-gray-400">{item.content}</td>
                                                             <td className="p-2 text-sm text-gray-400">{item.format || '-'}</td>
-                                                            <td className="p-2 text-sm text-right">{item.size_human || formatSize(item.size)}</td>
+                                                            <td className="p-2 text-sm text-right">
+                                                                {/* LW May 2026 — `~` prefix when PVE 9.2 only had approximate-size
+                                                                    (size_is_approx flag set by backend). For backends like shared
+                                                                    LVM or thick qcow2 where computing the real size is expensive. */}
+                                                                {item.size_is_approx && <span className="text-gray-500">~</span>}
+                                                                {item.size_human || formatSize(item.size)}
+                                                                {item.size_is_approx && <span className="text-[10px] text-gray-500 ml-1" title="Approximate — PVE 9.2 reported approximate-size, not exact size">≈</span>}
+                                                            </td>
                                                             {isAdmin && (
                                                                 <td className="p-2">
                                                                     {/* LW: allow deleting backups even with vmid - vzdumps always have vmid attached */}

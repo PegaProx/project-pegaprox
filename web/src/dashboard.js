@@ -17028,6 +17028,34 @@
                                                                 <span className="text-gray-300">{t('sshAuthMode') || 'SSH: Password'}</span>
                                                             </div>
                                                             <p className="text-xs text-gray-500">{t('dontChangePvePassword') || "Don't change the PVE password without updating it here"}</p>
+                                                            {/* LW May 2026 — PVE 9.2 in-place token regenerate. Pre-9.2
+                                                                falls back to delete+create with explicit "ACLs lost"
+                                                                warning. Admin-only. */}
+                                                            {isAdmin && selectedCluster.api_token_active && (
+                                                                <button
+                                                                    onClick={async () => {
+                                                                        if (!confirm(t('confirmRotateToken') ||
+                                                                            'Rotate the API token for this cluster?\n\n' +
+                                                                            'PVE 9.2: secret is regenerated in-place, ACLs preserved.\n' +
+                                                                            'PVE 8.x / 9.0 / 9.1: token is deleted + recreated — any ACL entries on the token will be lost.')) return;
+                                                                        try {
+                                                                            const r = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/api-token/rotate`, {method: 'POST'});
+                                                                            const d = await r.json();
+                                                                            if (r.ok && d.success) {
+                                                                                addToast(d.message || (t('tokenRotated') || 'API token rotated'),
+                                                                                    d.acls_preserved ? 'success' : 'warning');
+                                                                            } else {
+                                                                                addToast(d.error || (t('rotateFailed') || 'Rotation failed'), 'error');
+                                                                            }
+                                                                        } catch (e) {
+                                                                            addToast(String(e), 'error');
+                                                                        }
+                                                                    }}
+                                                                    className="mt-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5">
+                                                                    <Icons.RefreshCw className="w-3 h-3" />
+                                                                    {t('rotateApiToken') || 'Rotate API Token'}
+                                                                </button>
+                                                            )}
                                                         </div>
                                                     </div>
 

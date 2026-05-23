@@ -60,7 +60,7 @@
             const [showAddHaGroup, setShowAddHaGroup] = useState(false);
             const [showEditHaResource, setShowEditHaResource] = useState(null);
             const [showEditHaGroup, setShowEditHaGroup] = useState(null);
-            const [newHaResource, setNewHaResource] = useState({ sid: '', state: 'started', group: '', max_restart: 1, max_relocate: 1, comment: '' });
+            const [newHaResource, setNewHaResource] = useState({ sid: '', state: 'started', group: '', max_restart: 1, max_relocate: 1, comment: '', auto_rebalance: null });
             const [newHaGroup, setNewHaGroup] = useState({ group: '', nodes: '', restricted: 0, nofailback: 0 });
             
             const [metricServers, setMetricServers] = useState([]);
@@ -90,6 +90,16 @@
             
             // LW: SDN State - Feb 2026, GitHub Issue #38
             const [sdnData, setSdnData] = useState({ available: false, zones: [], vnets: [], subnets: [], controllers: [], ipams: [], dns: [], pending: false, debug: {} });
+            // LW May 2026 — PVE 9.2 SDN extras. Three new object families (fabrics,
+            // route-maps, prefix-lists) sit under the same /cluster/sdn path. Lazy-load
+            // when the user opens the SDN tab; pre-9.2 clusters return empty arrays
+            // (backend translates the 404 → []).
+            const [sdn92Fabrics, setSdn92Fabrics] = useState([]);
+            const [sdn92RouteMaps, setSdn92RouteMaps] = useState([]);
+            const [sdn92PrefixLists, setSdn92PrefixLists] = useState([]);
+            const [sdn92Loaded, setSdn92Loaded] = useState(false);
+            const [sdn92AddType, setSdn92AddType] = useState(null);  // null | 'fabric' | 'routemap' | 'prefixlist'
+            const [sdn92Form, setSdn92Form] = useState({ name: '', protocol: 'openfabric', comment: '' });
             const [sdnLoading, setSdnLoading] = useState(false);
             const [showAddZone, setShowAddZone] = useState(false);
             const [showAddVnet, setShowAddVnet] = useState(false);
@@ -4633,6 +4643,209 @@
                                         </div>
                                     </div>
                                 )}
+
+                                {/* LW May 2026 — PVE 9.2 SDN extras: fabrics + route-maps + prefix-lists.
+                                    Lazy-loaded so we don't 404-spam pre-9.2 clusters on every render. */}
+                                {sdnData.available && (
+                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 mt-4">
+                                        <div className="flex items-center justify-between mb-3">
+                                            <h3 className="text-sm font-medium text-white flex items-center gap-2">
+                                                <Icons.Layers className="w-4 h-4 text-orange-400" />
+                                                PVE 9.2 SDN extras
+                                                <span className="text-[10px] text-gray-500">(fabrics · route-maps · prefix-lists)</span>
+                                            </h3>
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        const [fr, rmr, plr] = await Promise.all([
+                                                            authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/fabrics`),
+                                                            authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/routemaps`),
+                                                            authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/prefixlists`),
+                                                        ]);
+                                                        setSdn92Fabrics(fr.ok ? (await fr.json()) || [] : []);
+                                                        setSdn92RouteMaps(rmr.ok ? (await rmr.json()) || [] : []);
+                                                        setSdn92PrefixLists(plr.ok ? (await plr.json()) || [] : []);
+                                                        setSdn92Loaded(true);
+                                                    } catch (e) {
+                                                        addToast('Failed to load PVE 9.2 SDN extras: ' + e, 'error');
+                                                    }
+                                                }}
+                                                className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5">
+                                                <Icons.RefreshCw className="w-3 h-3" />
+                                                {sdn92Loaded ? 'Refresh' : 'Load'}
+                                            </button>
+                                        </div>
+
+                                        {!sdn92Loaded ? (
+                                            <p className="text-xs text-gray-500">
+                                                Click Load to fetch fabrics + route-maps + prefix-lists. Pre-PVE-9.2 clusters will show empty lists (endpoints don't exist).
+                                            </p>
+                                        ) : (
+                                            <div className="grid grid-cols-3 gap-3">
+                                                {/* Fabrics */}
+                                                <div className="bg-proxmox-dark/50 rounded-lg p-3 border border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <div className="text-xs font-medium text-gray-300">Fabrics <span className="text-gray-500">({sdn92Fabrics.length})</span></div>
+                                                        <button onClick={() => { setSdn92AddType('fabric'); setSdn92Form({ name: '', protocol: 'openfabric', comment: '' }); }}
+                                                            className="text-xs text-orange-400 hover:text-orange-300">+ add</button>
+                                                    </div>
+                                                    {sdn92Fabrics.length === 0 ? (
+                                                        <p className="text-[11px] text-gray-500">none</p>
+                                                    ) : (
+                                                        <ul className="space-y-1">
+                                                            {sdn92Fabrics.map(f => (
+                                                                <li key={f.fabric} className="flex items-center justify-between text-xs">
+                                                                    <span className="font-mono text-gray-300">{f.fabric} <span className="text-gray-500">[{f.protocol}]</span></span>
+                                                                    <button onClick={async () => {
+                                                                        if (!confirm(`Delete fabric '${f.fabric}'?`)) return;
+                                                                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/fabrics/${f.fabric}`, {method:'DELETE'});
+                                                                        if (r.ok) { setSdn92Fabrics(sdn92Fabrics.filter(x => x.fabric !== f.fabric)); addToast('Fabric deleted', 'success'); }
+                                                                        else { addToast('Delete failed: ' + (await r.text()), 'error'); }
+                                                                    }} className="text-red-400 hover:text-red-300">×</button>
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                </div>
+                                                {/* Route-Maps */}
+                                                <div className="bg-proxmox-dark/50 rounded-lg p-3 border border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <div className="text-xs font-medium text-gray-300">Route-Maps <span className="text-gray-500">({sdn92RouteMaps.length})</span></div>
+                                                        <button onClick={() => { setSdn92AddType('routemap'); setSdn92Form({ name: '', protocol: '', comment: '' }); }}
+                                                            className="text-xs text-orange-400 hover:text-orange-300">+ add</button>
+                                                    </div>
+                                                    {sdn92RouteMaps.length === 0 ? (
+                                                        <p className="text-[11px] text-gray-500">none</p>
+                                                    ) : (
+                                                        <ul className="space-y-1">
+                                                            {sdn92RouteMaps.map(rm => {
+                                                                const key = rm.routemap || rm.name || JSON.stringify(rm).slice(0,16);
+                                                                return (
+                                                                    <li key={key} className="flex items-center justify-between text-xs">
+                                                                        <span className="font-mono text-gray-300">{key}</span>
+                                                                        <button onClick={async () => {
+                                                                            if (!confirm(`Delete route-map '${key}'?`)) return;
+                                                                            const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/routemaps/${key}`, {method:'DELETE'});
+                                                                            if (r.ok) { setSdn92RouteMaps(sdn92RouteMaps.filter(x => (x.routemap||x.name) !== key)); addToast('Route-map deleted','success'); }
+                                                                            else { addToast('Delete failed: ' + (await r.text()),'error'); }
+                                                                        }} className="text-red-400 hover:text-red-300">×</button>
+                                                                    </li>
+                                                                );
+                                                            })}
+                                                        </ul>
+                                                    )}
+                                                </div>
+                                                {/* Prefix-Lists */}
+                                                <div className="bg-proxmox-dark/50 rounded-lg p-3 border border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <div className="text-xs font-medium text-gray-300">Prefix-Lists <span className="text-gray-500">({sdn92PrefixLists.length})</span></div>
+                                                        <button onClick={() => { setSdn92AddType('prefixlist'); setSdn92Form({ name: '', protocol: '', comment: '' }); }}
+                                                            className="text-xs text-orange-400 hover:text-orange-300">+ add</button>
+                                                    </div>
+                                                    {sdn92PrefixLists.length === 0 ? (
+                                                        <p className="text-[11px] text-gray-500">none</p>
+                                                    ) : (
+                                                        <ul className="space-y-1">
+                                                            {sdn92PrefixLists.map(pl => {
+                                                                const key = pl.prefixlist || pl.name || JSON.stringify(pl).slice(0,16);
+                                                                return (
+                                                                    <li key={key} className="flex items-center justify-between text-xs">
+                                                                        <span className="font-mono text-gray-300">{key}</span>
+                                                                        <button onClick={async () => {
+                                                                            if (!confirm(`Delete prefix-list '${key}'?`)) return;
+                                                                            const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/prefixlists/${key}`, {method:'DELETE'});
+                                                                            if (r.ok) { setSdn92PrefixLists(sdn92PrefixLists.filter(x => (x.prefixlist||x.name) !== key)); addToast('Prefix-list deleted','success'); }
+                                                                            else { addToast('Delete failed: ' + (await r.text()),'error'); }
+                                                                        }} className="text-red-400 hover:text-red-300">×</button>
+                                                                    </li>
+                                                                );
+                                                            })}
+                                                        </ul>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Add modal — minimal shared form for all 3 types */}
+                                        {sdn92AddType && (
+                                            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 max-w-md w-full mx-4">
+                                                    <h4 className="text-sm font-medium text-white mb-3">
+                                                        Add {sdn92AddType}
+                                                    </h4>
+                                                    <div className="space-y-3">
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">Name</label>
+                                                            <input type="text" value={sdn92Form.name}
+                                                                onChange={e => setSdn92Form({...sdn92Form, name: e.target.value})}
+                                                                placeholder={sdn92AddType === 'fabric' ? 'fabric1' : (sdn92AddType === 'routemap' ? 'rmap1' : 'plist1')}
+                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
+                                                        </div>
+                                                        {sdn92AddType === 'fabric' && (
+                                                            <div>
+                                                                <label className="block text-xs text-gray-400 mb-1">Protocol</label>
+                                                                <select value={sdn92Form.protocol}
+                                                                    onChange={e => setSdn92Form({...sdn92Form, protocol: e.target.value})}
+                                                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                                    <option value="openfabric">openfabric</option>
+                                                                    <option value="ospf">ospf</option>
+                                                                    <option value="wireguard">wireguard (PVE 9.2+)</option>
+                                                                    <option value="bgp">bgp (PVE 9.2+)</option>
+                                                                </select>
+                                                            </div>
+                                                        )}
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">Comment (optional)</label>
+                                                            <input type="text" value={sdn92Form.comment}
+                                                                onChange={e => setSdn92Form({...sdn92Form, comment: e.target.value})}
+                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        </div>
+                                                        <p className="text-[11px] text-gray-500">
+                                                            Per-protocol details (wireguard endpoints, BGP ASN, OSPF area etc.) need to be set via the PVE web UI — PegaProx exposes the basic create here for inventory, you'll finish the config in PVE.
+                                                        </p>
+                                                    </div>
+                                                    <div className="flex justify-end gap-2 mt-4">
+                                                        <button onClick={() => setSdn92AddType(null)}
+                                                            className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border rounded text-xs">Cancel</button>
+                                                        <button
+                                                            disabled={!sdn92Form.name.trim()}
+                                                            onClick={async () => {
+                                                                const name = sdn92Form.name.trim();
+                                                                if (!name) return;
+                                                                let path, body;
+                                                                if (sdn92AddType === 'fabric') {
+                                                                    path = 'fabrics';
+                                                                    body = { fabric: name, protocol: sdn92Form.protocol };
+                                                                } else if (sdn92AddType === 'routemap') {
+                                                                    path = 'routemaps';
+                                                                    body = { routemap: name };
+                                                                } else {
+                                                                    path = 'prefixlists';
+                                                                    body = { prefixlist: name };
+                                                                }
+                                                                if (sdn92Form.comment) body.comment = sdn92Form.comment;
+                                                                const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/${path}`, {
+                                                                    method: 'POST',
+                                                                    headers: {'Content-Type': 'application/json'},
+                                                                    body: JSON.stringify(body),
+                                                                });
+                                                                if (r.ok) {
+                                                                    addToast('Created — reload list to see', 'success');
+                                                                    setSdn92AddType(null);
+                                                                    setSdn92Loaded(false);
+                                                                } else {
+                                                                    addToast('Create failed: ' + (await r.text()), 'error');
+                                                                }
+                                                            }}
+                                                            className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded text-xs">
+                                                            Create
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -5479,8 +5692,8 @@
                                                     </div>
                                                     <div>
                                                         <label className="block text-sm text-gray-400 mb-1">Request State:</label>
-                                                        <select 
-                                                            value={newHaResource.state || 'started'} 
+                                                        <select
+                                                            value={newHaResource.state || 'started'}
                                                             onChange={e => setNewHaResource({...newHaResource, state: e.target.value})}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                         >
@@ -5488,6 +5701,29 @@
                                                             <option value="stopped">stopped</option>
                                                             <option value="ignored">ignored</option>
                                                             <option value="disabled">disabled</option>
+                                                        </select>
+                                                    </div>
+                                                    {/* LW May 2026 — PVE 9.2 per-resource dynamic CRS opt-in/-out.
+                                                        Default state "unset" lets the cluster default win; admin
+                                                        explicitly enables/disables auto-rebalance per VM. Pre-9.2
+                                                        clusters ignore the field (backend version-gates). */}
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">
+                                                            Auto-Rebalance <span className="text-xs text-gray-500">PVE 9.2+</span>
+                                                        </label>
+                                                        <select
+                                                            value={newHaResource.auto_rebalance === null ? '' :
+                                                                   (newHaResource.auto_rebalance ? '1' : '0')}
+                                                            onChange={e => {
+                                                                const v = e.target.value;
+                                                                setNewHaResource({...newHaResource,
+                                                                    auto_rebalance: v === '' ? null : v === '1'});
+                                                            }}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                                        >
+                                                            <option value="">-- cluster default --</option>
+                                                            <option value="1">Enabled — CRS may move this VM</option>
+                                                            <option value="0">Disabled — pin to assigned node</option>
                                                         </select>
                                                     </div>
                                                 </div>
@@ -5523,8 +5759,14 @@
                                                         };
                                                         if (newHaResource.group) payload.group = newHaResource.group;
                                                         if (newHaResource.comment) payload.comment = newHaResource.comment;
-                                                        
-                                                        var res = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/resources', { 
+                                                        // MK May 2026 — PVE 9.2 introduced per-resource auto-rebalance
+                                                        // on /cluster/ha/resources. Only send the field if admin
+                                                        // explicitly chose; null = let the cluster CRS default win.
+                                                        if (newHaResource.auto_rebalance !== null && newHaResource.auto_rebalance !== undefined) {
+                                                            payload.auto_rebalance = newHaResource.auto_rebalance;
+                                                        }
+
+                                                        var res = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/resources', {
                                                             method: 'POST', 
                                                             headers: { 'Content-Type': 'application/json' }, 
                                                             body: JSON.stringify(payload) 
@@ -5533,7 +5775,7 @@
                                                         if (res && res.ok) { 
                                                             addToast('Resource added to HA', 'success'); 
                                                             setShowAddHaResource(false); 
-                                                            setNewHaResource({ sid: '', state: 'started', group: '', max_restart: 1, max_relocate: 1, comment: '' });
+                                                            setNewHaResource({ sid: '', state: 'started', group: '', max_restart: 1, max_relocate: 1, comment: '', auto_rebalance: null });
                                                             fetchAllData(); 
                                                         } else { 
                                                             var errData = await res.json().catch(function() { return {}; }); 

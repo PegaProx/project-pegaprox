@@ -1420,9 +1420,43 @@
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
                                                 </div>
                                             </div>
+                                            {/* NS May 2026 — PVE 9.2 mountpoint extras. idmap = inline uid/gid
+                                                mapping, format like 'u 0 100000 65536' (uid, host_id, len);
+                                                keepattrs = preserve xattr/setuid bits on snapshot + backup.
+                                                Pre-9.2 clusters silently ignore both; backend gates the emit. */}
+                                            <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-proxmox-border">
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">
+                                                        idmap <span className="text-[10px] text-gray-500">PVE 9.2+</span>
+                                                    </label>
+                                                    <input type="text" value={mp.idmap || ''} onChange={e => {
+                                                        const newMps = [...config.additional_disks];
+                                                        newMps[idx] = {...mp, idmap: e.target.value};
+                                                        setConfig({...config, additional_disks: newMps});
+                                                    }}
+                                                        placeholder="u 0 100000 65536"
+                                                        className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm font-mono" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">
+                                                        keepattrs <span className="text-[10px] text-gray-500">PVE 9.2+</span>
+                                                    </label>
+                                                    <label className="flex items-center gap-2 cursor-pointer pt-1.5">
+                                                        <input type="checkbox"
+                                                            checked={!!mp.keepattrs}
+                                                            onChange={e => {
+                                                                const newMps = [...config.additional_disks];
+                                                                newMps[idx] = {...mp, keepattrs: e.target.checked};
+                                                                setConfig({...config, additional_disks: newMps});
+                                                            }}
+                                                            className="rounded border-proxmox-border bg-proxmox-darker" />
+                                                        <span className="text-xs text-gray-300">preserve xattrs / suid on snapshot &amp; backup</span>
+                                                    </label>
+                                                </div>
+                                            </div>
                                         </div>
                                     ))}
-                                    
+
                                     {/* MK: Add Mount Point Button */}
                                     <button onClick={() => setConfig({...config, additional_disks: [...config.additional_disks, {storage: config.storage, size: '8', path: '/mnt/data' + config.additional_disks.length}]})}
                                         className="w-full px-4 py-2 border-2 border-dashed border-proxmox-border rounded-lg text-gray-400 hover:text-white hover:border-proxmox-orange transition-colors">
