@@ -1852,11 +1852,22 @@
                                             </div>
                                             {isQemu && (
                                                 <>
+                                                    {/* NS May 2026 — composite cpu= string parsers. PVE accepts
+                                                        "type,flags=...,reported-model=...,level=...". We keep the
+                                                        existing dropdown bound to the BASE type (first segment) and
+                                                        add reported-model + level as separate inputs below that
+                                                        splice into the composite. PVE 9.2+ exposes those sub-options
+                                                        formally; older PVE just sees them as unknown sub-options and
+                                                        ignores quietly. */}
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <ConfigInputField
                                                             label={t('cpuType')}
-                                                            value={getValue('hardware', 'cpu')}
-                                                            onChange={(v) => handleChange('hardware', 'cpu', v)}
+                                                            value={(getValue('hardware', 'cpu') || '').split(',')[0]}
+                                                            onChange={(v) => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                const parts = cur.split(',').slice(1);
+                                                                handleChange('hardware', 'cpu', [v, ...parts].filter(Boolean).join(','));
+                                                            }}
                                                             options={hardwareOptions?.cpu_types || ['host', 'kvm64', 'qemu64']}
                                                             needsRestart={true}
                                                         />
@@ -1873,6 +1884,56 @@
                                                                 { value: 'cirrus', label: 'Cirrus Logic' },
                                                                 { value: 'none', label: t('none') },
                                                             ]}
+                                                            needsRestart={true}
+                                                        />
+                                                    </div>
+                                                    {/* NS May 2026 — PVE 9.2 cpu sub-options. Splice in/out of the
+                                                        composite cpu= string. Empty input = remove the sub-option. */}
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <ConfigInputField
+                                                            label="reported-model"
+                                                            value={(() => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                for (const part of cur.split(',').slice(1)) {
+                                                                    const [k, v] = part.split('=');
+                                                                    if (k === 'reported-model') return v || '';
+                                                                }
+                                                                return '';
+                                                            })()}
+                                                            onChange={(v) => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                const [base, ...rest] = cur.split(',');
+                                                                const kept = rest.filter(p => !p.startsWith('reported-model='));
+                                                                if (v && v.trim()) kept.push(`reported-model=${v.trim()}`);
+                                                                handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
+                                                            }}
+                                                            placeholder="(empty) e.g. Skylake-Client, host"
+                                                            needsRestart={true}
+                                                        />
+                                                        <ConfigInputField
+                                                            label="level"
+                                                            type="number"
+                                                            min={1}
+                                                            max={64}
+                                                            value={(() => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                for (const part of cur.split(',').slice(1)) {
+                                                                    const [k, v] = part.split('=');
+                                                                    if (k === 'level') return v || '';
+                                                                }
+                                                                return '';
+                                                            })()}
+                                                            onChange={(v) => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                const [base, ...rest] = cur.split(',');
+                                                                const kept = rest.filter(p => !p.startsWith('level='));
+                                                                const num = parseInt(v, 10);
+                                                                if (!isNaN(num) && num >= 1 && num <= 64) {
+                                                                    kept.push(`level=${num}`);
+                                                                }
+                                                                handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
+                                                            }}
+                                                            placeholder="(empty) 1-64"
                                                             needsRestart={true}
                                                         />
                                                     </div>

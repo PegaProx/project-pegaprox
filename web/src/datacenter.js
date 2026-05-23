@@ -307,6 +307,13 @@
                 // CRS (complex)
                 crs_ha_rebalance: '',
                 crs_mode: '',
+                // MK May 2026 — PVE 9.2+ CRS auto-rebalance tuning (pve-ha-manager
+                // Manager.pm update_crs_scheduler_mode). All sub-keys of `crs`.
+                crs_ha_auto_rebalance: '',          // toggle '1' / ''
+                crs_ha_auto_rebalance_threshold: '', // % int (default 30)
+                crs_ha_auto_rebalance_method: '',    // 'bruteforce' default
+                crs_ha_auto_rebalance_hold_duration: '',  // int (default 3)
+                crs_ha_auto_rebalance_margin: '',    // % int (default 10)
                 // Next ID Range (complex)
                 next_id_lower: 100,
                 next_id_upper: 999999999,
@@ -363,19 +370,28 @@
                     }
                 }
                 
-                // CRS: can be object {ha-rebalance-on-start, scheduling} or string.
-                // Note: on PVE 9.2+ the `crs` key was retired from /cluster/options
-                // (config moved into /cluster/ha/rules), so this read+write path
-                // only applies to PVE 8.x/9.0/9.1.
+                // CRS: can be object {ha-rebalance-on-start, scheduling,
+                //   ha-auto-rebalance, ha-auto-rebalance-{threshold,method,hold-duration,margin}}
+                // OR the raw composite string PVE sometimes returns.
+                // Note: the `scheduling` sub-key is pre-9.2 only — on 9.2 the
+                // crs object is structured but `scheduling` is no longer in the
+                // schema. We read whatever's there and let the user re-save.
                 if (opts.crs) {
+                    const readPair = (k, v) => {
+                        if (k === 'ha-rebalance-on-start') parsed.crs_ha_rebalance = v === '1' ? '1' : '';
+                        else if (k === 'scheduling') parsed.crs_mode = v || '';
+                        else if (k === 'ha-auto-rebalance') parsed.crs_ha_auto_rebalance = v === '1' ? '1' : '';
+                        else if (k === 'ha-auto-rebalance-threshold') parsed.crs_ha_auto_rebalance_threshold = String(v || '');
+                        else if (k === 'ha-auto-rebalance-method') parsed.crs_ha_auto_rebalance_method = String(v || '');
+                        else if (k === 'ha-auto-rebalance-hold-duration') parsed.crs_ha_auto_rebalance_hold_duration = String(v || '');
+                        else if (k === 'ha-auto-rebalance-margin') parsed.crs_ha_auto_rebalance_margin = String(v || '');
+                    };
                     if (typeof opts.crs === 'object') {
-                        parsed.crs_ha_rebalance = opts.crs['ha-rebalance-on-start'] ? '1' : '';
-                        parsed.crs_mode = opts.crs.scheduling || '';
+                        for (const [k, v] of Object.entries(opts.crs)) readPair(k, v);
                     } else if (typeof opts.crs === 'string') {
                         opts.crs.split(',').forEach(part => {
                             const [k, v] = part.split('=');
-                            if (k === 'ha-rebalance-on-start') parsed.crs_ha_rebalance = v === '1' ? '1' : '';
-                            if (k === 'scheduling') parsed.crs_mode = v;
+                            readPair(k, v);
                         });
                     }
                 }
@@ -735,13 +751,35 @@
                         payload.ha = `shutdown_policy=${editingOptions.ha_shutdown_policy}`;
                     }
                     
-                    // === CRS Settings (pre-9.2 only — PVE 9.2 retired this key) ===
+                    // === CRS Settings ===
+                    // Mix of pre-9.2 (scheduling, ha-rebalance-on-start) and
+                    // 9.2+ (ha-auto-rebalance + its tuning sub-keys). Send
+                    // whatever the admin filled; PVE will reject keys it
+                    // doesn't understand for its version.
                     const crsParts = [];
                     if (editingOptions.crs_ha_rebalance === '1') {
                         crsParts.push('ha-rebalance-on-start=1');
                     }
                     if (editingOptions.crs_mode && editingOptions.crs_mode !== '') {
                         crsParts.push(`scheduling=${editingOptions.crs_mode}`);
+                    }
+                    if (editingOptions.crs_ha_auto_rebalance === '1') {
+                        crsParts.push('ha-auto-rebalance=1');
+                    }
+                    const arThresh = parseInt(editingOptions.crs_ha_auto_rebalance_threshold, 10);
+                    if (!isNaN(arThresh) && arThresh >= 0 && arThresh <= 100) {
+                        crsParts.push(`ha-auto-rebalance-threshold=${arThresh}`);
+                    }
+                    if (editingOptions.crs_ha_auto_rebalance_method) {
+                        crsParts.push(`ha-auto-rebalance-method=${editingOptions.crs_ha_auto_rebalance_method}`);
+                    }
+                    const arHold = parseInt(editingOptions.crs_ha_auto_rebalance_hold_duration, 10);
+                    if (!isNaN(arHold) && arHold >= 0) {
+                        crsParts.push(`ha-auto-rebalance-hold-duration=${arHold}`);
+                    }
+                    const arMargin = parseInt(editingOptions.crs_ha_auto_rebalance_margin, 10);
+                    if (!isNaN(arMargin) && arMargin >= 0 && arMargin <= 100) {
+                        crsParts.push(`ha-auto-rebalance-margin=${arMargin}`);
                     }
                     if (crsParts.length > 0) {
                         payload.crs = crsParts.join(',');
@@ -1623,10 +1661,61 @@
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">CRS Scheduling Mode</label>
                                                     <select value={editingOptions.crs_mode || ''} onChange={e => setEditingOptions({...editingOptions, crs_mode: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                        <option value="">Default (basic)</option>
+                                                        <option value="">Default (basic) - pre-9.2 only</option>
                                                         <option value="basic">Basic - simple load distribution</option>
                                                         <option value="static">Static - consider static resource config</option>
                                                     </select>
+                                                </div>
+                                            </div>
+                                            {/* MK May 2026 — PVE 9.2+ auto-rebalance tuning. Source:
+                                                pve-ha-manager Manager.pm update_crs_scheduler_mode reads
+                                                $dc_cfg->{crs}->{ha-auto-rebalance,
+                                                ha-auto-rebalance-{threshold,method,hold-duration,margin}}.
+                                                Older PVE will reject these on save with a schema error if
+                                                set — leave empty on pre-9.2 clusters. */}
+                                            <div className="mt-4 pt-3 border-t border-proxmox-border/50">
+                                                <p className="text-xs text-gray-500 mb-2">
+                                                    Auto-Rebalance tuning <span className="text-[10px] text-orange-400">PVE 9.2+</span>
+                                                </p>
+                                                <div className="grid grid-cols-2 gap-4">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Auto-Rebalance</label>
+                                                        <select value={editingOptions.crs_ha_auto_rebalance || ''} onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                            <option value="">Disabled (PVE default)</option>
+                                                            <option value="1">Enabled — CRS rebalances HA resources continuously</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Method</label>
+                                                        <select value={editingOptions.crs_ha_auto_rebalance_method || ''} onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_method: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                            <option value="">Default (bruteforce)</option>
+                                                            <option value="bruteforce">bruteforce</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Threshold (%)</label>
+                                                        <input type="number" min="0" max="100" placeholder="default 30"
+                                                            value={editingOptions.crs_ha_auto_rebalance_threshold || ''}
+                                                            onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_threshold: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        <p className="text-[11px] text-gray-500 mt-1">Imbalance threshold before CRS acts. Lower = more aggressive.</p>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Margin (%)</label>
+                                                        <input type="number" min="0" max="100" placeholder="default 10"
+                                                            value={editingOptions.crs_ha_auto_rebalance_margin || ''}
+                                                            onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_margin: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        <p className="text-[11px] text-gray-500 mt-1">Required improvement margin to justify a move.</p>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Hold Duration (cycles)</label>
+                                                        <input type="number" min="0" placeholder="default 3"
+                                                            value={editingOptions.crs_ha_auto_rebalance_hold_duration || ''}
+                                                            onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_hold_duration: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        <p className="text-[11px] text-gray-500 mt-1">CRM cycles a VM stays pinned after being placed.</p>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>

@@ -11940,31 +11940,63 @@ echo "AGENT_INSTALLED_OK"
     ]
 
     def get_cpu_types(self) -> List[str]:
-        custom = self._fetch_custom_cpu_models()
-        if not custom:
-            return list(self._STATIC_CPU_TYPES)
-        # custom-* prefix is the convention PVE uses internally; surface as-is
-        existing = set(self._STATIC_CPU_TYPES)
-        extras = sorted({c for c in custom if c and c not in existing})
-        return list(self._STATIC_CPU_TYPES) + extras
+        """Returns the list of CPU model names PegaProx offers in the VM create
+        form. Strategy:
+          1) Live fetch from /nodes/{n}/capabilities/qemu/cpu on the first
+             reachable online node. This endpoint has existed since PVE 7.x
+             and is architecture-aware (the node's host arch restricts what
+             shows up — e.g. EPYC entries only on AMD nodes). Returns rows
+             with {name, vendor, custom} — we keep names verbatim, including
+             custom-* models the admin defined.
+          2) Fall back to the static 61-entry list on any error or when no
+             node is reachable. Same shape that PegaProx has been returning
+             since forever, so callers don't see breakage.
 
-    def _fetch_custom_cpu_models(self) -> List[str]:
-        """PVE 9.2+: GET /cluster/cpu-models. Returns [] on older PVE / 404 / error."""
+        MK May 2026 — was hardcoded to the static list; replaced with the live
+        endpoint after we confirmed via live probe on PVE 9.2.2 that
+        /cluster/cpu-models (the supposed 9.2 endpoint per the early research)
+        does not exist. The per-node capabilities endpoint is the right place.
+        """
+        live = self._fetch_pve_cpu_types()
+        if live:
+            return live
+        return list(self._STATIC_CPU_TYPES)
+
+    def _fetch_pve_cpu_types(self) -> List[str]:
+        """GET /nodes/{n}/capabilities/qemu/cpu on the first online node. Returns
+        a list of name strings (PVE shape: [{name, vendor, custom}, ...]).
+        Empty list on error so the caller falls back to the static list."""
         try:
-            url = f"https://{self.host}:{self.api_port}/api2/json/cluster/cpu-models"
-            resp = self._create_session().get(url, timeout=5)
-            if resp.status_code != 200:
+            nodes_url = f"https://{self.host}:{self.api_port}/api2/json/nodes"
+            nresp = self._create_session().get(nodes_url, timeout=self.per_node_timeout)
+            if nresp.status_code != 200:
                 return []
-            data = resp.json().get('data') or []
+            nodes = nresp.json().get('data') or []
+            online = next(
+                (n.get('node') for n in nodes
+                 if n.get('node') and n.get('status') == 'online'
+                 and not self._is_node_blocked(n.get('node'))[0]),
+                None,
+            )
+            if not online:
+                return []
+            cpu_url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{online}/capabilities/qemu/cpu"
+            r = self._create_session().get(cpu_url, timeout=self.per_node_timeout)
+            if r.status_code != 200:
+                return []
+            data = r.json().get('data') or []
+            # Dedupe + keep PVE's order (which is sensible: x86-64-v2 first, then
+            # named profiles, then custom-* last). Empty names skipped defensively.
+            seen = set()
             out = []
             for entry in data:
-                # PVE returns {name: '...', vendor: '...', ...}; some builds
-                # nest under 'model' — accept both shapes.
-                name = entry.get('name') or entry.get('model') or ''
-                if name:
+                name = entry.get('name') or ''
+                if name and name not in seen:
+                    seen.add(name)
                     out.append(name)
             return out
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"[CPU] live fetch failed ({e}) — falling back to static list")
             return []
 
     # MK May 2026 — pve version tuple cache. Used by feature-gates that decide
