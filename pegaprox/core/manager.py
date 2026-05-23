@@ -2096,28 +2096,65 @@ class PegaProxManager:
         # clean up old entries
         self._vm_migration_cooldown = {v: t for v, t in self._vm_migration_cooldown.items() if now - t < cooldown_secs}
 
-        # MK May 2026 — PVE 9.2 introduced per-resource auto-rebalance (CRS
-        # dynamic placement). When an admin explicitly sets it to 1 on a VM,
-        # PVE will move that VM on its own — if we also try, the two LBs
-        # ping-pong it. So: query HA resources, collect vmids where
-        # auto-rebalance is *explicitly* on, and drop them from our
-        # candidate pool. Pre-9.2 + opt-out + unset → empty set → no
-        # change to existing behaviour. The /cluster/ha/resources fetch
-        # is cheap (single API call per balance cycle).
+        # MK May 2026 — coexistence with PVE 9.2's CRS. Two-layer check:
+        #
+        # 1) Cluster-wide CRS toggle. PVE 9.2 stores it under
+        #    /cluster/options.crs.ha-auto-rebalance (per pve-ha-manager's
+        #    Manager.pm:update_crs_scheduler_mode). When it's off — and on
+        #    pre-9.2 the key doesn't exist at all — CRS does nothing, so
+        #    our balancer runs everything as before. This is what keeps the
+        #    "compat when CRS is off / cluster is old" promise.
+        #
+        # 2) Resource-level overrides. When CRS is on cluster-wide, PVE's
+        #    HA config defaults auto-rebalance=1 on EVERY HA resource
+        #    (Config.pm: `$d->{'auto-rebalance'} = 1 if !defined ...`). So
+        #    we treat any HA-managed VM as PVE-owned unless the resource
+        #    record explicitly carries auto-rebalance ∈ {0, false, no}.
+        #    That covers the admin who keeps cluster-CRS on but pins a
+        #    specific VM to manual placement.
+        #
+        # The two GETs are cheap and happen once per balance cycle.
         pve_crs_managed_vmids = set()
+        cluster_crs_active = False
         try:
-            for res in self.get_proxmox_ha_resources() or []:
-                if str(res.get('auto-rebalance', '')) in ('1', 'true', 'yes'):
+            opts_resp = self._api_get(
+                f'https://{self.host}:{self.api_port}/api2/json/cluster/options',
+                timeout=5,
+            )
+            if opts_resp.status_code == 200:
+                crs = (opts_resp.json().get('data') or {}).get('crs', {})
+                # PVE returns the crs field either as a parsed dict OR as the
+                # raw composite string ("ha-auto-rebalance=1,...") depending
+                # on PVE version and serialiser version. Handle both shapes.
+                if isinstance(crs, dict):
+                    cluster_crs_active = str(crs.get('ha-auto-rebalance', '')).lower() in ('1', 'true', 'yes')
+                elif isinstance(crs, str) and crs:
+                    for part in crs.split(','):
+                        k, _, v = part.partition('=')
+                        if k.strip() == 'ha-auto-rebalance' and v.strip().lower() in ('1', 'true', 'yes'):
+                            cluster_crs_active = True
+                            break
+        except Exception as e:
+            self.logger.debug(f"[BAL] /cluster/options probe for CRS state failed ({e}) — assuming CRS off")
+
+        if cluster_crs_active:
+            try:
+                for res in self.get_proxmox_ha_resources() or []:
+                    # Explicit opt-out from CRS: keep VM eligible for our balancer
+                    rebal = str(res.get('auto-rebalance', '')).lower()
+                    if rebal in ('0', 'false', 'no'):
+                        continue
+                    # Default-on (unset) or explicit-on → CRS owns this VM
                     sid = res.get('sid', '')
                     if ':' in sid:
                         try:
                             pve_crs_managed_vmids.add(int(sid.split(':', 1)[1]))
                         except (ValueError, IndexError):
                             pass
-        except Exception as e:
-            # pre-9.2 clusters, broken HA endpoint, or network blip — treat as
-            # "no managed VMs", existing logic kicks in fully
-            self.logger.debug(f"[BAL] HA-resource probe for auto-rebalance failed ({e}) — assuming no PVE-CRS-managed VMs")
+            except Exception as e:
+                self.logger.debug(f"[BAL] HA-resource probe failed ({e}) — running balancer without CRS filter")
+        else:
+            self.logger.debug("[BAL] cluster CRS not active — balancer runs full set (compat path)")
 
         candidates = [
             vm for vm in vms
@@ -2138,7 +2175,10 @@ class PegaProxManager:
 
         crs_on_node = [vm for vm in vms if vm.get('node') == source_node and vm.get('vmid') in pve_crs_managed_vmids]
         if crs_on_node:
-            self.logger.info(f"Skipping {len(crs_on_node)} VM(s) on {source_node} with PVE CRS auto-rebalance=1: {[vm.get('vmid') for vm in crs_on_node]} (PVE will place them)")
+            self.logger.info(
+                f"Skipping {len(crs_on_node)} VM(s) on {source_node} owned by PVE CRS auto-rebalance: "
+                f"{[vm.get('vmid') for vm in crs_on_node]} (PVE will place them — opt out per VM via auto-rebalance=0 to give us back control)"
+            )
         
         # Filter out containers if balance_containers is disabled
         # NS: include_containers override allows cross-cluster LB to use group-level setting
