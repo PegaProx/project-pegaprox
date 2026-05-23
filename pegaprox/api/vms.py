@@ -133,13 +133,29 @@ def get_datacenter_status(cluster_id):
     try:
         host, port = manager.host, manager.api_port
 
-        # get cluster status
+        # MK May 2026 — cluster-wide aggregates ([cluster/status] + [cluster/resources])
+        # are genuinely expensive on big clusters (PVE walks every node to build the
+        # response). 10s was too tight; bump to 15s and mark the host as cold on
+        # timeout so subsequent calls roll over to a fallback host via the
+        # connect_to_proxmox skip-cache.
         status_url = f"https://{host}:{port}/api2/json/cluster/status"
-        status_resp = manager._create_session().get(status_url, timeout=10)
-
-        # get resources
         resources_url = f"https://{host}:{port}/api2/json/cluster/resources"
-        resources_resp = manager._create_session().get(resources_url, timeout=10)
+        try:
+            status_resp = manager._create_session().get(status_url, timeout=15)
+            resources_resp = manager._create_session().get(resources_url, timeout=15)
+        except requests.exceptions.Timeout:
+            # Mark host cold AND force an immediate reconnect so manager.host
+            # pivots to a warm fallback for the next request. Without the
+            # reconnect, _mark_host_failure only affects later
+            # connect_to_proxmox() calls — but the current manager.host
+            # pointer still points at the dead primary.
+            manager._mark_host_failure(host)
+            try:
+                manager.is_connected = False
+                manager.connect_to_proxmox()
+            except Exception:
+                pass  # best-effort; user will see the timeout this round
+            raise
 
         status_data = status_resp.json().get('data', []) if status_resp.status_code == 200 else []
         resources_data = resources_resp.json().get('data', []) if resources_resp.status_code == 200 else []
@@ -455,11 +471,34 @@ def set_datacenter_options(cluster_id):
         # only relevant on pre-9.2 clusters and PVE itself will reject it on
         # 9.2 with a clear schema error.
 
-        response = manager._create_session().put(url, data=data, timeout=10)
+        # MK May 2026 — /cluster/options PUT can legitimately take 15-25s on
+        # busy clusters (PVE writes datacenter.cfg, ipcc-syncs to all nodes,
+        # restarts pveproxy on each). The old 10s was tight enough to fail
+        # consistently on the ESXi-Test-Env lab; bump to 30s. If it still
+        # times out the host is genuinely wedged — mark it cold so the next
+        # request goes via fallback instead of waiting 30s again.
+        try:
+            response = manager._create_session().put(url, data=data, timeout=30)
+        except requests.exceptions.Timeout:
+            manager._mark_host_failure(host)
+            try:
+                manager.is_connected = False
+                manager.connect_to_proxmox()
+            except Exception:
+                pass
+            raise
 
         if response.status_code == 200:
             return jsonify({'success': True, 'message': 'Options updated'})
         return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+    except requests.exceptions.Timeout:
+        # Map to 504 so the frontend knows it's a slow-PVE thing, not a code bug.
+        # Settings *may* have applied — pveproxy on busy clusters sometimes
+        # commits the write but doesn't reply in time. Operator should re-load.
+        return jsonify({
+            'error': 'PVE took too long to apply datacenter options. The change may still have been written — reload the page to verify.',
+            'timeout': True,
+        }), 504
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to set datacenter options')}), 500
 
