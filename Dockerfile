@@ -28,6 +28,7 @@ COPY --chown=pegaprox:pegaprox pegaprox/ pegaprox/
 COPY --chown=pegaprox:pegaprox web/ web/
 COPY --chown=pegaprox:pegaprox static/ static/
 COPY --chown=pegaprox:pegaprox images/ images/
+COPY --chown=pegaprox:pegaprox plugins/ plugins/
 COPY --chown=pegaprox:pegaprox version.json .
 COPY --chown=pegaprox:pegaprox requirements.txt .
 COPY --chown=pegaprox:pegaprox update.sh .
