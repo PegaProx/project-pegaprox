@@ -16,6 +16,7 @@
   <a href="https://pegaprox.com">Website</a> •
   <a href="https://docs.pegaprox.com">Documentation</a> •
   <a href="https://github.com/PegaProx/project-pegaprox/releases">Releases</a> •
+  <a href="https://plugins.pegaprox.com/">Plugins</a> •
   <a href="https://opencollective.com/pegaprox">Sponsoring</a>
 </p>
 
