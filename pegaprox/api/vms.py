@@ -5723,6 +5723,75 @@ def _restore_vm_identity(mgr, node, vmid, vm_type, identity):
         logging.warning(f"[XCREPL] Identity PUT returned {put_resp.status_code}: {put_resp.text[:200]}")
 
 
+# MK May 2026 (#413 @blackshocks) — Replica safety gate. The earlier xcrepl flow
+# deleted any VM on the target that happened to share the source VMID, on the
+# assumption that the VMID-collision had to be a previous run of this same job.
+# Real-world scenario: two freshly-paired clusters where the target already had
+# an UNRELATED VM at the same VMID — the delete destroyed user data.
+#
+# Replicas are now tagged with a job-specific marker after a successful migration,
+# and the safety gate refuses to delete anything that isn't tagged for THIS job.
+# That also prevents cross-job blast: two unrelated xcrepl jobs colliding on the
+# same target VMID won't nuke each other's replicas.
+PEGAPROX_REPLICA_TAG = 'pegaprox-replica'
+
+
+def _job_tag(job_id):
+    return f'xcrepl-job-{job_id}'
+
+
+def _read_target_tags(mgr, node, vmid, vm_type):
+    """Return the set of tags on a VM, or None if config fetch failed."""
+    try:
+        cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
+        resp = mgr._api_get(cfg_url)
+        if resp.status_code != 200:
+            return None
+        cfg = resp.json().get('data', {})
+        tags_raw = cfg.get('tags', '') or ''
+        # PVE separates tags by ';' for both LXC and QEMU.
+        return {t.strip() for t in tags_raw.split(';') if t.strip()}
+    except Exception:
+        return None
+
+
+def _is_replica_of_job(mgr, node, vmid, vm_type, job_id):
+    """True iff the target VM is tagged as a replica of THIS specific xcrepl job."""
+    tags = _read_target_tags(mgr, node, vmid, vm_type)
+    if tags is None:
+        return False
+    return _job_tag(job_id) in tags
+
+
+def _tag_as_replica(mgr, node, vmid, vm_type, job_id):
+    """Mark the freshly-migrated replica with the job-specific + general
+    pegaprox-replica tags. Preserves any pre-existing tags so users' own
+    organisation tags stay intact."""
+    cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
+    try:
+        resp = mgr._api_get(cfg_url)
+        if resp.status_code != 200:
+            return
+        cfg = resp.json().get('data', {})
+        tags_raw = cfg.get('tags', '') or ''
+        existing = [t.strip() for t in tags_raw.split(';') if t.strip()]
+        want = [PEGAPROX_REPLICA_TAG, _job_tag(job_id)]
+        merged = list(existing)
+        for t in want:
+            if t not in merged:
+                merged.append(t)
+        if merged == existing:
+            return  # nothing to do
+        new_tags = ';'.join(merged)
+        put = mgr._api_put(cfg_url, data={'tags': new_tags})
+        if put.status_code == 200:
+            logging.info(f"[XCREPL] Tagged replica {vm_type}/{vmid} on {node} with {want}")
+        else:
+            logging.warning(f"[XCREPL] tag PUT returned {put.status_code}: {put.text[:200]}")
+    except Exception as e:
+        logging.warning(f"[XCREPL] Could not tag replica {vmid}: {e}")
+
+
 def _execute_replication(job):
     """
     Run a single cross-cluster replication cycle for one job.
@@ -5954,7 +6023,22 @@ def _execute_replication(job):
                 logging.warning(f"[XCREPL] Job {job_id}: target existence check failed: {e}")
 
             if existing_target_node:
-                logging.info(f"[XCREPL] Job {job_id}: VM {vmid} already on target node {existing_target_node}, removing old replica")
+                # MK May 2026 (#413 @blackshocks) — refuse to delete unless the existing
+                # target VM is tagged as a replica of THIS job. Without this gate, freshly
+                # paired clusters with an unrelated VM at the matching VMID lose data.
+                if not _is_replica_of_job(target_mgr, existing_target_node, vmid, vm_type, job_id):
+                    target_mgr.delete_api_token(token_name)
+                    _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                    err_msg = (f"Target VM {vmid} on node {existing_target_node} is not tagged as a replica "
+                               f"of this job ({_job_tag(job_id)} tag missing). Refusing to overwrite to "
+                               f"prevent data loss. If this is a stranded replica from a previous run or "
+                               f"manual clone, tag it with `{_job_tag(job_id)}` and re-run. If it is an "
+                               f"unrelated VM, pick a different target VMID for the job.")
+                    _update_repl_status(db, job_id, 'error', err_msg)
+                    logging.error(f"[XCREPL] Job {job_id}: ABORT — {err_msg}")
+                    return
+
+                logging.info(f"[XCREPL] Job {job_id}: VM {vmid} already on target node {existing_target_node}, removing old replica (tag verified)")
                 try:
                     # stop first so PVE lets us delete it (ignore errors if already stopped)
                     stop_url = (
@@ -6012,6 +6096,12 @@ def _execute_replication(job):
                         _restore_vm_identity(target_mgr, target_node, vmid, vm_type, source_identity)
                     except Exception as e:
                         logging.warning(f"[XCREPL] Job {job_id}: identity restoration failed: {e}")
+                    # MK May 2026 (#413) — tag the replica so the safety gate on the next
+                    # run recognises it as ours and can cycle it without operator action.
+                    try:
+                        _tag_as_replica(target_mgr, target_node, vmid, vm_type, job_id)
+                    except Exception as e:
+                        logging.warning(f"[XCREPL] Job {job_id}: replica-tag write failed: {e}")
                     _update_repl_status(db, job_id, 'ok', '')
                 else:
                     logging.error(f"[XCREPL] Job {job_id}: migration task failed: {mig_detail}")
