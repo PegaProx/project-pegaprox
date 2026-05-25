@@ -20,6 +20,41 @@ logger = logging.getLogger('pegaprox.xcrepl')
 _xcrepl_thread = None
 _xcrepl_running = False
 
+# MK May 2026 (#455 @DarmokNoob) — track jobs that are mid-flight so the
+# scheduler doesn't fire a duplicate while the previous run is still going.
+# Manual-trigger endpoint consults the same set to return 409 on collision.
+# (Set + lock live here because both the loop and the API blueprint need them.)
+_xcrepl_inflight = set()
+_xcrepl_inflight_lock = threading.Lock()
+
+
+def is_job_inflight(job_id):
+    """True if the given replication job is currently executing."""
+    with _xcrepl_inflight_lock:
+        return job_id in _xcrepl_inflight
+
+
+def _claim_job(job_id):
+    """Atomically claim a job for execution. Returns False if already running."""
+    with _xcrepl_inflight_lock:
+        if job_id in _xcrepl_inflight:
+            return False
+        _xcrepl_inflight.add(job_id)
+        return True
+
+
+def _release_job(job_id):
+    with _xcrepl_inflight_lock:
+        _xcrepl_inflight.discard(job_id)
+
+
+def _tracked_run(handler, job):
+    """Wrapper that releases the in-flight slot when the handler returns or raises."""
+    try:
+        handler(job)
+    finally:
+        _release_job(job['id'])
+
 
 def _parse_interval_seconds(schedule):
     """
@@ -94,6 +129,15 @@ def _xcrepl_loop():
                         elapsed = interval + 1  # never ran before -> run now
 
                     if elapsed >= interval:
+                        # MK May 2026 (#455) — skip the tick if this job is still
+                        # running from a previous fire. Real-world LXC migrations
+                        # take 2-5 min, our tick is 60s, without this guard the
+                        # second run kills the first via cleanup of the "stale"
+                        # target replica.
+                        if not _claim_job(job['id']):
+                            logger.debug(f"[XCREPL] Job {job['id']} (VM {job['vmid']}) still in-flight, skipping this tick")
+                            continue
+
                         # NS: same-cluster uses local replication (no remote-migrate)
                         is_local = job.get('source_cluster') == job.get('target_cluster')
                         handler = _execute_local_replication if is_local else _execute_replication
@@ -101,12 +145,13 @@ def _xcrepl_loop():
                         try:
                             # run in own thread so one slow job doesn't block others
                             threading.Thread(
-                                target=handler,
-                                args=(job,),
+                                target=_tracked_run,
+                                args=(handler, job),
                                 daemon=True
                             ).start()
                         except Exception as e:
                             logger.error(f"[XCREPL] Failed to start job {job['id']}: {e}")
+                            _release_job(job['id'])  # didn't actually start, free the slot
 
         except Exception as e:
             logger.error(f"[XCREPL] Scheduler loop error: {e}")

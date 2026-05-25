@@ -5611,6 +5611,118 @@ def _execute_local_replication(job):
 # Proxmox native replication only works intra-cluster, so for DR across
 # separate clusters we use snapshot + clone + remote-migrate approach.
 
+# MK May 2026 (#456 @DarmokNoob) — net interface MAC tokens vary by VM type:
+# LXC uses `hwaddr=<mac>`, QEMU uses `<model>=<mac>` where model is virtio/e1000/etc.
+_QEMU_NIC_MODELS = ('virtio', 'e1000', 'e1000-82540em', 'e1000-82544gc', 'e1000-82545em',
+                    'e1000e', 'i82551', 'i82557b', 'i82559er', 'ne2k_isa', 'ne2k_pci',
+                    'pcnet', 'rtl8139', 'vmxnet3')
+
+
+def _extract_nic_mac(nic_value):
+    """Return the MAC from a PVE net interface config string (or None)."""
+    if not isinstance(nic_value, str):
+        return None
+    for part in nic_value.split(','):
+        if '=' not in part:
+            continue
+        key, val = part.split('=', 1)
+        if key == 'hwaddr':
+            return val
+        if key in _QEMU_NIC_MODELS:
+            return val
+    return None
+
+
+def _swap_nic_mac(nic_value, new_mac):
+    """Rewrite a PVE net interface config to use new_mac, preserving every other token."""
+    if not isinstance(nic_value, str) or not new_mac:
+        return nic_value
+    parts = []
+    replaced = False
+    for part in nic_value.split(','):
+        if '=' not in part:
+            parts.append(part)
+            continue
+        key, val = part.split('=', 1)
+        if key == 'hwaddr':
+            parts.append(f'hwaddr={new_mac}')
+            replaced = True
+        elif key in _QEMU_NIC_MODELS:
+            parts.append(f'{key}={new_mac}')
+            replaced = True
+        else:
+            parts.append(part)
+    return ','.join(parts) if replaced else nic_value
+
+
+def _capture_vm_identity(mgr, node, vmid, vm_type):
+    """Pull hostname/name + per-NIC MAC from a VM's config so the xcrepl flow can
+    restore them on the target replica after clone+migrate destroyed both."""
+    out = {'hostname': None, 'name': None, 'nets': {}}
+    try:
+        cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
+        resp = mgr._api_get(cfg_url)
+        if resp.status_code != 200:
+            logging.debug(f"[XCREPL] _capture_vm_identity: GET {cfg_url} -> {resp.status_code}")
+            return out
+        cfg = resp.json().get('data', {})
+        if vm_type == 'lxc':
+            out['hostname'] = cfg.get('hostname')
+        else:
+            out['name'] = cfg.get('name')
+        for k, v in cfg.items():
+            if k.startswith('net') and k[3:].isdigit():
+                mac = _extract_nic_mac(v)
+                if mac:
+                    out['nets'][k] = mac
+    except Exception as e:
+        logging.debug(f"[XCREPL] _capture_vm_identity error: {e}")
+    return out
+
+
+def _restore_vm_identity(mgr, node, vmid, vm_type, identity):
+    """Apply the source's hostname/name + per-NIC MAC to a freshly-migrated replica.
+
+    Reads the target's current net config so we preserve bridge / firewall / VLAN-tag /
+    rate-limit tokens that the migration set — only the MAC token gets swapped back to
+    the source value.
+    """
+    if not identity:
+        return
+    cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
+    payload = {}
+
+    if vm_type == 'lxc' and identity.get('hostname'):
+        payload['hostname'] = identity['hostname']
+    elif vm_type == 'qemu' and identity.get('name'):
+        payload['name'] = identity['name']
+
+    if identity.get('nets'):
+        try:
+            cur_resp = mgr._api_get(cfg_url)
+            if cur_resp.status_code == 200:
+                cur_cfg = cur_resp.json().get('data', {})
+                for netname, src_mac in identity['nets'].items():
+                    cur_val = cur_cfg.get(netname)
+                    if cur_val:
+                        rebuilt = _swap_nic_mac(cur_val, src_mac)
+                        if rebuilt != cur_val:
+                            payload[netname] = rebuilt
+        except Exception as e:
+            logging.debug(f"[XCREPL] could not read target config for MAC restore: {e}")
+
+    if not payload:
+        return
+
+    put_resp = mgr._api_put(cfg_url, data=payload)
+    if put_resp.status_code == 200:
+        logging.info(f"[XCREPL] Restored identity on {vm_type}/{vmid}: "
+                     f"{'hostname' if vm_type == 'lxc' else 'name'}={payload.get('hostname') or payload.get('name')}, "
+                     f"{sum(1 for k in payload if k.startswith('net'))} NIC(s) MAC-swapped")
+    else:
+        logging.warning(f"[XCREPL] Identity PUT returned {put_resp.status_code}: {put_resp.text[:200]}")
+
+
 def _execute_replication(job):
     """
     Run a single cross-cluster replication cycle for one job.
@@ -5681,6 +5793,13 @@ def _execute_replication(job):
             return
 
         logging.info(f"[XCREPL] Job {job_id}: replicating {vm_type}/{vmid} from {source_node} -> {target_node} ({target_cid})")
+
+        # MK May 2026 (#456 @DarmokNoob) — capture source identity (hostname/name +
+        # per-NIC hwaddr) BEFORE the clone overwrites the label and PVE re-rolls the MAC.
+        # Replica is supposed to be a drop-in copy of the source for DR — the replica's
+        # hostname + DHCP-MAC need to match or Site Recovery failover lands on the wrong
+        # network identity.
+        source_identity = _capture_vm_identity(source_mgr, source_node, vmid, vm_type)
 
         # 2. create snapshot
         snap_url = (
@@ -5886,6 +6005,13 @@ def _execute_replication(job):
                 mig_ok, mig_detail = _wait_for_task(source_mgr, mig_task, timeout=3600)
                 if mig_ok:
                     logging.info(f"[XCREPL] Job {job_id}: migration complete")
+                    # MK May 2026 (#456) — restore source identity on the replica so
+                    # DR failover lands on the right hostname + DHCP-MAC. Best-effort —
+                    # don't fail the whole replication if this trips.
+                    try:
+                        _restore_vm_identity(target_mgr, target_node, vmid, vm_type, source_identity)
+                    except Exception as e:
+                        logging.warning(f"[XCREPL] Job {job_id}: identity restoration failed: {e}")
                     _update_repl_status(db, job_id, 'ok', '')
                 else:
                     logging.error(f"[XCREPL] Job {job_id}: migration task failed: {mig_detail}")
@@ -6178,12 +6304,25 @@ def run_cross_cluster_replication(job_id):
     if not job:
         return jsonify({'error': 'Replication job not found'}), 404
 
+    # MK May 2026 (#455 @DarmokNoob) — block duplicate triggers while a previous
+    # run is still in-flight. The scheduler uses the same _claim_job() guard.
+    from pegaprox.background.cross_cluster_replication import _claim_job, _release_job, _tracked_run
+    if not _claim_job(job_id):
+        return jsonify({
+            'error': 'Replication job is already running',
+            'detail': 'Wait for the current run to finish, then retry.'
+        }), 409
+
     # kick off in background so the API responds right away
     # NS: detect same-cluster -> use local replication
     job_dict = dict(job)
     is_local = job_dict.get('source_cluster') == job_dict.get('target_cluster')
     handler = _execute_local_replication if is_local else _execute_replication
-    threading.Thread(target=handler, args=(job_dict,), daemon=True).start()
+    try:
+        threading.Thread(target=_tracked_run, args=(handler, job_dict), daemon=True).start()
+    except Exception as e:
+        _release_job(job_id)
+        return jsonify({'error': f'Failed to start replication: {e}'}), 500
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'replication.triggered', f"{'Local' if is_local else 'Cross-cluster'} replication {job_id} manually triggered")
