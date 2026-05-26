@@ -1182,6 +1182,14 @@
         /* NS 2026-05-10 — text contrast bumped (AA on white). Old values were
            too washed (#555 secondary, #888 muted) — checked AA: failed. */
         body[data-corp-theme="light"] .text-white { color: #1c2733 !important; }
+        /* MK May 2026 (#451 thefiredragon) — Modern UI's corporateLight theme sets
+           `body.light-theme` instead of `data-corp-theme="light"`. The existing
+           rule above only catches Corporate Layout's light mode, so login inputs
+           (which carry .text-white) stayed white on a near-white (#fafafa) bg →
+           invisible typed text. Surgical fix: target input/textarea only, so the
+           orange submit-button's `text-white` stays white. */
+        body.light-theme input.text-white,
+        body.light-theme textarea.text-white { color: #1c2733 !important; }
         body[data-corp-theme="light"] .text-gray-200 { color: #2a3744 !important; }
         body[data-corp-theme="light"] .text-gray-300 { color: #3a4754 !important; }
         body[data-corp-theme="light"] .text-gray-400 { color: #5a6772 !important; }
