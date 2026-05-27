@@ -6,6 +6,7 @@ XAPI (XML-RPC) connection, VM lifecycle, storage, network ops.
 NS: Mar 2026 - first-class XCP-ng integration, same sidebar as Proxmox.
 """
 
+import base64
 import logging
 import os
 import threading
@@ -3152,8 +3153,9 @@ class XcpngManager:
             return {'success': False, 'error': 'No DNS servers specified'}
 
         content = '\n'.join(lines) + '\n'
-        rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/resolv.conf << 'RESOLV_EOF'\n{content}RESOLV_EOF")
+        # Encode content as base64 to prevent heredoc delimiter injection
+        content_b64 = base64.b64encode(content.encode('utf-8')).decode('ascii')
+        rc, _, err = self._ssh_exec(node, f"echo '{content_b64}' | base64 -d > /etc/resolv.conf")
         if rc == 0:
             return {'success': True, 'message': 'DNS updated'}
         return {'success': False, 'error': err or 'Failed to write resolv.conf'}
@@ -3166,9 +3168,9 @@ class XcpngManager:
     def update_node_hosts(self, node, hosts_content):
         if not hosts_content:
             return {'success': False, 'error': 'Empty hosts content'}
-        # write via heredoc to preserve formatting
-        rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/hosts << 'PEGAPROX_EOF'\n{hosts_content}\nPEGAPROX_EOF")
+        # Encode content as base64 to prevent heredoc delimiter injection
+        hosts_b64 = base64.b64encode(hosts_content.encode('utf-8')).decode('ascii')
+        rc, _, err = self._ssh_exec(node, f"echo '{hosts_b64}' | base64 -d > /etc/hosts")
         if rc == 0:
             return {'success': True, 'message': 'Hosts updated'}
         return {'success': False, 'error': err or 'Failed to write hosts file'}
@@ -4392,10 +4394,17 @@ echo DONE""",
             return {'success': False, 'error': 'Certificate and key required'}
         # combine cert + key into single PEM (xapi wants both in one file)
         combined = certificates.strip() + '\n' + key.strip() + '\n'
+        
+        # Encode the certificate data as base64 to prevent shell injection via heredoc delimiter
+        # This ensures no line in the payload can be interpreted as a shell command
+        combined_b64 = base64.b64encode(combined.encode('utf-8')).decode('ascii')
+        
         # backup current cert first
         self._ssh_exec(node, "cp /etc/xensource/xapi-ssl.pem /etc/xensource/xapi-ssl.pem.bak 2>/dev/null")
+        
+        # Use base64 decoding to safely write the certificate without heredoc injection risk
         rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/xensource/xapi-ssl.pem << 'CERT_EOF'\n{combined}CERT_EOF")
+            f"echo '{combined_b64}' | base64 -d > /etc/xensource/xapi-ssl.pem")
         if rc != 0:
             return {'success': False, 'error': err or 'Failed to write certificate'}
 
