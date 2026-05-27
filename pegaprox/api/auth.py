@@ -7,6 +7,7 @@ import secrets
 import base64
 import ipaddress
 from datetime import datetime
+from pathlib import Path
 from flask import Blueprint, jsonify, request, make_response
 
 from pegaprox.constants import *
@@ -668,6 +669,27 @@ def auth_login():
     if username in login_attempts_by_user:
         del login_attempts_by_user[username]
     
+    # SECURITY: Block session creation if password change is required
+    # This prevents exploitation of default admin accounts with known/predictable passwords
+    if user.get('force_password_change'):
+        logging.warning(f"[SECURITY] User '{username}' must change password before login (from {client_ip})")
+        # Generate a one-time token for password change
+        change_token = secrets.token_urlsafe(32)
+        # Store token temporarily (5 minutes expiry)
+        if not hasattr(request, '_password_change_tokens'):
+            from pegaprox.globals import _password_change_tokens
+        _password_change_tokens[change_token] = {
+            'username': username,
+            'expires_at': time.time() + 300,  # 5 minutes
+            'ip': client_ip
+        }
+        return jsonify({
+            'error': 'Password change required',
+            'code': 'PASSWORD_CHANGE_REQUIRED',
+            'change_token': change_token,
+            'message': 'You must change your password before logging in. This is a security requirement for default accounts.'
+        }), 403
+    
     # NS: Auto-migrate password to Argon2id if using old PBKDF2 format - Jan 2026
     # Only rehash for locally-authenticated users - LDAP passwords must NEVER be stored locally
     if not ldap_authenticated and needs_password_rehash(user.get('password_salt', ''), user.get('password_hash', '')):
@@ -1319,6 +1341,109 @@ def auth_change_password():
     # drop the session cookie so the browser stops sending the now-dead SID
     resp.delete_cookie('session_id')
     return resp
+
+
+@bp.route('/api/auth/force-password-change', methods=['POST'])
+def auth_force_password_change():
+    """Change password using a one-time token (for forced password changes)
+    
+    SECURITY: This endpoint allows password changes without authentication,
+    but only with a valid one-time token issued during login when force_password_change is True.
+    The token expires after 5 minutes and can only be used once.
+    """
+    from pegaprox.globals import _password_change_tokens
+    
+    data = request.get_json()
+    change_token = data.get('change_token', '')
+    current_password = data.get('current_password', '')
+    new_password = data.get('new_password', '')
+    
+    if not change_token or not current_password or not new_password:
+        return jsonify({'error': 'Token, current password, and new password required'}), 400
+    
+    # Validate token
+    token_data = _password_change_tokens.get(change_token)
+    if not token_data:
+        return jsonify({'error': 'Invalid or expired token'}), 401
+    
+    # Check token expiry
+    if time.time() > token_data['expires_at']:
+        del _password_change_tokens[change_token]
+        return jsonify({'error': 'Token expired. Please try logging in again.'}), 401
+    
+    username = token_data['username']
+    client_ip = get_client_ip()
+    
+    # Verify IP matches (prevent token theft)
+    if token_data['ip'] != client_ip:
+        logging.warning(f"[SECURITY] Password change token used from different IP: {token_data['ip']} -> {client_ip}")
+        # Allow it but log - IP can change legitimately (mobile networks, etc)
+    
+    # Rate limit password change attempts
+    if not check_auth_action_rate_limit(f'force_pwd_change:{username}', max_attempts=5, window=300):
+        return jsonify({'error': 'Too many password change attempts. Try again in 5 minutes.'}), 429
+    
+    # Load user
+    users_db = load_users()
+    if username not in users_db:
+        del _password_change_tokens[change_token]
+        return jsonify({'error': 'User not found'}), 404
+    
+    user = users_db[username]
+    
+    # Verify current password
+    if not verify_password(current_password, user['password_salt'], user['password_hash']):
+        log_audit(username, 'user.force_password_change_failed', f'Incorrect current password from {client_ip}')
+        return jsonify({'error': 'Current password is incorrect'}), 401
+    
+    # Validate new password policy
+    is_valid, error_msg = validate_password_policy(new_password)
+    if not is_valid:
+        return jsonify({'error': error_msg}), 400
+    
+    # Ensure new password is different from current
+    if verify_password(new_password, user['password_salt'], user['password_hash']):
+        return jsonify({'error': 'New password must be different from current password'}), 400
+    
+    # Update password
+    salt, password_hash = hash_password(new_password)
+    user['password_salt'] = salt
+    user['password_hash'] = password_hash
+    user['password_changed_at'] = datetime.now().isoformat()
+    
+    # Clear forced password change flag
+    user['force_password_change'] = False
+    
+    # Mark admin initialized and delete initial password file if this is the default admin
+    if user.get('is_default'):
+        user['is_default'] = False
+        mark_admin_initialized()
+        # Delete the initial password file
+        password_file = Path(CONFIG_DIR) / 'initial_admin_password.txt'
+        try:
+            if password_file.exists():
+                password_file.unlink()
+                logging.info(f"[SECURITY] Deleted initial admin password file after password change")
+        except Exception as e:
+            logging.warning(f"Failed to delete initial password file: {e}")
+    
+    save_users(users_db)
+    
+    # Consume the token (one-time use)
+    del _password_change_tokens[change_token]
+    
+    # Invalidate any existing sessions for this user
+    sessions_removed = invalidate_all_user_sessions(username)
+    
+    logging.info(f"[SECURITY] User '{username}' completed forced password change from {client_ip}")
+    log_audit(username, 'user.force_password_change_completed', 
+              f"Forced password change completed from {client_ip}, {sessions_removed} session(s) invalidated")
+    
+    return jsonify({
+        'success': True,
+        'message': 'Password changed successfully. You can now log in with your new password.',
+        'sessions_invalidated': sessions_removed
+    })
 
 
 # ============================================

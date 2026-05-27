@@ -32,6 +32,9 @@ audit_log = []
 login_attempts_by_ip = {}
 login_attempts_by_user = {}
 
+# Password change tokens for forced password changes
+_password_change_tokens = {}
+
 # Auth action rate limiting
 _auth_action_attempts = {}
 _auth_action_lock = threading.Lock()

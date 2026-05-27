@@ -742,12 +742,17 @@ def main(debug_mode=False):
 
     # Show default credentials hint
     if len(g.users_db) == 1 and 'pegaprox' in g.users_db:
-        print("\n" + "=" * 50)
-        print("DEFAULT LOGIN CREDENTIALS:")
-        print("  Username: pegaprox")
-        print("  Password: admin")
-        print("  Please change the password after first login!")
-        print("=" * 50 + "\n")
+        user = g.users_db['pegaprox']
+        if user.get('is_default') and user.get('force_password_change'):
+            from pegaprox.constants import CONFIG_DIR
+            password_file = os.path.join(CONFIG_DIR, 'initial_admin_password.txt')
+            print("\n" + "=" * 70)
+            print("INITIAL SETUP REQUIRED")
+            print("=" * 70)
+            print("  A default admin account has been created with a random password.")
+            print(f"  Retrieve the credentials from: {password_file}")
+            print("  You will be required to change the password on first login.")
+            print("=" * 70 + "\n")
 
     # Load existing configuration
     config = load_config()

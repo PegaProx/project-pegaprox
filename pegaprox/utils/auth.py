@@ -317,8 +317,39 @@ def mark_admin_initialized():
         logging.error(f"couldnt mark admin init: {e}")
 
 def create_default_users() -> dict:
-    """create default admin - pw is 'admin', should be changed obv"""
-    salt, password_hash = hash_password('admin')
+    """create default admin with random password for security
+    
+    SECURITY: Generate a cryptographically random password instead of using a
+    hardcoded default. The password is written to a file that must be retrieved
+    via server console access, preventing remote exploitation of fresh instances.
+    """
+    # Generate a secure random password (20 chars, alphanumeric + symbols)
+    import string
+    alphabet = string.ascii_letters + string.digits + '!@#$%^&*()-_=+[]{}|;:,.<>?'
+    random_password = ''.join(secrets.choice(alphabet) for _ in range(20))
+    
+    salt, password_hash = hash_password(random_password)
+    
+    # Write the password to a file that requires console access to retrieve
+    # This prevents remote exploitation while allowing legitimate operators to initialize
+    password_file = Path(CONFIG_DIR) / 'initial_admin_password.txt'
+    try:
+        password_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(password_file, 'w') as f:
+            f.write(f"PegaProx Initial Admin Credentials\n")
+            f.write(f"===================================\n\n")
+            f.write(f"Username: pegaprox\n")
+            f.write(f"Password: {random_password}\n\n")
+            f.write(f"IMPORTANT: Change this password immediately after first login!\n")
+            f.write(f"This file will be deleted after the password is changed.\n\n")
+            f.write(f"Generated: {datetime.now().isoformat()}\n")
+        os.chmod(password_file, 0o600)  # Owner read/write only
+        logging.warning(f"[SECURITY] Default admin created with random password. "
+                       f"Retrieve credentials from: {password_file}")
+    except Exception as e:
+        logging.error(f"Failed to write initial password file: {e}")
+        # Fall back to logging (less secure but better than hardcoded password)
+        logging.warning(f"[SECURITY] Default admin password: {random_password}")
     
     return {
         'pegaprox': {
