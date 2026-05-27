@@ -18,8 +18,9 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
-from pegaprox.utils.auth import require_auth
+from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection
@@ -876,6 +877,19 @@ def execute_storage_migration(cluster_id):
     
     if not all([vmid, disk, target_storage]):
         return jsonify({'error': 'Missing required parameters: vmid, disk, target'}), 400
+    
+    # Security: Verify user has access to the specific VM before allowing disk operations
+    # This prevents users with storage.config + any VM ACL from manipulating arbitrary VMs
+    users = load_users()
+    username = request.session.get('user', '')
+    user = users.get(username, {})
+    user['username'] = username
+    
+    # Require vm.config permission for the specific VM (disk operations are configuration changes)
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.config'):
+        log_audit(username, 'storage_balancing.disk_move_denied', 
+                  f"Denied attempt to move disk {disk} of VM {vmid} (no VM access)")
+        return jsonify({'error': 'Access denied: you do not have permission to modify this VM'}), 403
     
     try:
         host, port = manager.host, manager.api_port
