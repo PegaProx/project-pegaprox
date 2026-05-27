@@ -1660,6 +1660,9 @@ def get_ha_status_detailed(cluster_id):
 @bp.route('/api/clusters/<cluster_id>/ha/enable', methods=['POST'])
 @require_auth(perms=['ha.config'])
 def enable_ha(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -1680,6 +1683,9 @@ def enable_ha(cluster_id):
 @bp.route('/api/clusters/<cluster_id>/ha/disable', methods=['POST'])
 @require_auth(perms=['ha.config'])
 def disable_ha(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -1701,6 +1707,9 @@ def disable_ha(cluster_id):
 @require_auth(perms=['ha.config'])
 def update_ha_config(cluster_id):
     """Update HA configuration including split-brain prevention settings"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -1862,6 +1871,9 @@ def _save_ha_config_to_db(cluster_id: str, manager):
 @require_auth(perms=['ha.config'])
 def install_self_fence_agent(cluster_id):
     """Install self-fence agent on all cluster nodes"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -1901,6 +1913,9 @@ def install_self_fence_agent(cluster_id):
 @require_auth(perms=['ha.config'])
 def uninstall_self_fence_agent(cluster_id):
     """Uninstall self-fence agent from all cluster nodes"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -1940,6 +1955,9 @@ def uninstall_self_fence_agent(cluster_id):
 @require_auth(roles=[ROLE_ADMIN])
 def set_ha_status(cluster_id):
     """Enable or disable HA for a cluster (legacy endpoint)"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
