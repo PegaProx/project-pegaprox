@@ -1106,6 +1106,12 @@ def list_all_roles():
     """List all available roles (builtin + custom)"""
     custom = get_custom_roles()
     
+    # Get user's tenant for filtering
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+    is_admin = user.get('role') == ROLE_ADMIN
+    
     roles = []
     # builtins
     for role_id in BUILTIN_ROLES:
@@ -1128,8 +1134,11 @@ def list_all_roles():
             'created_by': data.get('created_by')
         })
     
-    # tenant-specific
+    # tenant-specific - filter by user's tenant unless admin
     for tenant_id, tenant_roles in custom.get('tenants', {}).items():
+        # Non-admins can only see roles from their own tenant
+        if not is_admin and tenant_id != user_tenant:
+            continue
         for role_id, data in tenant_roles.items():
             roles.append({
                 'id': role_id,
@@ -1170,6 +1179,19 @@ def create_custom_role():
     for p in permissions:
         if p not in PERMISSIONS:
             return jsonify({'error': f'Invalid permission: {p}'}), 400
+    
+    # Tenant validation: non-admins can only create roles for their own tenant
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    if user.get('role') != ROLE_ADMIN:
+        user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+        # Force tenant_id to user's own tenant for non-admins
+        if tenant_id and tenant_id != user_tenant:
+            log_audit(request.session['user'], 'role.create_denied', 
+                     f"Access denied: attempted to create role '{role_id}' in tenant '{tenant_id}' (user tenant: '{user_tenant}')",
+                     ip_address=request.remote_addr)
+            return jsonify({'error': 'Access denied - cannot create roles in other tenants'}), 403
+        tenant_id = user_tenant if tenant_id else None  # Allow global roles only if explicitly None
     
     custom = get_custom_roles()
     
@@ -1224,6 +1246,21 @@ def update_custom_role(role_id):
     permissions = data.get('permissions')
     tenant_id = data.get('tenant_id')  # which tenant's role to update
     
+    # Tenant validation: non-admins can only update roles in their own tenant
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    if user.get('role') != ROLE_ADMIN:
+        user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+        # Check if trying to update a role in a different tenant
+        if tenant_id and tenant_id != user_tenant:
+            log_audit(request.session['user'], 'role.update_denied',
+                     f"Access denied: attempted to update role '{role_id}' in tenant '{tenant_id}' (user tenant: '{user_tenant}')",
+                     ip_address=request.remote_addr)
+            return jsonify({'error': 'Access denied - cannot update roles in other tenants'}), 403
+        # Force tenant_id to user's own tenant for non-admins
+        if tenant_id:
+            tenant_id = user_tenant
+    
     custom = get_custom_roles()
     
     # find the role
@@ -1270,6 +1307,21 @@ def delete_custom_role(role_id):
         return jsonify({'error': 'Cannot delete builtin roles'}), 400
     
     tenant_id = request.args.get('tenant_id')
+    
+    # Tenant validation: non-admins can only delete roles in their own tenant
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    if user.get('role') != ROLE_ADMIN:
+        user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+        # Check if trying to delete a role in a different tenant
+        if tenant_id and tenant_id != user_tenant:
+            log_audit(request.session['user'], 'role.delete_denied',
+                     f"Access denied: attempted to delete role '{role_id}' in tenant '{tenant_id}' (user tenant: '{user_tenant}')",
+                     ip_address=request.remote_addr)
+            return jsonify({'error': 'Access denied - cannot delete roles in other tenants'}), 403
+        # Force tenant_id to user's own tenant for non-admins
+        if tenant_id:
+            tenant_id = user_tenant
     
     custom = get_custom_roles()
     found = False
