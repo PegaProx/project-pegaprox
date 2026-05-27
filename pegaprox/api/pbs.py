@@ -1859,6 +1859,15 @@ def start_backup_verification(cluster_id):
     """Start a PBS backup verification (restore → boot → check → cleanup)"""
     from pegaprox.core.backup_verify import start_verification
 
+    # MK May 2026 (#465 port) — cluster-scoped auth on cluster-id-keyed endpoints.
+    # The earlier #476 batch only covered the pbs_id-keyed `/api/pbs/<id>` routes
+    # via check_pbs_access; these `/api/clusters/<id>/backup-verify*` endpoints
+    # use a different auth-key and went unprotected.
+    from pegaprox.api.helpers import check_cluster_access
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1892,6 +1901,12 @@ def get_backup_verification_status(cluster_id, task_id):
     """Get status of a running or completed verification"""
     from pegaprox.core.backup_verify import get_verification, get_verification_history
 
+    # MK May 2026 (#465 port) — cluster-scoped auth (see start_backup_verification)
+    from pegaprox.api.helpers import check_cluster_access
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+
     # check active first
     status = get_verification(task_id)
     if status:
@@ -1918,6 +1933,12 @@ def get_backup_verification_status(cluster_id, task_id):
 def get_backup_verification_history(cluster_id):
     """Get verification history, optionally filtered by vmid"""
     from pegaprox.core.backup_verify import get_verification_history
+
+    # MK May 2026 (#465 port) — cluster-scoped auth (see start_backup_verification)
+    from pegaprox.api.helpers import check_cluster_access
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
 
     vmid = request.args.get('vmid', type=int)
     limit = request.args.get('limit', 50, type=int)
