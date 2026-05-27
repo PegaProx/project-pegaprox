@@ -20,7 +20,7 @@ from pegaprox.core.db import get_db, ENCRYPTION_AVAILABLE
 
 import requests
 from pegaprox.utils.auth import require_auth, load_users, save_users, validate_session, TOTP_AVAILABLE, ARGON2_AVAILABLE, _check_default_password_in_use, verify_password, needs_password_rehash
-from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int
+from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanitize_csv_field
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
@@ -2519,7 +2519,10 @@ def get_audit_log_api():
         writer = csv.DictWriter(buf, fieldnames=cols, extrasaction='ignore', quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
         for row in entries:
-            writer.writerow({c: row.get(c, '') for c in cols})
+            # Sanitize all fields to prevent CSV formula injection (CWE-1236)
+            # Neutralizes leading =, +, -, @, tab, CR that trigger formula evaluation
+            sanitized_row = {c: sanitize_csv_field(row.get(c, '')) for c in cols}
+            writer.writerow(sanitized_row)
         ts = time.strftime('%Y%m%d_%H%M%S')
         resp = Response(buf.getvalue(), mimetype='text/csv; charset=utf-8')
         resp.headers['Content-Disposition'] = f'attachment; filename=pegaprox_audit_{ts}.csv'
