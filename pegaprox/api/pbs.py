@@ -12,7 +12,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import safe_error
+from pegaprox.api.helpers import safe_error, check_cluster_access
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -1693,6 +1693,9 @@ def start_backup_verification(cluster_id):
     """Start a PBS backup verification (restore → boot → check → cleanup)"""
     from pegaprox.core.backup_verify import start_verification
 
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1726,6 +1729,9 @@ def get_backup_verification_status(cluster_id, task_id):
     """Get status of a running or completed verification"""
     from pegaprox.core.backup_verify import get_verification, get_verification_history
 
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
     # check active first
     status = get_verification(task_id)
     if status:
@@ -1753,6 +1759,9 @@ def get_backup_verification_history(cluster_id):
     """Get verification history, optionally filtered by vmid"""
     from pegaprox.core.backup_verify import get_verification_history
 
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
     vmid = request.args.get('vmid', type=int)
     limit = request.args.get('limit', 50, type=int)
 
@@ -1765,6 +1774,9 @@ def get_backup_verification_history(cluster_id):
 def get_active_verifications(cluster_id):
     """Get all currently running verifications"""
     from pegaprox.core.backup_verify import get_active_verifications
+
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
 
     active = get_active_verifications()
     # filter by cluster
@@ -2117,6 +2129,9 @@ def storage_preflight(cluster_id):
 
     Body: same shape as /datacenter/storage POST.
     """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     data = request.json or {}
@@ -2189,6 +2204,9 @@ def get_vms_backup_status(cluster_id):
     """Per-VM backup health: last backup age, encryption flag, count over last 30d.
     Used by the VM list to render a status pill column.
     """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     cm = cluster_managers[cluster_id]
@@ -2323,6 +2341,9 @@ def run_backup_job_now(cluster_id, job_id):
 
     Note: the job_id matches the UUID in /etc/pve/jobs.cfg (vzdump: <id>).
     """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     cm = cluster_managers[cluster_id]
@@ -2384,6 +2405,9 @@ def restore_backup(cluster_id):
 
     Body: {volid, target_node, target_vmid, mode, target_storage?}
     """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     cm = cluster_managers[cluster_id]
