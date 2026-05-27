@@ -142,6 +142,15 @@ def get_plan_detail(plan_id):
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
+    
+    # Authorization: verify user has access to plan's source and target clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+    
     return jsonify(_plan_with_vms(plan))
 
 
@@ -151,6 +160,14 @@ def update_plan(plan_id):
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
+
+    # Authorization: verify user has access to plan's source and target clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
 
     data = request.json or {}
     allowed = {'name', 'network_mappings', 'storage_mappings', 'auto_failover',
@@ -191,6 +208,14 @@ def delete_plan(plan_id):
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
 
+    # Authorization: verify user has access to plan's source and target clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
     # #238: allow force-delete of stuck plans via ?force=1 query param
     if plan['status'] in ('running', 'testing'):
         force = request.args.get('force', '').lower() in ('1', 'true')
@@ -217,6 +242,12 @@ def list_plan_vms(plan_id):
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
+    
+    # Authorization: verify user has access to plan's source cluster
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    
     return jsonify(_get_plan_vms(plan_id))
 
 
@@ -227,6 +258,11 @@ def add_plan_vm(plan_id):
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
 
+    # Authorization: verify user has access to plan's source cluster
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+
     data = request.json or {}
     if not data.get('vmid'):
         return jsonify({'error': 'vmid is required'}), 400
@@ -234,6 +270,16 @@ def add_plan_vm(plan_id):
         data['vmid'] = int(data['vmid'])
     except (ValueError, TypeError):
         return jsonify({'error': 'vmid must be a number'}), 400
+
+    # Authorization: verify user has access to the specific VM on the source cluster
+    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.rbac import user_can_access_vm
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    user['username'] = request.session['user']
+    vm_type = data.get('vm_type', 'qemu')
+    if not user_can_access_vm(user, plan['source_cluster'], data['vmid'], 'vm.view', vm_type):
+        return jsonify({'error': 'Access denied: you do not have permission to add this VM to the plan'}), 403
 
     vm_id = str(uuid.uuid4())[:8]
     db = get_db()
@@ -248,7 +294,7 @@ def add_plan_vm(plan_id):
         (id, plan_id, vmid, vm_name, vm_type, boot_group, boot_delay, replication_job_id, notes)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (vm_id, plan_id, data['vmid'], data.get('vm_name', ''),
-         data.get('vm_type', 'qemu'), data.get('boot_group', 0),
+         vm_type, data.get('boot_group', 0),
          data.get('boot_delay', 30), data.get('replication_job_id', ''),
          data.get('notes', '')))
 
@@ -265,6 +311,14 @@ def update_plan_vm(plan_id, vm_id):
     row = db.query_one('SELECT * FROM site_recovery_vms WHERE id = ? AND plan_id = ?', (vm_id, plan_id))
     if not row:
         return jsonify({'error': 'VM not found in plan'}), 404
+
+    # Authorization: verify user has access to the plan's source cluster
+    plan = _get_plan(plan_id)
+    if not plan:
+        return jsonify({'error': 'Plan not found'}), 404
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
 
     data = request.json or {}
     allowed = {'boot_group', 'boot_delay', 'replication_job_id', 'notes', 'vm_name'}
@@ -287,6 +341,14 @@ def update_plan_vm(plan_id, vm_id):
 @bp.route('/api/site-recovery/plans/<plan_id>/vms/<vm_id>', methods=['DELETE'])
 @require_auth(perms=['site_recovery.manage'])
 def remove_plan_vm(plan_id, vm_id):
+    # Authorization: verify user has access to the plan's source cluster
+    plan = _get_plan(plan_id)
+    if not plan:
+        return jsonify({'error': 'Plan not found'}), 404
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+
     db = get_db()
     row = db.query_one('SELECT vmid FROM site_recovery_vms WHERE id = ? AND plan_id = ?', (vm_id, plan_id))
     db.execute('DELETE FROM site_recovery_vms WHERE id = ? AND plan_id = ?', (vm_id, plan_id))
@@ -306,6 +368,14 @@ def check_readiness(plan_id):
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
+
+    # Authorization: verify user has access to plan's source and target clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
 
     issues = []
     vms = _get_plan_vms(plan_id)
@@ -402,6 +472,14 @@ def execute_planned_failover(plan_id):
     if plan['status'] == 'running':
         return jsonify({'error': 'Failover already in progress'}), 409
 
+    # Authorization: verify user has access to both source and target clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
     src_mgr = cluster_managers.get(plan['source_cluster'])
     tgt_mgr = cluster_managers.get(plan['target_cluster'])
     if not src_mgr or not src_mgr.is_connected:
@@ -445,6 +523,15 @@ def execute_emergency_failover(plan_id):
     if plan['status'] == 'running':
         return jsonify({'error': 'Failover already in progress'}), 409
 
+    # Authorization: verify user has access to target cluster (source may be down)
+    # Also check source cluster access to prevent unauthorized plan execution
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
     tgt_mgr = cluster_managers.get(plan['target_cluster'])
     if not tgt_mgr or not tgt_mgr.is_connected:
         return jsonify({'error': 'Target cluster not reachable'}), 503
@@ -483,6 +570,14 @@ def execute_test_failover(plan_id):
     if plan['status'] in ('running', 'testing'):
         return jsonify({'error': 'Action already in progress'}), 409
 
+    # Authorization: verify user has access to both source and target clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
     tgt_mgr = cluster_managers.get(plan['target_cluster'])
     if not tgt_mgr or not tgt_mgr.is_connected:
         return jsonify({'error': 'Target cluster not reachable'}), 503
@@ -507,6 +602,11 @@ def cleanup_test_failover(plan_id):
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
 
+    # Authorization: verify user has access to target cluster
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
     from pegaprox.background.site_recovery import cleanup_test
     _safe_spawn_failover(cleanup_test, plan_id)
 
@@ -525,6 +625,14 @@ def execute_failback(plan_id):
         return jsonify({'error': 'Plan not found'}), 404
     if plan['status'] == 'running':
         return jsonify({'error': 'Action already in progress'}), 409
+
+    # Authorization: verify user has access to both source and target clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
 
     # for failback, the original target is now source and vice versa
     original_src = cluster_managers.get(plan['source_cluster'])
@@ -553,6 +661,14 @@ def cancel_action(plan_id):
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
+
+    # Authorization: verify user has access to plan's clusters
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
     if plan['status'] not in ('running', 'testing'):
         return jsonify({'error': 'No active action to cancel'}), 409
     prev_status = plan['status']
@@ -571,6 +687,14 @@ def cancel_action(plan_id):
 @bp.route('/api/site-recovery/plans/<plan_id>/events', methods=['GET'])
 @require_auth(perms=['site_recovery.view'])
 def get_plan_events(plan_id):
+    # Authorization: verify user has access to the plan's clusters
+    plan = _get_plan(plan_id)
+    if not plan:
+        return jsonify({'error': 'Plan not found'}), 404
+    ok, err = check_cluster_access(plan['source_cluster'])
+    if not ok:
+        return err
+
     db = get_db()
     rows = db.query('SELECT * FROM site_recovery_events WHERE plan_id = ? ORDER BY started_at DESC LIMIT 50',
                     (plan_id,))
