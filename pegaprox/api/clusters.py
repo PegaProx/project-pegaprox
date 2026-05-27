@@ -455,6 +455,11 @@ def delete_cluster(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    # Check cluster-scoped authorization (tenant/VM-ACL access)
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    
     mgr = cluster_managers[cluster_id]
     cluster_name = mgr.config.name
 
