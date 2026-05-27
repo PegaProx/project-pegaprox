@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """vmware + v2p migration routes - split from monolith dec 2025, NS"""
 
+import logging
 import time
 import threading
 import uuid
@@ -97,16 +98,34 @@ def update_vmware_server(vmware_id):
         if not row:
             return jsonify({'error': 'VMware server not found'}), 404
     
+    # MK May 2026 (#469 port) — cred-exfil guard. If host changes WHILE the
+    # password is preserved (came in as ********), don't auto-connect — that
+    # would ship the saved credential to a potentially attacker-controlled host.
+    credentials_preserved = False
+    host_changed = False
+
     if vmware_id in vmware_managers:
         old_mgr = vmware_managers[vmware_id]
+        if (data.get('host') and data.get('host') != old_mgr.host) or \
+           (data.get('port') and int(data.get('port', 443)) != old_mgr.port):
+            host_changed = True
         if data.get('password') == '********':
             data['password'] = old_mgr.password
-    
+            credentials_preserved = True
+
     save_vmware_server(vmware_id, data)
-    
+
     mgr = VMwareManager(vmware_id, data)
     if data.get('enabled', True):
-        mgr.connect()
+        if host_changed and credentials_preserved:
+            try:
+                mgr.connected = False
+                mgr.last_error = 'Host changed — auto-connect skipped for security (preserved credentials). Use Test Connection manually after verifying the new host.'
+            except Exception:
+                pass
+            logging.warning(f"[VMware:{getattr(mgr, 'name', vmware_id)}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
+        else:
+            mgr.connect()
     vmware_managers[vmware_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'vmware.updated', f"Updated VMware server: {data.get('name', vmware_id)}")

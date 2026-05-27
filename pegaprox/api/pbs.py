@@ -110,25 +110,44 @@ def update_pbs_server(pbs_id):
             return jsonify({'error': 'PBS server not found'}), 404
     
     save_pbs_server(pbs_id, data)
-    
+
+    # MK May 2026 (#469 port) — track whether saved-creds are being preserved AND
+    # the host moved at the same time. If yes: don't auto-connect, because the
+    # operation could be a credential-exfil attempt where the user keeps the
+    # password (sent as ********) but points the server at an attacker-controlled
+    # host. We'd otherwise send the real password to that host on connect.
+    credentials_preserved = False
+    host_changed = False
+
     # Recreate manager with new config
     if pbs_id in pbs_managers:
         old_mgr = pbs_managers[pbs_id]
+        if (data.get('host') and data.get('host') != old_mgr.host) or \
+           (data.get('port') and int(data.get('port', 8007)) != old_mgr.port):
+            host_changed = True
         # Preserve credentials if masked
         if data.get('password') == '********':
             data['password'] = old_mgr.password
+            credentials_preserved = True
         if data.get('api_token_secret') == '********':
             data['api_token_secret'] = old_mgr.api_token_secret
+            credentials_preserved = True
         if data.get('ssh_key') == '********':
             data['ssh_key'] = getattr(old_mgr, 'ssh_key', '')
-    
+
     try:
         mgr = PBSManager(pbs_id, data)
     except ValueError as e:
         return jsonify({'error': 'Invalid PBS host'}), 400
-    
+
     if data.get('enabled', True):
-        mgr.connect()
+        if host_changed and credentials_preserved:
+            # cred-exfil guard — operator must explicitly re-test the new host
+            mgr.connected = False
+            mgr.last_error = 'Host changed — auto-connect skipped for security (preserved credentials). Use Test Connection manually after verifying the new host.'
+            logging.warning(f"[PBS:{mgr.name}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
+        else:
+            mgr.connect()
     pbs_managers[pbs_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'pbs.updated', f"Updated PBS server: {data.get('name', pbs_id)}")
