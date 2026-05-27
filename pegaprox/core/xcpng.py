@@ -3152,8 +3152,10 @@ class XcpngManager:
             return {'success': False, 'error': 'No DNS servers specified'}
 
         content = '\n'.join(lines) + '\n'
+        # Use random delimiter to prevent heredoc terminator injection
+        delimiter = f"EOF_{_uuid.uuid4().hex}"
         rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/resolv.conf << 'RESOLV_EOF'\n{content}RESOLV_EOF")
+            f"cat > /etc/resolv.conf << '{delimiter}'\n{content}{delimiter}")
         if rc == 0:
             return {'success': True, 'message': 'DNS updated'}
         return {'success': False, 'error': err or 'Failed to write resolv.conf'}
@@ -3166,9 +3168,10 @@ class XcpngManager:
     def update_node_hosts(self, node, hosts_content):
         if not hosts_content:
             return {'success': False, 'error': 'Empty hosts content'}
-        # write via heredoc to preserve formatting
+        # Use random delimiter to prevent heredoc terminator injection
+        delimiter = f"EOF_{_uuid.uuid4().hex}"
         rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/hosts << 'PEGAPROX_EOF'\n{hosts_content}\nPEGAPROX_EOF")
+            f"cat > /etc/hosts << '{delimiter}'\n{hosts_content}\n{delimiter}")
         if rc == 0:
             return {'success': True, 'message': 'Hosts updated'}
         return {'success': False, 'error': err or 'Failed to write hosts file'}
@@ -4394,8 +4397,10 @@ echo DONE""",
         combined = certificates.strip() + '\n' + key.strip() + '\n'
         # backup current cert first
         self._ssh_exec(node, "cp /etc/xensource/xapi-ssl.pem /etc/xensource/xapi-ssl.pem.bak 2>/dev/null")
+        # Use random delimiter to prevent heredoc terminator injection
+        delimiter = f"EOF_{_uuid.uuid4().hex}"
         rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/xensource/xapi-ssl.pem << 'CERT_EOF'\n{combined}CERT_EOF")
+            f"cat > /etc/xensource/xapi-ssl.pem << '{delimiter}'\n{combined}{delimiter}")
         if rc != 0:
             return {'success': False, 'error': err or 'Failed to write certificate'}
 
