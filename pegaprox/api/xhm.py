@@ -102,6 +102,12 @@ def xhm_start():
         if not data.get(f):
             return jsonify({'error': f'{f} is required'}), 400
 
+    # MK May 2026 (#481 port) — target_storage is embedded in pvesm alloc cmds
+    # in core/xhm.py. Validate at api boundary.
+    from pegaprox.utils.sanitization import validate_storage_name
+    if not validate_storage_name(data['target_storage']):
+        return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+
     # Authorization: check source cluster access
     ok, err = check_cluster_access(data['source_cluster'])
     if not ok:

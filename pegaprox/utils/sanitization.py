@@ -90,6 +90,22 @@ def validate_hostname(hostname: str) -> bool:
     return bool(re.match(ip_pattern, hostname) or re.match(hostname_pattern, hostname))
 
 
+def validate_storage_name(storage) -> bool:
+    """Validate Proxmox / XCP-ng storage identifier.
+
+    PVE/XCP storage names are alphanumeric + dash + underscore + dot. Anything
+    outside that set has no legitimate use in our context and reaching us is a
+    sign of an injection attempt against the `pvesm` / `qm` shell calls that
+    embed the storage name. MK May 2026 (Aikido #481 port — original PR was
+    closed-superseded by mistake; manually ported after re-review.)
+    """
+    if not storage or not isinstance(storage, str):
+        return False
+    # Must start with alphanumeric, 1-100 chars total, set: [A-Za-z0-9._-]
+    pattern = r'^[a-zA-Z0-9][a-zA-Z0-9_\-\.]{0,99}$'
+    return bool(re.match(pattern, storage))
+
+
 def sanitize_csv_field(value) -> str:
     """Sanitize field for CSV export to prevent formula injection.
     

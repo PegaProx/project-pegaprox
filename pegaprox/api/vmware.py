@@ -924,6 +924,13 @@ def start_vmware_migration(vmware_id, vm_id):
     for field in ('target_cluster', 'target_node', 'target_storage'):
         if not data.get(field):
             return jsonify({'error': f'{field} is required'}), 400
+
+    # MK May 2026 (#481 port) — target_storage flows into `pvesm` calls on the
+    # PVE node. Validate at the api boundary before the shell touches it.
+    from pegaprox.utils.sanitization import validate_storage_name
+    if not validate_storage_name(data['target_storage']):
+        return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+
     if not data.get('esxi_password'):
         return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
     if data['target_cluster'] not in cluster_managers:

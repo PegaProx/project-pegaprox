@@ -653,7 +653,7 @@ def _run_v2p_migration(task):
 
         # Resolve tmpdir on target storage so qemu-img/importdisk don't fill root
         rc_tp, tmpdir_out, _ = _pve_node_exec(pve_mgr, task.target_node,
-            f"dir=$(pvesm path {task.target_storage}:1 2>/dev/null | xargs dirname 2>/dev/null) && "
+            f"dir=$(pvesm path {shlex.quote(task.target_storage)}:1 2>/dev/null | xargs dirname 2>/dev/null) && "
             f"[ -d \"$dir\" ] && echo $dir || echo /var/tmp",
             timeout=10)
         v2p_tmpdir = str(tmpdir_out or '').strip() or '/var/tmp'
@@ -3274,7 +3274,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         if not vol_id or not dev_path:
             # NS Mar 2026 - #132: surface the actual pvesm error so user can debug
             rc_dbg, out_dbg, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"pvesm alloc {task.target_storage} {task.proxmox_vmid} vm-{task.proxmox_vmid}-disk-{di} 1G 2>&1",
+                f"pvesm alloc {shlex.quote(task.target_storage)} {task.proxmox_vmid} vm-{task.proxmox_vmid}-disk-{di} 1G 2>&1",
                 timeout=10)
             task.log(f"  Disk allocation failed for disk {di}")
             task.log(f"  Storage: {task.target_storage}, VMID: {task.proxmox_vmid}")
@@ -5431,7 +5431,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     if not vol_id or not vol_path:
         # surface pvesm error for debugging (#132)
         rc_dbg, out_dbg, _ = _pve_node_exec(pve_mgr, task.target_node,
-            f"pvesm status --storage {task.target_storage} 2>&1", timeout=10)
+            f"pvesm status --storage {shlex.quote(task.target_storage)} 2>&1", timeout=10)
         task.log(f"  Disk allocation failed for disk {disk_index}")
         task.log(f"  Storage: {task.target_storage} | pvesm: {str(out_dbg or '').strip()[:200]}")
         return None, None
