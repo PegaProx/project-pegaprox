@@ -4976,7 +4976,46 @@ exit $((S + R))
         _pve_node_exec(pve_mgr, task.target_node, "sync", timeout=10)
     else:
         task.log("Configuring VM with local disks...")
-    
+
+        # MK May 2026 (#438 @crcro) — drive_mirror -n live-pivots QEMU's runtime
+        # view to the local disk but DOES NOT update the persistent VM config.
+        # Without this block, the post-migration config still references the old
+        # sshfs source and the new scsi0:<local-vol-id> never gets written. The
+        # VM keeps running off the in-memory pivot just fine, but a reboot
+        # finds no disk in config and won't boot. Reporter saw exactly this:
+        # VM works post-migration, restart loses disks, .raw/.qcow2 left orphaned.
+        try:
+            # 1) clean stale args/boot/unused/old-scsi sshfs entries from config
+            _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^args:/d' {conf_path}", timeout=5)
+            _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^boot:/d' {conf_path}", timeout=5)
+            _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^unused/d' {conf_path}", timeout=5)
+            for di in range(len(descriptor_files)):
+                _pve_node_exec(pve_mgr, task.target_node,
+                    f"sed -i '/^{disk_bus}{di}:/d' {conf_path}", timeout=5)
+
+            # 2) write the local vol_id refs the live-pivot mirrored to
+            attached_count = 0
+            for di in range(len(descriptor_files)):
+                vol_id = local_volumes[di][0] if di < len(local_volumes) else ''
+                if not vol_id:
+                    task.log(f"  WARNING: post-pivot no volume for disk {di} — skipping")
+                    continue
+                rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node,
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id} 2>&1", timeout=15)
+                at_out = str(out_at or '').strip()
+                if rc_at == 0 and 'error' not in at_out.lower():
+                    task.log(f"  Disk {di}: {disk_bus}{di} → {vol_id} ✓ (persisted)")
+                    attached_count += 1
+                else:
+                    task.log(f"  WARNING: post-pivot qm set --{disk_bus}{di} {vol_id} failed: {at_out[:150]}")
+
+            # 3) boot order so the next reboot finds the disk
+            _pve_node_exec(pve_mgr, task.target_node,
+                f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=10)
+            task.log(f"  Post-pivot persistent config updated: {attached_count}/{len(descriptor_files)} disk(s) wired, boot order={disk_bus}0")
+        except Exception as e:
+            task.log(f"  WARNING: post-pivot config update failed: {e} — VM runs now but reboot will fail")
+
     if not mirror_success:
         # Clean config: remove SSH args, boot, and unused disk lines
         _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^args:/d' {conf_path}", timeout=5)
