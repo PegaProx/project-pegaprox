@@ -617,9 +617,21 @@ def get_vmware_console(vmware_id, vm_id):
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
     mgr.ensure_connected()
+    
+    # Security: Verify VM exists on this VMware server before issuing console ticket
+    # This prevents users from requesting console tickets for arbitrary VM IDs
+    vm_check = mgr.get_vm(vm_id)
+    if 'error' in vm_check:
+        log_audit(request.session.get('user', 'admin'), 'vmware.console.denied',
+                  f"Console access denied for VM {vm_id} @ {mgr.name}: VM not found")
+        return jsonify({'error': 'VM not found or access denied'}), 404
+    
     result = mgr.get_vm_console_ticket(vm_id)
     if 'error' in result:
         return jsonify(result), result.get('status_code', 500)
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.console.accessed',
+              f"Console ticket issued for VM {vm_id} @ {mgr.name}")
     return jsonify(result.get('data', {}))
 
 
