@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.api.helpers import check_cluster_access
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
     _run_xcpng_to_pve, _run_pve_to_xcpng,
@@ -41,6 +42,14 @@ def xhm_plan():
         return jsonify({'error': 'Source cluster not found'}), 404
     if not tgt_mgr:
         return jsonify({'error': 'Target cluster not found'}), 404
+
+    # Verify user has access to both source and target clusters
+    ok, err = check_cluster_access(source_cluster)
+    if not ok:
+        return err
+    ok, err = check_cluster_access(target_cluster)
+    if not ok:
+        return err
 
     src_type = getattr(src_mgr, 'cluster_type', 'proxmox')
     tgt_type = getattr(tgt_mgr, 'cluster_type', 'proxmox')
@@ -84,6 +93,14 @@ def xhm_start():
         return jsonify({'error': 'Source cluster not found'}), 404
     if not tgt_mgr:
         return jsonify({'error': 'Target cluster not found'}), 404
+
+    # Verify user has access to both source and target clusters
+    ok, err = check_cluster_access(data['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(data['target_cluster'])
+    if not ok:
+        return err
 
     src_type = getattr(src_mgr, 'cluster_type', 'proxmox')
     tgt_type = getattr(tgt_mgr, 'cluster_type', 'proxmox')
