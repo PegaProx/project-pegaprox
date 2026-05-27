@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.api.helpers import check_cluster_access
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
     _run_xcpng_to_pve, _run_pve_to_xcpng,
@@ -33,6 +34,16 @@ def xhm_plan():
 
     if not source_cluster or not source_vmid or not target_cluster:
         return jsonify({'error': 'source_cluster, source_vmid, and target_cluster are required'}), 400
+
+    # Security: verify user has access to source cluster
+    ok, err = check_cluster_access(source_cluster)
+    if not ok:
+        return err
+
+    # Security: verify user has access to target cluster
+    ok, err = check_cluster_access(target_cluster)
+    if not ok:
+        return err
 
     # auto-detect direction from cluster types
     src_mgr = cluster_managers.get(source_cluster)
@@ -77,6 +88,17 @@ def xhm_start():
     for f in required:
         if not data.get(f):
             return jsonify({'error': f'{f} is required'}), 400
+
+    # Security: verify user has access to source cluster
+    ok, err = check_cluster_access(data['source_cluster'])
+    if not ok:
+        return err
+
+    # Security: verify user has access to target cluster
+    # This prevents users from migrating VMs into clusters they don't have access to
+    ok, err = check_cluster_access(data['target_cluster'])
+    if not ok:
+        return err
 
     src_mgr = cluster_managers.get(data['source_cluster'])
     tgt_mgr = cluster_managers.get(data['target_cluster'])
