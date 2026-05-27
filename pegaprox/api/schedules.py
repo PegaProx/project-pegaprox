@@ -614,6 +614,34 @@ def update_schedule(schedule_id):
     ok, err = check_cluster_access(schedule.get('cluster_id', ''))
     if not ok: return err
 
+    # Validate action if being updated
+    if 'action' in data:
+        valid_actions = ['start', 'stop', 'shutdown', 'reboot', 'snapshot']
+        if data['action'] not in valid_actions:
+            return jsonify({'error': f'Action must be one of: {valid_actions}'}), 400
+    
+    # Validate time format if being updated
+    if 'time' in data:
+        try:
+            datetime.strptime(data['time'], '%H:%M')
+        except ValueError:
+            return jsonify({'error': 'Time must be in HH:MM format'}), 400
+    
+    # Validate schedule type if being updated
+    if 'schedule_type' in data:
+        valid_types = ['once', 'daily', 'weekly', 'weekdays', 'weekends']
+        if data['schedule_type'] not in valid_types:
+            return jsonify({'error': f'Schedule type must be one of: {valid_types}'}), 400
+    
+    # For 'once' type, require date
+    schedule_type = data.get('schedule_type', schedule.get('schedule_type'))
+    if schedule_type == 'once' and 'date' in data and not data.get('date'):
+        return jsonify({'error': 'Date is required for one-time schedules'}), 400
+    
+    # For 'weekly' type, require days
+    if schedule_type == 'weekly' and 'days' in data and not data.get('days'):
+        return jsonify({'error': 'Days are required for weekly schedules'}), 400
+
     # Update fields (vmid/vm_type added Mar 2026 - #133)
     updatable = ['name', 'vmid', 'vm_type', 'action', 'schedule_type', 'time', 'date', 'days', 'enabled']
     for field in updatable:
@@ -621,6 +649,9 @@ def update_schedule(schedule_id):
             schedule[field] = data[field]
     
     save_schedules(schedules)
+    
+    log_audit(request.session.get('user', 'system'), 'schedule.updated', 
+             f"Updated schedule ID {schedule_id}")
     
     return jsonify({'success': True, 'schedule': schedule})
 
