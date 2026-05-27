@@ -12,7 +12,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import safe_error
+from pegaprox.api.helpers import safe_error, check_pbs_access
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -203,6 +203,11 @@ def test_pbs_connection(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_status(pbs_id):
     """Get PBS server status (CPU, RAM, disk, uptime)"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -266,6 +271,11 @@ def refresh_pbs_apt(pbs_id):
 @require_auth(perms=['admin.settings'])
 def start_pbs_update(pbs_id):
     """Start apt-get dist-upgrade on PBS host via SSH"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -321,6 +331,11 @@ def clear_pbs_update_status(pbs_id):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_datastores(pbs_id):
     """List datastores with detailed status"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -401,6 +416,11 @@ def _pbs_vm_name_lookup(pbs_mgr):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_snapshots(pbs_id, store):
     """List snapshots in a datastore"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -428,6 +448,11 @@ def get_pbs_snapshots(pbs_id, store):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_groups(pbs_id, store):
     """List backup groups in a datastore"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -452,6 +477,11 @@ def get_pbs_groups(pbs_id, store):
 @require_auth(perms=['pbs.datastore.gc'])
 def pbs_start_gc(pbs_id, store):
     """Start garbage collection"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -465,6 +495,11 @@ def pbs_start_gc(pbs_id, store):
 @require_auth(perms=['pbs.datastore.verify'])
 def pbs_start_verify(pbs_id, store):
     """Start verification"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -479,6 +514,11 @@ def pbs_start_verify(pbs_id, store):
 @require_auth(perms=['pbs.datastore.prune'])
 def pbs_prune(pbs_id, store):
     """Prune old backups"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -501,6 +541,11 @@ def pbs_prune(pbs_id, store):
 @require_auth(perms=['pbs.snapshot.delete'])
 def pbs_delete_snapshot(pbs_id, store):
     """Delete a specific snapshot"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -572,6 +617,11 @@ def get_pbs_jobs(pbs_id):
 @require_auth(perms=['pbs.jobs.run'])
 def run_pbs_job(pbs_id, job_type, job_id):
     """Manually trigger a PBS job"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -671,6 +721,11 @@ def get_pbs_snapshot_notes(pbs_id, store):
 @require_auth(perms=['pbs.snapshot.notes'])
 def set_pbs_snapshot_notes(pbs_id, store):
     """Set notes for a specific snapshot"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -706,6 +761,11 @@ def get_pbs_group_notes(pbs_id, store):
 @require_auth(perms=['pbs.snapshot.notes'])
 def set_pbs_group_notes(pbs_id, store):
     """Set notes for a backup group"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -726,6 +786,11 @@ def set_pbs_group_notes(pbs_id, store):
 @require_auth(perms=['pbs.snapshot.protect'])
 def set_pbs_snapshot_protected(pbs_id, store):
     """Set protected flag on a snapshot"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -878,6 +943,11 @@ def create_pbs_datastore(pbs_id):
     NS: This creates the datastore config on the PBS. The path must already exist 
     on the PBS filesystem - we can't create directories remotely.
     """
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -930,6 +1000,11 @@ def create_pbs_datastore(pbs_id):
 @require_auth(perms=['pbs.datastore.modify'])
 def update_pbs_datastore_config(pbs_id, store):
     """Update datastore configuration (retention, GC schedule, etc.)"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -977,6 +1052,11 @@ def delete_pbs_datastore(pbs_id, store):
     NS: By default this only removes the config - actual backup data on disk stays.
     This is the safe default. To also destroy data, send keep_data=false (dangerous!).
     """
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1010,6 +1090,11 @@ def delete_pbs_datastore(pbs_id, store):
 @require_auth(perms=['pbs.jobs.create'])
 def create_pbs_job(pbs_id, job_type):
     """Create a new sync/verify/prune job"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1052,6 +1137,11 @@ def create_pbs_job(pbs_id, job_type):
 @require_auth(perms=['pbs.jobs.modify'])
 def update_pbs_job(pbs_id, job_type, job_id):
     """Update a job configuration"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1077,6 +1167,11 @@ def update_pbs_job(pbs_id, job_type, job_id):
 @require_auth(perms=['pbs.jobs.delete'])
 def delete_pbs_job(pbs_id, job_type, job_id):
     """Delete a job"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1103,6 +1198,11 @@ def delete_pbs_job(pbs_id, job_type, job_id):
 @require_auth(perms=['pbs.tasks.stop'])
 def stop_pbs_task(pbs_id, upid):
     """Stop a running PBS task"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1120,6 +1220,11 @@ def stop_pbs_task(pbs_id, upid):
 @require_auth(perms=['pbs.notifications.manage'])
 def create_pbs_notification_target(pbs_id, target_type):
     """Create a notification target (sendmail, gotify, smtp, webhook)"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     data = request.json or {}
@@ -1138,6 +1243,11 @@ def create_pbs_notification_target(pbs_id, target_type):
 @require_auth(perms=['pbs.notifications.manage'])
 def update_pbs_notification_target(pbs_id, target_type, name):
     """Update a notification target"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     data = request.json or {}
@@ -1151,6 +1261,11 @@ def update_pbs_notification_target(pbs_id, target_type, name):
 @require_auth(perms=['pbs.notifications.manage'])
 def delete_pbs_notification_target(pbs_id, target_type, name):
     """Delete a notification target"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].delete_notification_target(target_type, name)
@@ -1165,6 +1280,11 @@ def delete_pbs_notification_target(pbs_id, target_type, name):
 @require_auth(perms=['pbs.notifications.manage'])
 def create_pbs_notification_matcher(pbs_id):
     """Create a notification matcher"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     data = request.json or {}
@@ -1181,6 +1301,11 @@ def create_pbs_notification_matcher(pbs_id):
 @require_auth(perms=['pbs.notifications.manage'])
 def update_pbs_notification_matcher(pbs_id, name):
     """Update a notification matcher"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     data = request.json or {}
@@ -1194,6 +1319,11 @@ def update_pbs_notification_matcher(pbs_id, name):
 @require_auth(perms=['pbs.notifications.manage'])
 def delete_pbs_notification_matcher(pbs_id, name):
     """Delete a notification matcher"""
+    # Check PBS access authorization
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
+    
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].delete_notification_matcher(name)

@@ -301,6 +301,55 @@ def check_cluster_access(cluster_id):
     return True, None
 
 
+def check_pbs_access(pbs_id):
+    """Check if current user can access a PBS server based on its linked clusters.
+    Returns (True, None) if allowed, (False, error_response) if not.
+    
+    A PBS server is accessible if:
+    - User is admin (full access), OR
+    - PBS has no linked_clusters (backward compatibility - accessible to all), OR
+    - User has access to at least one of the PBS's linked clusters
+    """
+    from flask import request, jsonify
+    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.globals import pbs_managers
+    from pegaprox.models.permissions import ROLE_ADMIN
+    
+    # Check if PBS exists
+    if pbs_id not in pbs_managers:
+        return False, (jsonify({'error': 'PBS server not found'}), 404)
+    
+    pbs_mgr = pbs_managers[pbs_id]
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    
+    # Admins have full access
+    if user.get('role') == ROLE_ADMIN:
+        return True, None
+    
+    # Get PBS linked clusters
+    pbs_linked = pbs_mgr.linked_clusters or []
+    
+    # If PBS has no linked clusters, allow access (backward compatibility)
+    if not pbs_linked:
+        return True, None
+    
+    # Get user's allowed clusters
+    user_clusters = get_user_clusters(user)
+    
+    # If user has access to all clusters (None), allow
+    if user_clusters is None:
+        return True, None
+    
+    # Check if user has access to at least one linked cluster
+    for cluster_id in pbs_linked:
+        if cluster_id in user_clusters:
+            return True, None
+    
+    return False, (jsonify({'error': 'Access denied to this PBS server'}), 403)
+
+
 def safe_error(e, default_msg='An internal error occurred'):
     """Return a safe error message for API responses.
     MK Feb 2026 - logs full exception but returns generic message to client.
