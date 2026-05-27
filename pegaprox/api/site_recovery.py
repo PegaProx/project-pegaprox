@@ -277,6 +277,19 @@ def add_plan_vm(plan_id):
     except (ValueError, TypeError):
         return jsonify({'error': 'vmid must be a number'}), 400
 
+    # MK May 2026 (#477 port) — VM-level ACL gate on top of cluster-level above.
+    # Without this a user with cluster-view but no specific-VM access could add
+    # the VM to a recovery plan and trigger an authorized failover/test against
+    # a VM they shouldn't touch.
+    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.rbac import user_can_access_vm
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    user['username'] = request.session['user']
+    vm_type = data.get('vm_type', 'qemu')
+    if not user_can_access_vm(user, plan['source_cluster'], data['vmid'], 'vm.view', vm_type):
+        return jsonify({'error': 'Access denied: you do not have permission to add this VM to the plan'}), 403
+
     vm_id = str(uuid.uuid4())[:8]
     db = get_db()
 
