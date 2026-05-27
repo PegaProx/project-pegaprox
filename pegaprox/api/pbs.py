@@ -107,20 +107,43 @@ def update_pbs_server(pbs_id):
     
     save_pbs_server(pbs_id, data)
     
+    # Track whether credentials are being preserved and if host/port changed
+    credentials_preserved = False
+    host_changed = False
+    
     # Recreate manager with new config
     if pbs_id in pbs_managers:
         old_mgr = pbs_managers[pbs_id]
+        
+        # Check if host or port changed
+        if (data.get('host') and data.get('host') != old_mgr.host) or \
+           (data.get('port') and int(data.get('port', 8007)) != old_mgr.port):
+            host_changed = True
+        
         # Preserve credentials if masked
         if data.get('password') == '********':
             data['password'] = old_mgr.password
+            credentials_preserved = True
         if data.get('api_token_secret') == '********':
             data['api_token_secret'] = old_mgr.api_token_secret
+            credentials_preserved = True
         if data.get('ssh_key') == '********':
             data['ssh_key'] = getattr(old_mgr, 'ssh_key', '')
     
     mgr = PBSManager(pbs_id, data)
+    
+    # Security: Do not auto-connect if host changed while preserving credentials
+    # This prevents credential exfiltration by changing the target host
     if data.get('enabled', True):
-        mgr.connect()
+        if host_changed and credentials_preserved:
+            # Skip automatic connection test to prevent sending preserved credentials
+            # to a potentially attacker-controlled host
+            mgr.connected = False
+            mgr.last_error = 'Host changed - connection test skipped for security. Please test connection manually.'
+            logging.warning(f"[PBS:{mgr.name}] Skipped auto-connect after host change with preserved credentials (security)")
+        else:
+            mgr.connect()
+    
     pbs_managers[pbs_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'pbs.updated', f"Updated PBS server: {data.get('name', pbs_id)}")

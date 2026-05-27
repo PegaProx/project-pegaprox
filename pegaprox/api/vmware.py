@@ -96,16 +96,39 @@ def update_vmware_server(vmware_id):
         if not row:
             return jsonify({'error': 'VMware server not found'}), 404
     
+    # Track whether credentials are being preserved and if host/port changed
+    credentials_preserved = False
+    host_changed = False
+    
     if vmware_id in vmware_managers:
         old_mgr = vmware_managers[vmware_id]
+        
+        # Check if host or port changed
+        if (data.get('host') and data.get('host') != old_mgr.host) or \
+           (data.get('port') and int(data.get('port', 443)) != old_mgr.port):
+            host_changed = True
+        
         if data.get('password') == '********':
             data['password'] = old_mgr.password
+            credentials_preserved = True
     
     save_vmware_server(vmware_id, data)
     
     mgr = VMwareManager(vmware_id, data)
+    
+    # Security: Do not auto-connect if host changed while preserving credentials
+    # This prevents credential exfiltration by changing the target host
     if data.get('enabled', True):
-        mgr.connect()
+        if host_changed and credentials_preserved:
+            # Skip automatic connection test to prevent sending preserved credentials
+            # to a potentially attacker-controlled host
+            mgr.connected = False
+            mgr.last_error = 'Host changed - connection test skipped for security. Please test connection manually.'
+            import logging
+            logging.warning(f"[VMware:{mgr.name}] Skipped auto-connect after host change with preserved credentials (security)")
+        else:
+            mgr.connect()
+    
     vmware_managers[vmware_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'vmware.updated', f"Updated VMware server: {data.get('name', vmware_id)}")
