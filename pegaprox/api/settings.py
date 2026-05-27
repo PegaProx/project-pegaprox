@@ -10,6 +10,7 @@ import time
 import logging
 import threading
 import re
+import hashlib
 from datetime import datetime
 from flask import Blueprint, jsonify, request, Response, make_response, send_from_directory, send_file
 
@@ -314,19 +315,27 @@ def perform_pegaprox_update():
     PRIMARY: downloads GitHub source archive, extracts, copies.
     FALLBACK: expands update_files globs via GitHub API, downloads individually.
 
+    NS: May 2026 pentest fix - SHA256 integrity verification added:
+    - Archive hash verified against version.json archive_sha256 field
+    - requirements.txt added to protected paths (prevents malicious package injection)
+    - Update rejected if hash mismatch detected
+    - Backward compatible: proceeds with warning if hash not provided
+
     Protected paths (NEVER overwritten):
     - config/, ssl/, certs/   (settings, encrypted data)
     - *.db, *.enc             (databases, encrypted files)
     - *.pem, *.key, *.crt    (certificates, private keys)
+    - requirements.txt        (prevents malicious package injection)
     """
     try:
         data = request.json or {}
         force = data.get('force', False)
 
         # Protected paths - NEVER overwrite
+        # NS: May 2026 pentest fix - requirements.txt added to prevent malicious package injection
         PROTECTED = [
             'config/', 'ssl/', 'certs/', 'logs/', 'backups/', 'venv/', '.git/',
-            '.db', '.enc', '.pem', '.key', '.crt', '.p12'
+            '.db', '.enc', '.pem', '.key', '.crt', '.p12', 'requirements.txt'
         ]
 
         def is_protected(path):
@@ -439,9 +448,39 @@ def perform_pegaprox_update():
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 archive_path = os.path.join(tmpdir, 'repo.tar.gz')
+                
+                # NS: May 2026 pentest fix - compute SHA256 while writing
+                sha256_hash = hashlib.sha256()
                 with open(archive_path, 'wb') as f:
                     for chunk in resp.iter_content(8192):
                         f.write(chunk)
+                        sha256_hash.update(chunk)
+                
+                computed_hash = sha256_hash.hexdigest()
+                
+                # NS: May 2026 pentest fix - verify archive integrity
+                expected_hash = remote_version.get('archive_sha256')
+                if expected_hash:
+                    if computed_hash != expected_hash.lower():
+                        error_msg = f"Archive hash mismatch: expected {expected_hash[:16]}..., got {computed_hash[:16]}..."
+                        logging.error(f"SECURITY: {error_msg}")
+                        log_audit(user, 'pegaprox.update_failed', 
+                                 f"Update rejected: archive integrity check failed (hash mismatch)")
+                        return jsonify({
+                            'error': 'Update archive integrity verification failed',
+                            'details': 'The downloaded archive hash does not match the expected value. This may indicate tampering or corruption.',
+                            'hint': 'Contact your administrator or check the update source configuration.'
+                        }), 400
+                    else:
+                        logging.info(f"Archive integrity verified: SHA256 {computed_hash[:16]}...")
+                        log_audit(user, 'pegaprox.update_verified', 
+                                 f"Update archive integrity verified (SHA256: {computed_hash[:16]}...)")
+                else:
+                    # NS: May 2026 pentest fix - warn if no hash provided (backward compatibility)
+                    warning_msg = "Update archive has no SHA256 hash in version.json - integrity cannot be verified"
+                    logging.warning(f"SECURITY WARNING: {warning_msg}")
+                    log_audit(user, 'pegaprox.update_unverified', 
+                             f"Update proceeding without integrity verification (no hash in version.json)")
 
                 # MK: extractall with filter='data' to block path traversal
                 with tarfile.open(archive_path, 'r:gz') as tar:

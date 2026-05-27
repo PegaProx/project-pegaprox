@@ -1,4 +1,5 @@
 {
+  "_comment": "NS: May 2026 pentest fix - archive_sha256 field added for update integrity verification. Compute with: sha256sum main.tar.gz",
   "version": "0.9.11",
   "build": "2026.05.24",
   "release_date": "2026-05-24",

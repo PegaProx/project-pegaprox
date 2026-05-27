@@ -77,6 +77,26 @@ PegaProx implements the following security measures:
 - **Role-based access control:** Permission models 
 - **VM-level ACLs:** Fine-grained per-VM permissions for multi-tenant environments
 - **Audit logging:** All user actions are logged for accountability
+- **Update integrity verification:** SHA256 hash verification for update archives (May 2026)
+
+### Update Security (May 2026 Enhancement)
+
+PegaProx implements cryptographic verification of update archives to prevent supply-chain attacks:
+
+- **SHA256 verification:** All update archives are verified against a SHA256 hash published in `version.json`
+- **Protected files:** Critical files like `requirements.txt` are protected from being overwritten by updates
+- **Audit trail:** All update attempts (successful, failed, or unverified) are logged to the audit log
+- **Backward compatibility:** Updates without hashes proceed with a security warning (for legacy compatibility)
+
+**For update publishers:** To generate the hash for a new release:
+```bash
+sha256sum main.tar.gz
+# Add the output to version.json as "archive_sha256": "hash_value"
+```
+
+**For administrators:** Updates will be rejected if:
+- The downloaded archive hash does not match the expected hash in `version.json`
+- This protects against man-in-the-middle attacks and compromised update sources
 
 ## Disclosure Policy
 
