@@ -16,6 +16,7 @@ from datetime import datetime
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec
 from pegaprox.utils.realtime import broadcast_sse
+from pegaprox.utils.audit import log_audit
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,21 @@ class XHMigrationTask:
         elif phase == 'failed':
             self.status = 'failed'
             self.completed_at = datetime.now()
+
+        # MK May 2026 (audit completeness) — terminal-phase audit emit so the bundle's
+        # audit_log captures the outcome of every cross-hypervisor migration, not just
+        # the start. Same observability gap that surfaced via #438 on the v2p side.
+        if phase in ('completed', 'failed'):
+            try:
+                detail = f"{self.direction}: VM '{self.vm_name or self.source_vmid}' " \
+                         f"{self.source_cluster}/{self.source_node} → " \
+                         f"{self.target_cluster}/{self.target_node}"
+                if phase == 'failed':
+                    detail += f" — {error or getattr(self, 'error', None) or 'no detail'}"
+                log_audit('system', f'xhm.migration.{phase}', detail,
+                          cluster=str(self.target_cluster) if self.target_cluster else None)
+            except Exception:
+                pass
 
         self.log(f"Phase: {phase}")
         self._broadcast_status()

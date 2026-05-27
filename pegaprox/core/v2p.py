@@ -18,6 +18,7 @@ from datetime import datetime
 from pegaprox.globals import cluster_managers, vmware_managers, _v2p_migrations
 from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec
 from pegaprox.utils.realtime import broadcast_sse
+from pegaprox.utils.audit import log_audit
 
 class V2PMigrationTask:
     """Tracks VMware -> Proxmox migration through all phases.
@@ -158,6 +159,19 @@ class V2PMigrationTask:
         # hit a terminal phase. No more SSH calls happen after these phases.
         if phase in ('completed', 'failed'):
             self._scrub_credentials()
+        # MK May 2026 (audit completeness) — emit terminal-phase audit event so the
+        # support-bundle audit_log captures the outcome of every v2p run, not just
+        # the start. Closes the diagnostic-loop gap that #438 surfaced (audit only
+        # showed `vmware.migration.started` with no follow-up, forcing log archaeology).
+        if phase in ('completed', 'failed'):
+            try:
+                detail = f"VM '{self.vm_name or self.vm_id}' → VMID {getattr(self, 'proxmox_vmid', '?')}"
+                if phase == 'failed':
+                    detail += f" — {error or self.error or 'no detail'}"
+                log_audit('system', f'vmware.migration.{phase}', detail,
+                          cluster=str(self.target_cluster) if self.target_cluster else None)
+            except Exception:
+                pass
         self.log(f"Phase: {phase}")
         # Broadcast migration status change via SSE
         try:

@@ -6146,6 +6146,18 @@ def _update_repl_status(db, job_id, status, error=''):
         )
     except Exception as e:
         logging.warning(f"[XCREPL] Could not update status for {job_id}: {e}")
+    # MK May 2026 (audit completeness) — emit terminal audit event so the bundle's
+    # audit_log captures the outcome of every xcrepl run, not just `replication.triggered`.
+    # Mirrors the gap that surfaced via #438 on the v2p side: started-only audit forces
+    # log archaeology on every silent-failure investigation.
+    try:
+        if status == 'ok':
+            log_audit('system', 'replication.completed', f'xcrepl job {job_id} succeeded')
+        elif status == 'error':
+            log_audit('system', 'replication.failed',
+                      f'xcrepl job {job_id} failed: {error or "no detail"}')
+    except Exception:
+        pass
 
 
 def _wait_for_task(mgr, task_upid, timeout=600, poll=5):
