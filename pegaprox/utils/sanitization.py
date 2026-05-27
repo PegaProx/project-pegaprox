@@ -90,3 +90,31 @@ def validate_hostname(hostname: str) -> bool:
     return bool(re.match(ip_pattern, hostname) or re.match(hostname_pattern, hostname))
 
 
+def sanitize_csv_field(value) -> str:
+    """Sanitize field for CSV export to prevent formula injection.
+    
+    Neutralizes leading characters (=, +, -, @, tab, carriage return) that
+    spreadsheet applications interpret as formula prefixes. Prepends a single
+    quote to force literal interpretation while preserving the original value.
+    
+    References:
+    - OWASP: https://owasp.org/www-community/attacks/CSV_Injection
+    - CWE-1236: Improper Neutralization of Formula Elements in a CSV File
+    """
+    if value is None:
+        return ''
+    
+    # Convert to string
+    s = str(value)
+    
+    # Check if the field starts with a formula-triggering character
+    # =, +, -, @ are the primary formula prefixes
+    # \t (tab) and \r (carriage return) can also be exploited in some contexts
+    if s and s[0] in ('=', '+', '-', '@', '\t', '\r'):
+        # Prepend single quote to force literal interpretation
+        # This is the recommended mitigation per OWASP guidance
+        return "'" + s
+    
+    return s
+
+
