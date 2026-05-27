@@ -806,7 +806,11 @@ def require_auth(roles: list = None, perms: list = None):
             
             # Add session info to request context
             request.session = session
-            
+
+            # Report authenticated user to Aikido Zen
+            from aikido_zen import set_user
+            set_user({"id": session['user'], "name": session['user']})
+
             return f(*args, **kwargs)
         return decorated_function
     return decorator

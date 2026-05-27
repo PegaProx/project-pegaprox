@@ -58,6 +58,9 @@ if USE_GEVENT:
     except ImportError:
         pass
 
+import aikido_zen
+aikido_zen.protect()
+
 import warnings
 warnings.filterwarnings('ignore', message='coroutine.*was never awaited')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='asyncio')

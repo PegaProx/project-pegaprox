@@ -15,6 +15,8 @@ services:
       - pegaprox-logs:/app/logs
       # - ./ssl:/app/ssl   # mount custom certs if needed
     restart: unless-stopped
+    environment:
+      AIKIDO_TOKEN:
     # environment:
     #   PEGAPROX_BEHIND_PROXY: "true"           # behind nginx/haproxy
     #   PEGAPROX_TRUSTED_PROXIES: "172.16.0.0/12"

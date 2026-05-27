@@ -335,6 +335,10 @@ def create_app():
     # Register all API blueprints
     register_blueprints(app)
 
+    # Aikido Zen middleware for rate limiting and user blocking
+    from aikido_zen.middleware import AikidoFlaskMiddleware
+    app.wsgi_app = AikidoFlaskMiddleware(app.wsgi_app)
+
     # Load enabled plugins
     from pegaprox.api.plugins import load_enabled_plugins
     load_enabled_plugins(app)
