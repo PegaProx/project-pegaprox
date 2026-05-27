@@ -11,6 +11,7 @@ import time
 import uuid
 import os
 import re
+import shlex
 from datetime import datetime
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
@@ -713,7 +714,8 @@ def _run_xcpng_to_pve(task):
                                    key_path=pve_key, port=pve_port)
 
                 # allocate volume on target storage
-                alloc_cmd = f"pvesm alloc {task.target_storage} {new_vmid} '' {size_kb}"
+                # Use shlex.quote() to prevent command injection via storage name
+                alloc_cmd = f"pvesm alloc {shlex.quote(task.target_storage)} {new_vmid} '' {size_kb}"
                 _, a_out, a_err = ssh.exec_command(alloc_cmd, timeout=30)
                 a_exit = a_out.channel.recv_exit_status()
                 alloc_output = a_out.read().decode('utf-8', errors='replace').strip()
@@ -1807,7 +1809,8 @@ def _run_esxi_to_pve(task):
 
                     # allocate volume and convert
                     size_kb = max(1, cap // 1024)
-                    alloc_cmd = f"pvesm alloc {task.target_storage} {new_vmid} '' {size_kb}"
+                    # Use shlex.quote() to prevent command injection via storage name
+                    alloc_cmd = f"pvesm alloc {shlex.quote(task.target_storage)} {new_vmid} '' {size_kb}"
                     _, a_out, a_err = ssh_pve.exec_command(alloc_cmd, timeout=30)
                     a_out.channel.recv_exit_status()
                     alloc_output = a_out.read().decode().strip()
@@ -1857,7 +1860,8 @@ def _run_esxi_to_pve(task):
                 sshfs_vmdk = f"{mount_dir}/{flat_path}"
                 size_kb = max(1, cap // 1024)
 
-                alloc_cmd = f"pvesm alloc {task.target_storage} {new_vmid} '' {size_kb}"
+                # Use shlex.quote() to prevent command injection via storage name
+                alloc_cmd = f"pvesm alloc {shlex.quote(task.target_storage)} {new_vmid} '' {size_kb}"
                 _, a_out, a_err = ssh_pve.exec_command(alloc_cmd, timeout=30)
                 a_out.channel.recv_exit_status()
                 alloc_output = a_out.read().decode().strip()

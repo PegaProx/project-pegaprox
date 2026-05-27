@@ -11275,8 +11275,9 @@ echo "AGENT_INSTALLED_OK"
             node_ip = self._get_node_ip(node) or node
             ssh = self._ssh_connect(node_ip)
             # use pvesm to get the base path
+            # Use shlex.quote() to prevent command injection via storage name
             subdir = 'template/iso' if content_type == 'iso' else 'template/cache'
-            cmd = f"pvesm path {storage}:{content_type}/dummy.file 2>/dev/null || echo '/var/lib/vz/{subdir}/dummy.file'"
+            cmd = f"pvesm path {shlex.quote(storage)}:{content_type}/dummy.file 2>/dev/null || echo '/var/lib/vz/{subdir}/dummy.file'"
             _, out, _ = ssh.exec_command(cmd, timeout=10)
             out.channel.recv_exit_status()
             full_path = out.read().decode(errors='replace').strip()

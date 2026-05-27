@@ -20,6 +20,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.sanitization import validate_storage_name
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection
@@ -2510,6 +2511,11 @@ def iso_sync_trigger(cluster_id):
         return jsonify({'error': 'content_type must be iso or vztmpl'}), 400
     if not all([source, storage, filename]):
         return jsonify({'error': 'source_node, storage, filename required'}), 400
+    
+    # Validate storage name to prevent command injection
+    if not validate_storage_name(storage):
+        return jsonify({'error': 'Invalid storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+    
     if hasattr(mgr, '_get_syncable_storage'):
         _, storage_err = mgr._get_syncable_storage(source, storage, content_type)
         if storage_err:

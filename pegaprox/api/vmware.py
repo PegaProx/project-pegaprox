@@ -13,6 +13,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.sanitization import validate_storage_name
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server
 from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
 from pegaprox.background.broadcast import broadcast_resources_loop
@@ -805,6 +806,11 @@ def start_vmware_migration(vmware_id, vm_id):
     for field in ('target_cluster', 'target_node', 'target_storage'):
         if not data.get(field):
             return jsonify({'error': f'{field} is required'}), 400
+    
+    # Validate target_storage to prevent command injection
+    if not validate_storage_name(data['target_storage']):
+        return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+    
     if not data.get('esxi_password'):
         return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
     if data['target_cluster'] not in cluster_managers:

@@ -90,3 +90,24 @@ def validate_hostname(hostname: str) -> bool:
     return bool(re.match(ip_pattern, hostname) or re.match(hostname_pattern, hostname))
 
 
+def validate_storage_name(storage: str) -> bool:
+    """Validate Proxmox/XCP-ng storage identifier.
+    
+    Storage names in Proxmox and XCP-ng must be alphanumeric with hyphens,
+    underscores, and dots. This prevents command injection when storage names
+    are used in shell commands.
+    
+    Args:
+        storage: Storage identifier to validate
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    if not storage or not isinstance(storage, str):
+        return False
+    # Storage names: alphanumeric, hyphen, underscore, dot only
+    # Must start with alphanumeric, 1-100 chars
+    pattern = r'^[a-zA-Z0-9][a-zA-Z0-9_\-\.]{0,99}$'
+    return bool(re.match(pattern, storage))
+
+

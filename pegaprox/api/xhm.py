@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.sanitization import validate_storage_name
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
     _run_xcpng_to_pve, _run_pve_to_xcpng,
@@ -77,6 +78,10 @@ def xhm_start():
     for f in required:
         if not data.get(f):
             return jsonify({'error': f'{f} is required'}), 400
+
+    # Validate target_storage to prevent command injection
+    if not validate_storage_name(data['target_storage']):
+        return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
 
     src_mgr = cluster_managers.get(data['source_cluster'])
     tgt_mgr = cluster_managers.get(data['target_cluster'])
