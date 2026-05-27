@@ -78,7 +78,11 @@ def add_pbs_server():
     pbs_id = str(uuid.uuid4())[:8]
     
     # Test connection first
-    mgr = PBSManager(pbs_id, data)
+    try:
+        mgr = PBSManager(pbs_id, data)
+    except ValueError as e:
+        return jsonify({'error': 'Invalid PBS host'}), 400
+    
     if not mgr.connect():
         return jsonify({'error': f'Connection failed: {mgr.last_error}'}), 400
     
@@ -118,7 +122,11 @@ def update_pbs_server(pbs_id):
         if data.get('ssh_key') == '********':
             data['ssh_key'] = getattr(old_mgr, 'ssh_key', '')
     
-    mgr = PBSManager(pbs_id, data)
+    try:
+        mgr = PBSManager(pbs_id, data)
+    except ValueError as e:
+        return jsonify({'error': 'Invalid PBS host'}), 400
+    
     if data.get('enabled', True):
         mgr.connect()
     pbs_managers[pbs_id] = mgr
@@ -154,7 +162,12 @@ def test_pbs_new_connection():
     data = request.json or {}
     if not data.get('host'):
         return jsonify({'error': 'Host is required'}), 400
-    test_mgr = PBSManager('test', data)
+    
+    try:
+        test_mgr = PBSManager('test', data)
+    except ValueError as e:
+        return jsonify({'success': False, 'error': 'Invalid PBS host'}), 400
+    
     success = test_mgr.connect()
     if success:
         version = test_mgr.get_version()
@@ -175,7 +188,11 @@ def test_pbs_connection(pbs_id):
     
     if data.get('host'):
         # Test with provided credentials (before save)
-        test_mgr = PBSManager('test', data)
+        try:
+            test_mgr = PBSManager('test', data)
+        except ValueError as e:
+            return jsonify({'success': False, 'error': 'Invalid PBS host'}), 400
+        
         success = test_mgr.connect()
         if success:
             version = test_mgr.get_version()

@@ -13,11 +13,35 @@ import requests
 from datetime import datetime
 import urllib3
 from typing import List, Optional
+import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from pegaprox.core.db import get_db
 from pegaprox.globals import pbs_managers
+
+def _validate_pbs_host(host: str) -> bool:
+    """Validate PBS host against allowlist.
+    
+    Returns True if host is allowed, False otherwise.
+    """
+    # Domain allowlist - add your allowed PBS server domains here
+    allowed_domains = ['example.com']  # add your allowed domains here
+    
+    if not host:
+        return False
+    
+    # Validate host format (hostname or IP, no protocol/path)
+    # Allow alphanumeric, dots, hyphens, and colons (for IPv6)
+    if not re.match(r'^[a-zA-Z0-9\.\-\:]+$', host):
+        return False
+    
+    # Check if host matches any allowed domain (exact match or subdomain)
+    for allowed_domain in allowed_domains:
+        if host == allowed_domain or host.endswith('.' + allowed_domain):
+            return True
+    
+    return False
 
 class PBSManager:
     """Manages connection to a Proxmox Backup Server instance
@@ -46,6 +70,10 @@ class PBSManager:
         self.ssh_port = int(config.get('ssh_port', 22) or 22)
         self.ssh_key = config.get('ssh_key', '') or ''
         self._update_task = None  # active UpdateTask or None
+
+        # Validate host against allowlist
+        if not _validate_pbs_host(self.host):
+            raise ValueError(f"Invalid or disallowed PBS host")
 
         self._session = requests.Session()
         self._session.verify = self.ssl_verify
@@ -1034,10 +1062,14 @@ def load_pbs_servers():
                 'ssh_key': ssh_key,
             }
             
-            mgr = PBSManager(pbs_id, config)
-            if config['enabled']:
-                mgr.connect()
-            pbs_managers[pbs_id] = mgr
+            try:
+                mgr = PBSManager(pbs_id, config)
+                if config['enabled']:
+                    mgr.connect()
+                pbs_managers[pbs_id] = mgr
+            except ValueError as e:
+                logging.warning(f"[PBS] Skipping PBS server {pbs_id} ({config.get('name', 'unknown')}): Invalid or disallowed host")
+                continue
             
         logging.info(f"[PBS] Loaded {len(rows)} PBS servers ({sum(1 for m in pbs_managers.values() if m.connected)} connected)")
     except Exception as e:
