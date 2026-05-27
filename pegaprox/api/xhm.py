@@ -8,8 +8,10 @@ import uuid
 from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
-from pegaprox.utils.auth import require_auth
+from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.rbac import user_can_access_vm
+from pegaprox.api.helpers import check_cluster_access
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
     _run_xcpng_to_pve, _run_pve_to_xcpng,
@@ -33,6 +35,28 @@ def xhm_plan():
 
     if not source_cluster or not source_vmid or not target_cluster:
         return jsonify({'error': 'source_cluster, source_vmid, and target_cluster are required'}), 400
+
+    # Authorization: check source cluster access
+    ok, err = check_cluster_access(source_cluster)
+    if not ok:
+        return err
+
+    # Authorization: check target cluster access
+    ok, err = check_cluster_access(target_cluster)
+    if not ok:
+        return err
+
+    # Authorization: check source VM access
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    user['username'] = request.session['user']
+    try:
+        vmid_int = int(source_vmid)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid source_vmid'}), 400
+    
+    if not user_can_access_vm(user, source_cluster, vmid_int, 'vm.migrate'):
+        return jsonify({'error': 'Access denied to source VM'}), 403
 
     # auto-detect direction from cluster types
     src_mgr = cluster_managers.get(source_cluster)
@@ -77,6 +101,28 @@ def xhm_start():
     for f in required:
         if not data.get(f):
             return jsonify({'error': f'{f} is required'}), 400
+
+    # Authorization: check source cluster access
+    ok, err = check_cluster_access(data['source_cluster'])
+    if not ok:
+        return err
+
+    # Authorization: check target cluster access
+    ok, err = check_cluster_access(data['target_cluster'])
+    if not ok:
+        return err
+
+    # Authorization: check source VM access
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    user['username'] = request.session['user']
+    try:
+        vmid_int = int(data['source_vmid'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid source_vmid'}), 400
+    
+    if not user_can_access_vm(user, data['source_cluster'], vmid_int, 'vm.migrate'):
+        return jsonify({'error': 'Access denied to source VM'}), 403
 
     src_mgr = cluster_managers.get(data['source_cluster'])
     tgt_mgr = cluster_managers.get(data['target_cluster'])
