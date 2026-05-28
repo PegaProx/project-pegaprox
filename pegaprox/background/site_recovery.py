@@ -436,27 +436,47 @@ def execute_test_failover(plan_id):
     logger.info(f"[SR] Test failover for '{plan['name']}' ({len(vms)} VMs)")
     _broadcast_progress(plan_id, "Starting test failover...", 0)
 
+    # MK May 2026 (#413) — guard against tgt_mgr=None so the loop body
+    # surfaces a useful error instead of an AttributeError under `except Exception`.
+    if tgt_mgr is None:
+        for vm in vms:
+            results[str(vm['vmid'])] = {'success': False,
+                                        'error': f"Target cluster '{plan['target_cluster']}' not connected / not configured in PegaProx"}
+        logger.error(f"[SR] Test failover: target cluster '{plan['target_cluster']}' unreachable; aborting plan '{plan['name']}'")
+
     for i, vm in enumerate(vms):
+        if tgt_mgr is None:
+            break
         vmid = vm['vmid']
         vm_name = vm.get('vm_name', f'VM {vmid}')
+        # MK May 2026 (#413) — site_recovery_vms has a `target_vmid` column for
+        # asymmetric VMID mappings (xcrepl that renumbers, manual restore to a
+        # new ID, etc). Prefer it when the operator filled it in; fall back to
+        # the source vmid which is the common case (PVE qmigrate preserves the
+        # ID). Either way, log which one we're looking for so the next debug
+        # bundle tells us exactly why a detection failed.
+        target_vmid = vm.get('target_vmid') or vmid
         _broadcast_progress(plan_id, f"Cloning {vm_name}...", int(i / len(vms) * 100))
 
         try:
             # find the replicated VM on target and clone it
             node_status = tgt_mgr.get_node_status() or {}
+            logger.info(f"[SR] Test failover: searching for VM {target_vmid} (source vmid={vmid}) on "
+                        f"target cluster {plan['target_cluster']} across nodes {list(node_status.keys())}")
             found = False
             for node_name in node_status:
                 try:
                     tgt_vms = tgt_mgr.get_vms(node_name) if hasattr(tgt_mgr, 'get_vms') else []
                     all_vmids = [v.get('vmid') for v in tgt_vms]
+                    logger.info(f"[SR] Test failover: node {node_name} has {len(tgt_vms)} VMs: {all_vmids}")
                     for v in tgt_vms:
-                        if v.get('vmid') == vmid:
-                            # find free VMID for test clone
-                            test_vmid = vmid + 90000
+                        if v.get('vmid') == target_vmid:
+                            # find free VMID for test clone — base off the target vmid we found
+                            test_vmid = target_vmid + 90000
                             while test_vmid in all_vmids:
                                 test_vmid += 1
                             vtype = vm.get('vm_type', 'qemu')
-                            clone_result = tgt_mgr.clone_vm(node_name, vmid, vtype,
+                            clone_result = tgt_mgr.clone_vm(node_name, target_vmid, vtype,
                                                             newid=test_vmid, name=f"SR-TEST-{vm_name}")
                             # clone_vm returns dict {success, error, task?} OR truthy legacy value
                             clone_ok = clone_result.get('success') if isinstance(clone_result, dict) else bool(clone_result)
@@ -475,12 +495,14 @@ def execute_test_failover(plan_id):
                             found = True
                             break
                 except Exception as e:
-                    logger.warning(f"[SR] Test failover: exception probing node {node_name} for VM {vmid}: {e}")
+                    logger.warning(f"[SR] Test failover: exception probing node {node_name} for VM {target_vmid}: {e}")
                     continue
                 if found:
                     break
             if not found:
-                results[str(vmid)] = {'success': False, 'error': 'VM not found on target'}
+                results[str(vmid)] = {'success': False,
+                                      'error': f"VM not found on target (looked for vmid {target_vmid} on nodes {list(node_status.keys())})"}
+                logger.warning(f"[SR] Test failover: VM {target_vmid} not found on target {plan['target_cluster']}")
         except Exception as e:
             results[str(vmid)] = {'success': False, 'error': str(e)}
 
