@@ -1550,6 +1550,16 @@ class PegaProxManager:
         except:
             return []
     
+    # MK May 2026 (#413) — uniform get_vms(node=None) shim so the site-recovery
+    # detection code (and any other caller that loops over manager types) can
+    # treat Proxmox the same as VMware/XCP-NG. Returns the same list shape as
+    # get_vm_resources(); when `node` is given, filters down to that node.
+    def get_vms(self, node=None) -> list:
+        vms = self.get_vm_resources() or []
+        if node is None:
+            return vms
+        return [v for v in vms if v.get('node') == node]
+
     # MK: old version, keeping around just in case
     def get_vm_resources_v1(self) -> list:
         if not self.is_connected: return []
