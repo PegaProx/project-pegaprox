@@ -115,7 +115,10 @@ def validate_mappings(tgt_mgr, storage_map, net_map):
 
 def _broadcast_progress(plan_id, message, progress=None):
     """Push realtime update to frontend"""
-    broadcast_sse({'type': 'site_recovery', 'plan_id': plan_id, 'message': message, 'progress': progress})
+    # MK May 2026 (#413) — broadcast_sse signature is (update_type, data, cluster_id=None);
+    # the single-dict call was crashing the SR background task with "missing 1 required
+    # positional argument: 'data'" the moment a Test/Planned failover hit progress emit.
+    broadcast_sse('site_recovery', {'plan_id': plan_id, 'message': message, 'progress': progress})
 
 
 def _get_plan(plan_id):

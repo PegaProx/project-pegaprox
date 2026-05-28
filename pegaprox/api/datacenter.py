@@ -811,8 +811,14 @@ def get_sdn_overview(cluster_id):
             
             if sdn_resp.status_code == 200:
                 result['available'] = True
-                sdn_data = sdn_resp.json().get('data', {})
-                result['digest'] = sdn_data.get('digest')
+                # MK May 2026 (#413) — PVE 9.x returns /cluster/sdn as a *list* of
+                # available SDN endpoints (zones, vnets, ipams, …). Older clusters
+                # returned a dict-with-digest. Tolerate both — digest is only used
+                # downstream as a cache hint, so it's fine to leave it None when
+                # PVE doesn't expose it on the top-level endpoint.
+                sdn_payload = sdn_resp.json().get('data')
+                if isinstance(sdn_payload, dict):
+                    result['digest'] = sdn_payload.get('digest')
                 logging.info(f"SDN available, digest={result['digest']}")
             elif sdn_resp.status_code == 403:
                 # Permission denied - SDN exists but user can't access

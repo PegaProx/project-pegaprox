@@ -1670,14 +1670,15 @@ class XcpngManager:
                         info['status'] = 'completed'
                         finished.append(task_id)
                         self._cached_vms = None
-                        broadcast_sse({'type': 'task', 'task_id': task_id,
+                        # MK May 2026 (#413) — same signature fix as site_recovery
+                        broadcast_sse('xcpng_task', {'task_id': task_id,
                                        'status': 'completed', 'action': info['action']})
                     elif status in ('failure', 'cancelled'):
                         info['status'] = 'failed'
                         err_info = api.task.get_error_info(info['ref'])
                         info['error'] = str(err_info) if err_info else 'Unknown error'
                         finished.append(task_id)
-                        broadcast_sse({'type': 'task', 'task_id': task_id,
+                        broadcast_sse('xcpng_task', {'task_id': task_id,
                                        'status': 'failed', 'action': info['action']})
                 except Exception:
                     pass  # task ref might be gone already
