@@ -328,11 +328,15 @@ def broadcast_resources_loop():
             # NS May 2026 — periodic heartbeat. Lets the frontend distinguish
             # "server still ticking, just no data" from "server dead". Frontend
             # watchdog force-reconnects if no message for >30s.
-            if loop_count % 5 == 0:
-                try:
-                    broadcast_sse('heartbeat', {'ts': time.time(), 'loop': loop_count})
-                except Exception:
-                    pass
+            # MK May 2026 (#484) — was `loop_count % 5 == 0`. With a dead node
+            # in the cluster the per-cluster fan-out can wall on the join(8s)
+            # timeout for every cycle, so heartbeat-every-5-loops drifts out
+            # to ~40s between beats and the frontend's 30s wedge fires. Cost
+            # of one tiny SSE message per second is negligible, just send it.
+            try:
+                broadcast_sse('heartbeat', {'ts': time.time(), 'loop': loop_count})
+            except Exception:
+                pass
 
             # NS: Reduced to 1 second for faster task updates
             # Proxmox API can handle this - it's just GET requests

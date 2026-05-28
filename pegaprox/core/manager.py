@@ -1416,6 +1416,20 @@ class PegaProxManager:
                         self.logger.info(f"Node {node_name}: CPU {cpu_percent:.2f}%, RAM {mem_percent:.2f}% ({self._format_bytes(mem_used)}/{self._format_bytes(mem_total)}), Score {score:.2f}, Status: {node['status']}{maintenance_str}{update_str}")
                     else:
                         # Node exists but we couldn't get status - might be offline
+                        # MK May 2026 (#484) — keep the maintenance keys populated
+                        # even when status_data is missing. PegaProx's internal
+                        # nodes_in_maintenance dict is the source of truth here;
+                        # if we drop the keys during a reboot the sidebar reads
+                        # undefined and shows "(Offline)" with no maintenance
+                        # indicator while PVE still has the HA flag set — looks
+                        # like a state-drift bug.
+                        in_maintenance = node_name in self.nodes_in_maintenance
+                        maintenance_task = None
+                        maintenance_acknowledged = False
+                        if in_maintenance:
+                            task_obj = self.nodes_in_maintenance[node_name]
+                            maintenance_task = task_obj.to_dict()
+                            maintenance_acknowledged = task_obj.acknowledged
                         node_status[node_name] = {
                             'status': node.get('status', 'unknown'),
                             'cpu_percent': 0,
@@ -1429,12 +1443,26 @@ class PegaProxManager:
                             'netout': 0,
                             'score': 0,
                             'uptime': 0,
+                            'maintenance_mode': in_maintenance,
+                            'maintenance_task': maintenance_task,
+                            'maintenance_acknowledged': maintenance_acknowledged,
                             'offline': node.get('status') != 'online'
                         }
                 
                 # Add offline nodes from HA tracking that weren't in API response
                 for ha_node, ha_data in self.ha_node_status.items():
                     if ha_node not in api_nodes and ha_data.get('status') == 'offline':
+                        # MK May 2026 (#484) — same fix as the offline branch
+                        # above. ha_node_status fallback fires when PVE drops
+                        # the node entirely from /nodes (deeper reboot / corosync
+                        # partition), so this is exactly the path the user hit.
+                        ha_in_maint = ha_node in self.nodes_in_maintenance
+                        ha_maint_task = None
+                        ha_maint_ack = False
+                        if ha_in_maint:
+                            t_obj = self.nodes_in_maintenance[ha_node]
+                            ha_maint_task = t_obj.to_dict()
+                            ha_maint_ack = t_obj.acknowledged
                         node_status[ha_node] = {
                             'status': 'offline',
                             'cpu_percent': 0,
@@ -1448,6 +1476,9 @@ class PegaProxManager:
                             'netout': 0,
                             'score': 0,
                             'uptime': 0,
+                            'maintenance_mode': ha_in_maint,
+                            'maintenance_task': ha_maint_task,
+                            'maintenance_acknowledged': ha_maint_ack,
                             'offline': True,
                             'last_seen': ha_data.get('last_seen').isoformat() if ha_data.get('last_seen') else None
                         }
