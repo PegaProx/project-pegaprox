@@ -171,6 +171,10 @@
             const [oidcButtonText, setOidcButtonText] = useState('Sign in with SSO');
             const [loginBackground, setLoginBackground] = useState('');
             const [reverseProxyEnabled, setReverseProxyEnabled] = useState(false);
+            // MK May 2026 — when /auth/check returns initialized=false the install
+            // hasn't run the first-admin setup yet. Frontend gates this to render
+            // <SetupWizard /> instead of <LoginScreen />.
+            const [needsSetup, setNeedsSetup] = useState(false);
             
             // Check session on mount
             useEffect(() => {
@@ -257,6 +261,9 @@
                             if (errData.oidc_enabled !== undefined) { setOidcEnabled(errData.oidc_enabled); setOidcButtonText(errData.oidc_button_text || 'Sign in with SSO'); }
                             if (errData.login_background) setLoginBackground(errData.login_background);
                             if (errData.reverse_proxy_enabled !== undefined) setReverseProxyEnabled(errData.reverse_proxy_enabled);
+                            // MK May 2026 — first-run signal from backend
+                            if (errData.initialized === false) setNeedsSetup(true);
+                            else setNeedsSetup(false);
                         } catch(e) {}
                         logout();
                     }
@@ -439,7 +446,7 @@
             };
             
             return(
-                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, updateCurrentUser, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground, reverseProxyEnabled }}>
+                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, updateCurrentUser, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground, reverseProxyEnabled, needsSetup, setNeedsSetup }}>
                     {children}
                 </AuthContext.Provider>
             );

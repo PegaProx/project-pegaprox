@@ -370,3 +370,186 @@
             );
         }
 
+        // ═══════════════════════════════════════════════
+        // First-Run Setup Wizard
+        // MK May 2026 — replaces the hardcoded `pegaprox/admin` bootstrap that
+        // exposed every fresh network-reachable install to remote takeover.
+        // Renders instead of LoginScreen when /auth/check returns initialized=false.
+        // ═══════════════════════════════════════════════
+        function SetupWizard() {
+            const [username, setUsername] = useState('');
+            const [password, setPassword] = useState('');
+            const [passwordConfirm, setPasswordConfirm] = useState('');
+            const [displayName, setDisplayName] = useState('');
+            const [email, setEmail] = useState('');
+            const [showPassword, setShowPassword] = useState(false);
+            const [submitting, setSubmitting] = useState(false);
+            const [err, setErr] = useState('');
+            const [done, setDone] = useState(false);
+
+            const submit = async (e) => {
+                e.preventDefault();
+                setErr('');
+                if (!username || username.length < 2) { setErr('Username must be at least 2 characters'); return; }
+                if (username.toLowerCase() === 'pegaprox') { setErr("'pegaprox' is reserved — pick a different username"); return; }
+                if (!password) { setErr('Password is required'); return; }
+                if (password !== passwordConfirm) { setErr('Passwords do not match'); return; }
+                setSubmitting(true);
+                try {
+                    const r = await fetch(`${API_URL}/auth/setup`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            username: username.trim().toLowerCase(),
+                            password,
+                            display_name: displayName,
+                            email,
+                        }),
+                    });
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        setErr(data.error || `Setup failed (HTTP ${r.status})`);
+                        setSubmitting(false);
+                        return;
+                    }
+                    setDone(true);
+                    // reload after a short delay so AuthProvider re-checks and shows the login form
+                    setTimeout(() => window.location.reload(), 1500);
+                } catch (e2) {
+                    setErr('Network error — could not reach server');
+                    setSubmitting(false);
+                }
+            };
+
+            if (done) {
+                return (
+                    <div className="min-h-screen bg-proxmox-darker flex items-center justify-center p-4">
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-2xl p-8 shadow-xl max-w-md w-full text-center">
+                            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-500/20 flex items-center justify-center">
+                                <svg className="w-10 h-10 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                            </div>
+                            <h2 className="text-xl font-semibold text-white mb-2">Setup complete</h2>
+                            <p className="text-gray-400">Redirecting to login…</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-proxmox-darker flex items-center justify-center p-4">
+                    <div className="w-full max-w-md">
+                        <div className="text-center mb-8">
+                            <img
+                                src="/images/pegaprox-logo-dark.png"
+                                alt="PegaProx"
+                                className="w-28 h-28 mx-auto mb-4 object-contain drop-shadow-[0_8px_20px_rgba(229,112,0,0.35)]"
+                                onError={(e) => { e.target.style.display = 'none'; }}
+                            />
+                            <h1 className="text-3xl font-bold text-white mb-2">Welcome to PegaProx</h1>
+                            <p className="text-gray-400">Create the first administrator account to get started</p>
+                        </div>
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-2xl p-8 shadow-xl">
+                            <h2 className="text-xl font-semibold text-white mb-6">First-Time Setup</h2>
+
+                            {err && (
+                                <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+                                    {err}
+                                </div>
+                            )}
+
+                            <form onSubmit={submit} className="space-y-5">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">Username</label>
+                                    <input
+                                        type="text"
+                                        value={username}
+                                        onChange={(e) => setUsername(e.target.value)}
+                                        className="w-full px-4 py-3 bg-proxmox-dark border border-proxmox-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
+                                        placeholder="admin"
+                                        autoComplete="username"
+                                        autoFocus
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">Password</label>
+                                    <div className="relative">
+                                        <input
+                                            type={showPassword ? 'text' : 'password'}
+                                            value={password}
+                                            onChange={(e) => setPassword(e.target.value)}
+                                            className="w-full px-4 py-3 bg-proxmox-dark border border-proxmox-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors pr-12"
+                                            placeholder="••••••••"
+                                            autoComplete="new-password"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowPassword(!showPassword)}
+                                            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white"
+                                            tabIndex={-1}
+                                        >
+                                            {showPassword ? '🙈' : '👁'}
+                                        </button>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">Confirm password</label>
+                                    <input
+                                        type={showPassword ? 'text' : 'password'}
+                                        value={passwordConfirm}
+                                        onChange={(e) => setPasswordConfirm(e.target.value)}
+                                        className="w-full px-4 py-3 bg-proxmox-dark border border-proxmox-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
+                                        placeholder="••••••••"
+                                        autoComplete="new-password"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                                        Display name <span className="text-gray-500 font-normal">(optional)</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={displayName}
+                                        onChange={(e) => setDisplayName(e.target.value)}
+                                        className="w-full px-4 py-3 bg-proxmox-dark border border-proxmox-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
+                                        placeholder="Cluster Admin"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                                        Email <span className="text-gray-500 font-normal">(optional)</span>
+                                    </label>
+                                    <input
+                                        type="email"
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        className="w-full px-4 py-3 bg-proxmox-dark border border-proxmox-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
+                                        placeholder="admin@example.com"
+                                    />
+                                </div>
+                                <button
+                                    type="submit"
+                                    disabled={submitting}
+                                    className="w-full px-4 py-3 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded-xl text-white font-semibold transition-colors"
+                                >
+                                    {submitting ? 'Creating administrator…' : 'Create administrator'}
+                                </button>
+                            </form>
+
+                            <p className="text-xs text-gray-500 mt-6 leading-relaxed">
+                                This account becomes the first PegaProx administrator. Treat the
+                                password like any other root credential — store it in your password
+                                manager. You can create additional users (admin or scoped roles)
+                                once you are logged in.
+                            </p>
+                        </div>
+                        <p className="text-center text-gray-500 text-sm mt-6">
+                            PegaProx Cluster Management {PEGAPROX_VERSION}
+                        </p>
+                    </div>
+                </div>
+            );
+        }
+

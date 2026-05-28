@@ -23329,7 +23329,7 @@
         }
 
         function App() {
-            const { user, loading, requires2FASetup } = useAuth();
+            const { user, loading, requires2FASetup, needsSetup } = useAuth();
 
             if (loading) {
                 return (
@@ -23345,6 +23345,13 @@
                         </div>
                     </div>
                 );
+            }
+
+            // MK May 2026 — first-run setup wizard takes precedence over the login form
+            // until the operator creates the first admin (replaces the old hardcoded
+            // `pegaprox/admin` bootstrap that exposed every fresh install).
+            if (!user && needsSetup) {
+                return <SetupWizard />;
             }
 
             if (!user) {

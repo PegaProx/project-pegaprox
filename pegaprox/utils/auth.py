@@ -246,15 +246,17 @@ def validate_password_policy(password: str) -> tuple:
 def load_users(readonly: bool = False) -> dict:
     """Load users from db.
 
-    When readonly=True, never bootstrap the default admin user. This is for
-    observer-only paths such as metrics scrapes where reading auth state must not
-    mutate auth state.
+    MK May 2026 — no longer auto-bootstraps a default admin. First-run installs
+    go through the setup wizard at /api/auth/setup (which creates the first
+    admin from operator-supplied creds, see `create_initial_admin`). Returning
+    an empty dict here is now a *valid* "uninitialised" state — callers in the
+    login path must check is_initialized() before assuming the absence of a
+    user means corruption.
     """
-    # MK: migrated from json files, was a pain
     try:
         db = get_db()
         users = db.get_all_users()
-        
+
         if users:
             # MK: sanity check - had issues with corrupt user data once
             for username, userdata in users.items():
@@ -264,20 +266,53 @@ def load_users(readonly: bool = False) -> dict:
     except Exception as e:
         logging.error(f"db load failed: {e}")
         return _load_users_legacy()  # fallback to old format
-    
-    # no users found
-    if readonly:
-        return {}
 
+    # no users in db — uninitialised install, or admin deleted on purpose.
+    # the previous code auto-bootstrapped pegaprox/admin here; that path is
+    # gone for security reasons (Aikido finding: hardcoded creds, fresh
+    # network-reachable install = remote admin takeover).
+    return {}
+
+
+def is_initialized() -> bool:
+    """True if first-run setup has been completed.
+
+    Two ways an install becomes initialised:
+      1. /api/auth/setup ran successfully and wrote ADMIN_INITIALIZED_FILE
+      2. backfill_initialized_marker() observed pre-existing users on an
+         upgrade from a pre-setup-wizard build
+
+    Pure read, no side effects.
+    """
     if os.path.exists(ADMIN_INITIALIZED_FILE):
-        # dont recreate admin if it was deleted on purpose
-        logging.error("users missing but admin was initialized - wont recreate")
-        return {}
-    
-    logging.info("no users, creating default admin")
-    default_users = create_default_users()
-    save_users(default_users)
-    return default_users
+        return True
+    # second-opinion against the DB in case the marker file was wiped but
+    # the user table survived (volume mount oddities, manual restore, etc.)
+    try:
+        db = get_db()
+        return bool(db.get_all_users())
+    except Exception:
+        return False
+
+
+def backfill_initialized_marker():
+    """Upgrade-safety: mark ADMIN_INITIALIZED_FILE if users already exist.
+
+    Run once at app startup. Pre-setup-wizard installs have users in the DB
+    but never wrote ADMIN_INITIALIZED_FILE — without this, after upgrade the
+    /login path's is_initialized() second-opinion saves us, but writing the
+    marker also avoids the every-call DB roundtrip and makes the post-upgrade
+    state explicit on disk.
+    """
+    if os.path.exists(ADMIN_INITIALIZED_FILE):
+        return
+    try:
+        db = get_db()
+        if db.get_all_users():
+            mark_admin_initialized()
+            logging.info("backfilled ADMIN_INITIALIZED_FILE for pre-setup-wizard install")
+    except Exception as e:
+        logging.debug(f"backfill check skipped: {e}")
 
 
 def _load_users_legacy() -> dict:
@@ -316,22 +351,30 @@ def mark_admin_initialized():
     except Exception as e:
         logging.error(f"couldnt mark admin init: {e}")
 
-def create_default_users() -> dict:
-    """create default admin - pw is 'admin', should be changed obv"""
-    salt, password_hash = hash_password('admin')
-    
+def create_initial_admin(username: str, password: str, display_name: str = '', email: str = '') -> dict:
+    """Build the first-admin user record from setup-wizard input.
+
+    Caller is responsible for is_initialized() check + password policy
+    validation. This helper just shapes the dict; it does NOT save or mark
+    the install as initialised.
+    """
+    salt, password_hash = hash_password(password)
     return {
-        'pegaprox': {
+        username: {
             'password_salt': salt,
             'password_hash': password_hash,
             'role': ROLE_ADMIN,
             'created_at': datetime.now().isoformat(),
             'last_login': None,
-            'display_name': 'PegaProx Admin',
-            'email': '',
+            'display_name': display_name or username,
+            'email': email or '',
             'enabled': True,
-            'is_default': True,  # Flag to identify default admin
-            'force_password_change': True  # MK Feb 2026 - force change on first login
+            # NS — these flags are kept for back-compat with downstream UI
+            # ("Welcome banner" etc) but no longer carry a fixed-password risk
+            # since the operator chose the password themselves.
+            'is_default': False,
+            'force_password_change': False,
+            'password_changed_at': datetime.now().isoformat(),
         }
     }
 

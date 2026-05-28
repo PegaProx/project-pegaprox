@@ -156,6 +156,7 @@ def create_app():
         # session yet to protect.
         _CSRF_EXEMPT = (
             '/api/auth/login',
+            '/api/auth/setup',  # MK May 2026 — first-run wizard, no session yet
             '/api/auth/oidc/authorize',
             '/api/auth/oidc/callback',
             '/api/auth/oidc/config',
@@ -600,7 +601,7 @@ export * from '/static/js/novnc/core/rfb.js';
 
 def main(debug_mode=False):
     """Main entry point - starts PegaProx server."""
-    from pegaprox.utils.auth import load_users, load_sessions, create_default_users
+    from pegaprox.utils.auth import load_users, load_sessions, backfill_initialized_marker, is_initialized
     from pegaprox.utils.audit import load_audit_log
     from pegaprox.core.config import load_config
     from pegaprox.core.pbs import load_pbs_servers
@@ -740,13 +741,18 @@ def main(debug_mode=False):
     load_sessions()
     print(f"Loaded {len(g.active_sessions)} active sessions")
 
-    # Show default credentials hint
-    if len(g.users_db) == 1 and 'pegaprox' in g.users_db:
+    # MK May 2026 — backfill initialized marker for upgrades from pre-setup-wizard
+    # builds (pre-init installs already had users; we just stamp the marker so the
+    # /login path's is_initialized() doesn't fall through to NOT_INITIALIZED).
+    backfill_initialized_marker()
+
+    if not is_initialized():
         print("\n" + "=" * 50)
-        print("DEFAULT LOGIN CREDENTIALS:")
-        print("  Username: pegaprox")
-        print("  Password: admin")
-        print("  Please change the password after first login!")
+        print("FIRST-RUN SETUP REQUIRED")
+        print("  No admin account exists yet — open the PegaProx URL")
+        print("  in a browser to create the first administrator via the")
+        print("  setup wizard. /api/auth/login is disabled until that")
+        print("  is done.")
         print("=" * 50 + "\n")
 
     # Load existing configuration

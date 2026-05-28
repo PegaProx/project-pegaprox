@@ -16,7 +16,8 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import (
     hash_password, verify_password, needs_password_rehash,
-    validate_password_policy, load_users, save_users, create_default_users,
+    validate_password_policy, load_users, save_users,
+    create_initial_admin, is_initialized,
     create_session, validate_session, invalidate_session,
     invalidate_all_user_sessions, cleanup_expired_sessions,
     generate_api_token, create_api_token, validate_api_token,
@@ -380,11 +381,88 @@ def oidc_test_connection():
     return jsonify({'success': all_ok, 'results': results})
 
 
+# MK May 2026 — first-run setup endpoint. Reachable only while the install
+# is uninitialised; closes itself once the first admin is created. Replaces
+# the old auto-bootstrapped `pegaprox/admin` default that exposed every
+# fresh install to a network-attacker race.
+_setup_attempts_by_ip = {}  # very light rate-limit, IP → list[ts]
+
+
+@bp.route('/api/auth/setup', methods=['POST'])
+def auth_setup():
+    if is_initialized():
+        # already done, no replay
+        return jsonify({
+            'error': 'PegaProx is already initialised',
+            'code': 'ALREADY_INITIALIZED',
+        }), 409
+
+    client_ip = get_client_ip()
+    now = time.time()
+    # crude per-IP rate-limit: max 5 attempts / 60s. Mostly hygiene; the real
+    # race-window protection is the operator firewalling 5000 until setup
+    # completes. Document that in the install guide.
+    window = [t for t in _setup_attempts_by_ip.get(client_ip, []) if now - t < 60]
+    if len(window) >= 5:
+        logging.warning(f"[SETUP] rate-limited setup attempt from {client_ip}")
+        return jsonify({'error': 'Too many attempts, slow down'}), 429
+    window.append(now)
+    _setup_attempts_by_ip[client_ip] = window
+
+    data = request.get_json() or {}
+    username = sanitize_username(str(data.get('username', '')).strip().lower(), max_length=64)
+    password = data.get('password', '')
+    display_name = sanitize_identifier(str(data.get('display_name', '')).strip(), max_length=128)
+    email = str(data.get('email', '')).strip()[:254]
+
+    if not username or len(username) < 2:
+        return jsonify({'error': 'Username must be at least 2 characters'}), 400
+    # don't let setup conflict with the legacy default-admin name —
+    # avoids confusion in audit logs across the upgrade boundary
+    if username == 'pegaprox':
+        return jsonify({'error': "Choose a different username ('pegaprox' is reserved)"}), 400
+    if not password:
+        return jsonify({'error': 'Password required'}), 400
+    ok, err = validate_password_policy(password)
+    if not ok:
+        return jsonify({'error': err}), 400
+
+    # build, save, mark — order matters: if mark fails the next request
+    # would re-allow setup and double-create, so the audit log catches it.
+    try:
+        admin = create_initial_admin(username, password, display_name=display_name, email=email)
+        save_users(admin)
+        mark_admin_initialized()
+    except Exception as e:
+        logging.error(f"[SETUP] failed to create initial admin: {e}")
+        return jsonify({'error': 'Setup failed, check server logs'}), 500
+
+    log_audit(username, 'admin.initial_setup',
+              f"First admin '{username}' created via setup wizard from {client_ip}")
+    logging.info(f"[SETUP] initial admin '{username}' created from {client_ip}")
+
+    return jsonify({
+        'success': True,
+        'message': 'Setup complete, you can now log in',
+        'username': username,
+    })
+
+
 @bp.route('/api/auth/login', methods=['POST'])
 def auth_login():
     """login endpoint - MK"""
     global users_db, login_attempts_by_ip, login_attempts_by_user
-    
+
+    # MK May 2026 — first-run safety gate. Before the setup wizard runs there
+    # is no admin to authenticate against; refusing /login here closes the old
+    # hardcoded-creds path (`pegaprox/admin` was bootstrapped automatically
+    # which let any network-reachable fresh install be taken over).
+    if not is_initialized():
+        return jsonify({
+            'error': 'PegaProx is not initialised — run the setup wizard first',
+            'code': 'NOT_INITIALIZED',
+        }), 503
+
     # get settings
     login_settings = get_login_settings()
     max_attempts = login_settings['max_attempts']
@@ -872,7 +950,16 @@ def auth_check():
         oidc_enabled = settings.get('oidc_enabled', False)
         oidc_button_text = settings.get('oidc_button_text', 'Sign in with Microsoft')
         login_background = settings.get('login_background', '')
-        return jsonify({'authenticated': False, 'ldap_enabled': ldap_enabled, 'oidc_enabled': oidc_enabled, 'oidc_button_text': oidc_button_text, 'login_background': login_background}), 401
+        # MK May 2026 — first-run signal so the React shell can show the setup
+        # wizard instead of the login form on an uninitialised install.
+        return jsonify({
+            'authenticated': False,
+            'initialized': is_initialized(),
+            'ldap_enabled': ldap_enabled,
+            'oidc_enabled': oidc_enabled,
+            'oidc_button_text': oidc_button_text,
+            'login_background': login_background,
+        }), 401
     
     # Get user info - always fresh from database
     users_db = load_users()
