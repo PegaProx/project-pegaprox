@@ -7927,9 +7927,13 @@ echo "AGENT_INSTALLED_OK"
                     
                     # Try via Proxmox API as fallback
                     try:
-                        # Proxmox has a reboot command via API
+                        # MK May 2026 — was `self.session.post(..., verify=False)` which
+                        # hardcoded the SSL bypass even when the operator configured
+                        # `_ssl_verify=True` on this cluster. Use _create_session()
+                        # so the per-cluster TLS preference is honoured (proper CA
+                        # verification when the user pinned a custom CA bundle).
                         url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node_name}/status"
-                        response = self.session.post(url, data={'command': 'reboot'}, verify=False)
+                        response = self._create_session().post(url, data={'command': 'reboot'})
                         if response.status_code == 200:
                             task.add_output("Reboot initiated via Proxmox API")
                         else:

@@ -9,13 +9,18 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# MK May 2026 — top-level permissions implicitly cascaded `packages: write`
+# into any future job added to this workflow. Aikido flagged it as overly
+# broad. Scope per-job instead so only build-and-push gets the GHCR write.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
