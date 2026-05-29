@@ -6,6 +6,7 @@ XAPI (XML-RPC) connection, VM lifecycle, storage, network ops.
 NS: Mar 2026 - first-class XCP-ng integration, same sidebar as Proxmox.
 """
 
+import base64
 import logging
 import os
 import threading
@@ -3153,10 +3154,10 @@ class XcpngManager:
             return {'success': False, 'error': 'No DNS servers specified'}
 
         content = '\n'.join(lines) + '\n'
-        # Use random delimiter to prevent heredoc terminator injection
-        delimiter = f"EOF_{_uuid.uuid4().hex}"
+        # Base64 encode to prevent shell injection
+        content_b64 = base64.b64encode(content.encode('utf-8')).decode('ascii')
         rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/resolv.conf << '{delimiter}'\n{content}{delimiter}")
+            f"echo '{content_b64}' | base64 -d > /etc/resolv.conf")
         if rc == 0:
             return {'success': True, 'message': 'DNS updated'}
         return {'success': False, 'error': err or 'Failed to write resolv.conf'}
@@ -3169,10 +3170,10 @@ class XcpngManager:
     def update_node_hosts(self, node, hosts_content):
         if not hosts_content:
             return {'success': False, 'error': 'Empty hosts content'}
-        # Use random delimiter to prevent heredoc terminator injection
-        delimiter = f"EOF_{_uuid.uuid4().hex}"
+        # Base64 encode to prevent shell injection
+        hosts_b64 = base64.b64encode(hosts_content.encode('utf-8')).decode('ascii')
         rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/hosts << '{delimiter}'\n{hosts_content}\n{delimiter}")
+            f"echo '{hosts_b64}' | base64 -d > /etc/hosts")
         if rc == 0:
             return {'success': True, 'message': 'Hosts updated'}
         return {'success': False, 'error': err or 'Failed to write hosts file'}
@@ -4398,10 +4399,14 @@ echo DONE""",
         combined = certificates.strip() + '\n' + key.strip() + '\n'
         # backup current cert first
         self._ssh_exec(node, "cp /etc/xensource/xapi-ssl.pem /etc/xensource/xapi-ssl.pem.bak 2>/dev/null")
-        # Use random delimiter to prevent heredoc terminator injection
-        delimiter = f"EOF_{_uuid.uuid4().hex}"
+        
+        # Base64 encode the certificate content to prevent shell injection
+        # This eliminates heredoc delimiter injection vulnerabilities
+        combined_b64 = base64.b64encode(combined.encode('utf-8')).decode('ascii')
+        
+        # Write the certificate using base64 decoding - safe from injection
         rc, _, err = self._ssh_exec(node,
-            f"cat > /etc/xensource/xapi-ssl.pem << '{delimiter}'\n{combined}{delimiter}")
+            f"echo '{combined_b64}' | base64 -d > /etc/xensource/xapi-ssl.pem")
         if rc != 0:
             return {'success': False, 'error': err or 'Failed to write certificate'}
 
