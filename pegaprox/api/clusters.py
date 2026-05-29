@@ -128,6 +128,10 @@ def get_clusters():
                 'last_run': mgr.last_run.isoformat() if mgr.last_run else None,
                 'api_token_active': bool(getattr(mgr, '_using_api_token', False)),
                 'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
+                # MK May 2026 — worldmap location (per-cluster). None when not set.
+                'latitude': getattr(mgr.config, 'latitude', None),
+                'longitude': getattr(mgr.config, 'longitude', None),
+                'location_label': getattr(mgr.config, 'location_label', '') or '',
             })
 
     # MK: Sort clusters by sort_order first, then by name for consistent ordering
@@ -540,28 +544,124 @@ def reorder_clusters():
 @require_auth(perms=['cluster.config'])
 def update_cluster_sort_order(cluster_id):
     """Update a single cluster's sort order
-    
+
     Request body: { "sort_order": 5 }
     """
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     data = request.get_json()
     sort_order = data.get('sort_order', 0)
-    
+
     db = get_db()
     cursor = db.conn.cursor()
-    
+
     try:
         cursor.execute(
             'UPDATE clusters SET sort_order = ? WHERE id = ?',
             (sort_order, cluster_id)
         )
         db.conn.commit()
-        
+
         return jsonify({'message': 'Sort order updated', 'sort_order': sort_order})
     except Exception as e:
         logging.error(f"Failed to update sort order: {e}")
+        return jsonify({'error': safe_error(e, 'Operation failed')}), 500
+
+
+# MK May 2026 — Worldmap location (per-cluster).
+# Body: { "latitude": 50.1109, "longitude": 8.6821, "location_label": "Frankfurt DC1" }
+# Pass `null` for lat+lon to remove the dot from the map.
+#
+# MK May 2026 — light per-IP+per-cluster rate limit. Authenticated users with
+# cluster.config could otherwise hammer this endpoint to flood the HMAC-signed
+# audit log (each location update writes one entry). 30 updates/min is way more
+# than any legitimate UI flow needs — operators set lat/lon once and move on.
+_location_put_attempts = {}  # (ip, cluster_id) → list[ts]
+
+
+@bp.route('/api/clusters/<cluster_id>/location', methods=['PUT'])
+@require_auth(perms=['cluster.config'])
+def update_cluster_location(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    # rate-limit per (IP, cluster) — 30 updates / 60s window
+    from pegaprox.utils.audit import get_client_ip
+    import time as _t
+    client_ip = get_client_ip()
+    key = (client_ip, cluster_id)
+    now = _t.time()
+    window = [t for t in _location_put_attempts.get(key, []) if now - t < 60]
+    if len(window) >= 30:
+        logging.warning(f"[CLUSTER-LOC] rate-limited update on {cluster_id} from {client_ip}")
+        return jsonify({'error': 'Too many location updates — slow down'}), 429
+    window.append(now)
+    _location_put_attempts[key] = window
+
+    data = request.get_json() or {}
+    lat = data.get('latitude')
+    lon = data.get('longitude')
+
+    # MK May 2026 — strict type check before float() cast. Python's bool subclasses
+    # int, so `float(True)` is 1.0 — would pass range check and silently set lat=1.
+    # Also reject dict / list / bytes which could slip through some serializers.
+    if lat is not None and (isinstance(lat, bool) or not isinstance(lat, (int, float))):
+        return jsonify({'error': 'latitude must be a number'}), 400
+    if lon is not None and (isinstance(lon, bool) or not isinstance(lon, (int, float))):
+        return jsonify({'error': 'longitude must be a number'}), 400
+
+    # MK May 2026 — label sanitisation: strip control chars + collapse internal
+    # whitespace + cap length. Newlines/CR in audit-log details would let an
+    # operator forge multi-line audit entries that look like separate events
+    # to a naive log reader. Defense-in-depth.
+    raw_label = data.get('location_label') or ''
+    if not isinstance(raw_label, str):
+        return jsonify({'error': 'location_label must be a string'}), 400
+    # remove ASCII control chars (0x00-0x1F + 0x7F) including \n \r \t \0
+    label = ''.join(ch for ch in raw_label if ord(ch) >= 0x20 and ord(ch) != 0x7F)
+    label = label.strip()[:120]
+
+    # both lat+lon must be set together, OR both null to clear the dot
+    if (lat is None) != (lon is None):
+        return jsonify({'error': 'latitude and longitude must be set together (or both null)'}), 400
+    if lat is not None:
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'latitude/longitude must be numeric'}), 400
+        # also catches NaN/Inf since the comparison returns False for those
+        if not (-90.0 <= lat <= 90.0):
+            return jsonify({'error': 'latitude must be between -90 and 90'}), 400
+        if not (-180.0 <= lon <= 180.0):
+            return jsonify({'error': 'longitude must be between -180 and 180'}), 400
+
+    db = get_db()
+    cursor = db.conn.cursor()
+    try:
+        from datetime import datetime as _dt
+        cursor.execute(
+            'UPDATE clusters SET latitude = ?, longitude = ?, location_label = ?, updated_at = ? WHERE id = ?',
+            (lat, lon, label, _dt.now().isoformat(), cluster_id)
+        )
+        db.conn.commit()
+        # mirror into in-memory config so the next /api/clusters GET reflects it
+        mgr = cluster_managers[cluster_id]
+        mgr.config.latitude = lat
+        mgr.config.longitude = lon
+        mgr.config.location_label = label
+
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'cluster.location_updated',
+                  f"Cluster '{mgr.config.name}' location set to {lat},{lon} ({label or '—'})")
+        return jsonify({'message': 'Location updated',
+                        'latitude': lat, 'longitude': lon, 'location_label': label})
+    except Exception as e:
+        logging.error(f"Failed to update cluster location: {e}")
         return jsonify({'error': safe_error(e, 'Operation failed')}), 500
 
 

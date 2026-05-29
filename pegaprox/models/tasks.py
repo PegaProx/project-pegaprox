@@ -122,6 +122,12 @@ class PegaProxConfig:
         # https://pve:8006. Defeats TLS-inspection middleboxes that re-encrypt
         # the second leg and modify binary RFB bytes. Customer-side opt-in.
         self.vnc_tunnel = cluster_data.get('vnc_tunnel', False)
+        # MK May 2026 — worldmap location. Both None until the operator sets it
+        # via the Cluster Edit dialog. location_label is a free-text hint
+        # ("Frankfurt DC1") shown in tooltips next to the dot.
+        self.latitude = cluster_data.get('latitude')
+        self.longitude = cluster_data.get('longitude')
+        self.location_label = cluster_data.get('location_label', '') or ''
         # NS May 2026 (#364) — load-balancer settings finally hydrated from db.
         # Were API-settable but never persisted before, so users saw "saved"
         # toasts that reverted within seconds.

@@ -988,6 +988,12 @@ class PegaProxDB:
                 # MK May 2026 — Proxmox API port override (default 8006). Direct
                 # TLS only — we don't support reverse-proxied PVE by design.
                 ('api_port', "INTEGER DEFAULT 8006"),
+                # MK May 2026 — worldmap location (per-cluster). NULL lat/lon
+                # means "not configured" → cluster won't be plotted on the map.
+                # location_label is a human-readable hint ("Frankfurt DC1").
+                ('latitude', "REAL DEFAULT NULL"),
+                ('longitude', "REAL DEFAULT NULL"),
+                ('location_label', "TEXT DEFAULT ''"),
             ]:
                 if col_name not in cluster_columns:
                     try:
@@ -2634,6 +2640,10 @@ class PegaProxDB:
                 'vnc_tunnel': bool(row['vnc_tunnel']) if 'vnc_tunnel' in row.keys() else False,
                 'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
                 'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
+                # MK May 2026 — worldmap fields (per-cluster)
+                'latitude': float(row['latitude']) if 'latitude' in row.keys() and row['latitude'] is not None else None,
+                'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
+                'location_label': row['location_label'] if 'location_label' in row.keys() and row['location_label'] else '',
             }
 
         return clusters
@@ -2716,6 +2726,10 @@ class PegaProxDB:
             'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
             # MK May 2026 — Proxmox API port override (default 8006). Direct-TLS only, never proxied.
             'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
+            # MK May 2026 — worldmap fields (per-cluster, NULL = not plotted)
+            'latitude': float(row['latitude']) if 'latitude' in row.keys() and row['latitude'] is not None else None,
+            'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
+            'location_label': row['location_label'] if 'location_label' in row.keys() and row['location_label'] else '',
         }
 
     def save_cluster(self, cluster_id: str, data: dict):
@@ -2726,6 +2740,22 @@ class PegaProxDB:
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
         cursor.execute('SELECT group_id, display_name, sort_order, created_at FROM clusters WHERE id = ?', (cluster_id,))
         existing = cursor.fetchone()
+
+        # MK May 2026 — preserve previously-set worldmap location across save_cluster
+        # round-trips. The cluster-edit UI only sends location when the operator
+        # actually opens the location panel; without this preserve, every other
+        # edit (rename, password rotation, etc.) would wipe the dot off the map.
+        existing_lat = existing_lon = existing_loc_label = None
+        if existing:
+            try:
+                cursor.execute('SELECT latitude, longitude, location_label FROM clusters WHERE id = ?', (cluster_id,))
+                _loc = cursor.fetchone()
+                if _loc:
+                    existing_lat = _loc['latitude']
+                    existing_lon = _loc['longitude']
+                    existing_loc_label = _loc['location_label']
+            except Exception:
+                pass
 
         cursor.execute('''
             INSERT OR REPLACE INTO clusters
@@ -2742,9 +2772,10 @@ class PegaProxDB:
              cpu_baseline, vnc_tunnel,
              backup_sla_max_age_hours,
              api_port,
+             latitude, longitude, location_label,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -2783,6 +2814,9 @@ class PegaProxDB:
             1 if data.get('vnc_tunnel', False) else 0,
             int(data.get('backup_sla_max_age_hours', 0) or 0),
             int(data.get('api_port', 8006) or 8006),
+            data.get('latitude', existing_lat),
+            data.get('longitude', existing_lon),
+            data.get('location_label', existing_loc_label) or '',
             existing['created_at'] if existing else now,
             now
         ))
@@ -2793,6 +2827,8 @@ class PegaProxDB:
         'name', 'host', 'port', 'user', 'password_encrypted', 'cluster_type',
         'auto_balance', 'balance_threshold', 'balance_local_disks', 'migration_tolerance',
         'ha_enabled', 'ha_check_interval', 'smbios_autoconfig', 'max_migrations_per_cycle',
+        # MK May 2026 — worldmap (per-cluster location).
+        'latitude', 'longitude', 'location_label',
     })
 
     def update_cluster(self, cluster_id: str, fields: dict):

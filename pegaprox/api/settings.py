@@ -894,6 +894,19 @@ def serve_images(filename):
     return send_from_directory(IMAGES_DIR, filename)
 
 
+# MK May 2026 — bundled offline assets (currently only the world-countries SVG
+# for the worldmap, but the route accepts any sub-file). Air-gap-safe: never
+# fetches from a CDN, always served from disk next to the rest of the app.
+@bp.route('/assets/<path:filename>')
+def serve_web_assets(filename):
+    web_assets_dir = os.path.join('web', 'assets')
+    resp = send_from_directory(web_assets_dir, filename)
+    # The SVG is huge-ish (~140 KB) but completely static; let the browser cache
+    # it for a day so the worldmap reloads are cheap.
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    return resp
+
+
 # MK May 2026 — PWA: manifest + service worker. SW must live at root scope
 # or it can only control its sub-path; same for the manifest URL.
 @bp.route('/manifest.webmanifest')
