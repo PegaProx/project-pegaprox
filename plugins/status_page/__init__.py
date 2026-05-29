@@ -97,7 +97,23 @@ def _update_config():
               'show_storage', 'show_cluster_name', 'theme_color', 'custom_logo_url',
               'show_pbs_backups', 'pbs_stale_hours']:
         if k in data:
-            cfg[k] = data[k]
+            val = data[k]
+            # NS Jun 2026: validate numeric fields to prevent stored XSS
+            if k == 'pbs_stale_hours':
+                try:
+                    val = int(val)
+                    if val < 1 or val > 8760:  # 1 hour to 1 year
+                        val = 48
+                except (ValueError, TypeError):
+                    val = 48
+            elif k == 'refresh_interval':
+                try:
+                    val = int(val)
+                    if val < 5 or val > 3600:
+                        val = 30
+                except (ValueError, TypeError):
+                    val = 30
+            cfg[k] = val
     _save_config(cfg)
     return {'success': True}
 
