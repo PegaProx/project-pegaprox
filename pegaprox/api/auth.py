@@ -37,6 +37,7 @@ from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID
 from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error
 from pegaprox.utils.sanitization import sanitize_identifier, sanitize_username
 from pegaprox.utils.ssh import check_auth_action_rate_limit
+from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
 # NS: Mar 2026 - removed add_allowed_origin import (no longer auto-adding on login)
 import requests
 
@@ -340,6 +341,13 @@ def oidc_test_connection():
     # Step 2: Test authorization endpoint
     try:
         skip_ssl = bool(config.get('oidc_skip_ssl_verify', False))
+        allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
+        try:
+            sanitize_outbound_url(endpoints['authorization'], allow_private=allow_private_ip)
+        except SsrfError as guard_err:
+            results.append({'step': 'Authorization Endpoint', 'status': 'error',
+                            'detail': f"URL rejected by security validation: {guard_err}"})
+            return jsonify({'success': False, 'results': results})
         resp = requests.get(endpoints['authorization'], allow_redirects=False, timeout=10, verify=not skip_ssl)
         # Auth endpoint should return 200 or redirect
         if resp.status_code in [200, 302, 400]:
@@ -355,6 +363,13 @@ def oidc_test_connection():
 
     # Step 3: Test JWKS endpoint
     try:
+        allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
+        try:
+            sanitize_outbound_url(endpoints['jwks'], allow_private=allow_private_ip)
+        except SsrfError as guard_err:
+            results.append({'step': 'JWKS Endpoint', 'status': 'error',
+                            'detail': f"URL rejected by security validation: {guard_err}"})
+            return jsonify({'success': False, 'results': results})
         resp = requests.get(endpoints['jwks'], timeout=10)
         if resp.status_code == 200:
             keys = resp.json().get('keys', [])
