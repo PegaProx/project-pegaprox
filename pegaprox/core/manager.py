@@ -446,6 +446,23 @@ class PegaProxManager:
                 session.cookies.set('PVEAuthCookie', self._ticket)
             if self._csrf_token:
                 session.headers.update({'CSRFPreventionToken': self._csrf_token})
+
+        # MK May 2026 — default-timeout safety net for the whole codebase.
+        # ~14 callsites in this file (and a handful in api/) used the session
+        # without an explicit timeout=, defaulting to None = wait-forever.
+        # When the PVE cluster goes dark (host unreachable, network partition)
+        # those calls block 30+ seconds on TCP keepalive each and freeze the
+        # UI thread that issued them. Wrapping session.request() to inject a
+        # default applies the safety net to ALL current + future callers
+        # without touching every individual `.get(...)` / `.post(...)`.
+        # Explicit `timeout=N` in callsites still wins — we only fill in
+        # when the caller didn't say.
+        _original_request = session.request
+        def _request_with_default_timeout(method, url, **kwargs):
+            if 'timeout' not in kwargs or kwargs.get('timeout') is None:
+                kwargs['timeout'] = 15  # 15 s is plenty for any PVE API call
+            return _original_request(method, url, **kwargs)
+        session.request = _request_with_default_timeout
         return session
     
     @staticmethod
