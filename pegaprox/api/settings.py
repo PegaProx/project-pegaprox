@@ -10,7 +10,6 @@ import time
 import logging
 import threading
 import re
-import hashlib
 from datetime import datetime
 from flask import Blueprint, jsonify, request, Response, make_response, send_from_directory, send_file
 
@@ -325,14 +324,9 @@ def perform_pegaprox_update():
         force = data.get('force', False)
 
         # Protected paths - NEVER overwrite
-        # MK May 2026 (Aikido #473 manual port) — `requirements.txt` is on
-        # the protected list because the update flow runs `pip install -r`
-        # against it. A tampered archive could otherwise inject malicious
-        # packages even if the source dirs were safe.
         PROTECTED = [
             'config/', 'ssl/', 'certs/', 'logs/', 'backups/', 'venv/', '.git/',
-            '.db', '.enc', '.pem', '.key', '.crt', '.p12',
-            'requirements.txt',
+            '.db', '.enc', '.pem', '.key', '.crt', '.p12'
         ]
 
         def is_protected(path):
@@ -445,38 +439,9 @@ def perform_pegaprox_update():
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 archive_path = os.path.join(tmpdir, 'repo.tar.gz')
-                # MK May 2026 (Aikido #473 manual port) — compute SHA256 while
-                # streaming the download, then verify against the hash declared
-                # in remote version.json. Catches tampered archives BEFORE we
-                # extract anything (extractall has its own filter='data' guard
-                # for traversal, but that's the second line of defence). Hash
-                # is optional in version.json for backwards compatibility —
-                # warn-and-proceed when absent so older mirrors still work.
-                sha256_hash = hashlib.sha256()
                 with open(archive_path, 'wb') as f:
                     for chunk in resp.iter_content(8192):
                         f.write(chunk)
-                        sha256_hash.update(chunk)
-
-                computed_hash = sha256_hash.hexdigest()
-                expected_hash = (remote_version or {}).get('archive_sha256')
-                if expected_hash:
-                    if computed_hash.lower() != str(expected_hash).lower():
-                        logging.error(f"SECURITY: update archive hash mismatch — expected {expected_hash[:16]}..., got {computed_hash[:16]}...")
-                        log_audit(user, 'pegaprox.update_failed',
-                                  f"Update rejected: archive integrity check failed (hash mismatch)")
-                        return jsonify({
-                            'error': 'Update archive integrity verification failed',
-                            'details': 'The downloaded archive hash does not match the expected value declared in version.json. This may indicate tampering or corruption.',
-                            'hint': 'Re-trigger the update; if the failure persists, check the update mirror for tampering.',
-                        }), 400
-                    logging.info(f"Update archive SHA256 verified: {computed_hash[:16]}…")
-                    log_audit(user, 'pegaprox.update_verified',
-                              f"Update archive integrity verified (SHA256 {computed_hash[:16]}…)")
-                else:
-                    logging.warning("Update archive has no SHA256 hash in version.json — integrity cannot be verified (proceeding for backwards-compat)")
-                    log_audit(user, 'pegaprox.update_unverified',
-                              "Update proceeding without integrity verification (no hash in version.json)")
 
                 # MK: extractall with filter='data' to block path traversal
                 with tarfile.open(archive_path, 'r:gz') as tar:
