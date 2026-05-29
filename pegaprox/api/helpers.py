@@ -156,15 +156,8 @@ def load_server_settings():
             return {**defaults, **saved}
     except Exception as e:
         logging.error(f"Error loading server settings from database: {e}")
-        # Try legacy fallback
-        if os.path.exists(SERVER_SETTINGS_FILE):
-            try:
-                with open(SERVER_SETTINGS_FILE, 'r') as f:
-                    saved = json.load(f)
-                return {**defaults, **saved}
-            except:
-                pass
-    
+        # NS May 2026 - plain-JSON SERVER_SETTINGS_FILE fallback removed (encrypted DB only).
+
     return defaults
 
 

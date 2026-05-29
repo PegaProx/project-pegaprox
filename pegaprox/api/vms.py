@@ -7799,35 +7799,14 @@ async def ssh_handler(websocket):
     except Exception as e:
         print(f"Could not get node IP from API: {e}")
 
-    # Method 2: Fallback - read directly from clusters config file
-    if not cluster_host:
-        try:
-            import os
-            config_paths = [
-                'config/clusters.json',
-                './config/clusters.json',
-                '/home/admin_321/pegaprox/config/clusters.json',
-                '/home/admin_321/pegaprox/data/clusters.json',
-                './data/clusters.json',
-                os.path.expanduser('~/.pegaprox/clusters.json'),
-                '/var/lib/pegaprox/clusters.json'
-            ]
-            print(f"Trying config file fallback, cwd={os.getcwd()}")
-            for config_path in config_paths:
-                if os.path.exists(config_path):
-                    print(f"Found config at: {config_path}")
-                    with open(config_path, 'r') as f:
-                        clusters = json.load(f)
-                    if cluster_id in clusters:
-                        cluster_host = clusters[cluster_id].get('host')
-                        print(f"Got cluster_host from config file: {cluster_host}")
-                        break
-                    else:
-                        print(f"Cluster {cluster_id} not in config, available: {list(clusters.keys())}")
-        except Exception as e:
-            print(f"Config file fallback failed: {e}")
+    # NS May 2026 - Method 2 (read plain-JSON clusters.json from disk) removed.
+    # The only legitimate source for cluster info now is the encrypted SQLCipher
+    # DB, surfaced via /api/internal/cluster-creds above. If Method 1 fails the
+    # shell connection fails — fixing the cluster config is the right recovery,
+    # not a plain-JSON spill.
 
-    # cluster_host fallback for node_ip
+    # cluster_host fallback for node_ip (still useful when Method 1 returned only
+    # the host but not a per-node IP).
     if not node_ip and cluster_host:
         node_ip = cluster_host
         print(f"Using cluster host as fallback: {cluster_host}")

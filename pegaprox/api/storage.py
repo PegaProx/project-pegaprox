@@ -75,13 +75,7 @@ def load_esxi_config():
         
     except Exception as e:
         logging.debug(f"Loading ESXi config from DB: {e}")
-        # Fallback to JSON for backwards compat
-        try:
-            if os.path.exists(ESXI_CONFIG_FILE):
-                with open(ESXI_CONFIG_FILE, 'r') as f:
-                    esxi_storages = json.load(f)
-        except:
-            esxi_storages = {}
+        # NS May 2026 - plain-JSON ESXI_CONFIG_FILE fallback removed (encrypted DB only).
 
 def save_esxi_config():
     """Save ESXi storage config to SQLite database
@@ -432,13 +426,7 @@ def load_storage_clusters():
                 })
         except Exception as e:
             logging.debug(f"Loading storage clusters from DB: {e}")
-            # Fallback to JSON for backwards compat
-            try:
-                if os.path.exists(STORAGE_CLUSTERS_FILE):
-                    with open(STORAGE_CLUSTERS_FILE, 'r') as f:
-                        storage_clusters_config = json.load(f)
-            except:
-                storage_clusters_config = {}
+            # NS May 2026 - plain-JSON STORAGE_CLUSTERS_FILE fallback removed (encrypted DB only).
 
 def save_storage_clusters():
     """save storage cluster config to sqlite"""

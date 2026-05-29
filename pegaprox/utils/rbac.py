@@ -77,14 +77,8 @@ def load_custom_roles() -> dict:
         return {'global': global_roles, 'tenants': tenant_roles}
     except Exception as e:
         logging.error(f"Error loading custom roles from database: {e}")
-        # Legacy fallback
-        if os.path.exists(CUSTOM_ROLES_FILE):
-            try:
-                with open(CUSTOM_ROLES_FILE, 'r') as f:
-                    return json.load(f)
-            except:
-                pass
-    
+        # NS May 2026 - plain-JSON CUSTOM_ROLES_FILE fallback removed (encrypted DB only).
+
     return {'global': {}, 'tenants': {}}
 
 
@@ -204,14 +198,8 @@ def load_tenants() -> dict:
             return {t['id']: t for t in tenants_list}
     except Exception as e:
         logging.error(f"Error loading tenants from database: {e}")
-        # Legacy fallback
-        if os.path.exists(TENANTS_FILE):
-            try:
-                with open(TENANTS_FILE, 'r') as f:
-                    return json.load(f)
-            except:
-                pass
-    
+        # NS May 2026 - plain-JSON TENANTS_FILE fallback removed (encrypted DB only).
+
     # Create default tenant
     default = {
         DEFAULT_TENANT_ID: {

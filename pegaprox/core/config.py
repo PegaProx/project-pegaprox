@@ -80,10 +80,18 @@ def load_config():
 
 
 def _load_config_legacy():
-    """Legacy config loader - used as fallback if database fails"""
+    """Legacy config loader - used as fallback if database fails
+
+    NS May 2026 - plain-JSON CONFIG_FILE (clusters.json) fallback dropped. The
+    only legacy path still trusted here is the Fernet-encrypted .enc file (which
+    was already encrypted-at-rest). A plain-text spill would defeat the whole
+    SQLCipher migration done in v0.9.10. If both DB load and the .enc fallback
+    fail, return empty and let the caller deal with it — operator has to fix the
+    DB, not bring back a JSON file.
+    """
     fernet = get_fernet()
-    
-    # Try encrypted file
+
+    # Encrypted-only legacy fallback
     if fernet and os.path.exists(CONFIG_FILE_ENCRYPTED):
         try:
             with open(CONFIG_FILE_ENCRYPTED, 'rb') as f:
@@ -95,18 +103,7 @@ def _load_config_legacy():
                 return config
         except Exception as e:
             logging.error(f"Failed to load legacy encrypted config: {e}")
-    
-    # Try unencrypted file
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                config = json.load(f)
-            if config:
-                logging.info(f"✓ Loaded {len(config)} clusters from legacy JSON file")
-                return config
-        except Exception as e:
-            logging.error(f"Failed to load legacy config: {e}")
-    
+
     return {}
 
 
