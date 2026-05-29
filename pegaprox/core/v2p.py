@@ -882,7 +882,7 @@ def _run_v2p_migration(task):
                     pending = getattr(task, '_pending_efidisk', None) or {'efitype': '4m', 'pre_enrolled_keys': '1'}
                     pre_keys = pending.get('pre_enrolled_keys', '1')
                     _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --efidisk0 {task.target_storage}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                        f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                         timeout=15)
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
@@ -1040,7 +1040,7 @@ def _run_v2p_migration(task):
                 pending = getattr(task, '_pending_efidisk', None) or {'efitype': '4m', 'pre_enrolled_keys': '1'}
                 pre_keys = pending.get('pre_enrolled_keys', '1')
                 _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --efidisk0 {task.target_storage}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                    f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
                 task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
 
@@ -1231,7 +1231,7 @@ def _run_v2p_migration(task):
                     pending = getattr(task, '_pending_efidisk', None) or {'efitype': '4m', 'pre_enrolled_keys': '1'}
                     pre_keys = pending.get('pre_enrolled_keys', '1')
                     _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --efidisk0 {task.target_storage}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                        f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                         timeout=15)
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
@@ -1383,7 +1383,7 @@ def _run_v2p_migration(task):
             pending = getattr(task, '_pending_efidisk', None) or {'efitype': '4m', 'pre_enrolled_keys': '1'}
             pre_keys = pending.get('pre_enrolled_keys', '1')
             _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --efidisk0 {task.target_storage}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                 timeout=15)
             task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
 
@@ -4915,7 +4915,7 @@ exit $((S + R))
                           or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
                 pre_keys = '1' if _is_win else '0'
                 _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --efidisk0 {task.target_storage}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                    f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
                 task.log(f"  EFI disk allocated (pre-enrolled-keys={pre_keys})")
             try:
@@ -5123,7 +5123,7 @@ exit $((S + R))
 
             if not efi_line:
                 _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --efidisk0 {task.target_storage}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                    f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
                 task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
             task.log(f"  BIOS: ovmf, Machine: q35 ✓")
@@ -5260,7 +5260,7 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
 
         if not efi_line:
             _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --efidisk0 {task.target_storage}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                 timeout=15)
             task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
         task.log(f"  BIOS: ovmf, Machine: q35 ✓")
