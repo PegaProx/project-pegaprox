@@ -144,6 +144,12 @@ def get_ws_token():
 def validate_ws_token_api():
     """Validate a WS token - called by standalone VNC/SSH servers
     MK: internal endpoint, consumes the token (single-use)
+
+    MK May 2026 (CodeAnt CWE-285) - if the caller passes ?cluster_id=<id>, also
+    verify the token's user has access to that cluster. Closes the cross-cluster
+    BOLA case where someone with cluster-A access could open a WS for cluster-B
+    and trust the token alone to gate it. cluster_id is OPTIONAL for back-compat
+    (the VNC paths in vms.py / VM-level shells call without it today).
     """
     token = request.args.get('token')
     if not token:
@@ -152,6 +158,30 @@ def validate_ws_token_api():
     data = validate_ws_token(token)
     if not data:
         return jsonify({'error': 'Invalid or expired token'}), 401
+
+    requested_cluster = (request.args.get('cluster_id') or '').strip()
+    if requested_cluster:
+        try:
+            from pegaprox.utils.auth import load_users
+            from pegaprox.utils.rbac import get_user_clusters, load_vm_acls
+            users = load_users()
+            user = users.get(data['user'], {})
+            allowed = get_user_clusters(user)
+            access_ok = allowed is None or requested_cluster in allowed
+            if not access_ok:
+                # VM-ACL fallback (mirrors api/helpers.py check_cluster_access)
+                cluster_acls = load_vm_acls().get(requested_cluster, {}) or {}
+                for _vmid, acl in cluster_acls.items():
+                    if data['user'] in (acl.get('users') or []) or '*' in (acl.get('users') or []):
+                        access_ok = True
+                        break
+            if not access_ok:
+                logging.warning(f"[WS-TOKEN] user '{data['user']}' has no access to cluster '{requested_cluster}'")
+                return jsonify({'error': 'Access denied to this cluster'}), 403
+        except Exception as e:
+            logging.error(f"[WS-TOKEN] cluster-access check failed: {e}")
+            # fail closed
+            return jsonify({'error': 'Authorization check failed'}), 500
 
     return jsonify({'valid': True, 'user': data['user'], 'role': data['role']})
 

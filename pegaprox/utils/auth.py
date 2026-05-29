@@ -831,10 +831,29 @@ def require_auth(roles: list = None, perms: list = None):
             if not user.get('enabled', True):
                 return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
             
-            # NS Mar 2026 - refresh role from DB, session might be stale after admin change
-            fresh_role = user.get('role', session['role'])
-            if fresh_role != session['role']:
-                session['role'] = fresh_role
+            # MK May 2026 (CodeAnt CWE-269) — DO NOT refresh role from the user record
+            # when this is an API-token session. The token has its own role bound at
+            # creation (e.g. an admin creating a 'viewer' token for CI/CD); refreshing
+            # to user.role would silently escalate every restricted token to its
+            # owner's current global role. For session-auth (interactive login) we
+            # still refresh so an admin-side role change applies on the next request.
+            if session.get('api_token'):
+                # Floor at min(token_role, user_current_role) — if user got demoted
+                # since token creation, follow them down so the token can't outrank
+                # its owner. Won't auto-escalate.
+                _hier = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
+                token_lvl = _hier.get(session.get('role'), 1)
+                user_lvl = _hier.get(user.get('role'), 1)
+                eff_lvl = min(token_lvl, user_lvl)
+                fresh_role = next((r for r, lvl in _hier.items() if lvl == eff_lvl), ROLE_VIEWER)
+                # Don't mutate session['role'] — keep the original token-bound value
+                # in the session dict for audit/log purposes; fresh_role drives the
+                # role check below.
+            else:
+                # NS Mar 2026 - refresh role from DB, session might be stale after admin change
+                fresh_role = user.get('role', session['role'])
+                if fresh_role != session['role']:
+                    session['role'] = fresh_role
 
             # Check role if specified
             if roles and fresh_role not in roles:
