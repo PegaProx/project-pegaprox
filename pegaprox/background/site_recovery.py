@@ -259,9 +259,37 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         import gevent
         gevent.spawn(_delayed_cleanup)
 
-        if result.get('success'):
+        if not result.get('success'):
+            return False, result.get('error', 'Migration failed')
+
+        # MK May 2026 (#413 layer 4) — remote_migrate_vm returns success the
+        # moment PVE accepts the task UPID, NOT when the underlying qmigrate
+        # actually finishes. A failover where the target already has the VMID
+        # (e.g. xcrepl pre-replicated it) submits fine then aborts mid-flight
+        # with "VM N already exists" — and the old code treated that as a clean
+        # planned_complete, which is how @blackshocks ended up with a Failback
+        # button on a migration that never actually moved the VM. Poll the
+        # UPID's PVE task status before declaring victory.
+        task_upid = result.get('task')
+        if not task_upid:
+            # successful submit without a UPID — extremely unusual but treat as
+            # opaque success (don't make this stricter than before for paths
+            # we don't fully understand)
             return True, ''
-        return False, result.get('error', 'Migration failed')
+        try:
+            from pegaprox.api.vms import _wait_for_task
+        except Exception as _imp_err:
+            logger.warning(f"[SR] _wait_for_task import failed, falling back to submit-only success: {_imp_err}")
+            return True, ''
+        ok, detail = _wait_for_task(src_mgr, task_upid, timeout=3600, poll=5)
+        if not ok:
+            err = f"Migration task aborted on PVE: {detail}"
+            # hint for the most common cause we can identify from the detail string
+            if detail and 'already exists' in detail.lower():
+                err += " (target VMID already in use — likely a replication-pre-seeded VM; consider Emergency Failover instead of Planned)"
+            logger.error(f"[SR] {err} (vmid {vmid}, task {task_upid})")
+            return False, err
+        return True, ''
 
     except Exception as e:
         logger.error(f"[SR] Migration error for VM {vmid}: {e}")
