@@ -134,3 +134,30 @@ def sanitize_csv_field(value) -> str:
     return s
 
 
+def sanitize_log_message(value) -> str:
+    """Sanitize string for log output to prevent log forging via newline injection.
+    
+    Removes carriage return (CR) and line feed (LF) characters that could allow
+    an attacker to inject fake log entries by making one audit event appear as
+    multiple log lines in text-based log streams.
+    
+    The database audit record remains unchanged (stores original value), so this
+    only affects the text log output format.
+    
+    References:
+    - CWE-117: Improper Output Neutralization for Logs
+    - OWASP: https://owasp.org/www-community/attacks/Log_Injection
+    """
+    if value is None:
+        return ''
+    
+    # Convert to string
+    s = str(value)
+    
+    # Replace CR and LF with space to prevent log forging
+    # Using replace() is more efficient than regex for simple character substitution
+    s = s.replace('\r', ' ').replace('\n', ' ')
+    
+    return s
+
+
