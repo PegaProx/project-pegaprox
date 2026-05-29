@@ -7738,20 +7738,28 @@ async def ssh_handler(websocket):
         await websocket.close(1008, "No auth")
         return
 
-    # Validate via main server
+    # Validate via main server. MK May 2026 - when called with ws_token + cluster_id,
+    # the response now also carries `cluster_context` (host/node_ips/ssh_port) so we
+    # don't need a second authenticated round-trip. The WS subprocess holds only the
+    # consumed ws-token, no session cookie, so cluster-creds was previously
+    # unreachable from here.
+    node_ip = None
+    cluster_host = None
+    node_ips = {}
     try:
         if ws_token:
-            # MK May 2026 (CodeAnt CWE-285) - bind validate to this cluster so the
-            # main server cross-checks RBAC for *this* cluster, not just session-alive.
-            validate_url = f"{PEGAPROX_URL}/api/ws/token/validate?token={ws_token}&cluster_id={quote_plus(cluster_id)}"
-            print(f"Validating WS token (cluster={cluster_id})...")
+            validate_url = (
+                f"{PEGAPROX_URL}/api/ws/token/validate"
+                f"?token={ws_token}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}"
+            )
+            print(f"Validating WS token (cluster={cluster_id}, node={node})...")
         else:
             validate_url = f"{PEGAPROX_URL}/api/auth/validate"
             print("Validating session (legacy)...")
 
         headers = {'X-Session-ID': session_id} if session_id else {}
         cookies = {'session': session_id} if session_id else {}
-        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=5, verify=False)
+        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=8, verify=False)
 
         if r.status_code == 403:
             print(f"Auth failed: 403 (no access to cluster {cluster_id})")
@@ -7763,6 +7771,33 @@ async def ssh_handler(websocket):
             await websocket.send('{"status":"error","message":"Session ungültig - bitte neu einloggen"}')
             await websocket.close(1008, "Invalid auth")
             return
+
+        # Pull the cluster context out of the validate response (ws-token path only)
+        if ws_token:
+            try:
+                payload = r.json() or {}
+                ctx = payload.get('cluster_context') or {}
+                cluster_host = ctx.get('host')
+                node_ips = ctx.get('node_ips') or {}
+                node_ip = node_ips.get(node) or node_ips.get(node.lower())
+                print(f"validate→ host={cluster_host} node_ips={node_ips} resolved_node_ip={node_ip}")
+            except Exception as e:
+                print(f"Could not parse validate payload: {e}")
+
+        # Legacy session path: fall back to cluster-creds with the session cookie.
+        if not ws_token and session_id:
+            try:
+                print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}")
+                rc = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
+                                  cookies={'session': session_id}, timeout=10, verify=False)
+                if rc.status_code == 200:
+                    creds = rc.json()
+                    cluster_host = creds.get('host')
+                    node_ips = creds.get('node_ips', {})
+                    node_ip = node_ips.get(node) or node_ips.get(node.lower())
+            except Exception as e:
+                print(f"Could not get node IP from API: {e}")
+
         print("Auth successful")
     except requests.exceptions.ConnectionError as e:
         print(f"Connection error to main server: {e}")
@@ -7776,37 +7811,8 @@ async def ssh_handler(websocket):
         await websocket.close(1011, "Auth error")
         return
 
-    # MK May 2026 (CodeAnt CWE-918) - resolve cluster-creds *always*, so the
-    # prefetched ?ip= and the user-supplied creds.host can be gated against the
-    # cluster's known node IPs. Previously prefetched_ip skipped the lookup.
-    node_ip = None
-    cluster_host = None
-    node_ips = {}
-
-    # Method 1: Try API endpoint (unconditional)
-    try:
-        print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}")
-        r = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}", cookies={'session': session_id}, timeout=10, verify=False)
-        print(f"Cluster creds response: {r.status_code}")
-        if r.status_code == 200:
-            creds = r.json()
-            cluster_host = creds.get('host')
-            node_ips = creds.get('node_ips', {})
-            node_ip = node_ips.get(node) or node_ips.get(node.lower())
-            print(f"Got node_ips: {node_ips}, looking for: {node}, found: {node_ip}, cluster_host: {cluster_host}")
-        else:
-            print(f"Cluster creds failed: {r.status_code} - {r.text[:200] if r.text else 'no body'}")
-    except Exception as e:
-        print(f"Could not get node IP from API: {e}")
-
-    # NS May 2026 - Method 2 (read plain-JSON clusters.json from disk) removed.
-    # The only legitimate source for cluster info now is the encrypted SQLCipher
-    # DB, surfaced via /api/internal/cluster-creds above. If Method 1 fails the
-    # shell connection fails — fixing the cluster config is the right recovery,
-    # not a plain-JSON spill.
-
-    # cluster_host fallback for node_ip (still useful when Method 1 returned only
-    # the host but not a per-node IP).
+    # cluster_host fallback for node_ip (single-node setups where only the host
+    # was registered).
     if not node_ip and cluster_host:
         node_ip = cluster_host
         print(f"Using cluster host as fallback: {cluster_host}")
@@ -8010,16 +8016,21 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
         await client_ws.close(1008, "No auth")
         return
 
-    # Validate via main server (same as shell + cluster-scope check)
+    # Validate via main server (cluster-scope check + inline cluster context)
+    # MK May 2026 - response carries cluster_context so we don't need a second
+    # authenticated round-trip from the WS subprocess.
+    validate_payload = {}
     try:
         if ws_token:
-            # MK May 2026 (CodeAnt CWE-285) - cluster-scoped validate.
-            validate_url = f"{PEGAPROX_URL}/api/ws/token/validate?token={ws_token}&cluster_id={quote_plus(cluster_id)}"
+            validate_url = (
+                f"{PEGAPROX_URL}/api/ws/token/validate"
+                f"?token={ws_token}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}"
+            )
         else:
             validate_url = f"{PEGAPROX_URL}/api/auth/validate"
         headers = {'X-Session-ID': session_id} if session_id else {}
         cookies = {'session': session_id} if session_id else {}
-        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=5, verify=False)
+        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=8, verify=False)
         if r.status_code == 403:
             await client_ws.send(json.dumps({'status': 'error', 'message': f'No access to cluster {cluster_id}'}))
             await client_ws.close(1008, "Forbidden")
@@ -8028,6 +8039,10 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
             await client_ws.send('{"status":"error","message":"Invalid session"}')
             await client_ws.close(1008, "auth")
             return
+        try:
+            validate_payload = r.json() or {}
+        except Exception:
+            validate_payload = {}
     except Exception as e:
         print(f"[TERMPROXY] auth validate failed: {e}")
         await client_ws.send('{"status":"error","message":"Auth server unreachable"}')
@@ -8052,24 +8067,27 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
     pve_host = unquote(pve_host)
     pve_auth = unquote(pve_auth)
 
-    # MK May 2026 (CodeAnt CWE-918) - same SSRF gate as the shell path. pve_host is
-    # otherwise an unrestricted user-input that gets embedded in the wss:// URL.
-    # Port is hardcoded 8006 so the surface was narrower than the shell SSRF, but
-    # an authenticated user could still probe :8006 on arbitrary internal hosts.
+    # MK May 2026 (CodeAnt CWE-918) - SSRF gate. Use the cluster_context already
+    # returned by the validate call; fall back to cluster-creds only on the legacy
+    # session-cookie path (ws-token flow has no session cookie to authenticate it).
     allowed_hosts = set()
-    try:
-        cookies = {'session': session_id} if session_id else {}
-        cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
-                          cookies=cookies, timeout=10, verify=False)
-        if cr.status_code == 200:
-            cr_data = cr.json() or {}
-            if cr_data.get('host'):
-                allowed_hosts.add(cr_data['host'])
-            allowed_hosts.update(v for v in (cr_data.get('node_ips') or {}).values() if v)
-        else:
-            print(f"[TERMPROXY] cluster-creds non-200 ({cr.status_code}); allow-list empty -> rejecting host")
-    except Exception as e:
-        print(f"[TERMPROXY] cluster-creds fetch failed: {e}; allow-list empty -> rejecting host")
+    ctx = (validate_payload or {}).get('cluster_context') or {}
+    if ctx.get('host'):
+        allowed_hosts.add(ctx['host'])
+    allowed_hosts.update(v for v in (ctx.get('node_ips') or {}).values() if v)
+    if not allowed_hosts and session_id:
+        try:
+            cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
+                              cookies={'session': session_id}, timeout=10, verify=False)
+            if cr.status_code == 200:
+                cr_data = cr.json() or {}
+                if cr_data.get('host'):
+                    allowed_hosts.add(cr_data['host'])
+                allowed_hosts.update(v for v in (cr_data.get('node_ips') or {}).values() if v)
+            else:
+                print(f"[TERMPROXY] cluster-creds non-200 ({cr.status_code}); allow-list empty")
+        except Exception as e:
+            print(f"[TERMPROXY] cluster-creds legacy fetch failed: {e}")
 
     if pve_host not in allowed_hosts:
         print(f"[TERMPROXY] REJECT host {pve_host!r} (not in {sorted(allowed_hosts)})")

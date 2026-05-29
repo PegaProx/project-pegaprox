@@ -1141,7 +1141,17 @@ def get_cluster_creds_internal(cluster_id):
     session = validate_session(session_id)
     if not session:
         return jsonify({'error': 'Invalid session'}), 401
-    
+
+    # MK May 2026 - check_cluster_access reads request.session['user'], which
+    # @require_auth normally sets. This endpoint does its own cookie-based session
+    # validation (no decorator), so we have to attach the session to the request
+    # explicitly. Without this the call below raises AttributeError and the SSH-WS
+    # shell flow breaks (cluster-creds 500 -> Method 1 falls through -> no node IPs).
+    try:
+        request.session = session
+    except Exception:
+        pass
+
     # Check if cluster exists
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
