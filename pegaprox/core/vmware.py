@@ -14,6 +14,7 @@ import base64
 import re
 import requests
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -344,13 +345,35 @@ class VMwareManager:
     
     def _headers(self) -> dict:
         return {'vmware-api-session-id': self.session_id} if self.session_id else {}
-    
+
+    def _build_validated_url(self, path: str) -> str:
+        """Build the full vSphere URL from base + path with defensive validation.
+
+        MK May 2026 (Aikido #489 manual port) — every caller passes a hardcoded
+        path literal (e.g. '/api/vcenter/vm') or an f-string with internally-
+        looked-up IDs, so there's no real SSRF surface today. This is
+        defense-in-depth: reject `..` traversal segments before the URL is
+        built so a future refactor that lets external input near `path` can't
+        weaponise it. URL is reconstructed via urlparse() to drop any sneaky
+        query/fragment that might be inside `path`.
+        """
+        if not path.startswith('/'):
+            raise ValueError('path must start with /')
+        if '/../' in path or re.search(r'/%2e%2e/', path, re.IGNORECASE):
+            raise ValueError('path traversal blocked')
+        parsed = urlparse(self._base_url)._replace(path=path, query='', fragment='')
+        return urlunparse(parsed)
+
     def api_get(self, path: str, params: dict = None) -> dict:
         """GET request to vSphere REST API"""
         try:
             import requests
+            try:
+                url = self._build_validated_url(path)
+            except ValueError as ve:
+                return {'error': f'invalid path: {ve}'}
             resp = requests.get(
-                f"{self._base_url}{path}",
+                url,
                 headers=self._headers(),
                 params=params,
                 verify=self.ssl_verify,
@@ -359,7 +382,7 @@ class VMwareManager:
             if resp.status_code == 401:
                 # Session expired, try reconnect
                 if self.connect():
-                    resp = requests.get(f"{self._base_url}{path}", headers=self._headers(), 
+                    resp = requests.get(url, headers=self._headers(),
                                        params=params, verify=self.ssl_verify, timeout=30)
             if resp.status_code == 200:
                 try:
