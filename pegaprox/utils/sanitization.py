@@ -130,7 +130,30 @@ def sanitize_csv_field(value) -> str:
         # Prepend single quote to force literal interpretation
         # This is the recommended mitigation per OWASP guidance
         return "'" + s
-    
+
+    return s
+
+
+def sanitize_log_message(value) -> str:
+    """Strip CR/LF from a value before writing it to the text audit log.
+
+    Without this, an attacker who controls any audit field (e.g. submits a
+    username containing `\\nAudit: admin - deleted_everything`) could inject
+    a fake-looking log line and confuse anyone tailing the file. The DB
+    record stores the unmodified value, so this only sanitises the text
+    stream.
+
+    CWE-117 / OWASP Log Injection.
+    """
+    if value is None:
+        return ''
+    # MK May 2026 - cheap str-replace, called on every audit log write.
+    # Also strips the unicode line separators U+2028/U+2029 which some viewers
+    # (and json.dumps without ensure_ascii) treat as newlines. Tab is left
+    # alone (legitimate in some action strings).
+    s = str(value)
+    s = s.replace('\r', ' ').replace('\n', ' ')
+    s = s.replace('\u2028', ' ').replace('\u2029', ' ')
     return s
 
 

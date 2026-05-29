@@ -17,6 +17,7 @@ from pegaprox.constants import (
 )
 from pegaprox.globals import audit_log
 from pegaprox.core.db import get_db
+from pegaprox.utils.sanitization import sanitize_log_message
 
 def load_audit_log():
     """Load audit log from SQLite database
@@ -134,8 +135,15 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
     except Exception as e:
         logging.error(f"Failed to save audit entry to database: {e}")
     
-    cluster_info = f" [{cluster}]" if cluster else ""
-    logging.info(f"Audit: {user} - {action}{cluster_info} - {details}")
+    # MK May 2026 - CWE-117. user / action / details / cluster all flow through
+    # API inputs; strip CR/LF before they hit the text logger so an attacker can't
+    # forge a fake follow-up audit line. DB row above keeps the raw value.
+    safe_user = sanitize_log_message(user)
+    safe_action = sanitize_log_message(action)
+    safe_details = sanitize_log_message(details)
+    safe_cluster = sanitize_log_message(cluster) if cluster else ""
+    cluster_info = f" [{safe_cluster}]" if safe_cluster else ""
+    logging.info(f"Audit: {safe_user} - {safe_action}{cluster_info} - {safe_details}")
 
 def _is_loopback(addr):
     """Check if address is loopback (trusted proxy)

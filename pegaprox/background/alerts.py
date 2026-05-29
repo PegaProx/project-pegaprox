@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import uuid
+import html as html_lib  # MK May 2026 - aliased so we don't shadow local `html` vars
 from datetime import datetime
 
 from pegaprox.constants import (
@@ -347,12 +348,17 @@ Cluster: {cluster_id}
 
 This is an automated alert from PegaProx.
 """
+            # MK May 2026 - escape user-controlled strings in the HTML email
+            # (alert_name + target_name come from user-defined alert rules, target_type
+            # from manager state, metric/operator from rule config). current_value +
+            # threshold are floats so format-spec coercion already kills any payload.
+            _e = html_lib.escape
             html_body = f"""
-<h2 style="color: #e74c3c;">⚠️ PegaProx Alert: {alert_name}</h2>
+<h2 style="color: #e74c3c;">⚠️ PegaProx Alert: {_e(str(alert_name))}</h2>
 <table style="border-collapse: collapse; width: 100%; max-width: 500px;">
-<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Target</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{target_type.capitalize()} - {target_name}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Metric</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{metric.upper()}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Condition</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{metric} {operator} {threshold}%</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Target</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(target_type).capitalize())} - {_e(str(target_name))}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Metric</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(metric).upper())}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Condition</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(metric))} {_e(str(operator))} {threshold}%</td></tr>
 <tr style="background-color: #fee2e2;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Current Value</strong></td><td style="padding: 8px; border: 1px solid #ddd;"><strong>{current_value:.1f}%</strong></td></tr>
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Time</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
 </table>
@@ -529,14 +535,18 @@ def check_update_available_alert():
     body_lines += [f"  - {line}" for line in changelog[:10]]
     body_lines += ['', f"Download: {remote.get('download_url', '')}"]
     body = '\n'.join([ln for ln in body_lines if ln is not None])
-    html_items = ''.join(f"<li>{c}</li>" for c in changelog[:10])
+    # MK May 2026 - changelog + version come from remote update server (version.json).
+    # If GitHub-mirror is ever compromised an attacker could ship `<script>` inside
+    # the release notes; escape them all before they hit the email's HTML body.
+    download_url = remote.get('download_url', '')
+    html_items = ''.join(f"<li>{html_lib.escape(str(c))}</li>" for c in changelog[:10])
     html_body = (
         f"<h2>PegaProx update available</h2>"
-        f"<p>A new release <b>{latest}</b> is available.</p>"
-        f"<p>Current: <code>{PEGAPROX_VERSION}</code>"
-        + (f" · Released: {release_date}" if release_date else '') + "</p>"
+        f"<p>A new release <b>{html_lib.escape(str(latest))}</b> is available.</p>"
+        f"<p>Current: <code>{html_lib.escape(PEGAPROX_VERSION)}</code>"
+        + (f" · Released: {html_lib.escape(str(release_date))}" if release_date else '') + "</p>"
         f"<ul>{html_items}</ul>"
-        f"<p><a href=\"{remote.get('download_url','')}\">Release page</a></p>"
+        f"<p><a href=\"{html_lib.escape(str(download_url), quote=True)}\">Release page</a></p>"
     )
 
     ok, err = send_email(recipients, subject, body, html_body)
@@ -634,8 +644,16 @@ def _emit_node_status_event(cluster_id, node, new_status, message, severity, rec
         try:
             subject = f"[PegaProx] {alert_data['alert_name']}"
             body = f"{message}\n\nCluster: {cluster_id}\nNode: {node}\nTime: {alert_data['timestamp']}\n"
-            html = f"<h2>{alert_data['alert_name']}</h2><p>{message}</p><p><b>Cluster:</b> {cluster_id}<br><b>Time:</b> {alert_data['timestamp']}</p>"
-            send_email(recipients, subject, body, html)
+            # MK May 2026 - alert_data['alert_name'] is user-defined; message comes
+            # from the watcher (mostly safe) but cluster_id can be free-form. Escape
+            # everything before it hits HTML.
+            html_email = (
+                f"<h2>{html_lib.escape(str(alert_data['alert_name']))}</h2>"
+                f"<p>{html_lib.escape(str(message))}</p>"
+                f"<p><b>Cluster:</b> {html_lib.escape(str(cluster_id))}<br>"
+                f"<b>Time:</b> {html_lib.escape(str(alert_data['timestamp']))}</p>"
+            )
+            send_email(recipients, subject, body, html_email)
         except Exception as e:
             logging.debug(f"[NodeWatch] email failed: {e}")
 
