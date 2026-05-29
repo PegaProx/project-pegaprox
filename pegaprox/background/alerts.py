@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import uuid
+import html
 from datetime import datetime
 
 from pegaprox.constants import (
@@ -347,12 +348,21 @@ Cluster: {cluster_id}
 
 This is an automated alert from PegaProx.
 """
+            # Escape all user-controlled fields to prevent HTML injection
+            alert_name_escaped = html.escape(str(alert_name))
+            target_name_escaped = html.escape(str(target_name))
+            target_type_escaped = html.escape(str(target_type).capitalize())
+            metric_escaped = html.escape(str(metric).upper())
+            metric_cond_escaped = html.escape(str(metric))
+            operator_escaped = html.escape(str(operator))
+            cluster_id_escaped = html.escape(str(cluster_id))
+            
             html_body = f"""
-<h2 style="color: #e74c3c;">⚠️ PegaProx Alert: {alert_name}</h2>
+<h2 style="color: #e74c3c;">⚠️ PegaProx Alert: {alert_name_escaped}</h2>
 <table style="border-collapse: collapse; width: 100%; max-width: 500px;">
-<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Target</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{target_type.capitalize()} - {target_name}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Metric</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{metric.upper()}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Condition</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{metric} {operator} {threshold}%</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Target</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{target_type_escaped} - {target_name_escaped}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Metric</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{metric_escaped}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Condition</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{metric_cond_escaped} {operator_escaped} {threshold}%</td></tr>
 <tr style="background-color: #fee2e2;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Current Value</strong></td><td style="padding: 8px; border: 1px solid #ddd;"><strong>{current_value:.1f}%</strong></td></tr>
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Time</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
 </table>
@@ -529,14 +539,21 @@ def check_update_available_alert():
     body_lines += [f"  - {line}" for line in changelog[:10]]
     body_lines += ['', f"Download: {remote.get('download_url', '')}"]
     body = '\n'.join([ln for ln in body_lines if ln is not None])
-    html_items = ''.join(f"<li>{c}</li>" for c in changelog[:10])
+    
+    # Escape all fields from external source to prevent HTML injection
+    latest_escaped = html.escape(str(latest))
+    release_date_escaped = html.escape(str(release_date)) if release_date else ''
+    changelog_escaped = [html.escape(str(c)) for c in changelog[:10]]
+    download_url_escaped = html.escape(str(remote.get('download_url', '')))
+    
+    html_items = ''.join(f"<li>{c}</li>" for c in changelog_escaped)
     html_body = (
         f"<h2>PegaProx update available</h2>"
-        f"<p>A new release <b>{latest}</b> is available.</p>"
-        f"<p>Current: <code>{PEGAPROX_VERSION}</code>"
-        + (f" · Released: {release_date}" if release_date else '') + "</p>"
+        f"<p>A new release <b>{latest_escaped}</b> is available.</p>"
+        f"<p>Current: <code>{html.escape(PEGAPROX_VERSION)}</code>"
+        + (f" · Released: {release_date_escaped}" if release_date else '') + "</p>"
         f"<ul>{html_items}</ul>"
-        f"<p><a href=\"{remote.get('download_url','')}\">Release page</a></p>"
+        f"<p><a href=\"{download_url_escaped}\">Release page</a></p>"
     )
 
     ok, err = send_email(recipients, subject, body, html_body)
@@ -634,8 +651,15 @@ def _emit_node_status_event(cluster_id, node, new_status, message, severity, rec
         try:
             subject = f"[PegaProx] {alert_data['alert_name']}"
             body = f"{message}\n\nCluster: {cluster_id}\nNode: {node}\nTime: {alert_data['timestamp']}\n"
-            html = f"<h2>{alert_data['alert_name']}</h2><p>{message}</p><p><b>Cluster:</b> {cluster_id}<br><b>Time:</b> {alert_data['timestamp']}</p>"
-            send_email(recipients, subject, body, html)
+            
+            # Escape all user-controlled fields to prevent HTML injection
+            alert_name_escaped = html.escape(str(alert_data['alert_name']))
+            message_escaped = html.escape(str(message))
+            cluster_id_escaped = html.escape(str(cluster_id))
+            timestamp_escaped = html.escape(str(alert_data['timestamp']))
+            
+            html_email = f"<h2>{alert_name_escaped}</h2><p>{message_escaped}</p><p><b>Cluster:</b> {cluster_id_escaped}<br><b>Time:</b> {timestamp_escaped}</p>"
+            send_email(recipients, subject, body, html_email)
         except Exception as e:
             logging.debug(f"[NodeWatch] email failed: {e}")
 
