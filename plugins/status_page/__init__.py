@@ -97,7 +97,24 @@ def _update_config():
               'show_storage', 'show_cluster_name', 'theme_color', 'custom_logo_url',
               'show_pbs_backups', 'pbs_stale_hours']:
         if k in data:
-            cfg[k] = data[k]
+            val = data[k]
+            # MK May 2026 - numeric fields get rendered into status.html; clamp before
+            # store so a future template change without escapeHtml can't leak a payload.
+            if k == 'pbs_stale_hours':
+                try:
+                    val = int(val)
+                    if val < 1 or val > 8760:
+                        val = 48
+                except (ValueError, TypeError):
+                    val = 48
+            elif k == 'refresh_interval':
+                try:
+                    val = int(val)
+                    if val < 5 or val > 3600:
+                        val = 30
+                except (ValueError, TypeError):
+                    val = 30
+            cfg[k] = val
     _save_config(cfg)
     return {'success': True}
 

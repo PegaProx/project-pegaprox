@@ -283,7 +283,10 @@ function _stripDangerousNodes(root) {
             var val = attr.value || '';
             if (name.indexOf('on') === 0) {
                 el.removeAttribute(attr.name);
-            } else if ((name === 'href' || name === 'src' || name === 'action' || name === 'formaction') &&
+            } else if ((name === 'href' || name === 'src' || name === 'action' || name === 'formaction' ||
+                        // MK May 2026: SVG-namespaced variants (xlink:href, ev:href, …)
+                        // can carry the same javascript:/data:/vbscript: payloads.
+                        name.indexOf(':href') > 0 || name.indexOf(':src') > 0) &&
                        /^\s*(javascript|data|vbscript):/i.test(val)) {
                 el.removeAttribute(attr.name);
             }
@@ -608,7 +611,7 @@ function renderPbsBackups(pbsList, cfg) {
         html += '<div class="summary-row">' +
                 '<div class="summary-item"><div class="summary-value" style="color:var(--text)">' + (p.total_groups || 0) + '</div><div class="summary-label">Backup groups</div></div>';
         html += '<div class="summary-item"><div class="summary-value" style="color:' + (hasStale ? 'var(--yellow)' : 'var(--green)') + '">' +
-                (p.stale_count || 0) + '</div><div class="summary-label">Stale (&gt; ' + (cfg.pbs_stale_hours || 48) + 'h)</div></div>';
+                (p.stale_count || 0) + '</div><div class="summary-label">Stale (&gt; ' + escapeHtml(String(cfg.pbs_stale_hours || 48)) + 'h)</div></div>';
         html += '<div class="summary-item"><div class="summary-value" style="color:' + (hasFailed ? 'var(--red)' : 'var(--green)') + '">' +
                 (p.failed_verifications || 0) + '</div><div class="summary-label">Failed verifies</div></div>';
         html += '<div class="summary-item"><div class="summary-value" style="color:var(--blue)">' + (p.datastores ? p.datastores.length : 0) + '</div><div class="summary-label">Datastores</div></div>';

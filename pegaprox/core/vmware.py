@@ -400,8 +400,12 @@ class VMwareManager:
         """POST request to vSphere REST API"""
         try:
             import requests
+            try:
+                url = self._build_validated_url(path)
+            except ValueError as ve:
+                return {'error': f'invalid path: {ve}'}
             resp = requests.post(
-                f"{self._base_url}{path}",
+                url,
                 headers={**self._headers(), 'Content-Type': 'application/json'},
                 json=data,
                 verify=self.ssl_verify,
@@ -409,7 +413,7 @@ class VMwareManager:
             )
             if resp.status_code == 401:
                 if self.connect():
-                    resp = requests.post(f"{self._base_url}{path}", 
+                    resp = requests.post(url,
                                         headers={**self._headers(), 'Content-Type': 'application/json'},
                                         json=data, verify=self.ssl_verify, timeout=60)
             if resp.status_code in (200, 201, 204):
@@ -425,8 +429,12 @@ class VMwareManager:
         """DELETE request to vSphere REST API"""
         try:
             import requests
+            try:
+                url = self._build_validated_url(path)
+            except ValueError as ve:
+                return {'error': f'invalid path: {ve}'}
             resp = requests.delete(
-                f"{self._base_url}{path}",
+                url,
                 headers=self._headers(),
                 verify=self.ssl_verify,
                 timeout=30
