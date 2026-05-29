@@ -102,14 +102,45 @@ def update_pbs_server(pbs_id):
     """Update a PBS server config"""
     data = request.json or {}
     
-    if pbs_id not in pbs_managers:
+    # Load existing PBS server from memory or DB
+    old_mgr = None
+    if pbs_id in pbs_managers:
+        old_mgr = pbs_managers[pbs_id]
+    else:
         # Try loading from DB
         db = get_db()
         row = db.conn.cursor().execute("SELECT * FROM pbs_servers WHERE id = ?", (pbs_id,)).fetchone()
         if not row:
             return jsonify({'error': 'PBS server not found'}), 404
-    
-    save_pbs_server(pbs_id, data)
+        # Load the old manager from DB to get original credentials and host
+        try:
+            import json
+            row_dict = dict(row)
+            old_config = {
+                'name': row_dict.get('name', ''),
+                'host': row_dict.get('host', ''),
+                'port': row_dict.get('port', 8007),
+                'user': row_dict.get('user', ''),
+                'password': row_dict.get('password', ''),
+                'api_token_id': row_dict.get('api_token_id', ''),
+                'api_token_secret': row_dict.get('api_token_secret', ''),
+                'fingerprint': row_dict.get('fingerprint', ''),
+                'ssl_verify': bool(row_dict.get('ssl_verify', False)),
+                'linked_clusters': json.loads(row_dict.get('linked_clusters', '[]') or '[]'),
+                'enabled': bool(row_dict.get('enabled', True)),
+                'notes': row_dict.get('notes', ''),
+                'ssh_user': row_dict.get('ssh_user', ''),
+                'ssh_port': row_dict.get('ssh_port', 22),
+                'ssh_key': row_dict.get('ssh_key', ''),
+            }
+            # Create a temporary manager to access old credentials
+            try:
+                old_mgr = PBSManager(pbs_id, old_config)
+            except ValueError:
+                # If old config has invalid host, we can't safely preserve credentials
+                pass
+        except Exception as e:
+            logging.error(f"[PBS:{pbs_id}] Failed to load old config from DB: {e}")
 
     # MK May 2026 (#469 port) — track whether saved-creds are being preserved AND
     # the host moved at the same time. If yes: don't auto-connect, because the
@@ -119,12 +150,14 @@ def update_pbs_server(pbs_id):
     credentials_preserved = False
     host_changed = False
 
-    # Recreate manager with new config
-    if pbs_id in pbs_managers:
-        old_mgr = pbs_managers[pbs_id]
-        if (data.get('host') and data.get('host') != old_mgr.host) or \
-           (data.get('port') and int(data.get('port', 8007)) != old_mgr.port):
+    # Check for host/port changes and preserve credentials if masked
+    if old_mgr:
+        # Detect host or port changes
+        new_host = data.get('host', old_mgr.host)
+        new_port = int(data.get('port', old_mgr.port) or old_mgr.port)
+        if new_host != old_mgr.host or new_port != old_mgr.port:
             host_changed = True
+        
         # Preserve credentials if masked
         if data.get('password') == '********':
             data['password'] = old_mgr.password
@@ -134,20 +167,26 @@ def update_pbs_server(pbs_id):
             credentials_preserved = True
         if data.get('ssh_key') == '********':
             data['ssh_key'] = getattr(old_mgr, 'ssh_key', '')
+            credentials_preserved = True
+
+    # Security check: prevent credential exfiltration
+    if host_changed and credentials_preserved:
+        return jsonify({
+            'error': 'Security policy violation: Cannot change host/port while preserving masked credentials. Please provide the password explicitly when changing the target host, or update credentials separately after verifying the new host.'
+        }), 403
 
     try:
         mgr = PBSManager(pbs_id, data)
     except ValueError as e:
         return jsonify({'error': 'Invalid PBS host'}), 400
 
+    # Only save to DB after validation passes
+    save_pbs_server(pbs_id, data)
+
+    # Auto-connect if enabled
     if data.get('enabled', True):
-        if host_changed and credentials_preserved:
-            # cred-exfil guard — operator must explicitly re-test the new host
-            mgr.connected = False
-            mgr.last_error = 'Host changed — auto-connect skipped for security (preserved credentials). Use Test Connection manually after verifying the new host.'
-            logging.warning(f"[PBS:{mgr.name}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
-        else:
-            mgr.connect()
+        mgr.connect()
+    
     pbs_managers[pbs_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'pbs.updated', f"Updated PBS server: {data.get('name', pbs_id)}")
@@ -207,6 +246,26 @@ def test_pbs_connection(pbs_id):
     
     if data.get('host'):
         # Test with provided credentials (before save)
+        # Security: Ensure credentials are explicitly provided when testing a different host
+        if pbs_id in pbs_managers:
+            old_mgr = pbs_managers[pbs_id]
+            new_host = data.get('host', '')
+            new_port = int(data.get('port', 8007) or 8007)
+            
+            # Check if host/port changed
+            if (new_host != old_mgr.host or new_port != old_mgr.port):
+                # Verify that credentials are explicitly provided (not masked)
+                has_password = data.get('password') and data.get('password') != '********'
+                has_api_token = (data.get('api_token_id') and 
+                                data.get('api_token_secret') and 
+                                data.get('api_token_secret') != '********')
+                
+                if not has_password and not has_api_token:
+                    return jsonify({
+                        'success': False, 
+                        'error': 'Security policy: Cannot test connection to a different host without explicitly providing credentials. Please enter the password or API token.'
+                    }), 403
+        
         try:
             test_mgr = PBSManager('test', data)
         except ValueError as e:
@@ -223,7 +282,7 @@ def test_pbs_connection(pbs_id):
             })
         return jsonify({'success': False, 'error': test_mgr.last_error}), 400
     
-    # Test existing connection
+    # Test existing connection (no host change)
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     

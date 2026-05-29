@@ -92,11 +92,34 @@ def update_vmware_server(vmware_id):
     """Update a VMware server config"""
     data = request.json or {}
     
-    if vmware_id not in vmware_managers:
+    # Load existing VMware server from memory or DB
+    old_mgr = None
+    if vmware_id in vmware_managers:
+        old_mgr = vmware_managers[vmware_id]
+    else:
+        # Try loading from DB
         db = get_db()
         row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
         if not row:
             return jsonify({'error': 'VMware server not found'}), 404
+        # Load the old manager from DB to get original credentials and host
+        try:
+            row_dict = dict(row)
+            old_config = {
+                'name': row_dict.get('name', ''),
+                'host': row_dict.get('host', ''),
+                'port': row_dict.get('port', 443),
+                'username': row_dict.get('username', ''),
+                'password': row_dict.get('password', ''),
+                'server_type': row_dict.get('server_type', 'vcenter'),
+                'ssl_verify': bool(row_dict.get('ssl_verify', False)),
+                'enabled': bool(row_dict.get('enabled', True)),
+                'notes': row_dict.get('notes', ''),
+            }
+            # Create a temporary manager to access old credentials
+            old_mgr = VMwareManager(vmware_id, old_config)
+        except Exception as e:
+            logging.error(f"[VMware:{vmware_id}] Failed to load old config from DB: {e}")
     
     # MK May 2026 (#469 port) — cred-exfil guard. If host changes WHILE the
     # password is preserved (came in as ********), don't auto-connect — that
@@ -104,28 +127,34 @@ def update_vmware_server(vmware_id):
     credentials_preserved = False
     host_changed = False
 
-    if vmware_id in vmware_managers:
-        old_mgr = vmware_managers[vmware_id]
-        if (data.get('host') and data.get('host') != old_mgr.host) or \
-           (data.get('port') and int(data.get('port', 443)) != old_mgr.port):
+    # Check for host/port changes and preserve credentials if masked
+    if old_mgr:
+        # Detect host or port changes
+        new_host = data.get('host', old_mgr.host)
+        new_port = int(data.get('port', old_mgr.port) or old_mgr.port)
+        if new_host != old_mgr.host or new_port != old_mgr.port:
             host_changed = True
+        
+        # Preserve credentials if masked
         if data.get('password') == '********':
             data['password'] = old_mgr.password
             credentials_preserved = True
 
-    save_vmware_server(vmware_id, data)
+    # Security check: prevent credential exfiltration
+    if host_changed and credentials_preserved:
+        return jsonify({
+            'error': 'Security policy violation: Cannot change host/port while preserving masked credentials. Please provide the password explicitly when changing the target host, or update credentials separately after verifying the new host.'
+        }), 403
 
     mgr = VMwareManager(vmware_id, data)
+    
+    # Only save to DB after validation passes
+    save_vmware_server(vmware_id, data)
+    
+    # Auto-connect if enabled
     if data.get('enabled', True):
-        if host_changed and credentials_preserved:
-            try:
-                mgr.connected = False
-                mgr.last_error = 'Host changed — auto-connect skipped for security (preserved credentials). Use Test Connection manually after verifying the new host.'
-            except Exception:
-                pass
-            logging.warning(f"[VMware:{getattr(mgr, 'name', vmware_id)}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
-        else:
-            mgr.connect()
+        mgr.connect()
+    
     vmware_managers[vmware_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'vmware.updated', f"Updated VMware server: {data.get('name', vmware_id)}")
