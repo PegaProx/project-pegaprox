@@ -511,18 +511,25 @@ def execute_planned_failover(plan_id):
     if not vms:
         return jsonify({'error': 'No VMs in plan'}), 400
 
-    # NS Apr 2026: atomic ready->running transition. UPDATE..WHERE status='ready' only
-    # changes the row if no one else flipped it first (e.g. auto-failover heartbeat racing).
+    # MK May 2026 (#413 layer 5) - was `WHERE status = 'ready'` which broke the moment
+    # a plan had been failed-over once before: a successful run sets status='completed',
+    # which is non-'ready', so the next click rowcount=0 → 409 "concurrent failover".
+    # @blackshocks hit this after his first test passed. Accept the three terminal
+    # states so a plan can be re-run; concurrent-state-protection is still done by
+    # the 'running' check above + this UPDATE's narrow set.
     db = get_db()
     now = datetime.utcnow().isoformat()
     cur = db.conn.cursor()
     cur.execute(
-        "UPDATE site_recovery_plans SET status = 'running', updated_at = ? WHERE id = ? AND status = 'ready'",
+        "UPDATE site_recovery_plans SET status = 'running', updated_at = ? "
+        "WHERE id = ? AND status IN ('ready', 'completed', 'failed')",
         (now, plan_id)
     )
     db.conn.commit()
     if cur.rowcount != 1:
-        return jsonify({'error': 'Plan state changed — concurrent failover may be in progress'}), 409
+        fresh = _get_plan(plan_id)
+        actual = (fresh or {}).get('status', 'unknown')
+        return jsonify({'error': f"Cannot start failover — plan is in state '{actual}' (need ready/completed/failed)"}), 409
 
     from pegaprox.background.site_recovery import execute_failover
     _safe_spawn_failover(execute_failover, plan_id, 'planned')
@@ -560,17 +567,21 @@ def execute_emergency_failover(plan_id):
     if not vms:
         return jsonify({'error': 'No VMs in plan'}), 400
 
-    # atomic ready->running transition (same race protection as planned failover)
+    # MK May 2026 (#413 layer 5) - mirror the planned-failover relaxation: a successful
+    # prior emergency leaves status='completed', which `WHERE status='ready'` rejected.
     db = get_db()
     now = datetime.utcnow().isoformat()
     cur = db.conn.cursor()
     cur.execute(
-        "UPDATE site_recovery_plans SET status = 'running', updated_at = ? WHERE id = ? AND status = 'ready'",
+        "UPDATE site_recovery_plans SET status = 'running', updated_at = ? "
+        "WHERE id = ? AND status IN ('ready', 'completed', 'failed')",
         (now, plan_id)
     )
     db.conn.commit()
     if cur.rowcount != 1:
-        return jsonify({'error': 'Plan state changed — concurrent failover may be in progress'}), 409
+        fresh = _get_plan(plan_id)
+        actual = (fresh or {}).get('status', 'unknown')
+        return jsonify({'error': f"Cannot start emergency failover — plan is in state '{actual}' (need ready/completed/failed)"}), 409
 
     from pegaprox.background.site_recovery import execute_failover
     _safe_spawn_failover(execute_failover, plan_id, 'emergency')
