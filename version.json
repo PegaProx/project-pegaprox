@@ -250,6 +250,7 @@
     "web/Dev/build.sh",
     "web/Dev/patch.sh",
     "web/Dev/static/js/html2canvas.min.js",
+    "web/assets/world-countries.svg",
     "web/index.html",
     "web/index.html.original",
     "web/manifest.webmanifest",
@@ -271,6 +272,7 @@
     "web/src/vm_config.js",
     "web/src/vm_modals.js",
     "web/src/vnc_secure_socket.js",
+    "web/src/worldmap.js",
     "web/sw.js"
   ],
   "prev_changelog": [
