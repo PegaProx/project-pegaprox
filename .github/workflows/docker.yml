@@ -18,9 +18,16 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # MK May 2026 — minimum perms for the build:
+    #   contents: read   → actions/checkout@v4
+    #   packages: write  → docker/login-action@v3 + push to ghcr.io
+    #   actions:  write  → cache-from / cache-to: type=gha (saves ~5-8 min on
+    #                      multi-arch builds; without it the cache write fails
+    #                      silently and we lose layer reuse between runs)
     permissions:
       contents: read
       packages: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
 
