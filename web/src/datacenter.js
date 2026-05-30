@@ -501,10 +501,13 @@
             }, [clusterId]);
 
             useEffect(() => {
+                // NS 2026-05-30 — also depend on clusterId, otherwise switching clusters
+                // while parked on ceph/metric/subscriptions leaves the table showing nodes
+                // from the previous cluster.
                 if (activeSection === 'ceph') fetchCephData();
                 if (activeSection === 'metricserver') loadMetricServers();
                 if (activeSection === 'subscriptions') loadSubscriptions();
-            }, [activeSection]);
+            }, [activeSection, clusterId]);
 
             const loadMetricServers = async () => {
                 try {

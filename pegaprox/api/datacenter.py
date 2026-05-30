@@ -38,6 +38,27 @@ def _list_cluster_node_names(manager):
         return []
 
 
+def _mask_subscription_key(key: str) -> str:
+    """Return a redacted form of a PVE subscription key for the cluster-wide
+    aggregator. Last four chars stay visible so operators can still tell which
+    license is on which node at a glance; everything before that is replaced
+    with dots. Empty/short keys come back unchanged.
+
+    NS 2026-05-30 — the cluster-wide endpoint is gated by `cluster.view`, which
+    is a much weaker permission than the per-node `/nodes/<n>/subscription`
+    flow (admin.settings for writes). Returning the raw key here meant any
+    read-only user with cluster access could pull every node's license in
+    one call. PVE's own UI gates subscription detail behind `Sys.Audit`, so
+    matching that intent. The full key is still reachable on the per-node
+    endpoint when needed for rotation / debugging.
+    """
+    if not key or not isinstance(key, str):
+        return ''
+    if len(key) <= 8:
+        return key  # short / fake key — masking would obscure everything
+    return '•' * max(0, len(key) - 4) + key[-4:]
+
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/subscriptions', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_datacenter_subscriptions(cluster_id):
@@ -53,11 +74,14 @@ def get_datacenter_subscriptions(cluster_id):
         subscriptions = []
         for node in _list_cluster_node_names(manager):
             sub = manager.get_node_subscription(node) or {}
+            # NS 2026-05-30 — see _mask_subscription_key docstring. Aggregator
+            # masks; per-node endpoint (admin.settings for writes, node.view
+            # for read) keeps the raw value for rotation flows.
             subscriptions.append({
                 **sub,
                 'node': node,
                 'serverid': sub.get('serverid') or '',
-                'key': sub.get('key') or '',
+                'key': _mask_subscription_key(sub.get('key') or ''),
                 'nextduedate': sub.get('nextduedate') or '',
                 'status': sub.get('status') or 'unknown',
             })
