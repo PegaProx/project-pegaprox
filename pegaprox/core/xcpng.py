@@ -14,6 +14,7 @@ import uuid as _uuid
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse, urlencode
 
 from pegaprox.constants import LOG_DIR
 from pegaprox import globals as _g
@@ -42,6 +43,71 @@ def _sanitize_str(val):
     if not isinstance(val, str):
         return str(val) if val is not None else ''
     return val.replace('\x00', '')[:4096]
+
+
+def _build_validated_url_upload(
+    base_url: str,
+    session_id: str,
+    vdi: str,
+    format: str,
+) -> str:
+    try:
+        parsed = urlparse(base_url)
+        
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid protocol")
+        if not parsed.hostname:
+            raise ValueError("Invalid host")
+        
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", vdi):
+            raise ValueError("Invalid parameter")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", format):
+            raise ValueError("Invalid parameter")
+        
+        parsed = parsed._replace(path="/import_raw_vdi")
+        
+        query = {
+            "session_id": session_id,
+            "vdi": vdi,
+            "format": format,
+        }
+        parsed = parsed._replace(query=urlencode(query))
+        
+        return urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
+
+
+def _build_validated_url_rrd(
+    base_url: str,
+    path: str,
+    session_id: str,
+    params: dict = None,
+) -> str:
+    try:
+        if "/../" in path or re.search(r"/%2e%2e/", path, re.IGNORECASE):
+            raise ValueError("Invalid path")
+        
+        parsed = urlparse(base_url)
+        
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid protocol")
+        if not parsed.hostname:
+            raise ValueError("Invalid host")
+        
+        if not re.fullmatch(r"[A-Za-z0-9_/-]+", path):
+            raise ValueError("Invalid parameter")
+        
+        parsed = parsed._replace(path=f"/{path}")
+        
+        query = {"session_id": session_id}
+        if params:
+            query.update(params)
+        parsed = parsed._replace(query=urlencode(query))
+        
+        return urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
 
 
 class XcpngManager:
@@ -2538,7 +2604,7 @@ class XcpngManager:
                 vdi_uuid = api.VDI.get_uuid(vdi_ref)
 
                 # HTTP PUT to import endpoint
-                url = f"{host_url}/import_raw_vdi?session_id={session_ref}&vdi={vdi_uuid}&format=raw"
+                url = _build_validated_url_upload(host_url, session_ref, vdi_uuid, "raw")
                 _ssl_verify = getattr(self.config, 'ssl_verification', False)
                 resp = _req.put(url, data=file_stream, verify=_ssl_verify,
                                headers={'Content-Type': 'application/octet-stream'})
@@ -2577,13 +2643,10 @@ class XcpngManager:
                 return None, None
             sid = self._session._session
 
-        p = {'session_id': sid}
-        if params:
-            p.update(params)
-
         try:
             _ssl_verify = getattr(self.config, 'ssl_verification', False)
-            resp = _req.get(f"{host_url}/{path}", params=p, verify=_ssl_verify, timeout=15)
+            url = _build_validated_url_rrd(host_url, path, sid, params)
+            resp = _req.get(url, verify=_ssl_verify, timeout=15)
             if resp.status_code != 200:
                 return None, None
             root = ET.fromstring(resp.text)
