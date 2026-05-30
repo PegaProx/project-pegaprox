@@ -15,6 +15,7 @@ import re
 import requests
 from datetime import datetime
 import urllib3
+from urllib.parse import urlparse, urlunparse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -345,12 +346,33 @@ class VMwareManager:
     def _headers(self) -> dict:
         return {'vmware-api-session-id': self.session_id} if self.session_id else {}
     
+    def _build_validated_url(self, base_url: str, path: str) -> str:
+        """Build and validate URL to prevent SSRF attacks."""
+        try:
+            # Validate path for directory traversal
+            if "/../" in path or re.search(r"/%2e%2e/", path, re.IGNORECASE):
+                raise ValueError("Invalid path")
+            
+            parsed = urlparse(base_url)
+            
+            # Validate path parameter
+            if not path.startswith('/'):
+                raise ValueError("Invalid parameter")
+            
+            # Append validated path to base URL's path
+            parsed = parsed._replace(path=path)
+            
+            return urlunparse(parsed)
+        except Exception:
+            raise ValueError("Invalid URL")
+    
     def api_get(self, path: str, params: dict = None) -> dict:
         """GET request to vSphere REST API"""
         try:
             import requests
+            url = self._build_validated_url(self._base_url, path)
             resp = requests.get(
-                f"{self._base_url}{path}",
+                url,
                 headers=self._headers(),
                 params=params,
                 verify=self.ssl_verify,
@@ -359,7 +381,8 @@ class VMwareManager:
             if resp.status_code == 401:
                 # Session expired, try reconnect
                 if self.connect():
-                    resp = requests.get(f"{self._base_url}{path}", headers=self._headers(), 
+                    url = self._build_validated_url(self._base_url, path)
+                    resp = requests.get(url, headers=self._headers(), 
                                        params=params, verify=self.ssl_verify, timeout=30)
             if resp.status_code == 200:
                 try:
@@ -377,8 +400,9 @@ class VMwareManager:
         """POST request to vSphere REST API"""
         try:
             import requests
+            url = self._build_validated_url(self._base_url, path)
             resp = requests.post(
-                f"{self._base_url}{path}",
+                url,
                 headers={**self._headers(), 'Content-Type': 'application/json'},
                 json=data,
                 verify=self.ssl_verify,
@@ -386,7 +410,8 @@ class VMwareManager:
             )
             if resp.status_code == 401:
                 if self.connect():
-                    resp = requests.post(f"{self._base_url}{path}", 
+                    url = self._build_validated_url(self._base_url, path)
+                    resp = requests.post(url, 
                                         headers={**self._headers(), 'Content-Type': 'application/json'},
                                         json=data, verify=self.ssl_verify, timeout=60)
             if resp.status_code in (200, 201, 204):
@@ -402,8 +427,9 @@ class VMwareManager:
         """DELETE request to vSphere REST API"""
         try:
             import requests
+            url = self._build_validated_url(self._base_url, path)
             resp = requests.delete(
-                f"{self._base_url}{path}",
+                url,
                 headers=self._headers(),
                 verify=self.ssl_verify,
                 timeout=30
