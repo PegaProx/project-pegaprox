@@ -1430,7 +1430,12 @@ class PegaProxManager:
 
                         maintenance_str = " [MAINTENANCE]" if in_maintenance else ""
                         update_str = " [UPDATING]" if is_updating else ""
-                        self.logger.info(f"Node {node_name}: CPU {cpu_percent:.2f}%, RAM {mem_percent:.2f}% ({self._format_bytes(mem_used)}/{self._format_bytes(mem_total)}), Score {score:.2f}, Status: {node['status']}{maintenance_str}{update_str}")
+                        # NS May 2026 — per-node status fires N×poll_interval per cluster
+                        # (5×6×60s on a 6-node setup = ~720 lines/h of routine metrics).
+                        # Demoted to debug so stdout / k8s log collectors don't carry
+                        # this at default verbosity. Still available via --debug or
+                        # PEGAPROX_LOG_LEVEL=DEBUG. (davinkevin PR #510)
+                        self.logger.debug(f"Node {node_name}: CPU {cpu_percent:.2f}%, RAM {mem_percent:.2f}% ({self._format_bytes(mem_used)}/{self._format_bytes(mem_total)}), Score {score:.2f}, Status: {node['status']}{maintenance_str}{update_str}")
                     else:
                         # Node exists but we couldn't get status - might be offline
                         # MK May 2026 (#484) — keep the maintenance keys populated
