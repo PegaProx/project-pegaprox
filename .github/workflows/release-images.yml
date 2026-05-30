@@ -31,11 +31,14 @@ jobs:
       aptver:  ${{ steps.poll.outputs.aptver }}
     steps:
       - id: ver
+        env:
+          RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ -n "${{ github.event.release.tag_name }}" ]; then
-            V="${{ github.event.release.tag_name }}"
-          elif [ -n "${{ inputs.tag }}" ]; then
-            V="${{ inputs.tag }}"
+          if [ -n "$RELEASE_TAG_NAME" ]; then
+            V="$RELEASE_TAG_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            V="$INPUT_TAG"
           else
             V="dev-$(date +%Y%m%d-%H%M%S)"
           fi
