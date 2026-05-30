@@ -1413,7 +1413,7 @@ class PegaProxManager:
 
                         maintenance_str = " [MAINTENANCE]" if in_maintenance else ""
                         update_str = " [UPDATING]" if is_updating else ""
-                        self.logger.info(f"Node {node_name}: CPU {cpu_percent:.2f}%, RAM {mem_percent:.2f}% ({self._format_bytes(mem_used)}/{self._format_bytes(mem_total)}), Score {score:.2f}, Status: {node['status']}{maintenance_str}{update_str}")
+                        self.logger.debug(f"Node {node_name}: CPU {cpu_percent:.2f}%, RAM {mem_percent:.2f}% ({self._format_bytes(mem_used)}/{self._format_bytes(mem_total)}), Score {score:.2f}, Status: {node['status']}{maintenance_str}{update_str}")
                     else:
                         # Node exists but we couldn't get status - might be offline
                         node_status[node_name] = {
