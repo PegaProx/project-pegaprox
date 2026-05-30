@@ -1,0 +1,389 @@
+name: Build Release Appliances (VM + LXC)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release-Tag (z. B. v0.9.11), nur für manuelle Läufe"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  PVE_PORT: "5000"
+  DEBIAN_RELEASE: "trixie"
+  # Wie oft / wie lange auf das APT-Paket gewartet wird
+  APT_POLL_RETRIES: "40"     # 40 x 30s = max. 20 Minuten
+  APT_POLL_INTERVAL: "30"
+
+jobs:
+  # ----------------------------------------------------------------------
+  # 1) Version ermitteln + warten bis Paket im gyptazy-Repo verfügbar ist
+  # ----------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      aptver:  ${{ steps.poll.outputs.aptver }}
+    steps:
+      - id: ver
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            V="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            V="${{ inputs.tag }}"
+          else
+            V="dev-$(date +%Y%m%d-%H%M%S)"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gnupg ca-certificates
+
+      - id: poll
+        name: Auf PegaProx-Paket im APT-Repo warten
+        run: |
+          set -e
+          install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key \
+            -o /etc/apt/keyrings/gyptazy.asc
+          echo "deb [signed-by=/etc/apt/keyrings/gyptazy.asc] https://packages.gyptazy.com/api/packages/gyptazy/debian ${DEBIAN_RELEASE} main" \
+            | sudo tee /etc/apt/sources.list.d/gyptazy.list
+
+          # Tag z. B. "v0.9.11" -> Debian-Version meist "0.9.11"
+          WANT="$(echo '${{ steps.ver.outputs.version }}' | sed 's/^v//')"
+          echo "Erwarte Paketversion (Präfix): $WANT"
+
+          FOUND=""
+          for i in $(seq 1 "${APT_POLL_RETRIES}"); do
+            sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/gyptazy.list" \
+                                -o Dir::Etc::sourceparts="-" >/dev/null 2>&1 || true
+            # Alle verfügbaren Versionen auflisten und nach unserem Tag suchen
+            CAND="$(apt-cache madison pegaprox 2>/dev/null | awk '{print $3}' || true)"
+            MATCH="$(echo "$CAND" | grep -E "^${WANT}([.+~-]|$)" | head -n1 || true)"
+            if [ -n "$MATCH" ]; then
+              FOUND="$MATCH"
+              echo "Gefunden: pegaprox=$FOUND"
+              break
+            fi
+            echo "[$i/${APT_POLL_RETRIES}] Paket $WANT noch nicht im Repo, warte ${APT_POLL_INTERVAL}s..."
+            sleep "${APT_POLL_INTERVAL}"
+          done
+
+          if [ -z "$FOUND" ]; then
+            echo "::error::Paket für $WANT ist nach dem Timeout nicht im gyptazy-Repo aufgetaucht."
+            exit 1
+          fi
+          echo "aptver=$FOUND" >> "$GITHUB_OUTPUT"
+
+  # ----------------------------------------------------------------------
+  # 2) LXC-Template per distrobuilder (gepinnte Version) + Smoke-Test
+  # ----------------------------------------------------------------------
+  build-lxc:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            distrobuilder debootstrap rsync \
+            systemd-container curl xz-utils
+
+      - name: distrobuilder-Definition schreiben
+        env:
+          APTVER: ${{ needs.prepare.outputs.aptver }}
+        run: |
+          mkdir -p packaging/lxc
+          cat > packaging/lxc/pegaprox-lxc.yaml <<YAML
+          image:
+            distribution: debian
+            release: ${DEBIAN_RELEASE}
+            description: PegaProx LXC Appliance (${APTVER})
+            architecture: amd64
+
+          source:
+            downloader: debootstrap
+            url: http://deb.debian.org/debian
+            keyserver: keyserver.ubuntu.com
+
+          targets:
+            lxc:
+              create_message: |
+                PegaProx Appliance - Login: pegaprox / admin
+              config:
+                - type: all
+                  before: 5
+                  content: |-
+                    lxc.include = LXC_TEMPLATE_CONFIG/common.conf
+                - type: all
+                  after: 4
+                  content: |-
+                    lxc.include = LXC_TEMPLATE_CONFIG/userns.conf
+                - type: all
+                  content: |-
+                    lxc.arch = x86_64
+
+          packages:
+            manager: apt
+            update: true
+            cleanup: true
+            sets:
+              - packages:
+                  - python3
+                  - python3-pip
+                  - curl
+                  - ca-certificates
+                  - gnupg
+                  - systemd
+                  - systemd-sysv
+                action: install
+
+          actions:
+            - trigger: post-packages
+              action: |-
+                #!/bin/sh
+                set -eu
+                install -d -m 0755 /etc/apt/keyrings
+                curl -fsSL https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key \\
+                  -o /etc/apt/keyrings/gyptazy.asc
+                echo "deb [signed-by=/etc/apt/keyrings/gyptazy.asc] https://packages.gyptazy.com/api/packages/gyptazy/debian ${DEBIAN_RELEASE} main" \\
+                  > /etc/apt/sources.list.d/gyptazy.list
+                apt-get update
+                apt-get -y install "pegaprox=${APTVER}"
+                systemctl enable pegaprox || true
+
+          mappings:
+            architecture_map: debian
+          YAML
+
+      - name: rootfs bauen
+        run: |
+          sudo distrobuilder build-lxc packaging/lxc/pegaprox-lxc.yaml \
+            -o image.release=${DEBIAN_RELEASE}
+          ls -lh *.tar.xz
+
+      - name: Smoke-Test (Container starten + HTTP-Check)
+        run: |
+          set -e
+          mkdir -p /tmp/ct/rootfs
+          sudo tar -xpJf rootfs.tar.xz -C /tmp/ct/rootfs
+          sudo systemd-nspawn -D /tmp/ct/rootfs --boot --bind-ro=/etc/resolv.conf &
+          NSPAWN_PID=$!
+          echo "Warte auf PegaProx auf Port ${PVE_PORT}..."
+          OK=0
+          for i in $(seq 1 30); do
+            if sudo systemd-nspawn -D /tmp/ct/rootfs \
+                 curl -kfs "https://localhost:${PVE_PORT}/" >/dev/null 2>&1; then
+              OK=1; break
+            fi
+            sleep 5
+          done
+          sudo kill "$NSPAWN_PID" 2>/dev/null || true
+          [ "$OK" -eq 1 ] || { echo "::error::PegaProx kam im LXC nicht hoch"; exit 1; }
+          echo "LXC Smoke-Test erfolgreich."
+
+      - name: Template umbenennen
+        run: |
+          mv rootfs.tar.xz \
+            "pegaprox-${{ needs.prepare.outputs.version }}-lxc-amd64.tar.xz"
+          # versionslose Kopie für latest-Download-Alias
+          cp "pegaprox-${{ needs.prepare.outputs.version }}-lxc-amd64.tar.xz" \
+             "pegaprox-lxc-amd64.tar.xz"
+
+      - name: Artefakt sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: lxc-template
+          path: pegaprox-*lxc*.tar.xz
+          retention-days: 7
+
+  # ----------------------------------------------------------------------
+  # 3) VM-Image via libguestfs (gepinnte Version) + Smoke-Test
+  # ----------------------------------------------------------------------
+  build-vm:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libguestfs-tools qemu-system-x86 qemu-utils \
+            cloud-image-utils curl
+          sudo chmod 0644 /boot/vmlinuz-* || true
+
+      - name: Debian Cloud-Image laden
+        run: |
+          wget -q -O pegaprox.qcow2 \
+            "https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/latest/debian-13-genericcloud-amd64.qcow2"
+          qemu-img resize pegaprox.qcow2 8G
+
+      - name: PegaProx ins Image installieren
+        env:
+          LIBGUESTFS_BACKEND: direct
+          APTVER: ${{ needs.prepare.outputs.aptver }}
+        run: |
+          sudo -E virt-customize -a pegaprox.qcow2 \
+            --install curl,ca-certificates,gnupg,python3,python3-pip \
+            --run-command 'install -d -m 0755 /etc/apt/keyrings' \
+            --run-command 'curl -fsSL https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key -o /etc/apt/keyrings/gyptazy.asc' \
+            --run-command "echo 'deb [signed-by=/etc/apt/keyrings/gyptazy.asc] https://packages.gyptazy.com/api/packages/gyptazy/debian ${DEBIAN_RELEASE} main' > /etc/apt/sources.list.d/gyptazy.list" \
+            --run-command "apt-get update && apt-get -y install pegaprox=${APTVER}" \
+            --run-command 'systemctl enable pegaprox' \
+            --run-command 'systemctl enable ssh || true'
+
+      - name: Smoke-Test (VM booten + HTTP-Check)
+        run: |
+          set -e
+          cat > user-data <<'EOF'
+          #cloud-config
+          password: pegaprox
+          chpasswd: { expire: false }
+          ssh_pwauth: true
+          EOF
+          echo "instance-id: iid-pegaprox" > meta-data
+          cloud-localds seed.iso user-data meta-data
+
+          qemu-system-x86_64 \
+            -m 2048 -smp 2 \
+            -drive file=pegaprox.qcow2,format=qcow2,if=virtio \
+            -drive file=seed.iso,format=raw,if=virtio \
+            -netdev user,id=n0,hostfwd=tcp::${PVE_PORT}-:${PVE_PORT} \
+            -device virtio-net-pci,netdev=n0 \
+            -display none -daemonize -pidfile qemu.pid
+
+          echo "Warte auf PegaProx in der VM (max. 5 min)..."
+          OK=0
+          for i in $(seq 1 60); do
+            if curl -kfs "https://localhost:${PVE_PORT}/" >/dev/null 2>&1; then
+              OK=1; break
+            fi
+            sleep 5
+          done
+          sudo kill "$(cat qemu.pid)" 2>/dev/null || true
+          [ "$OK" -eq 1 ] || { echo "::error::PegaProx kam in der VM nicht hoch"; exit 1; }
+          echo "VM Smoke-Test erfolgreich."
+
+      - name: Image komprimieren + umbenennen
+        run: |
+          qemu-img convert -O qcow2 -c pegaprox.qcow2 \
+            "pegaprox-${{ needs.prepare.outputs.version }}-vm-amd64.qcow2"
+          cp "pegaprox-${{ needs.prepare.outputs.version }}-vm-amd64.qcow2" \
+             "pegaprox-vm-amd64.qcow2"
+
+      - name: Artefakt sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-image
+          path: pegaprox-*vm*.qcow2
+          retention-days: 7
+
+  # ----------------------------------------------------------------------
+  # 4) OPTIONAL: Echtes vzdump-Backup auf self-hosted Proxmox-Node
+  #    Aktiviert sich nur, wenn ein Runner mit Label 'proxmox' existiert.
+  # ----------------------------------------------------------------------
+  build-vzdump:
+    needs: [prepare, build-vm]
+    runs-on: [self-hosted, proxmox]
+    # Falls kein solcher Runner da ist, läuft der Job einfach nicht an.
+    continue-on-error: true
+    steps:
+      - name: VM-qcow2 holen
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-image
+          path: .
+
+      - name: VM importieren, testen und als vzdump exportieren
+        env:
+          VMID: "9000"            # freie Test-VMID auf der Node
+          STORAGE: "local-lvm"    # Ziel-Storage für die Disk
+          DUMP_STORAGE: "local"   # Storage mit 'Backup'-Content für vzdump
+        run: |
+          set -e
+          QCOW="$(ls pegaprox-*-vm-amd64.qcow2 | head -n1)"
+          VER="${{ needs.prepare.outputs.version }}"
+
+          # Aufräumen, falls Test-VMID belegt
+          qm stop "$VMID" 2>/dev/null || true
+          qm destroy "$VMID" --purge 2>/dev/null || true
+
+          # VM anlegen + Disk importieren
+          qm create "$VMID" --name "pegaprox-build-$VER" \
+            --memory 2048 --cores 2 --net0 virtio,bridge=vmbr0 \
+            --scsihw virtio-scsi-single --ostype l26 --agent 1
+          qm importdisk "$VMID" "$QCOW" "$STORAGE"
+          qm set "$VMID" --scsi0 "${STORAGE}:vm-${VMID}-disk-0"
+          qm set "$VMID" --boot order=scsi0
+          qm set "$VMID" --ciuser pegaprox --cipassword pegaprox --ipconfig0 ip=dhcp
+          qm set "$VMID" --ide2 "${STORAGE}:cloudinit"
+
+          # Boot-Test
+          qm start "$VMID"
+          echo "Warte auf Guest-Agent / Boot..."
+          OK=0
+          for i in $(seq 1 60); do
+            if qm guest cmd "$VMID" ping >/dev/null 2>&1; then OK=1; break; fi
+            sleep 5
+          done
+          [ "$OK" -eq 1 ] || { echo "::error::vzdump-VM bootete nicht"; qm stop "$VMID" || true; exit 1; }
+
+          # Sauber herunterfahren und vzdump erzeugen
+          qm shutdown "$VMID" --timeout 120 || qm stop "$VMID"
+          vzdump "$VMID" --storage "$DUMP_STORAGE" --mode stop --compress zstd
+
+          # Neuestes Backup-File finden und umbenennen
+          DUMP_DIR="/var/lib/vz/dump"
+          LATEST="$(ls -t ${DUMP_DIR}/vzdump-qemu-${VMID}-*.vma.zst | head -n1)"
+          cp "$LATEST" "pegaprox-${VER}-vzdump.vma.zst"
+
+          # Test-VM entfernen
+          qm destroy "$VMID" --purge
+
+      - name: vzdump sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: vzdump-backup
+          path: pegaprox-*-vzdump.vma.zst
+          retention-days: 7
+
+  # ----------------------------------------------------------------------
+  # 5) Alles an den Release anhängen (nur bei echtem Release-Event)
+  # ----------------------------------------------------------------------
+  publish:
+    needs: [prepare, build-lxc, build-vm, build-vzdump]
+    # vzdump ist optional -> nicht blockieren, wenn der Job übersprungen wurde
+    if: ${{ always() && github.event_name == 'release' && needs.build-lxc.result == 'success' && needs.build-vm.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Checksums erzeugen
+        run: |
+          cd dist
+          find . -type f \( -name '*.qcow2' -o -name '*.tar.xz' -o -name '*.vma.zst' \) \
+            -exec sha256sum {} \; > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: An Release anhängen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          files: |
+            dist/**/*.qcow2
+            dist/**/*.tar.xz
+            dist/**/*.vma.zst
+            dist/SHA256SUMS.txt
