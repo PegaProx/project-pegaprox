@@ -7888,7 +7888,7 @@ echo "AGENT_INSTALLED_OK"
                     try:
                         # Proxmox has a reboot command via API
                         url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node_name}/status"
-                        response = self.session.post(url, data={'command': 'reboot'}, verify=False)
+                        response = self.session.post(url, data={'command': 'reboot'})
                         if response.status_code == 200:
                             task.add_output("Reboot initiated via Proxmox API")
                         else:
