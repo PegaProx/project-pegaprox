@@ -346,7 +346,7 @@ def oidc_test_connection():
         # nets, so honour the existing oidc_allow_private_ip toggle.
         allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
         try:
-            sanitize_outbound_url(endpoints['authorization'], allow_private=allow_private_ip)
+            validated_auth_url = sanitize_outbound_url(endpoints['authorization'], allow_private=allow_private_ip)
         except SsrfError as guard_err:
             hint = ''
             if not allow_private_ip and 'private' in str(guard_err).lower():
@@ -354,7 +354,7 @@ def oidc_test_connection():
             results.append({'step': 'Authorization Endpoint', 'status': 'error',
                             'detail': f"URL rejected by SSRF guard: {guard_err}{hint}"})
             return jsonify({'success': False, 'results': results})
-        resp = requests.get(endpoints['authorization'], allow_redirects=False, timeout=10, verify=not skip_ssl)
+        resp = requests.get(validated_auth_url, allow_redirects=False, timeout=10, verify=not skip_ssl)
         # Auth endpoint should return 200 or redirect
         if resp.status_code in [200, 302, 400]:
             results.append({'step': 'Authorization Endpoint', 'status': 'ok', 'detail': endpoints['authorization']})
@@ -372,7 +372,7 @@ def oidc_test_connection():
         # MK May 2026 - same SSRF guard, same allow-private toggle.
         allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
         try:
-            sanitize_outbound_url(endpoints['jwks'], allow_private=allow_private_ip)
+            validated_jwks_url = sanitize_outbound_url(endpoints['jwks'], allow_private=allow_private_ip)
         except SsrfError as guard_err:
             hint = ''
             if not allow_private_ip and 'private' in str(guard_err).lower():
@@ -380,7 +380,7 @@ def oidc_test_connection():
             results.append({'step': 'JWKS Endpoint', 'status': 'error',
                             'detail': f"URL rejected by SSRF guard: {guard_err}{hint}"})
             return jsonify({'success': False, 'results': results})
-        resp = requests.get(endpoints['jwks'], timeout=10)
+        resp = requests.get(validated_jwks_url, timeout=10)
         if resp.status_code == 200:
             keys = resp.json().get('keys', [])
             results.append({'step': 'JWKS Endpoint', 'status': 'ok', 'detail': f"Found {len(keys)} signing keys"})
