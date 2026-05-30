@@ -20,6 +20,51 @@ from pegaprox.api.helpers import get_connected_manager, check_cluster_access, sa
 
 bp = Blueprint('datacenter', __name__)
 
+
+def _list_cluster_node_names(manager):
+    """Return node names from the cluster-wide /nodes endpoint."""
+    try:
+        url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes"
+        response = manager._api_get(url)
+        if response.status_code != 200:
+            return []
+        return [
+            node.get('node') or node.get('name')
+            for node in response.json().get('data', [])
+            if node.get('node') or node.get('name')
+        ]
+    except Exception as e:
+        logging.error(f"Failed to list cluster nodes: {e}")
+        return []
+
+
+@bp.route('/api/clusters/<cluster_id>/datacenter/subscriptions', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_datacenter_subscriptions(cluster_id):
+    """Get subscription status for all nodes in a cluster."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+
+    try:
+        subscriptions = []
+        for node in _list_cluster_node_names(manager):
+            sub = manager.get_node_subscription(node) or {}
+            subscriptions.append({
+                **sub,
+                'node': node,
+                'serverid': sub.get('serverid') or '',
+                'key': sub.get('key') or '',
+                'nextduedate': sub.get('nextduedate') or '',
+                'status': sub.get('status') or 'unknown',
+            })
+        return jsonify(subscriptions)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Failed to get subscriptions')}), 500
+
 # ============================================
 # NS: Multipath Easy Setup - Feb 2026
 # Redundant SAN/iSCSI with multipath
@@ -2210,4 +2255,3 @@ def get_metric_servers(cluster_id):
         return error
 
     return jsonify(manager.get_metric_servers())
-

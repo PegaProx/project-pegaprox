@@ -513,6 +513,47 @@ def update_node_subscription_api(cluster_id, node):
     return jsonify({'error': result['error']}), 500
 
 
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def check_node_subscription_api(cluster_id, node):
+    """Refresh subscription status - admin only"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    data = request.json or {}
+    result = mgr.check_node_subscription(node, bool(data.get('force', False)))
+
+    if result['success']:
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'subscription.checked', f"Subscription checked for {node}", cluster=mgr.config.name)
+        return jsonify({'message': 'Subscription check started', 'data': result.get('data')})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def delete_node_subscription_api(cluster_id, node):
+    """Delete subscription key - admin only"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    result = mgr.delete_node_subscription(node)
+
+    if result['success']:
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'subscription.deleted', f"Subscription key deleted for {node}", cluster=mgr.config.name)
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
 # =============================================================================
 # SMBIOS Auto-Configurator Feature
 # MK: Automatically sets SMBIOS data on new VMs for Windows licensing etc.
@@ -1956,4 +1997,3 @@ def get_vm_guest_metrics_api(cluster_id, vmid):
     if not hasattr(mgr, 'get_guest_metrics'):
         return jsonify({})
     return jsonify(mgr.get_guest_metrics(None, vmid))
-

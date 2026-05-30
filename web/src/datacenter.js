@@ -20,6 +20,10 @@
             const [editingOptions, setEditingOptions] = useState({});
             const [storage, setStorage] = useState([]);
             const [showAddStorage, setShowAddStorage] = useState(false);
+            const [subscriptions, setSubscriptions] = useState([]);
+            const [subscriptionsLoading, setSubscriptionsLoading] = useState(false);
+            const [subscriptionKeys, setSubscriptionKeys] = useState({});
+            const [subscriptionBusy, setSubscriptionBusy] = useState({});
             
             // Multipath Easy Setup - NS Feb 2026
             const [multipathStatus, setMultipathStatus] = useState(null);
@@ -272,6 +276,7 @@
                 { id: 'ha', labelKey: 'proxmoxNativeHa', icon: Icons.Activity, descKey: 'ha' },
                 { id: 'cpucompat', labelKey: 'cpuCompatibility', icon: Icons.Cpu, descKey: 'cpucompat' },
                 { id: 'firewall', labelKey: 'firewall', icon: Icons.Shield, descKey: 'firewall' },
+                { id: 'subscriptions', labelKey: 'subscriptions', icon: Icons.FileKey, descKey: 'subscriptions' },
                 { id: 'ceph', labelKey: 'ceph', icon: Icons.Database, descKey: 'ceph' },
                 { id: 'metricserver', labelKey: 'metricServer', icon: Icons.BarChart, descKey: 'metricserver' },
             ];
@@ -498,6 +503,7 @@
             useEffect(() => {
                 if (activeSection === 'ceph') fetchCephData();
                 if (activeSection === 'metricserver') loadMetricServers();
+                if (activeSection === 'subscriptions') loadSubscriptions();
             }, [activeSection]);
 
             const loadMetricServers = async () => {
@@ -520,6 +526,104 @@
                     }
                 } catch (e) {
                     console.error('Error refreshing storage:', e);
+                }
+            };
+
+            const loadSubscriptions = async () => {
+                setSubscriptionsLoading(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/subscriptions`);
+                    if (res?.ok) {
+                        setSubscriptions(await res.json());
+                    } else {
+                        const err = await res?.json().catch(() => ({}));
+                        addToast(err?.error || 'Failed to load subscriptions', 'error');
+                    }
+                } catch (e) {
+                    console.error('Error loading subscriptions:', e);
+                    addToast('Failed to load subscriptions', 'error');
+                } finally {
+                    setSubscriptionsLoading(false);
+                }
+            };
+
+            const setSubscriptionBusyForNode = (node, busy) => {
+                setSubscriptionBusy(prev => ({ ...prev, [node]: busy }));
+            };
+
+            const saveSubscriptionKey = async (node) => {
+                const key = (subscriptionKeys[node] || '').trim();
+                if (!key) {
+                    addToast(t('pleaseEnterLicenseKey') || 'Please enter license key', 'error');
+                    return;
+                }
+
+                setSubscriptionBusyForNode(node, true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/subscription`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ key })
+                    });
+                    if (res?.ok) {
+                        setSubscriptionKeys(prev => ({ ...prev, [node]: '' }));
+                        addToast(t('licenseActivated') || 'Subscription key saved', 'success');
+                        await loadSubscriptions();
+                    } else {
+                        const err = await res?.json().catch(() => ({}));
+                        addToast(err?.error || t('activationFailed') || 'Activation failed', 'error');
+                    }
+                } catch (e) {
+                    console.error('Error saving subscription:', e);
+                    addToast(t('activationFailed') || 'Activation failed', 'error');
+                } finally {
+                    setSubscriptionBusyForNode(node, false);
+                }
+            };
+
+            const checkSubscription = async (node) => {
+                setSubscriptionBusyForNode(node, true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/subscription`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ force: true })
+                    });
+                    if (res?.ok) {
+                        addToast(t('refreshStatus') || 'Subscription status refreshed', 'success');
+                        await loadSubscriptions();
+                    } else {
+                        const err = await res?.json().catch(() => ({}));
+                        addToast(err?.error || 'Failed to refresh subscription', 'error');
+                    }
+                } catch (e) {
+                    console.error('Error checking subscription:', e);
+                    addToast('Failed to refresh subscription', 'error');
+                } finally {
+                    setSubscriptionBusyForNode(node, false);
+                }
+            };
+
+            const deleteSubscriptionKey = async (node) => {
+                if (!confirm('Delete subscription key from this node?')) return;
+
+                setSubscriptionBusyForNode(node, true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/subscription`, {
+                        method: 'DELETE'
+                    });
+                    if (res?.ok) {
+                        addToast('Subscription key deleted', 'success');
+                        await loadSubscriptions();
+                    } else {
+                        const err = await res?.json().catch(() => ({}));
+                        addToast(err?.error || 'Failed to delete subscription key', 'error');
+                    }
+                } catch (e) {
+                    console.error('Error deleting subscription:', e);
+                    addToast('Failed to delete subscription key', 'error');
+                } finally {
+                    setSubscriptionBusyForNode(node, false);
                 }
             };
 
@@ -6344,6 +6448,111 @@
                             </div>
                         )}
 
+                        {activeSection === 'subscriptions' && (
+                            <div className="space-y-6">
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                    <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                        <h3 className="font-semibold flex items-center gap-2">
+                                            <Icons.FileKey />
+                                            {t('subscriptions') || 'Subscriptions'}
+                                        </h3>
+                                        <button
+                                            onClick={loadSubscriptions}
+                                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm transition-colors"
+                                        >
+                                            <Icons.RefreshCw className={`w-4 h-4 ${subscriptionsLoading ? 'animate-spin' : ''}`} />
+                                            {t('refresh') || 'Refresh'}
+                                        </button>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full">
+                                            <thead className="bg-proxmox-dark">
+                                                <tr>
+                                                    <th className="text-left p-3 text-sm text-gray-400">Node</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">Status</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">Server ID</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">Subscription ID</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">Next Due Date</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">Product</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">Set Key</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400"></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {subscriptionsLoading && (!subscriptions || subscriptions.length === 0) ? (
+                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">{t('loading') || 'Loading'}...</td></tr>
+                                                ) : (!subscriptions || subscriptions.length === 0) ? (
+                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">No subscription data available</td></tr>
+                                                ) : subscriptions.map((sub) => {
+                                                    const status = (sub.status || 'unknown').toLowerCase();
+                                                    const isActive = status === 'active';
+                                                    const isBusy = !!subscriptionBusy[sub.node];
+                                                    return (
+                                                        <tr key={sub.node} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                            <td className="p-3 font-medium">{sub.node}</td>
+                                                            <td className="p-3">
+                                                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                                                    isActive ? 'bg-green-500/20 text-green-400' :
+                                                                    status === 'notfound' || status === 'unknown' ? 'bg-gray-500/20 text-gray-400' :
+                                                                    'bg-red-500/20 text-red-400'
+                                                                }`}>
+                                                                    {sub.status || '-'}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-3 font-mono text-xs text-gray-300">{sub.serverid || '-'}</td>
+                                                            <td className="p-3 font-mono text-xs text-gray-300">{sub.key || '-'}</td>
+                                                            <td className="p-3 text-gray-300">{sub.nextduedate || '-'}</td>
+                                                            <td className="p-3 text-gray-300">{sub.productname || sub.level || '-'}</td>
+                                                            <td className="p-3 min-w-72">
+                                                                <div className="flex items-center gap-2">
+                                                                    <input
+                                                                        type="text"
+                                                                        value={subscriptionKeys[sub.node] || ''}
+                                                                        onChange={e => setSubscriptionKeys(prev => ({ ...prev, [sub.node]: e.target.value }))}
+                                                                        placeholder="pve..."
+                                                                        className="w-44 bg-proxmox-dark border border-proxmox-border rounded px-3 py-1.5 text-sm font-mono"
+                                                                        disabled={isBusy}
+                                                                    />
+                                                                    <button
+                                                                        onClick={() => saveSubscriptionKey(sub.node)}
+                                                                        disabled={isBusy}
+                                                                        className="p-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded text-white transition-colors"
+                                                                        title={t('activateLicense') || 'Set subscription key'}
+                                                                    >
+                                                                        <Icons.Check className="w-4 h-4" />
+                                                                    </button>
+                                                                </div>
+                                                            </td>
+                                                            <td className="p-3">
+                                                                <div className="flex items-center gap-1">
+                                                                    <button
+                                                                        onClick={() => checkSubscription(sub.node)}
+                                                                        disabled={isBusy}
+                                                                        className="p-2 hover:bg-proxmox-border disabled:opacity-50 rounded transition-colors"
+                                                                        title={t('refreshStatus') || 'Refresh Status'}
+                                                                    >
+                                                                        <Icons.RefreshCw className={`w-4 h-4 ${isBusy ? 'animate-spin' : ''}`} />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => deleteSubscriptionKey(sub.node)}
+                                                                        disabled={isBusy}
+                                                                        className="p-2 hover:bg-red-500/20 disabled:opacity-50 rounded text-red-400 transition-colors"
+                                                                        title={t('delete') || 'Delete'}
+                                                                    >
+                                                                        <Icons.Trash className="w-4 h-4" />
+                                                                    </button>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         {activeSection === 'ceph' && (
                             <div className="space-y-6">
                                 {cephLoading ? (
@@ -7408,4 +7617,3 @@
                 </div>
             );
         }
-

@@ -13058,6 +13058,39 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': response.text}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    def check_node_subscription(self, node: str, force: bool = False) -> Dict[str, Any]:
+        """Refresh node subscription status"""
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'success': False, 'error': 'Could not connect'}
+
+        try:
+            url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/subscription"
+            data = {'force': 1} if force else {}
+            response = self._api_post(url, data=data)
+
+            if response.status_code == 200:
+                return {'success': True, 'data': response.json().get('data')}
+            return {'success': False, 'error': response.text}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def delete_node_subscription(self, node: str) -> Dict[str, Any]:
+        """Delete subscription key"""
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'success': False, 'error': 'Could not connect'}
+
+        try:
+            url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/subscription"
+            response = self._api_delete(url)
+
+            if response.status_code == 200:
+                return {'success': True, 'message': 'Subscription removed'}
+            return {'success': False, 'error': response.text}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
     
     def get_node_options(self, node: str) -> Dict[str, Any]:
         """Get node options (from datacenter)"""
