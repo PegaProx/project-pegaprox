@@ -9,12 +9,33 @@ import time
 import hashlib
 import base64
 import secrets
+import re
 import requests
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, urlunparse
 
 # NS May 2026 — SSRF guard for admin-supplied OIDC URLs (discovery / token / userinfo).
 from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+
+
+# MK May 2026 (CodeAnt #500) — pre-validate the authority URL before composing the
+# discovery URL. The existing sanitize_outbound_url() catches the same family of
+# attacks one step later, but doing the urlparse here means we never even *build*
+# a string with a path-traversal sequence in it; we fail fast with a structured
+# error before any I/O. Defence in depth.
+def build_validated_discovery_url(authority: str) -> str:
+    """Build the `.well-known/openid-configuration` URL from the admin-supplied
+    authority. Raises ValueError on bad scheme / hostname / path-traversal.
+    """
+    if "/../" in authority or re.search(r"/%2e%2e/", authority, re.IGNORECASE):
+        raise ValueError("path-traversal sequence in authority URL")
+    parsed = urlparse(authority)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported scheme {parsed.scheme!r}")
+    if not parsed.hostname:
+        raise ValueError("authority URL has no hostname")
+    new_path = parsed.path.rstrip('/') + "/.well-known/openid-configuration"
+    return urlunparse(parsed._replace(path=new_path))
 
 # MK Mar 2026 - PyJWT for proper signature verification
 try:
@@ -141,7 +162,17 @@ def get_oidc_endpoints(config: dict) -> dict:
         # NS Apr 2026 (#188) — bumped timeout 5→15s; loud-log discovery failures so admins notice
         # silent fallback (which builds wrong endpoints for Authentik because its issuer URL
         # is per-application but its authorize endpoint is one path level up).
-        discovery_url = f"{authority}/.well-known/openid-configuration"
+        try:
+            discovery_url = build_validated_discovery_url(authority)
+        except ValueError as e:
+            logging.warning(f"[OIDC] authority URL rejected pre-validation: {e}")
+            return {
+                'authorization': '', 'token': '', 'jwks': '', 'userinfo': '',
+                'graph_me': '', 'graph_groups': '',
+                '_discovery_used': False,
+                '_error': 'invalid_authority_url',
+                '_error_detail': f"Authority/issuer URL is invalid ({e}). Fix the OIDC settings and retry.",
+            }
         cache_entry = _oidc_discovery_cache.get(authority)
         if cache_entry and cache_entry.get('expires', 0) > time.time():
             disco = cache_entry['data']

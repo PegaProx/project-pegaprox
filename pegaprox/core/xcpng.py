@@ -14,6 +14,7 @@ import uuid as _uuid
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse, urlencode
 
 from pegaprox.constants import LOG_DIR
 from pegaprox import globals as _g
@@ -42,6 +43,39 @@ def _sanitize_str(val):
     if not isinstance(val, str):
         return str(val) if val is not None else ''
     return val.replace('\x00', '')[:4096]
+
+
+# MK May 2026 (CodeAnt #502) — defensive URL builders for the two raw-f-string
+# XAPI endpoints (import_raw_vdi, rrd_updates). host_url is server-derived from
+# the cluster config so direct SSRF is a stretch, but pre-validating session_id /
+# vdi_uuid / path keeps the surface clean if a future caller starts passing
+# externally-influenced values.
+def _build_xapi_import_vdi_url(base_url: str, session_id: str, vdi_uuid: str, format_type: str) -> str:
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("invalid scheme")
+    if not parsed.hostname:
+        raise ValueError("missing hostname")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", vdi_uuid or ""):
+        raise ValueError("vdi_uuid must be alphanumeric / dash / underscore")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", format_type or ""):
+        raise ValueError("format must be alphanumeric / dash / underscore")
+    parsed = parsed._replace(path="/import_raw_vdi",
+                             query=urlencode({"session_id": session_id, "vdi": vdi_uuid, "format": format_type}))
+    return urlunparse(parsed)
+
+
+def _build_xapi_rrd_url(base_url: str, path: str) -> str:
+    if "/../" in base_url or re.search(r"/%2e%2e/", base_url, re.IGNORECASE):
+        raise ValueError("path-traversal in base url")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("invalid scheme")
+    if not parsed.hostname:
+        raise ValueError("missing hostname")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", path or ""):
+        raise ValueError("rrd path must be alphanumeric / dash / underscore")
+    return urlunparse(parsed._replace(path=f"/{path}"))
 
 
 class XcpngManager:
@@ -2538,8 +2572,8 @@ class XcpngManager:
                 vdi_ref = api.VDI.create(vdi_rec)
                 vdi_uuid = api.VDI.get_uuid(vdi_ref)
 
-                # HTTP PUT to import endpoint
-                url = f"{host_url}/import_raw_vdi?session_id={session_ref}&vdi={vdi_uuid}&format=raw"
+                # HTTP PUT to import endpoint — URL built via defensive helper
+                url = _build_xapi_import_vdi_url(host_url, session_ref, vdi_uuid, "raw")
                 _ssl_verify = getattr(self.config, 'ssl_verification', False)
                 resp = _req.put(url, data=file_stream, verify=_ssl_verify,
                                headers={'Content-Type': 'application/octet-stream'})
@@ -2583,8 +2617,9 @@ class XcpngManager:
             p.update(params)
 
         try:
+            url = _build_xapi_rrd_url(host_url, path)
             _ssl_verify = getattr(self.config, 'ssl_verification', False)
-            resp = _req.get(f"{host_url}/{path}", params=p, verify=_ssl_verify, timeout=15)
+            resp = _req.get(url, params=p, verify=_ssl_verify, timeout=15)
             if resp.status_code != 200:
                 return None, None
             root = ET.fromstring(resp.text)
