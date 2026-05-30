@@ -5541,7 +5541,11 @@ echo "AGENT_INSTALLED_OK"
                 
                 # Read heartbeat content with validation
                 try:
-                    with open(heartbeat_file, 'r') as f:
+                    base_real = os.path.realpath(os.path.join(storage_path, '.pegaprox'))
+                    target_real = os.path.realpath(heartbeat_file)
+                    if os.path.commonpath([base_real, target_real]) != base_real:
+                        raise Exception('Invalid file path')
+                    with open(target_real, 'r') as f:
                         data = json.load(f)
                     if not isinstance(data, dict):
                         self.logger.warning(f"[HA] Invalid heartbeat format for {node}: expected dict, got {type(data).__name__}")
@@ -5811,7 +5815,11 @@ echo "AGENT_INSTALLED_OK"
                 'recovery_will_start_after': (datetime.now() + timedelta(seconds=60)).isoformat()
             }
             
-            with open(poison_file, 'w') as f:
+            base_real = os.path.realpath(heartbeat_dir)
+            target_real = os.path.realpath(poison_file)
+            if os.path.commonpath([base_real, target_real]) != base_real:
+                raise Exception('Invalid file path')
+            with open(target_real, 'w') as f:
                 import json
                 json.dump(poison_data, f)
             
@@ -5878,7 +5886,11 @@ echo "AGENT_INSTALLED_OK"
         while time.time() - start_time < timeout:
             try:
                 if os.path.exists(ack_file):
-                    with open(ack_file, 'r') as f:
+                    base_real = os.path.realpath(heartbeat_dir)
+                    target_real = os.path.realpath(ack_file)
+                    if os.path.commonpath([base_real, target_real]) != base_real:
+                        raise Exception('Invalid file path')
+                    with open(target_real, 'r') as f:
                         ack_data = json.load(f)
                     
                     if ack_data.get('vms_stopped'):
@@ -5939,7 +5951,11 @@ echo "AGENT_INSTALLED_OK"
                 age = (datetime.now() - mtime).total_seconds()
                 
                 if age < 300:  # Lock valid for 5 minutes
-                    with open(lock_file, 'r') as f:
+                    base_real = os.path.realpath(heartbeat_dir)
+                    target_real = os.path.realpath(lock_file)
+                    if os.path.commonpath([base_real, target_real]) != base_real:
+                        raise Exception('Invalid file path')
+                    with open(target_real, 'r') as f:
                         import json
                         lock_data = json.load(f)
                     
@@ -5955,7 +5971,11 @@ echo "AGENT_INSTALLED_OK"
                 'cluster': self.config.name
             }
             
-            with open(lock_file, 'w') as f:
+            base_real = os.path.realpath(heartbeat_dir)
+            target_real = os.path.realpath(lock_file)
+            if os.path.commonpath([base_real, target_real]) != base_real:
+                raise Exception('Invalid file path')
+            with open(target_real, 'w') as f:
                 import json
                 json.dump(lock_data, f)
             
