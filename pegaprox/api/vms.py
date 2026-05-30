@@ -3473,6 +3473,10 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         import base64 as _b64
         host, port = mgr.host, mgr.api_port
 
+        # Validate node parameter to prevent path traversal
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', node):
+            return jsonify({'error': 'Invalid node parameter'}), 400
+
         ssl_ctx = _ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = _ssl.CERT_NONE
@@ -6597,6 +6601,12 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         cluster_id, node, vm_type, vmid = match.groups()
         vmid = int(vmid)
         
+        # Validate node parameter to prevent path traversal
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', node):
+            print(f"ERROR: Invalid node parameter: {node}")
+            await websocket.close(1002, "Invalid node parameter")
+            return
+        
         print(f"Cluster: {cluster_id}, Node: {node}, Type: {vm_type}, VMID: {vmid}")
         
         if cluster_id not in cluster_managers:
@@ -7148,7 +7158,14 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         except: pass
         return
 
-    print(f"User {auth_user} authenticated for VNC")
+    print(f\"User {auth_user} authenticated for VNC\")
+    
+    # Validate node parameter to prevent path traversal
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', node):
+        print(f"ERROR: Invalid node parameter: {node}")
+        try: ws.send('Invalid node parameter')
+        except: pass
+        return
     
     if cluster_id not in cluster_managers:
         print(f"ERROR: Cluster {cluster_id} not found")
