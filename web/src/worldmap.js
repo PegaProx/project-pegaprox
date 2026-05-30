@@ -137,14 +137,20 @@
                 }
             }
 
-            // wheel-zoom — toward cursor for natural feel
-            const handleWheel = (e) => {
+            // wheel-zoom — toward cursor for natural feel.
+            // MK 2026-05-30 — React's onWheel synthetic prop registers as a PASSIVE
+            // listener since React 17, so calling preventDefault() inside throws
+            // the "Unable to preventDefault inside passive event listener" warning
+            // we were seeing 30+ times per scroll session. Attach via raw
+            // addEventListener({passive:false}) instead. The handler reads vbW/vbH/vbX/vbY
+            // through a ref so we don't re-attach on every render.
+            const wheelHandlerRef = useRef(null);
+            wheelHandlerRef.current = (e) => {
                 if (compact) return;
                 e.preventDefault();
                 const delta = e.deltaY < 0 ? 1.25 : 0.8;
                 const rect = containerRef.current?.getBoundingClientRect();
                 if (!rect) return;
-                // cursor position in viewBox-coords (0..1000, 0..500)
                 const cx = ((e.clientX - rect.left) / rect.width) * vbW + vbX;
                 const cy = ((e.clientY - rect.top) / rect.height) * vbH + vbY;
                 setView(v => {
@@ -152,7 +158,6 @@
                     if (newScale === v.scale) return v;
                     const newVbW = 1000 / newScale;
                     const newVbH = 500 / newScale;
-                    // keep (cx, cy) under cursor after zoom — anchor zoom on cursor
                     const newVbX = cx - ((e.clientX - rect.left) / rect.width) * newVbW;
                     const newVbY = cy - ((e.clientY - rect.top) / rect.height) * newVbH;
                     return {
@@ -162,6 +167,13 @@
                     };
                 });
             };
+            useEffect(() => {
+                const el = containerRef.current;
+                if (!el) return;
+                const wheelListener = (e) => wheelHandlerRef.current && wheelHandlerRef.current(e);
+                el.addEventListener('wheel', wheelListener, { passive: false });
+                return () => el.removeEventListener('wheel', wheelListener);
+            }, []);
 
             const handleMouseDown = (e) => {
                 if (compact || view.scale === 1) return;
@@ -193,7 +205,6 @@
                         maxHeight: compact ? '14rem' : '62vh',
                         cursor: view.scale > 1 ? (dragRef.current ? 'grabbing' : 'grab') : 'default',
                     }}
-                    onWheel={handleWheel}
                     onMouseDown={handleMouseDown}
                     onMouseMove={handleMouseMove}
                     onMouseUp={handleMouseUp}

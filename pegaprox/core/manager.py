@@ -12055,11 +12055,41 @@ echo "AGENT_INSTALLED_OK"
         endpoint after we confirmed via live probe on PVE 9.2.2 that
         /cluster/cpu-models (the supposed 9.2 endpoint per the early research)
         does not exist. The per-node capabilities endpoint is the right place.
+
+        MK 2026-05-30 — output is sorted now: `host` first, then `max`, then
+        alphabetical (case-insensitive). PVE returns the raw enum order which
+        starts host/kvm64/kvm32/qemu64/… and feels arbitrary once vendor models
+        get mixed in. Keeping host pinned at the top because that's the default
+        we set on every new VM and operators expect to find it first.
         """
         live = self._fetch_pve_cpu_types()
-        if live:
-            return live
-        return list(self._STATIC_CPU_TYPES)
+        return self._sort_cpu_types(live if live else list(self._STATIC_CPU_TYPES))
+
+    @staticmethod
+    def _sort_cpu_types(types):
+        """host first, max second, the rest alphabetical (case-insensitive)."""
+        if not types:
+            return []
+        # dedupe preserving first occurrence (live + custom can repeat)
+        seen, ordered = set(), []
+        for t in types:
+            if t and t not in seen:
+                seen.add(t); ordered.append(t)
+        head = []
+        rest = []
+        for t in ordered:
+            if t == 'host':
+                head.insert(0, t)
+            elif t == 'max':
+                head.append(t) if 'host' in head else head.insert(0, t)
+            else:
+                rest.append(t)
+        # MK: 'host' always first if present; 'max' next if present
+        head_sorted = []
+        if 'host' in head: head_sorted.append('host')
+        if 'max' in head: head_sorted.append('max')
+        rest.sort(key=str.casefold)
+        return head_sorted + rest
 
     def _fetch_pve_cpu_types(self) -> List[str]:
         """GET /nodes/{n}/capabilities/qemu/cpu on the first online node. Returns

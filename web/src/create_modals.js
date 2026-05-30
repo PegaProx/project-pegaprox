@@ -299,20 +299,34 @@
                 { value: 'other', label: 'Other OS types' },
             ];
 
-            const cpuTypes = [
-                'host', 'kvm64', 'kvm32', 'qemu64', 'qemu32', 'max',
-                'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
-                'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Conroe', 'EPYC', 'EPYC-IBPB',
-                'EPYC-Milan', 'EPYC-Rome', 'Haswell', 'Haswell-IBRS', 'Haswell-noTSX',
-                'Haswell-noTSX-IBRS', 'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server',
-                'Icelake-Server-noTSX', 'IvyBridge', 'IvyBridge-IBRS', 'KnightsMill', 'Nehalem',
-                'Nehalem-IBRS', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
-                'Penryn', 'SandyBridge', 'SandyBridge-IBRS', 'Skylake-Client', 'Skylake-Client-IBRS',
-                'Skylake-Client-noTSX-IBRS', 'Skylake-Server', 'Skylake-Server-IBRS',
-                'Skylake-Server-noTSX-IBRS', 'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo',
-                'coreduo', 'n270', 'pentium', 'pentium2', 'pentium3', 'phenom', 'x86-64-v2',
-                'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4'
-            ];
+            // MK 2026-05-30 — host first, max second, then alphabetical (case-insensitive).
+            // Matches the backend get_cpu_types() ordering; VM Config dropdown already gets
+            // a sorted list from /api/hardware-options so the two surfaces look identical now.
+            const cpuTypes = (() => {
+                const all = [
+                    'host', 'max',
+                    'kvm64', 'kvm32', 'qemu64', 'qemu32',
+                    'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
+                    'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Conroe', 'EPYC', 'EPYC-IBPB',
+                    'EPYC-Milan', 'EPYC-Rome', 'Haswell', 'Haswell-IBRS', 'Haswell-noTSX',
+                    'Haswell-noTSX-IBRS', 'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server',
+                    'Icelake-Server-noTSX', 'IvyBridge', 'IvyBridge-IBRS', 'KnightsMill', 'Nehalem',
+                    'Nehalem-IBRS', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
+                    'Penryn', 'SandyBridge', 'SandyBridge-IBRS', 'Skylake-Client', 'Skylake-Client-IBRS',
+                    'Skylake-Client-noTSX-IBRS', 'Skylake-Server', 'Skylake-Server-IBRS',
+                    'Skylake-Server-noTSX-IBRS', 'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo',
+                    'coreduo', 'n270', 'pentium', 'pentium2', 'pentium3', 'phenom', 'x86-64-v2',
+                    'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
+                ];
+                const head = [];
+                const rest = [];
+                for (const t of all) {
+                    if (t === 'host' || t === 'max') head.push(t);
+                    else rest.push(t);
+                }
+                rest.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+                return ['host', 'max', ...rest];
+            })();
 
             const vgaTypes = [
                 { value: 'std', label: 'Standard VGA' },
