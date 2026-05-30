@@ -223,10 +223,37 @@ jobs:
             cloud-image-utils curl
           sudo chmod 0644 /boot/vmlinuz-* || true
 
-      - name: Debian Cloud-Image laden
+      - name: Debian Cloud-Image laden + Checksum verifizieren
         run: |
-          wget -q -O pegaprox.qcow2 \
-            "https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/latest/debian-13-genericcloud-amd64.qcow2"
+          # NS 2026-05-30 — the image we pull here becomes the rootfs of every
+          # published PegaProx VM appliance. Downloading over plain HTTPS without
+          # verifying the bytes against the published checksum leaves a
+          # supply-chain hole: a compromised mirror or a MITM with a forged cert
+          # could substitute a backdoored qcow2 and every release artefact would
+          # carry it. Fix: pull SHA512SUMS from the same path Debian publishes
+          # alongside the image and fail the build if the hash doesn't match.
+          set -euo pipefail
+          BASE_URL="https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/latest"
+          IMG_NAME="debian-13-genericcloud-amd64.qcow2"
+
+          wget -q -O pegaprox.qcow2 "${BASE_URL}/${IMG_NAME}"
+          wget -q -O SHA512SUMS     "${BASE_URL}/SHA512SUMS"
+
+          # SHA512SUMS lists every asset Debian ships at this path. Pull the
+          # row for our image, swap the original filename for the local name
+          # we saved under, then let sha512sum do the actual comparison.
+          # Failing here aborts the build before the image ever touches
+          # virt-customize, which is exactly what we want.
+          EXPECTED_LINE=$(grep "[ \t*]${IMG_NAME}\$" SHA512SUMS || true)
+          if [ -z "${EXPECTED_LINE}" ]; then
+            echo "::error::SHA512SUMS does not contain a line for ${IMG_NAME}"
+            echo "::error::SHA512SUMS contents:"
+            cat SHA512SUMS
+            exit 1
+          fi
+          echo "${EXPECTED_LINE}" | sed "s| [ *]${IMG_NAME}\$|  pegaprox.qcow2|" > pegaprox.qcow2.sha512
+          sha512sum -c pegaprox.qcow2.sha512
+
           qemu-img resize pegaprox.qcow2 8G
 
       - name: PegaProx ins Image installieren
