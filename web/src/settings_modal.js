@@ -704,6 +704,16 @@
                 acme_provider: 'letsencrypt',
                 acme_email: '',
                 acme_staging: false,
+                acme_challenge_type: 'http-01',
+                acme_dns_provider: 'manual',
+                acme_dns_rfc2136_nameserver: '',
+                acme_dns_rfc2136_port: 53,
+                acme_dns_rfc2136_zone: '',
+                acme_dns_rfc2136_key_name: '',
+                acme_dns_rfc2136_secret: '',
+                acme_dns_rfc2136_algorithm: 'hmac-sha512',
+                acme_dns_rfc2136_ttl: 60,
+                acme_dns_propagation_seconds: 30,
                 acme_directory_url: '',
                 cert_info: null,
                 reverse_proxy_enabled: false,
@@ -1491,6 +1501,8 @@
                     });
                     if (response && response.ok) {
                         const data = await response.json();
+                        const acmeCertificate = data.acme_certificate || {};
+                        const acmeDnsConfig = acmeCertificate.dns_config || {};
                         setServerSettings(prev => ({
                             ...prev,
                             // Server settings
@@ -1502,10 +1514,20 @@
                             ssl_cert: data.ssl_cert_exists ? (t('certPresentPlaceholder') || '(certificate uploaded)') : '',
                             ssl_key: data.ssl_key_exists ? (t('keyPresentPlaceholder') || '(private key uploaded)') : '',
                             acme_enabled: data.acme_enabled || false,
-                            acme_provider: data.acme_provider || 'letsencrypt',
-                            acme_email: data.acme_email || '',
-                            acme_directory_url: data.acme_directory_url || '',
-                            acme_staging: data.acme_staging || false,
+                            acme_provider: acmeCertificate.provider || data.acme_provider || 'letsencrypt',
+                            acme_email: acmeCertificate.email || data.acme_email || '',
+                            acme_directory_url: acmeCertificate.directory_url || data.acme_directory_url || '',
+                            acme_staging: acmeCertificate.staging ?? data.acme_staging ?? false,
+                            acme_challenge_type: acmeCertificate.challenge_type || data.acme_challenge_type || 'http-01',
+                            acme_dns_provider: acmeCertificate.dns_provider || data.acme_dns_provider || 'manual',
+                            acme_dns_rfc2136_nameserver: acmeDnsConfig.nameserver || data.acme_dns_rfc2136_nameserver || '',
+                            acme_dns_rfc2136_port: acmeDnsConfig.port || data.acme_dns_rfc2136_port || 53,
+                            acme_dns_rfc2136_zone: acmeDnsConfig.zone || data.acme_dns_rfc2136_zone || '',
+                            acme_dns_rfc2136_key_name: acmeDnsConfig.key_name || data.acme_dns_rfc2136_key_name || '',
+                            acme_dns_rfc2136_secret: acmeDnsConfig.secret || data.acme_dns_rfc2136_secret || '',
+                            acme_dns_rfc2136_algorithm: acmeDnsConfig.algorithm || data.acme_dns_rfc2136_algorithm || 'hmac-sha512',
+                            acme_dns_rfc2136_ttl: acmeDnsConfig.ttl || data.acme_dns_rfc2136_ttl || 60,
+                            acme_dns_propagation_seconds: acmeDnsConfig.propagation_seconds || data.acme_dns_propagation_seconds || 30,
                             cert_info: data.cert_info || null,
                             http_redirect_port: data.http_redirect_port || 0,
                             reverse_proxy_enabled: data.reverse_proxy_enabled || false,
@@ -1725,6 +1747,21 @@
                     formData.append('port', serverSettings.port);
                     formData.append('http_redirect_port', serverSettings.http_redirect_port || 0);
                     formData.append('ssl_enabled', serverSettings.ssl_enabled);
+                    formData.append('acme_enabled', serverSettings.acme_enabled ? 'true' : 'false');
+                    formData.append('acme_provider', serverSettings.acme_provider || 'letsencrypt');
+                    formData.append('acme_email', serverSettings.acme_email || '');
+                    formData.append('acme_staging', serverSettings.acme_staging ? 'true' : 'false');
+                    formData.append('acme_challenge_type', serverSettings.acme_challenge_type || 'http-01');
+                    formData.append('acme_dns_provider', serverSettings.acme_dns_provider || 'manual');
+                    formData.append('acme_dns_rfc2136_nameserver', serverSettings.acme_dns_rfc2136_nameserver || '');
+                    formData.append('acme_dns_rfc2136_port', serverSettings.acme_dns_rfc2136_port || 53);
+                    formData.append('acme_dns_rfc2136_zone', serverSettings.acme_dns_rfc2136_zone || '');
+                    formData.append('acme_dns_rfc2136_key_name', serverSettings.acme_dns_rfc2136_key_name || '');
+                    formData.append('acme_dns_rfc2136_secret', serverSettings.acme_dns_rfc2136_secret || '');
+                    formData.append('acme_dns_rfc2136_algorithm', serverSettings.acme_dns_rfc2136_algorithm || 'hmac-sha512');
+                    formData.append('acme_dns_rfc2136_ttl', serverSettings.acme_dns_rfc2136_ttl || 60);
+                    formData.append('acme_dns_propagation_seconds', serverSettings.acme_dns_propagation_seconds || 30);
+                    formData.append('acme_directory_url', serverSettings.acme_provider === 'custom' ? (serverSettings.acme_directory_url || '') : '');
                     formData.append('reverse_proxy_enabled', serverSettings.reverse_proxy_enabled);
                     formData.append('audit_retention_days', String(serverSettings.audit_retention_days || 90));
                     formData.append('air_gap_mode', serverSettings.air_gap_mode ? 'true' : 'false');
@@ -1810,12 +1847,25 @@
                             provider: serverSettings.acme_provider || 'letsencrypt',
                             email: serverSettings.acme_email,
                             staging: serverSettings.acme_staging,
+                            challenge_type: serverSettings.acme_challenge_type || 'http-01',
+                            dns_provider: serverSettings.acme_dns_provider || 'manual',
+                            acme_dns_provider: serverSettings.acme_dns_provider || 'manual',
+                            acme_dns_rfc2136_nameserver: serverSettings.acme_dns_rfc2136_nameserver || '',
+                            acme_dns_rfc2136_port: serverSettings.acme_dns_rfc2136_port || 53,
+                            acme_dns_rfc2136_zone: serverSettings.acme_dns_rfc2136_zone || '',
+                            acme_dns_rfc2136_key_name: serverSettings.acme_dns_rfc2136_key_name || '',
+                            acme_dns_rfc2136_secret: serverSettings.acme_dns_rfc2136_secret || '',
+                            acme_dns_rfc2136_algorithm: serverSettings.acme_dns_rfc2136_algorithm || 'hmac-sha512',
+                            acme_dns_rfc2136_ttl: serverSettings.acme_dns_rfc2136_ttl || 60,
+                            acme_dns_propagation_seconds: serverSettings.acme_dns_propagation_seconds || 30,
                             directory_url: serverSettings.acme_provider === 'custom' ? serverSettings.acme_directory_url : '',
                         })
                     });
                     const data = await resp.json();
                     setAcmeResult(data);
-                    if (data.success) {
+                    if (data.pending_dns) {
+                        addToast(t('acmeDnsPrepared') || 'DNS challenge prepared', 'success');
+                    } else if (data.success) {
                         addToast(t('acmeSuccess'), 'success');
                         fetchServerSettings();
                     } else {
@@ -1823,6 +1873,29 @@
                     }
                 } catch (err) {
                     addToast('ACME request failed: ' + err.message, 'error');
+                }
+                setAcmeLoading(false);
+            };
+
+            const handleAcmeDnsComplete = async () => {
+                if (!acmeResult?.challenge_id) return;
+                setAcmeLoading(true);
+                try {
+                    const resp = await fetch(`${API_URL}/settings/acme/dns/complete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                        body: JSON.stringify({ challenge_id: acmeResult.challenge_id })
+                    });
+                    const data = await resp.json();
+                    setAcmeResult(data);
+                    if (data.success) {
+                        addToast(t('acmeSuccess'), 'success');
+                        fetchServerSettings();
+                    } else {
+                        addToast(data.message || data.error || 'DNS-01 validation failed', 'error');
+                    }
+                } catch (err) {
+                    addToast('DNS-01 validation failed: ' + err.message, 'error');
                 }
                 setAcmeLoading(false);
             };
@@ -5814,11 +5887,171 @@
                                                     </label>
                                                 )}
 
-                                                <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-                                                    <p className="text-xs text-blue-400">{t('acmePort80')}</p>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('acmeChallengeType') || 'Challenge Type'}</label>
+                                                    <select
+                                                        value={serverSettings.acme_challenge_type || 'http-01'}
+                                                        onChange={e => {
+                                                            setServerSettings({...serverSettings, acme_challenge_type: e.target.value});
+                                                            setAcmeResult(null);
+                                                        }}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    >
+                                                        <option value="http-01">{t('acmeChallengeHttp') || 'HTTP-01'}</option>
+                                                        <option value="dns-01">{t('acmeChallengeDns') || 'DNS-01'}</option>
+                                                    </select>
                                                 </div>
 
-                                                {acmeResult && !acmeResult.success && (
+                                                {(serverSettings.acme_challenge_type || 'http-01') === 'dns-01' && (
+                                                    <>
+                                                        <div>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('acmeDnsProvider') || 'DNS Provider'}</label>
+                                                            <select
+                                                                value={serverSettings.acme_dns_provider || 'manual'}
+                                                                onChange={e => setServerSettings({...serverSettings, acme_dns_provider: e.target.value})}
+                                                                className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                            >
+                                                                <option value="manual">{t('acmeDnsProviderManual') || 'Manual TXT Record'}</option>
+                                                                <option value="rfc2136">{t('acmeDnsProviderRfc2136') || 'RFC 2136 Dynamic DNS'}</option>
+                                                            </select>
+                                                        </div>
+
+                                                        {(serverSettings.acme_dns_provider || 'manual') === 'rfc2136' && (
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsNameserver') || 'Nameserver'}</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={serverSettings.acme_dns_rfc2136_nameserver || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_nameserver: e.target.value})}
+                                                                        placeholder="192.0.2.53"
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsPort') || 'Port'}</label>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="1"
+                                                                        max="65535"
+                                                                        value={serverSettings.acme_dns_rfc2136_port || 53}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_port: parseInt(e.target.value) || 53})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsZone') || 'Zone'}</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={serverSettings.acme_dns_rfc2136_zone || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_zone: e.target.value})}
+                                                                        placeholder="example.com"
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsKeyName') || 'TSIG Key Name'}</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={serverSettings.acme_dns_rfc2136_key_name || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_key_name: e.target.value})}
+                                                                        placeholder="mein-certbot-key"
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsAlgorithm') || 'TSIG Algorithm'}</label>
+                                                                    <select
+                                                                        value={serverSettings.acme_dns_rfc2136_algorithm || 'hmac-sha512'}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_algorithm: e.target.value})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    >
+                                                                        <option value="hmac-sha512">hmac-sha512</option>
+                                                                        <option value="hmac-sha384">hmac-sha384</option>
+                                                                        <option value="hmac-sha256">hmac-sha256</option>
+                                                                        <option value="hmac-sha224">hmac-sha224</option>
+                                                                        <option value="hmac-sha1">hmac-sha1</option>
+                                                                        <option value="hmac-md5">hmac-md5</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsSecret') || 'TSIG Secret'}</label>
+                                                                    <input
+                                                                        type="password"
+                                                                        value={serverSettings.acme_dns_rfc2136_secret || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_secret: e.target.value})}
+                                                                        placeholder="IHR_GENERIERTER_BASE64_SECRET_STRING"
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsTtl') || 'TXT TTL'}</label>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="1"
+                                                                        max="86400"
+                                                                        value={serverSettings.acme_dns_rfc2136_ttl || 60}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_ttl: parseInt(e.target.value) || 60})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsPropagation') || 'Propagation Wait (seconds)'}</label>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        max="600"
+                                                                        value={serverSettings.acme_dns_propagation_seconds || 30}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_propagation_seconds: parseInt(e.target.value) || 0})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                )}
+
+                                                <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                                                    <p className="text-xs text-blue-400">
+                                                        {(serverSettings.acme_challenge_type || 'http-01') === 'dns-01'
+                                                            ? ((serverSettings.acme_dns_provider || 'manual') === 'rfc2136'
+                                                                ? (t('acmeDnsRfc2136Hint') || 'RFC 2136 will create and remove the _acme-challenge TXT record automatically using TSIG.')
+                                                                : (t('acmeDnsHint') || 'DNS-01 requires a TXT record at _acme-challenge for this request. The record value is shown after preparing the challenge.'))
+                                                            : t('acmePort80')}
+                                                    </p>
+                                                </div>
+
+                                                {acmeResult?.pending_dns && (
+                                                    <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-3">
+                                                        <p className="text-sm text-amber-300">{t('acmeDnsInstructions') || 'Create this TXT record, wait for DNS propagation, then continue validation.'}</p>
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsName') || 'TXT Name'}</label>
+                                                            <input
+                                                                readOnly
+                                                                value={acmeResult.dns_name || ''}
+                                                                className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsValue') || 'TXT Value'}</label>
+                                                            <textarea
+                                                                readOnly
+                                                                value={acmeResult.dns_value || ''}
+                                                                rows="2"
+                                                                className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono resize-none"
+                                                            />
+                                                        </div>
+                                                        <button
+                                                            onClick={handleAcmeDnsComplete}
+                                                            disabled={acmeLoading}
+                                                            className="w-full px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+                                                        >
+                                                            {acmeLoading ? t('acmeRequesting') : (t('acmeDnsContinue') || 'Continue DNS Validation')}
+                                                        </button>
+                                                    </div>
+                                                )}
+
+                                                {acmeResult && !acmeResult.success && !acmeResult.pending_dns && (
                                                     <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
                                                         <p className="text-sm text-red-400">{acmeResult.message}</p>
                                                     </div>
@@ -5826,10 +6059,10 @@
 
                                                 <button
                                                     onClick={handleAcmeRequest}
-                                                    disabled={acmeLoading || !serverSettings.domain || (serverSettings.acme_provider === 'letsencrypt' && !serverSettings.acme_email) || (serverSettings.acme_provider === 'custom' && !serverSettings.acme_directory_url)}
+                                                    disabled={acmeLoading || !serverSettings.domain || (serverSettings.acme_provider === 'letsencrypt' && !serverSettings.acme_email) || (serverSettings.acme_provider === 'custom' && !serverSettings.acme_directory_url) || ((serverSettings.acme_challenge_type || 'http-01') === 'dns-01' && (serverSettings.acme_dns_provider || 'manual') === 'rfc2136' && (!serverSettings.acme_dns_rfc2136_nameserver || !serverSettings.acme_dns_rfc2136_zone || !serverSettings.acme_dns_rfc2136_key_name || !serverSettings.acme_dns_rfc2136_secret))}
                                                     className="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
                                                 >
-                                                    {acmeLoading ? t('acmeRequesting') : t('acmeRequest')}
+                                                    {acmeLoading ? t('acmeRequesting') : ((serverSettings.acme_challenge_type || 'http-01') === 'dns-01' && (serverSettings.acme_dns_provider || 'manual') === 'manual' ? (t('acmeDnsPrepare') || 'Prepare DNS Challenge') : t('acmeRequest'))}
                                                 </button>
                                             </div>
                                         </div>

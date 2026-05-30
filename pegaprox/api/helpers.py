@@ -31,6 +31,16 @@ def load_server_settings():
         'acme_enabled': False,
         'acme_email': '',
         'acme_staging': False,  # use LE staging for testing
+        'acme_challenge_type': 'http-01',
+        'acme_dns_provider': 'manual',
+        'acme_dns_rfc2136_nameserver': '',
+        'acme_dns_rfc2136_port': 53,
+        'acme_dns_rfc2136_zone': '',
+        'acme_dns_rfc2136_key_name': '',
+        'acme_dns_rfc2136_secret': '',
+        'acme_dns_rfc2136_algorithm': 'hmac-sha512',
+        'acme_dns_rfc2136_ttl': 60,
+        'acme_dns_propagation_seconds': 30,
         'logo_url': '',
         'app_name': 'PegaProx',
         # HTTP redirect port - NS Jan 2026
@@ -159,6 +169,41 @@ def load_server_settings():
         # NS May 2026 - plain-JSON SERVER_SETTINGS_FILE fallback removed (encrypted DB only).
 
     return defaults
+
+
+def decrypt_secret_setting(value, *, label='secret'):
+    """Decrypt an encrypted server setting, preserving legacy plaintext values."""
+    if not value or value == '********':
+        return ''
+    try:
+        return get_db()._decrypt(str(value))
+    except RuntimeError as e:
+        logging.error(f"Failed to decrypt {label}: {e}")
+        return ''
+    except Exception as e:
+        if str(value).startswith(('aes256:', 'gAAAA')):
+            logging.error(f"Could not decrypt encrypted {label}: {e}")
+            return ''
+        logging.warning(f"Could not decrypt {label}; treating as legacy plaintext: {e}")
+        return str(value)
+
+
+def acme_dns_config_from_settings(settings):
+    """Build an RFC 2136 DNS config, decrypting the TSIG secret only for use."""
+    settings = settings or {}
+    return {
+        'nameserver': settings.get('acme_dns_rfc2136_nameserver', ''),
+        'port': settings.get('acme_dns_rfc2136_port', 53),
+        'zone': settings.get('acme_dns_rfc2136_zone', ''),
+        'key_name': settings.get('acme_dns_rfc2136_key_name', ''),
+        'secret': decrypt_secret_setting(
+            settings.get('acme_dns_rfc2136_secret', ''),
+            label='ACME RFC 2136 secret'
+        ),
+        'algorithm': settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512'),
+        'ttl': settings.get('acme_dns_rfc2136_ttl', 60),
+        'propagation_seconds': settings.get('acme_dns_propagation_seconds', 30),
+    }
 
 
 def save_server_settings(settings):

@@ -616,7 +616,7 @@ def main(debug_mode=False):
     from pegaprox.background.cross_cluster_replication import start_cross_cluster_replication_thread
     from pegaprox.background.syslog_server import start_syslog_server
     from pegaprox.api.schedules import start_scheduler as start_actions_scheduler
-    from pegaprox.api.helpers import load_server_settings
+    from pegaprox.api.helpers import load_server_settings, acme_dns_config_from_settings
     from pegaprox.utils.rbac import get_pool_membership_cache
     from pegaprox.constants import AUDIT_RETENTION_DAYS
 
@@ -866,9 +866,15 @@ def main(debug_mode=False):
                         _ssl = str(Path("/var/lib/pegaprox/ssl"))
                     else:
                         _ssl = str(Path(__file__).resolve().parent.parent / 'ssl')
+                    _challenge_type = _settings.get('acme_challenge_type') or 'http-01'
+                    _dns_provider = _settings.get('acme_dns_provider') or 'manual'
                     renewed = check_and_renew(
                         _settings['domain'], _settings.get('acme_email', ''),
-                        _ssl, staging=_settings.get('acme_staging', False)
+                        _ssl, staging=_settings.get('acme_staging', False),
+                        directory_url=_settings.get('acme_directory_url', ''),
+                        challenge_type=_challenge_type,
+                        dns_provider=_dns_provider,
+                        dns_config=acme_dns_config_from_settings(_settings)
                     )
                     if renewed:
                         logging.info("[ACME] Certificate renewed, restart required for new cert")

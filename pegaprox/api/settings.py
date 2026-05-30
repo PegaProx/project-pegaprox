@@ -24,11 +24,47 @@ from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanit
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
-from pegaprox.api.helpers import load_server_settings, save_server_settings, check_cluster_access, get_login_settings, get_session_timeout, safe_error
+from pegaprox.api.helpers import (
+    load_server_settings, save_server_settings, check_cluster_access,
+    get_login_settings, get_session_timeout, safe_error,
+    acme_dns_config_from_settings,
+)
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
 
 bp = Blueprint('settings', __name__)
+
+
+def _sanitize_acme_dns_settings(settings, data):
+    dns_provider = str(data.get('acme_dns_provider', settings.get('acme_dns_provider', 'manual')) or 'manual').strip()
+    settings['acme_dns_provider'] = dns_provider if dns_provider in ('manual', 'rfc2136') else 'manual'
+    settings['acme_dns_rfc2136_nameserver'] = str(data.get('acme_dns_rfc2136_nameserver', settings.get('acme_dns_rfc2136_nameserver', '')) or '').strip()
+    settings['acme_dns_rfc2136_zone'] = str(data.get('acme_dns_rfc2136_zone', settings.get('acme_dns_rfc2136_zone', '')) or '').strip()
+    settings['acme_dns_rfc2136_key_name'] = str(data.get('acme_dns_rfc2136_key_name', settings.get('acme_dns_rfc2136_key_name', '')) or '').strip()
+    settings['acme_dns_rfc2136_algorithm'] = str(data.get('acme_dns_rfc2136_algorithm', settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512')) or 'hmac-sha512').strip().lower()
+
+    if 'acme_dns_rfc2136_secret' in data:
+        secret = str(data.get('acme_dns_rfc2136_secret', '') or '').strip()
+        if secret != '********':
+            settings['acme_dns_rfc2136_secret'] = get_db()._encrypt(secret) if secret else ''
+
+    try:
+        settings['acme_dns_rfc2136_port'] = max(1, min(65535, int(data.get('acme_dns_rfc2136_port', settings.get('acme_dns_rfc2136_port', 53)) or 53)))
+    except (TypeError, ValueError):
+        settings['acme_dns_rfc2136_port'] = 53
+    try:
+        settings['acme_dns_rfc2136_ttl'] = max(1, min(86400, int(data.get('acme_dns_rfc2136_ttl', settings.get('acme_dns_rfc2136_ttl', 60)) or 60)))
+    except (TypeError, ValueError):
+        settings['acme_dns_rfc2136_ttl'] = 60
+    try:
+        settings['acme_dns_propagation_seconds'] = max(0, min(600, int(data.get('acme_dns_propagation_seconds', settings.get('acme_dns_propagation_seconds', 30)) or 30)))
+    except (TypeError, ValueError):
+        settings['acme_dns_propagation_seconds'] = 30
+    return settings
+
+
+def _acme_dns_config(settings):
+    return acme_dns_config_from_settings(settings)
 
 @bp.route('/api/pegaprox/version', methods=['GET'])
 @require_auth()
@@ -956,6 +992,8 @@ def get_server_settings():
     # NS: Mask OIDC client secret
     if settings.get('oidc_client_secret'):
         settings['oidc_client_secret'] = '********'
+    if settings.get('acme_dns_rfc2136_secret'):
+        settings['acme_dns_rfc2136_secret'] = '********'
     return jsonify(settings)
 
 
@@ -1019,6 +1057,11 @@ def update_server_settings():
                 settings['acme_email'] = str(data['acme_email']).strip()
             if 'acme_staging' in data:
                 settings['acme_staging'] = bool(data['acme_staging'])
+            if 'acme_challenge_type' in data:
+                challenge_type = str(data['acme_challenge_type'] or 'http-01').strip()
+                settings['acme_challenge_type'] = challenge_type if challenge_type in ('http-01', 'dns-01') else 'http-01'
+            if any(k.startswith('acme_dns_') for k in data):
+                settings = _sanitize_acme_dns_settings(settings, data)
             if 'acme_provider' in data:
                 provider = str(data['acme_provider'] or 'letsencrypt').strip()
                 settings['acme_provider'] = provider if provider in ('letsencrypt', 'custom') else 'letsencrypt'
@@ -1374,6 +1417,9 @@ def update_server_settings():
             settings['acme_enabled'] = request.form.get('acme_enabled', str(settings.get('acme_enabled', 'false'))).lower() == 'true'
             settings['acme_email'] = request.form.get('acme_email', settings.get('acme_email', '')).strip()
             settings['acme_staging'] = request.form.get('acme_staging', str(settings.get('acme_staging', 'false'))).lower() == 'true'
+            acme_challenge_type = request.form.get('acme_challenge_type', settings.get('acme_challenge_type', 'http-01')).strip()
+            settings['acme_challenge_type'] = acme_challenge_type if acme_challenge_type in ('http-01', 'dns-01') else 'http-01'
+            settings = _sanitize_acme_dns_settings(settings, request.form)
             acme_provider = request.form.get('acme_provider', settings.get('acme_provider', 'letsencrypt')).strip()
             settings['acme_provider'] = acme_provider if acme_provider in ('letsencrypt', 'custom') else 'letsencrypt'
             settings['acme_directory_url'] = request.form.get('acme_directory_url', settings.get('acme_directory_url', '')).strip()
@@ -1577,6 +1623,16 @@ def get_acme_status():
             'acme_enabled': settings.get('acme_enabled', False),
             'acme_email': settings.get('acme_email', ''),
             'acme_staging': settings.get('acme_staging', False),
+            'acme_challenge_type': settings.get('acme_challenge_type', 'http-01'),
+            'acme_dns_provider': settings.get('acme_dns_provider', 'manual'),
+            'acme_dns_rfc2136_nameserver': settings.get('acme_dns_rfc2136_nameserver', ''),
+            'acme_dns_rfc2136_port': settings.get('acme_dns_rfc2136_port', 53),
+            'acme_dns_rfc2136_zone': settings.get('acme_dns_rfc2136_zone', ''),
+            'acme_dns_rfc2136_key_name': settings.get('acme_dns_rfc2136_key_name', ''),
+            'acme_dns_rfc2136_secret': '********' if settings.get('acme_dns_rfc2136_secret') else '',
+            'acme_dns_rfc2136_algorithm': settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512'),
+            'acme_dns_rfc2136_ttl': settings.get('acme_dns_rfc2136_ttl', 60),
+            'acme_dns_propagation_seconds': settings.get('acme_dns_propagation_seconds', 30),
             'acme_provider': settings.get('acme_provider', 'letsencrypt'),
             'acme_directory_url': settings.get('acme_directory_url', ''),
             'domain': settings.get('domain', ''),
@@ -1605,13 +1661,33 @@ def request_acme_certificate():
         domain = data.get('domain') or settings.get('domain', '')
         email = data.get('email') or settings.get('acme_email', '')
         staging = data.get('staging', settings.get('acme_staging', False))
+        challenge_type = str(data.get('challenge_type') or settings.get('acme_challenge_type', 'http-01')).strip()
         acme_provider = str(data.get('provider') or settings.get('acme_provider', 'letsencrypt')).strip() or 'letsencrypt'
         directory_url = str(data.get('directory_url') or settings.get('acme_directory_url', '')).strip()
+        if data.get('dns_provider') and not data.get('acme_dns_provider'):
+            data['acme_dns_provider'] = data.get('dns_provider')
+        settings = _sanitize_acme_dns_settings(settings, data)
+        dns_provider = settings.get('acme_dns_provider', 'manual')
 
         if not domain:
             return jsonify({'error': 'Domain is required'}), 400
         if acme_provider not in ('letsencrypt', 'custom'):
             return jsonify({'error': 'Invalid ACME provider'}), 400
+        if challenge_type not in ('http-01', 'dns-01'):
+            return jsonify({'error': 'Invalid ACME challenge type'}), 400
+        if dns_provider not in ('manual', 'rfc2136'):
+            return jsonify({'error': 'Invalid DNS-01 provider'}), 400
+        if challenge_type == 'dns-01' and dns_provider == 'rfc2136':
+            missing = [
+                label for label, value in (
+                    ('RFC 2136 nameserver', settings.get('acme_dns_rfc2136_nameserver')),
+                    ('RFC 2136 zone', settings.get('acme_dns_rfc2136_zone')),
+                    ('RFC 2136 key name', settings.get('acme_dns_rfc2136_key_name')),
+                    ('RFC 2136 secret', settings.get('acme_dns_rfc2136_secret')),
+                ) if not value
+            ]
+            if missing:
+                return jsonify({'error': ', '.join(missing) + ' required'}), 400
         if acme_provider == 'custom':
             if not directory_url:
                 return jsonify({'error': 'Custom ACME directory URL is required'}), 400
@@ -1626,15 +1702,21 @@ def request_acme_certificate():
         settings['acme_enabled'] = True
         settings['acme_email'] = email
         settings['acme_staging'] = bool(staging)
+        settings['acme_challenge_type'] = challenge_type
+        settings['acme_dns_provider'] = dns_provider
         settings['acme_provider'] = acme_provider
         settings['acme_directory_url'] = directory_url
         settings['domain'] = domain
         save_server_settings(settings)
 
         usr = getattr(request, 'session', {}).get('user', 'admin')
-        log_audit(usr, 'settings.acme_request', f"ACME certificate requested for {domain} via {acme_provider}")
+        log_audit(usr, 'settings.acme_request', f"ACME certificate requested for {domain} via {acme_provider} ({challenge_type}/{dns_provider})")
 
-        result = request_certificate(domain, email, ssl_dir, staging=staging, directory_url=directory_url)
+        result = request_certificate(
+            domain, email, ssl_dir, staging=staging, directory_url=directory_url,
+            challenge_type=challenge_type, dns_provider=dns_provider,
+            dns_config=_acme_dns_config(settings)
+        )
 
         if result['success']:
             # enable SSL automatically
@@ -1647,6 +1729,39 @@ def request_acme_certificate():
     except Exception as e:
         logging.error(f"ACME request error: {e}")
         return jsonify({'error': safe_error(e, 'Certificate request failed')}), 500
+
+
+@bp.route('/api/settings/acme/dns/complete', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def complete_acme_dns_challenge():
+    """Complete a pending ACME DNS-01 certificate request."""
+    try:
+        from pegaprox.core.acme import complete_dns01_challenge
+        from pathlib import Path
+
+        if Path("/usr/lib/pegaprox").exists():
+            ssl_dir = str(Path("/var/lib/pegaprox/ssl"))
+        else:
+            ssl_dir = str(Path(__file__).resolve().parent.parent.parent / 'ssl')
+
+        data = request.get_json() or {}
+        challenge_id = str(data.get('challenge_id') or '').strip()
+        if not challenge_id:
+            return jsonify({'error': 'DNS-01 challenge ID is required'}), 400
+
+        result = complete_dns01_challenge(challenge_id, ssl_dir)
+
+        if result.get('success'):
+            settings = load_server_settings()
+            settings['ssl_enabled'] = True
+            save_server_settings(settings)
+            usr = getattr(request, 'session', {}).get('user', 'admin')
+            log_audit(usr, 'settings.acme_issued', f"Certificate issued via DNS-01, expires {result.get('expires', '?')}")
+
+        return jsonify(result)
+    except Exception as e:
+        logging.error(f"ACME DNS-01 completion error: {e}")
+        return jsonify({'error': safe_error(e, 'DNS-01 challenge completion failed')}), 500
 
 
 # ============================================
@@ -1763,6 +1878,8 @@ def backup_config():
         if not include_secrets:
             if 'smtp_password' in backup_data['server_settings']:
                 backup_data['server_settings']['smtp_password'] = ''
+            if 'acme_dns_rfc2136_secret' in backup_data['server_settings']:
+                backup_data['server_settings']['acme_dns_rfc2136_secret'] = ''
         
         # Clusters
         clusters = database.get_all_clusters()
@@ -4694,5 +4811,3 @@ def test_ldap():
         results['steps'].append({'step': failed_step, 'status': 'error', 'detail': str(e)})
     
     return jsonify(results)
-
-
