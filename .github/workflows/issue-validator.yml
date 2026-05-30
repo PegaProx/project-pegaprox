@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check issue body
-        uses: actions/github-script@v7
+        # NS 2026-05-30 — pinned to commit SHA so a moving-tag compromise can't
+        # smuggle malicious script into the issue-validator step.
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const issue = context.payload.issue;
