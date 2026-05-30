@@ -12,12 +12,62 @@ import uuid
 import os
 import re
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse, urlencode
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec
 from pegaprox.utils.realtime import broadcast_sse
 
 logger = logging.getLogger(__name__)
+
+
+def _build_export_raw_vdi_url(base_url: str, session_id: str, vdi: str, format: str = "raw") -> str:
+    """Build validated URL for XCP-ng export_raw_vdi endpoint."""
+    try:
+        if "/../" in base_url or re.search(r"/%2e%2e/", base_url, re.IGNORECASE):
+            raise ValueError("Invalid path")
+        
+        parsed = urlparse(base_url)
+        
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid protocol")
+        if not parsed.hostname:
+            raise ValueError("Invalid host")
+        allowed_domains = ["example.com"]  # add your allowed domains here
+        if parsed.hostname.lower() not in allowed_domains:
+            raise ValueError("Invalid host")
+        
+        query = {"session_id": session_id, "vdi": vdi, "format": format}
+        parsed = parsed._replace(path="/export_raw_vdi", query=urlencode(query))
+        
+        return urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
+
+
+def _build_import_raw_vdi_url(base_url: str, session_id: str, vdi: str, format: str = "raw") -> str:
+    """Build validated URL for XCP-ng import_raw_vdi endpoint."""
+    try:
+        if "/../" in base_url or re.search(r"/%2e%2e/", base_url, re.IGNORECASE):
+            raise ValueError("Invalid path")
+        
+        parsed = urlparse(base_url)
+        
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid protocol")
+        if not parsed.hostname:
+            raise ValueError("Invalid host")
+        allowed_domains = ["example.com"]  # add your allowed domains here
+        if parsed.hostname.lower() not in allowed_domains:
+            raise ValueError("Invalid host")
+        
+        query = {"session_id": session_id, "vdi": vdi, "format": format}
+        parsed = parsed._replace(path="/import_raw_vdi", query=urlencode(query))
+        
+        return urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
+
 
 # MK: Mar 2026 - hardware mapping tables for cross-hypervisor translation
 # Proxmox ostype -> XCP-ng template name
@@ -667,7 +717,11 @@ def _run_xcpng_to_pve(task):
             task.log(f"Transferring {vdi['name'] or f'disk {idx}'} ({vdi['size']/(1024**3):.1f} GB)")
 
             # stream from XCP-ng -> PVE node via SSH pipe
-            export_url = f"{host_url}/export_raw_vdi?session_id={session_ref}&vdi={vdi['uuid']}&format=raw"
+            try:
+                export_url = _build_export_raw_vdi_url(host_url, session_ref, vdi['uuid'], "raw")
+            except ValueError as e:
+                task.set_phase('failed', f'Invalid export URL: {e}')
+                return
 
             try:
                 export_resp = _req.get(export_url, stream=True, verify=ssl_verify, timeout=30)
@@ -2113,8 +2167,11 @@ def _run_esxi_to_xcpng(task):
                     return
 
                 # stream raw to XCP-ng import_raw_vdi
-                import_url = (f"{xcp_host_url}/import_raw_vdi?"
-                              f"session_id={session_ref}&vdi={new_vdi_uuid}&format=raw")
+                try:
+                    import_url = _build_import_raw_vdi_url(xcp_host_url, session_ref, new_vdi_uuid, "raw")
+                except ValueError as e:
+                    task.set_phase('failed', f'Invalid import URL: {e}')
+                    return
 
                 task.log(f"  Uploading to XCP-ng...")
                 with open(tmp_raw, 'rb') as f:
