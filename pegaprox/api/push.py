@@ -232,17 +232,45 @@ def _trim_inbox():
 # Wake-up push send
 # ──────────────────────────────────────────────────────────────────────────
 
+def _validate_push_endpoint(endpoint: str) -> str:
+    """Validate push endpoint URL to prevent SSRF attacks."""
+    import re
+    try:
+        # Check for path traversal before parsing
+        if "/../" in endpoint or re.search(r"/%2e%2e/", endpoint, re.IGNORECASE):
+            raise ValueError("Invalid URL")
+        
+        parsed = urllib.parse.urlparse(endpoint)
+        
+        # Protocol check
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid URL")
+        
+        # Host check
+        if not parsed.hostname:
+            raise ValueError("Invalid URL")
+        
+        # Block internal/metadata hosts
+        if _is_internal_or_metadata_host(parsed.hostname):
+            raise ValueError("Invalid URL")
+        
+        return urllib.parse.urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
+
+
 def _send_one(endpoint: str, sub_id: int):
     """Fire one wake-up push (no payload) to the given subscription."""
     try:
         import urllib.request
-        parsed = urllib.parse.urlparse(endpoint)
+        validated_endpoint = _validate_push_endpoint(endpoint)
+        parsed = urllib.parse.urlparse(validated_endpoint)
         audience = f"{parsed.scheme}://{parsed.netloc}"
         jwt = _vapid_jwt(audience)
         kp = _load_vapid()
 
         req = urllib.request.Request(
-            endpoint,
+            validated_endpoint,
             data=b'',
             method='POST',
             headers={
