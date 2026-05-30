@@ -63,6 +63,72 @@ def is_encrypted() -> bool:
     return BACKEND == 'sqlcipher'
 
 
+# ─── cipher_memory_security toggle (issue #509, davinkevin) ────────────────
+# SQLCipher's default behaviour is to mlock() its internal page caches so
+# plaintext page bytes don't get paged to swap. mlock(2) needs either root,
+# CAP_IPC_LOCK, or a fat RLIMIT_MEMLOCK — none of which apply to a default
+# non-root container in k3s, so the lock fails with ENOMEM on every open
+# and SQLCipher emits a WARN line. Over ~2 connections/sec that drowns the
+# log. The at-rest encryption is unaffected; only the in-memory page cache
+# protection goes away.
+#
+# Decision:
+#   PEGAPROX_CIPHER_MEMORY_SECURITY=on       force the PRAGMA on (bare-metal)
+#   PEGAPROX_CIPHER_MEMORY_SECURITY=off      force off (rootless containers)
+#   PEGAPROX_CIPHER_MEMORY_SECURITY=auto     (default) heuristic below
+
+_CIPHER_MEMORY_SECURITY_ENV = (os.environ.get('PEGAPROX_CIPHER_MEMORY_SECURITY')
+                               or 'auto').strip().lower()
+
+
+def _mlock_likely_works() -> bool:
+    """True if the process can plausibly mlock(): running as root, or has an
+    RLIMIT_MEMLOCK soft limit above the page-cache footprint SQLCipher needs."""
+    try:
+        if os.geteuid() == 0:
+            return True
+    except AttributeError:
+        # geteuid not on Windows — fall through to the rlimit probe
+        pass
+    try:
+        import resource
+        soft, _hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        # SQLCipher needs at least one page per locked region plus its
+        # working set. 8 MB is comfortably above what we've seen it hold
+        # and well below the typical bare-metal 64 MB / unlimited limit.
+        return soft >= 8 * 1024 * 1024
+    except Exception:
+        return False
+
+
+def _resolve_memory_security_setting() -> bool:
+    if _CIPHER_MEMORY_SECURITY_ENV == 'on':
+        return True
+    if _CIPHER_MEMORY_SECURITY_ENV == 'off':
+        return False
+    # 'auto' or unrecognised — heuristic decides
+    return _mlock_likely_works()
+
+
+_MEMORY_SECURITY_ON = _resolve_memory_security_setting()
+
+if BACKEND == 'sqlcipher':
+    if not _MEMORY_SECURITY_ON:
+        _LOG.info(
+            "[DBCRYPTO] cipher_memory_security disabled (env=%r, euid=%s) — "
+            "at-rest encryption unchanged, SQLCipher page caches just won't "
+            "be mlock()-pinned. Set PEGAPROX_CIPHER_MEMORY_SECURITY=on to "
+            "force-enable on bare-metal where the rlimit allows it.",
+            _CIPHER_MEMORY_SECURITY_ENV,
+            getattr(os, 'geteuid', lambda: 'n/a')(),
+        )
+    else:
+        _LOG.debug(
+            "[DBCRYPTO] cipher_memory_security enabled (env=%r)",
+            _CIPHER_MEMORY_SECURITY_ENV,
+        )
+
+
 def backend_status() -> dict:
     """For the /api/security/db-status endpoint + admin health-indicator."""
     return {
@@ -123,6 +189,14 @@ def _apply_sqlcipher_pragmas(conn, db_path: str) -> None:
         # to v4 means future SQLCipher upgrades don't silently change the
         # at-rest format.
         cur.execute("PRAGMA cipher_compatibility = 4")
+        # NS May 2026 (#509 davinkevin) — when running rootless / container
+        # the mlock() SQLCipher uses to pin page-cache pages fails with
+        # ENOMEM and floods stderr. Disabling the in-memory pinning here is
+        # safe — at-rest AES-256 + HMAC-SHA512 stays in place — and clears
+        # the log spam. Heuristic + env override decided once at module
+        # load; see _resolve_memory_security_setting().
+        if not _MEMORY_SECURITY_ON:
+            cur.execute("PRAGMA cipher_memory_security = OFF")
         # Verify the key works — if wrong, SQLCipher returns OK on the
         # PRAGMA key but the next read throws "file is not a database".
         # The smoke read catches that immediately with a clearer message.
