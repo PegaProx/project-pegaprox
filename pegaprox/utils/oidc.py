@@ -9,9 +9,10 @@ import time
 import hashlib
 import base64
 import secrets
+import re
 import requests
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, urlunparse
 
 # NS May 2026 — SSRF guard for admin-supplied OIDC URLs (discovery / token / userinfo).
 from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
@@ -30,6 +31,42 @@ from pegaprox.globals import users_db
 from pegaprox.models.permissions import ROLE_VIEWER, ROLE_ADMIN, ROLE_USER
 
 # ============================================================================
+
+def build_validated_discovery_url(base_url: str) -> str:
+    """Build and validate OIDC discovery URL to prevent SSRF attacks.
+    
+    Args:
+        base_url: The authority/issuer URL (user-controlled)
+    
+    Returns:
+        Validated discovery URL with /.well-known/openid-configuration appended
+    
+    Raises:
+        ValueError: If URL is invalid or potentially malicious
+    """
+    try:
+        # Minimal path validation before urlparse
+        if "/../" in base_url or re.search(r"/%2e%2e/", base_url, re.IGNORECASE):
+            raise ValueError("Invalid path")
+        
+        parsed = urlparse(base_url)
+        
+        # Protocol check
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid protocol")
+        
+        # Host check
+        if not parsed.hostname:
+            raise ValueError("Invalid host")
+        
+        # Append the fixed discovery path to the existing path
+        existing_path = parsed.path.rstrip('/')
+        new_path = f"{existing_path}/.well-known/openid-configuration"
+        parsed = parsed._replace(path=new_path)
+        
+        return urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
 
 # NS: Feb 2026 - Microsoft cloud environment endpoint mapping
 # GCC High and DoD use separate sovereign cloud endpoints
@@ -141,7 +178,19 @@ def get_oidc_endpoints(config: dict) -> dict:
         # NS Apr 2026 (#188) — bumped timeout 5→15s; loud-log discovery failures so admins notice
         # silent fallback (which builds wrong endpoints for Authentik because its issuer URL
         # is per-application but its authorize endpoint is one path level up).
-        discovery_url = f"{authority}/.well-known/openid-configuration"
+        try:
+            discovery_url = build_validated_discovery_url(authority)
+        except ValueError as e:
+            logging.warning(f"[OIDC] Invalid authority URL: {e}")
+            return {
+                'authorization': '', 'token': '', 'jwks': '', 'userinfo': '',
+                'graph_me': '', 'graph_groups': '',
+                '_discovery_used': False,
+                '_error': 'invalid_authority_url',
+                '_error_detail': f"Authority URL '{authority}' is invalid or malformed. "
+                                 f"Ensure it is a valid HTTP(S) URL without path traversal sequences.",
+            }
+        
         cache_entry = _oidc_discovery_cache.get(authority)
         if cache_entry and cache_entry.get('expires', 0) > time.time():
             disco = cache_entry['data']
