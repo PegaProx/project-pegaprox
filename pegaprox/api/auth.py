@@ -38,6 +38,8 @@ from pegaprox.utils.sanitization import sanitize_identifier, sanitize_username
 from pegaprox.utils.ssh import check_auth_action_rate_limit
 # NS: Mar 2026 - removed add_allowed_origin import (no longer auto-adding on login)
 import requests
+import re
+from urllib.parse import urlparse, urlunparse
 
 try:
     import pyotp
@@ -47,6 +49,24 @@ except ImportError:
     pass
 
 bp = Blueprint('auth', __name__)
+
+def build_validated_url(base_url: str) -> str:
+    try:
+        # Minimal path validation
+        if "/../" in base_url or re.search(r"/%2e%2e/", base_url, re.IGNORECASE):
+            raise ValueError("Invalid path")
+        
+        parsed = urlparse(base_url)
+        
+        # Protocol + host checks
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid protocol")
+        if not parsed.hostname:
+            raise ValueError("Invalid host")
+        
+        return urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
 
 # ============================================================================
     
@@ -339,7 +359,8 @@ def oidc_test_connection():
     # Step 2: Test authorization endpoint
     try:
         skip_ssl = bool(config.get('oidc_skip_ssl_verify', False))
-        resp = requests.get(endpoints['authorization'], allow_redirects=False, timeout=10, verify=not skip_ssl)
+        validated_url = build_validated_url(endpoints['authorization'])
+        resp = requests.get(validated_url, allow_redirects=False, timeout=10, verify=not skip_ssl)
         # Auth endpoint should return 200 or redirect
         if resp.status_code in [200, 302, 400]:
             results.append({'step': 'Authorization Endpoint', 'status': 'ok', 'detail': endpoints['authorization']})
@@ -354,7 +375,8 @@ def oidc_test_connection():
 
     # Step 3: Test JWKS endpoint
     try:
-        resp = requests.get(endpoints['jwks'], timeout=10)
+        validated_url = build_validated_url(endpoints['jwks'])
+        resp = requests.get(validated_url, timeout=10)
         if resp.status_code == 200:
             keys = resp.json().get('keys', [])
             results.append({'step': 'JWKS Endpoint', 'status': 'ok', 'detail': f"Found {len(keys)} signing keys"})
