@@ -164,6 +164,7 @@ def broadcast_resources_loop():
                                     logging.info(f"[SSE] Cluster '{cid}' reconnected successfully "
                                                  f"after {attempt_count} attempt(s)!")
                                     mgr._reconnect_attempt_count = 0
+                                    mgr._sse_cooldown_until = 0  # clear any pending cooldown
                                     # only notify if last broadcast was >60s ago (avoid toast spam on WAN)
                                     last_notified = getattr(mgr, '_last_reconnect_broadcast', 0)
                                     if now - last_notified >= 60:
@@ -173,6 +174,17 @@ def broadcast_resources_loop():
                                             'cluster_id': cid,
                                             'message': f'Connection to cluster restored'
                                         }, cid)
+                                    # MK 2026-05-31 — push a fresh metrics
+                                    # snapshot immediately so the UI flips
+                                    # to "online" without waiting one full
+                                    # loop tick. Worst case the next-loop
+                                    # broadcast just re-confirms.
+                                    try:
+                                        _fresh = mgr.get_node_status()
+                                        if _fresh:
+                                            broadcast_sse('metrics', _fresh, cid)
+                                    except Exception:
+                                        pass
                                 else:
                                     logging.debug(f"[SSE] Cluster '{cid}' reconnect failed, will retry in 10s")
                             except Exception as e:
@@ -191,7 +203,7 @@ def broadcast_resources_loop():
                     except Exception as e:
                         logging.debug(f"[SSE] {cid} get_tasks failed: {e}")
                         # cooldown so we don't hammer a hung host
-                        mgr._sse_cooldown_until = time.time() + 15
+                        mgr._sse_cooldown_until = time.time() + 10
                         broadcast_sse('tasks', [], cid)
                         return
                     task_list = tasks or []
@@ -220,7 +232,7 @@ def broadcast_resources_loop():
                     except Exception as e:
                         # NS May 2026 — surface this in debug; cooldown if frequent
                         logging.debug(f"[SSE] {cid} get_node_status failed: {e}")
-                        mgr._sse_cooldown_until = time.time() + 15
+                        mgr._sse_cooldown_until = time.time() + 10
                     
                     # NS: Resources every loop now (was every 2nd loop)
                     # This makes VM status update much faster in the UI
