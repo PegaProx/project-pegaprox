@@ -2403,12 +2403,20 @@ def get_vms_backup_status(cluster_id):
         if verified_ts and verified_ts > rec['last_verify_ts']:
             rec['last_verify_ts'] = verified_ts
 
-    # PBS-side: walk all linked PBS servers, all datastores, all snapshots
-    for pbs_id, pbs in pbs_managers.items():
-        if cluster_id not in (pbs.linked_clusters or []):
-            continue
-        if not pbs.connected:
-            continue
+    # MK 2026-05-31 (F1b) — parallelise both fanouts: per-PBS-server and
+    # per-PVE-node. Each task collects (vmid, ts, encrypted, verified_ts)
+    # tuples in isolation, then we sequentially _bump them into by_vm at
+    # the end. This separates network I/O (parallel) from shared-state
+    # mutation (sequential) so we don't need a lock around by_vm.
+    #
+    # Was sequential: ΣPBS × Σdatastores + Σnodes × Σbackup-storages PVE
+    # calls back-to-back on one worker. With 2+ PBS servers + 6+ nodes this
+    # easily breached 10s and that's what was wedging /vms-backup-status.
+    from pegaprox.utils.concurrent import run_concurrent_dict
+
+    def _scan_pbs(pbs):
+        """Returns list of (vmid, ts, encrypted, verified_ts) tuples for one PBS server."""
+        bumps = []
         try:
             _ds = pbs.get_datastores() or {}
             stores = _ds.get('data', []) if isinstance(_ds, dict) else (_ds or [])
@@ -2432,50 +2440,91 @@ def get_vms_backup_status(cluster_id):
                 if not vmid:
                     continue
                 ts = sn.get('backup-time') or 0
-                # encryption: PBS marks it via files[].crypt-mode != 'none'
                 files = sn.get('files') or []
                 enc = any((f.get('crypt-mode') or 'none') != 'none' for f in files)
-                # verified state: PBS exposes 'verification' on the snapshot
                 verified_ts = 0
                 v = sn.get('verification') or {}
                 if v.get('state') == 'ok':
                     verified_ts = v.get('upid_time') or ts
                 try:
-                    _bump(int(vmid), ts, encrypted=enc, verified_ts=verified_ts)
+                    bumps.append((int(vmid), ts, enc, verified_ts))
                 except (ValueError, TypeError):
                     continue
+        return bumps
 
-    # PVE-side: scan dump-storages for vzdump files (best-effort — only counts)
-    try:
-        nodes = list(getattr(cm, '_cached_node_dict', {}) or [])
-        for node in (nodes or [n['node'] for n in (cm._api_get(f'https://{cm.host}:{cm.api_port}/api2/json/nodes').json().get('data', []) or [])]):
-            try:
-                r = cm._api_get(f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{node}/storage')
-                stores = r.json().get('data', []) if r.status_code == 200 else []
-            except Exception:
+    def _scan_node(node):
+        """Returns list of (vmid, ts, encrypted, 0) tuples for one PVE node's vzdump backups."""
+        bumps = []
+        try:
+            r = cm._api_get(f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{node}/storage')
+            stores = r.json().get('data', []) if r.status_code == 200 else []
+        except Exception:
+            return bumps
+        for s in stores:
+            if 'backup' not in (s.get('content') or ''):
                 continue
-            for s in stores:
-                if 'backup' not in (s.get('content') or ''):
+            if s.get('type') == 'pbs':
+                continue  # already counted PBS-side
+            store_name = s.get('storage')
+            try:
+                cr = cm._api_get(f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{node}/storage/{store_name}/content?content=backup')
+                items = cr.json().get('data', []) if cr.status_code == 200 else []
+            except Exception:
+                items = []
+            for it in items:
+                vmid = it.get('vmid')
+                ts = it.get('ctime') or 0
+                if vmid is None:
                     continue
-                if s.get('type') == 'pbs':
-                    continue  # already counted via PBS-side scan
-                store_name = s.get('storage')
                 try:
-                    cr = cm._api_get(f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{node}/storage/{store_name}/content?content=backup')
-                    items = cr.json().get('data', []) if cr.status_code == 200 else []
-                except Exception:
-                    items = []
-                for it in items:
-                    vmid = it.get('vmid')
-                    ts = it.get('ctime') or 0
-                    if vmid is None:
-                        continue
-                    try:
-                        _bump(int(vmid), ts, encrypted=bool(it.get('encryption')))
-                    except (ValueError, TypeError):
-                        continue
+                    bumps.append((int(vmid), ts, bool(it.get('encryption')), 0))
+                except (ValueError, TypeError):
+                    continue
+        return bumps
+
+    # PBS-side tasks: one per linked + connected PBS server
+    tasks = {}
+    for pbs_id, pbs in pbs_managers.items():
+        if cluster_id not in (pbs.linked_clusters or []):
+            continue
+        if not pbs.connected:
+            continue
+        tasks[f'pbs:{pbs_id}'] = (lambda p=pbs: _scan_pbs(p))
+
+    # PVE-side tasks: one per ONLINE node. Skip dead nodes — under parallel
+    # fanout they'd park the joinall() at the full timeout, dragging total
+    # wall-time. Sequential code happened to mask this because per-call
+    # connect-fail was fast; parallel waits the slowest call.
+    try:
+        nodes_data = []
+        try:
+            nodes_data = cm._api_get(
+                f'https://{cm.host}:{cm.api_port}/api2/json/nodes'
+            ).json().get('data', []) or []
+        except Exception:
+            nodes_data = []
+        for nd in nodes_data:
+            name = nd.get('node')
+            if not name:
+                continue
+            # PVE marks dead nodes 'offline' or status != 'online' on /nodes
+            status = (nd.get('status') or '').lower()
+            if status and status not in ('online', 'running'):
+                continue
+            tasks[f'node:{name}'] = (lambda nn=name: _scan_node(nn))
     except Exception as e:
-        logging.debug(f'[vms-backup-status] vzdump scan failed: {e}')
+        logging.debug(f'[vms-backup-status] node enum failed: {e}')
+
+    if tasks:
+        # Tight timeout: most PBS + healthy-node calls return in <2s. Anything
+        # stuck longer contributes None and we move on with partial data.
+        results = run_concurrent_dict(tasks, timeout=8)
+        for bumps in results.values():
+            for (vmid, ts, enc, verified_ts) in (bumps or []):
+                try:
+                    _bump(vmid, ts, encrypted=enc, verified_ts=verified_ts)
+                except (ValueError, TypeError):
+                    continue
 
     # Finalize ages
     out = []

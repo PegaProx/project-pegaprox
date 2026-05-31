@@ -761,15 +761,32 @@ def get_cluster_health(cluster_id):
             issues.append(f'{offline} node(s) offline: {", ".join(offline_names) or "?"}')
 
     # 2) Storage pressure — worst-offender across all nodes
+    # MK 2026-05-31 (F1a) — parallelise the per-node get_storage_list fanout.
+    # Was sequential: N nodes × ~200ms = up to 1.2s for a 6-node cluster, and
+    # one slow node could push past 5s. /health is dashboard-polled every
+    # ~10-20s, so this used to chew gevent workers. run_concurrent_dict skips
+    # the broken `if GEVENT_POOL` truthy check in the older inline callsites.
     worst_pct = 0.0
     worst_label = None
     try:
-        for node_name in ns.keys():
-            try:
-                stors = mgr.get_storage_list(node_name) or []
-            except Exception:
-                stors = []
-            for s in stors:
+        from pegaprox.utils.concurrent import run_concurrent_dict
+        # Only scan ONLINE nodes — a dead node's storage call would otherwise
+        # park the whole parallel batch at the 10s gevent-pool timeout (we'd
+        # be waiting for joinall to finish). Sequential code masked this
+        # because the connection failed fast, but parallel waits the full
+        # timeout. Net: post-parallelise /health was SLOWER on degraded
+        # clusters until this filter went in.
+        online_node_names = [
+            name for name, d in ns.items()
+            if (d.get('status') in ('online', 'running') or not d.get('offline'))
+        ]
+        if online_node_names:
+            tasks = {n: (lambda nn=n: mgr.get_storage_list(nn) or []) for n in online_node_names}
+            per_node_stors = run_concurrent_dict(tasks, timeout=8)
+        else:
+            per_node_stors = {}
+        for node_name, stors in per_node_stors.items():
+            for s in (stors or []):
                 if not s.get('active'):
                     continue
                 total = s.get('total') or 0
