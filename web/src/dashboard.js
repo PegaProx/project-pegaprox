@@ -5281,6 +5281,10 @@
         function InsightsTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
             const [rs, setRs] = React.useState(null);
             const [fc, setFc] = React.useState(null);
+            // LW May 2026 — top-N noisy neighbors card
+            const [top, setTop] = React.useState(null);
+            const [topMetric, setTopMetric] = React.useState('cpu');
+            const [topLoading, setTopLoading] = React.useState(false);
             const [loading, setLoading] = React.useState(false);
             const [forcing, setForcing] = React.useState(false);
             const [exporting, setExporting] = React.useState(false);
@@ -5297,6 +5301,17 @@
                     if (r2 && !r2.error) setFc(r2);
                 } finally { setLoading(false); }
             };
+
+            const refreshTop = async (metric) => {
+                if (!clusterId) return;
+                setTopLoading(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/insights/top-talkers?metric=${metric}&limit=10`).then(r => r?.json()).catch(() => null);
+                    if (r && !r.error) setTop(r);
+                } finally { setTopLoading(false); }
+            };
+
+            React.useEffect(() => { refreshTop(topMetric); /* eslint-disable-line */ }, [clusterId, topMetric]);
 
             const forceSnap = async () => {
                 setForcing(true);
@@ -5575,6 +5590,79 @@
                                 ))}
                             </div>
                         )}
+                    </div>
+
+                    {/* LW May 2026 — Top Talkers (noisy neighbors) */}
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                                <Icons.Activity className="w-4 h-4" />
+                                {t('topTalkers') || 'Top Talkers'}
+                                {top && <span className="text-xs text-gray-500 font-normal">
+                                    ({top.top?.length || 0} {t('of') || 'of'} {top.total_vms || 0} {t('runningVms') || 'running VMs'})
+                                </span>}
+                            </h3>
+                            <select value={topMetric} onChange={e => setTopMetric(e.target.value)}
+                                className="bg-proxmox-dark border border-proxmox-border rounded px-2 py-1 text-xs text-white">
+                                <option value="cpu">{t('cpuPercent') || 'CPU %'}</option>
+                                <option value="memory">{t('memoryPercent') || 'Memory %'}</option>
+                                <option value="disk_usage">{t('diskUsagePercent') || 'Disk %'}</option>
+                                <option value="disk_io">{t('diskIo') || 'Disk I/O (bytes total)'}</option>
+                                <option value="net_io">{t('netIo') || 'Net I/O (bytes total)'}</option>
+                            </select>
+                        </div>
+                        {topLoading && !top && <div className="text-sm text-gray-500">{t('loading') || 'Loading…'}</div>}
+                        {top && Array.isArray(top.top) && top.top.length > 0 && (
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="text-xs text-gray-400">
+                                        <tr>
+                                            <th className="text-left p-2 w-8">#</th>
+                                            <th className="text-left p-2">VM</th>
+                                            <th className="text-left p-2">Node</th>
+                                            <th className="text-right p-2">CPU</th>
+                                            <th className="text-right p-2">RAM</th>
+                                            <th className="text-right p-2">Disk</th>
+                                            <th className="text-right p-2">Disk I/O</th>
+                                            <th className="text-right p-2">Net I/O</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {top.top.map((vm, idx) => {
+                                            const fmtBytes = (n) => {
+                                                if (!n) return '0';
+                                                const u = ['B','KB','MB','GB','TB','PB'];
+                                                let i = Math.floor(Math.log10(n) / 3);
+                                                if (i < 0) i = 0; if (i >= u.length) i = u.length - 1;
+                                                return `${(n / Math.pow(1000, i)).toFixed(1)} ${u[i]}`;
+                                            };
+                                            const hi = (k) => topMetric === k ? 'bg-proxmox-orange/10' : '';
+                                            return (
+                                                <tr key={vm.vmid} className="border-t border-proxmox-border hover:bg-proxmox-dark/40">
+                                                    <td className="p-2 text-gray-500 font-mono">{idx + 1}</td>
+                                                    <td className="p-2">
+                                                        <span className="text-white font-medium">{vm.name}</span>
+                                                        <span className="text-xs text-gray-500 ml-2 font-mono">#{vm.vmid}</span>
+                                                    </td>
+                                                    <td className="p-2 text-gray-400">{vm.node}</td>
+                                                    <td className={`p-2 text-right font-mono ${hi('cpu')}`}>{vm.cpu_percent != null ? `${vm.cpu_percent.toFixed(1)}%` : '-'}</td>
+                                                    <td className={`p-2 text-right font-mono ${hi('memory')}`}>{vm.mem_percent != null ? `${vm.mem_percent.toFixed(1)}%` : '-'}</td>
+                                                    <td className={`p-2 text-right font-mono ${hi('disk_usage')}`}>{vm.disk_percent != null ? `${vm.disk_percent.toFixed(1)}%` : '-'}</td>
+                                                    <td className={`p-2 text-right font-mono ${hi('disk_io')}`}>{fmtBytes(vm.disk_io)}</td>
+                                                    <td className={`p-2 text-right font-mono ${hi('net_io')}`}>{fmtBytes(vm.net_io)}</td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                        {top && Array.isArray(top.top) && top.top.length === 0 && (
+                            <div className="text-sm text-gray-500">{t('noRunningVms') || 'No running VMs to rank.'}</div>
+                        )}
+                        <div className="text-xs text-gray-500 mt-2">
+                            {t('topTalkersHint') || 'CPU/RAM/Disk are instantaneous; Disk I/O and Net I/O are cumulative since VM boot (active VMs sort to the top).'}
+                        </div>
                     </div>
 
                     {/* Right-sizing */}

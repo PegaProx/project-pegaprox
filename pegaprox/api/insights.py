@@ -352,6 +352,84 @@ def capacity_forecast(cluster_id):
     })
 
 
+# MK May 2026 — top-N noisy neighbors. Pure aggregator over /cluster/resources,
+# no history needed. The cpu_percent + mem_percent are instantaneous; the
+# disk_io/net_io rankings sort by cumulative bytes since VM boot which is
+# fine as a "currently active VM" proxy. For real instantaneous rates we'd
+# need RRD deltas — not the use case operators are asking for here.
+_TOP_METRICS = {
+    'cpu':        ('cpu_percent', '%'),
+    'memory':     ('mem_percent', '%'),
+    'disk_usage': ('disk_percent', '%'),
+    'disk_io':    ('_disk_io', 'B'),   # diskread + diskwrite
+    'net_io':     ('_net_io', 'B'),    # netin + netout
+}
+
+
+@bp.route('/api/clusters/<cluster_id>/insights/top-talkers', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def top_talkers(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    metric = (request.args.get('metric') or 'cpu').lower()
+    if metric not in _TOP_METRICS:
+        return jsonify({'error': f'unknown metric (one of: {", ".join(_TOP_METRICS)})'}), 400
+
+    try:
+        limit = max(1, min(100, int(request.args.get('limit') or 10)))
+    except ValueError:
+        limit = 10
+
+    only_running = (request.args.get('status') or 'running').lower() != 'all'
+
+    mgr = cluster_managers[cluster_id]
+    if not mgr.is_connected:
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    vms = mgr.get_vm_resources() or []
+    if only_running:
+        vms = [v for v in vms if v.get('status') == 'running']
+
+    # synth composite IO fields once
+    for v in vms:
+        v['_disk_io'] = (v.get('diskread') or 0) + (v.get('diskwrite') or 0)
+        v['_net_io'] = (v.get('netin') or 0) + (v.get('netout') or 0)
+
+    sort_key, unit = _TOP_METRICS[metric]
+    vms.sort(key=lambda x: x.get(sort_key) or 0, reverse=True)
+    top = vms[:limit]
+
+    # trim payload to what the UI cares about
+    out = []
+    for v in top:
+        out.append({
+            'vmid': v.get('vmid'),
+            'name': v.get('name') or f"VM {v.get('vmid')}",
+            'type': v.get('type'),
+            'node': v.get('node'),
+            'status': v.get('status'),
+            'cpu_percent': v.get('cpu_percent'),
+            'mem_percent': v.get('mem_percent'),
+            'disk_percent': v.get('disk_percent'),
+            'disk_io': v.get('_disk_io'),
+            'net_io': v.get('_net_io'),
+            'uptime': v.get('uptime'),
+            'value': v.get(sort_key) or 0,
+        })
+
+    return jsonify({
+        'metric': metric,
+        'unit': unit,
+        'limit': limit,
+        'only_running': only_running,
+        'total_vms': len(vms),
+        'top': out,
+    })
+
+
 @bp.route('/api/insights/force-snapshot', methods=['POST'])
 @require_auth(perms=['admin.api'])
 def force_snapshot():
