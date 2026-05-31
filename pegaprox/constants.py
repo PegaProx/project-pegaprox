@@ -9,7 +9,7 @@ from pathlib import Path
 
 # Version
 PEGAPROX_VERSION = "Beta 0.9.12.0"
-PEGAPROX_BUILD = "2026.05.30"
+PEGAPROX_BUILD = "2026.05.31"
 
 # File Paths & Directories
 CONFIG_DIR = 'config'
