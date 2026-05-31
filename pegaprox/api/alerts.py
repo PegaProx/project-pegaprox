@@ -671,7 +671,7 @@ def alerts_force_check():
         A.check_and_send_alerts()
         return jsonify({'ok': True, 'evaluations': A._last_eval})
     except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return jsonify({'ok': False, 'error': safe_error(e)}), 500
 
 
 # =====================================================

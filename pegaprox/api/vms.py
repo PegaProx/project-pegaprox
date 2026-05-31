@@ -2352,11 +2352,11 @@ def test_node_connection(cluster_id):
     except paramiko.AuthenticationException:
         return jsonify({'success': False, 'error': 'Authentication failed. Check username/password.'}), 401
     except paramiko.SSHException as e:
-        return jsonify({'success': False, 'error': f'SSH error: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': safe_error(e, 'SSH error')}), 500
     except socket.timeout:
         return jsonify({'success': False, 'error': 'Connection timeout. Check IP and network.'}), 500
     except Exception as e:
-        return jsonify({'success': False, 'error': f'Connection failed: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': safe_error(e, 'Connection failed')}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/join', methods=['POST'])
@@ -4058,7 +4058,7 @@ def get_vm_guest_file_read_api(cluster_id, node, vm_type, vmid):
             })
         return jsonify({'error': resp.text or f'HTTP {resp.status_code}'}), resp.status_code
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/rrd/<timeframe>', methods=['GET'])
@@ -4262,7 +4262,7 @@ def fix_vm_qemu_args(cluster_id, node, vmid):
             'message': 'args updated' if changed else 'args already match current disks'
         })
     except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return jsonify({'ok': False, 'error': safe_error(e)}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/passthrough', methods=['GET'])
@@ -5044,7 +5044,7 @@ def get_snapshot_config_api(cluster_id, node, vm_type, vmid, snapname):
             return jsonify({'error': f'Failed to fetch snapshot config (status {getattr(r, "status_code", "?")})'}), 502
         return jsonify(r.json().get('data', {}) or {})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/snapshots/diff', methods=['GET'])

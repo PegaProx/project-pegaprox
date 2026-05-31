@@ -1103,7 +1103,7 @@ def get_cpu_compatibility(cluster_id):
         matrix = mgr._get_cpu_compatibility_matrix()
         return jsonify(matrix)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/predictive-analysis', methods=['GET'])

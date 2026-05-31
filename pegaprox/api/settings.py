@@ -3006,7 +3006,7 @@ def public_status_api():
     except ImportError:
         return jsonify({'error': 'Status Page plugin not loaded'}), 404
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 @bp.route('/portal')
 @bp.route('/portal/<path:subpath>')

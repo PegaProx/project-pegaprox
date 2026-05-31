@@ -24,6 +24,7 @@ from pegaprox.models.permissions import ROLE_ADMIN
 from pegaprox.core.db import get_db
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.api.helpers import safe_error
 
 bp = Blueprint('plugins', __name__)
 
@@ -471,7 +472,7 @@ def get_plugin_config(plugin_id):
     try:
         return jsonify({'config': config_path.read_text(encoding='utf-8')})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/plugins/<plugin_id>/config', methods=['PUT'])

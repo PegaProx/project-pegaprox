@@ -144,7 +144,7 @@ def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
 
     except Exception as e:
         logging.error(f"rbd SSH error on {node_ip}: {e}")
-        return None, (jsonify({'error': f'SSH error: {str(e)}'}), 503)
+        return None, (jsonify({'error': safe_error(e, 'SSH error')}), 503)
     finally:
         if ssh:
             try:

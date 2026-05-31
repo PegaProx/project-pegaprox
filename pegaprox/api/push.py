@@ -42,6 +42,7 @@ from cryptography.hazmat.backends import default_backend
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.core.db import get_db
+from pegaprox.api.helpers import safe_error
 
 bp = Blueprint('push', __name__)
 
@@ -450,7 +451,7 @@ def subscribe():
         get_db().conn.commit()
         return jsonify({'ok': True})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/push/unsubscribe', methods=['POST'])
@@ -466,7 +467,7 @@ def unsubscribe():
         get_db().conn.commit()
         return jsonify({'ok': True})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/push/subscriptions', methods=['GET'])
@@ -486,7 +487,7 @@ def list_subs():
             out.append(d)
         return jsonify({'subscriptions': out})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/push/test', methods=['POST'])
@@ -526,7 +527,7 @@ def inbox():
         rows = [dict(r) for r in c.fetchall()]
         return jsonify({'items': rows})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/push/inbox/clear', methods=['POST'])
@@ -540,4 +541,4 @@ def inbox_clear():
         get_db().conn.commit()
         return jsonify({'ok': True})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500

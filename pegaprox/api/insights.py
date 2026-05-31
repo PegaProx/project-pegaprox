@@ -19,7 +19,7 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
-from pegaprox.api.helpers import check_cluster_access
+from pegaprox.api.helpers import check_cluster_access, safe_error
 from pegaprox.core.db import get_db
 
 bp = Blueprint('insights', __name__)
@@ -544,4 +544,4 @@ def force_snapshot():
             }
         return jsonify(out)
     except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        return jsonify({'ok': False, 'error': safe_error(e)}), 500

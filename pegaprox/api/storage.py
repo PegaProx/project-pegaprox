@@ -2251,7 +2251,7 @@ def get_node_storage_identity(cluster_id, node, storage):
             return jsonify({'supported': True, **data})
         return jsonify({'error': resp.text or f'HTTP {resp.status_code}'}), resp.status_code
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/storage/<storage>/download-url', methods=['POST'])

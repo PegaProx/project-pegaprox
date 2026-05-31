@@ -1886,7 +1886,7 @@ def start_backup_verification(cluster_id):
     try:
         task_id = start_verification(pve_mgr, data)
     except Exception as e:
-        return jsonify({'error': str(e)}), 409
+        return jsonify({'error': safe_error(e)}), 409
 
     user = request.session.get('user', 'system')
     log_audit(user, 'backup.verify_started',
@@ -2011,7 +2011,7 @@ def probe_pbs_fingerprint():
     except (_sock.gaierror, ConnectionRefusedError, OSError) as e:
         return jsonify({'error': f'cannot reach {host}:{port}: {e}'}), 502
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/pbs/<pbs_id>/health', methods=['GET'])
@@ -2620,7 +2620,7 @@ def run_backup_job_now(cluster_id, job_id):
             return jsonify({'success': True, 'upid': upid, 'node': pve_node})
         return jsonify({'error': r.text or f'HTTP {r.status_code}'}), r.status_code
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/backup-restore', methods=['POST'])
@@ -2668,7 +2668,7 @@ def restore_backup(cluster_id):
             })
             return jsonify({'success': True, 'task_id': task_id, 'mode': 'test'})
         except Exception as e:
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': safe_error(e)}), 500
 
     # Choose vm_type from volid: pbs:backup/vm/100/... vs pbs:backup/ct/100/...
     is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid
@@ -2701,7 +2701,7 @@ def restore_backup(cluster_id):
             err = r.text or f'HTTP {r.status_code}'
         return jsonify({'error': err, 'pve_status': r.status_code}), r.status_code
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/pbs/<pbs_id>/backup-diff', methods=['GET'])

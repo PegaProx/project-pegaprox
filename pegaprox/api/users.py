@@ -1829,7 +1829,7 @@ def create_user_folder():
         db.conn.commit()
         return jsonify({'success': True, 'id': fid})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/user-folders/<folder_id>', methods=['PUT'])
@@ -1850,7 +1850,7 @@ def update_user_folder(folder_id):
         db.conn.commit()
         return jsonify({'success': True})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
 
 
 @bp.route('/api/user-folders/<folder_id>', methods=['DELETE'])
@@ -1870,4 +1870,4 @@ def delete_user_folder(folder_id):
         db.conn.commit()
         return jsonify({'success': True})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': safe_error(e)}), 500
