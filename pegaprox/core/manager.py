@@ -1287,7 +1287,11 @@ class PegaProxManager:
                     return (node_name, node, status_data, netio)
                 
                 # parallel if available
-                if GEVENT_AVAILABLE and GEVENT_POOL:
+                # MK 2026-05-31 — paired with run_concurrent helper bugfix;
+                # the same `and GEVENT_POOL` truthy bug used to make this
+                # silently sequential. `is not None` flips it actually
+                # parallel. Callbacks here are pure reads → safe to fan out.
+                if GEVENT_AVAILABLE and GEVENT_POOL is not None:
                     tasks = [lambda n=node: fetch_node_details(n) for node in nodes]
                     results = run_concurrent(tasks, timeout=15.0)
                 else:
