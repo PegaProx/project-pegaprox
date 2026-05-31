@@ -1110,6 +1110,7 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/time`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
                         ],
                         disks: [
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/disks`,
@@ -1144,6 +1145,7 @@
                         newData.time = results[2] || {};
                         newData.syslog = results[3] || [];
                         newData.certificates = results[4] || [];
+                        newData.clusterHealth = (results[5] && !results[5].error) ? results[5] : null;
                     }
                     else if (tab === 'disks') {
                         newData.disks = results[0] || [];
@@ -2266,6 +2268,79 @@
 
                                     {activeTab === 'system' && (
                                         <div className="space-y-6">
+                                            {/* MK May 2026 — Cluster Health panel (corosync rings + pvecm quorum + service state) */}
+                                            {data.clusterHealth && (
+                                                <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <h4 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.Shield className="w-4 h-4" />
+                                                            {t('clusterHealth') || 'Cluster Health'}
+                                                        </h4>
+                                                        <button onClick={() => loadTabData('system')}
+                                                            className="p-1.5 hover:bg-proxmox-hover rounded text-gray-400 hover:text-white">
+                                                            <Icons.RefreshCw className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                    {/* pvecm quorum */}
+                                                    {data.clusterHealth.pvecm && (
+                                                        <div className="mb-3">
+                                                            <div className="text-xs text-gray-400 mb-1">{t('quorum') || 'Quorum'}</div>
+                                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                                                                <div><span className="text-gray-500">{t('status') || 'Status'}:</span>
+                                                                    <span className="ml-2 font-medium" style={{color: data.clusterHealth.pvecm.quorate === 'Yes' ? '#60b515' : '#f54f47'}}>
+                                                                        {data.clusterHealth.pvecm.quorate || '?'}
+                                                                    </span>
+                                                                </div>
+                                                                {data.clusterHealth.pvecm.cluster_name && <div><span className="text-gray-500">{t('clusterName') || 'Name'}:</span><span className="ml-2 text-white font-mono">{data.clusterHealth.pvecm.cluster_name}</span></div>}
+                                                                {data.clusterHealth.pvecm.total_votes != null && <div><span className="text-gray-500">{t('votes') || 'Votes'}:</span><span className="ml-2 text-white font-mono">{data.clusterHealth.pvecm.total_votes} / {data.clusterHealth.pvecm.expected_votes ?? '?'}</span></div>}
+                                                                {data.clusterHealth.pvecm.config_version != null && <div><span className="text-gray-500">{t('configVersion') || 'Config v'}:</span><span className="ml-2 text-white font-mono">{data.clusterHealth.pvecm.config_version}</span></div>}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {/* corosync rings */}
+                                                    {data.clusterHealth.corosync?.rings?.length > 0 && (
+                                                        <div className="mb-3">
+                                                            <div className="text-xs text-gray-400 mb-1">{t('corosyncRings') || 'Corosync Rings'}</div>
+                                                            <table className="w-full text-sm">
+                                                                <thead className="text-xs text-gray-500"><tr><th className="text-left p-1">Ring</th><th className="text-left p-1">{t('address') || 'Address'}</th><th className="text-left p-1">{t('status') || 'Status'}</th><th className="text-right p-1">{t('nodes') || 'Nodes'}</th></tr></thead>
+                                                                <tbody>
+                                                                    {data.clusterHealth.corosync.rings.map((r, idx) => {
+                                                                        const ok = (r.status || '').toLowerCase().includes('active') || (r.status || '').toLowerCase().includes('connected');
+                                                                        return (
+                                                                            <tr key={r.id ?? idx} className="border-t border-proxmox-border">
+                                                                                <td className="p-1 font-mono">{r.id ?? '?'}</td>
+                                                                                <td className="p-1 font-mono text-gray-300">{r.address || '-'}</td>
+                                                                                <td className="p-1" style={{color: ok ? '#60b515' : '#efc006'}}>{r.status || '-'}</td>
+                                                                                <td className="p-1 text-right font-mono">{r.nodes ?? '-'}</td>
+                                                                            </tr>
+                                                                        );
+                                                                    })}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    )}
+                                                    {/* services */}
+                                                    {data.clusterHealth.services?.length > 0 && (
+                                                        <div>
+                                                            <div className="text-xs text-gray-400 mb-1">{t('services') || 'Services'}</div>
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-2">
+                                                                {data.clusterHealth.services.map(s => {
+                                                                    const ok = s.active === 'active';
+                                                                    const bad = s.active === 'failed' || s.result === 'failure';
+                                                                    const clr = bad ? '#f54f47' : ok ? '#60b515' : '#efc006';
+                                                                    return (
+                                                                        <div key={s.name} className="p-2 bg-proxmox-card rounded border border-proxmox-border">
+                                                                            <div className="text-xs font-mono text-white">{s.name}</div>
+                                                                            <div className="text-xs" style={{color: clr}}>{s.active || '?'}{s.sub && s.sub !== 'running' ? ` (${s.sub})` : ''}</div>
+                                                                            {s.since && <div className="text-[10px] text-gray-500 truncate" title={s.since}>{t('since') || 'since'} {s.since.split(' ').slice(0,2).join(' ')}</div>}
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
                                             {/* DNS */}
                                             <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                 <div className="flex justify-between items-center mb-4">
@@ -4164,6 +4239,7 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/time`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
                         ],
                         disks: [
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/disks`,

@@ -3981,6 +3981,11 @@
                 clockSkew: 'Uhr-Drift',
                 filesystems: 'Dateisysteme',
                 interfaces: 'Interfaces',
+                // MK + LW 2026-05-31 — cluster health panel
+                configVersion: 'Config v',
+                corosyncRings: 'Corosync-Ringe',
+                address: 'Adresse',
+                services: 'Dienste',
             },
             en: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -7884,6 +7889,11 @@
                 bulkAction: 'Action',
                 shortcutsHint: 'Press ? for shortcuts',
                 themeToggle: 'Toggle theme',
+                // MK + LW 2026-05-31 — cluster health panel
+                configVersion: 'Config v',
+                corosyncRings: 'Corosync Rings',
+                address: 'Address',
+                services: 'Services',
                 // MK + LW 2026-05-31 — guest-agent enrichment
                 guestDetail: 'Guest detail',
                 loggedInUsers: 'Logged-in users',
@@ -11579,6 +11589,11 @@
                 clockSkew: 'Décalage d\'horloge',
                 filesystems: 'Systèmes de fichiers',
                 interfaces: 'Interfaces',
+                // MK + LW 2026-05-31 — cluster health panel
+                configVersion: 'Config v',
+                corosyncRings: 'Anneaux Corosync',
+                address: 'Adresse',
+                services: 'Services',
             },
             es: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -15396,6 +15411,11 @@
                 clockSkew: 'Desfase del reloj',
                 filesystems: 'Sistemas de archivos',
                 interfaces: 'Interfaces',
+                // MK + LW 2026-05-31 — cluster health panel
+                configVersion: 'Config v',
+                corosyncRings: 'Anillos Corosync',
+                address: 'Dirección',
+                services: 'Servicios',
             },
             pt: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -19013,6 +19033,11 @@
                 clockSkew: 'Desvio do relógio',
                 filesystems: 'Sistemas de ficheiros',
                 interfaces: 'Interfaces',
+                // MK + LW 2026-05-31 — cluster health panel
+                configVersion: 'Config v',
+                corosyncRings: 'Anéis Corosync',
+                address: 'Endereço',
+                services: 'Serviços',
             },
             ko: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -22694,6 +22719,16 @@
                 clockSkew: 'Sfasamento dell\'orologio',
                 filesystems: 'File system',
                 interfaces: 'Interfacce',
+                // MK + LW 2026-05-31 — cluster health panel
+                configVersion: '설정 버전',
+                corosyncRings: 'Corosync 링',
+                address: '주소',
+                services: '서비스',
+                // MK + LW 2026-05-31 — cluster health panel
+                configVersion: 'Config v',
+                corosyncRings: 'Anelli Corosync',
+                address: 'Indirizzo',
+                services: 'Servizi',
             },
             it: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings

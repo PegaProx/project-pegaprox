@@ -140,6 +140,22 @@ def get_node_netstats_api(cluster_id, node):
     return jsonify(result)
 
 
+# MK May 2026 — cluster health: corosync ring + pvecm quorum + service state.
+# /cluster/status gives "are we quorate" but not ring latency, per-service
+# uptime, or per-ring health — chasing a flapping cluster needs all three.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/cluster-health', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_cluster_health_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    result = cluster_managers[cluster_id].get_node_cluster_health(node)
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify(result), 502
+    return jsonify(result)
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])
 @require_auth(perms=['node.network'])
 def update_node_network_api(cluster_id, node, iface):

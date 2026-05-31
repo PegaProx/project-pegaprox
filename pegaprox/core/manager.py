@@ -12830,6 +12830,97 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    def get_node_cluster_health(self, node: str) -> Dict[str, Any]:
+        # MK May 2026 — SSH-side cluster health: corosync ring status,
+        # pvecm quorum + per-service uptime. PVE's REST `/cluster/status`
+        # gives the high-level "are we quorate" answer but not ring latency,
+        # service uptime, or per-ring health. operators chasing a flapping
+        # cluster want all three on one page.
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'error': 'cluster not connected'}
+        ip = self._get_node_ip(node)
+        if not ip:
+            return {'error': f'no SSH-reachable IP for node {node}'}
+        user = getattr(self.config, 'ssh_user', None) or 'root'
+
+        out = {'corosync': None, 'pvecm': None, 'services': []}
+
+        # corosync-cfgtool -s : ring status
+        cfg = self._ssh_run_command_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8)
+        if cfg:
+            rings = []
+            cur = None
+            for line in cfg.splitlines():
+                line = line.strip()
+                if not line: continue
+                if line.startswith('LINK ID'):
+                    if cur: rings.append(cur)
+                    cur = {'raw': [line]}
+                    try:
+                        cur['id'] = int(line.split()[2])
+                    except Exception:
+                        pass
+                elif cur is not None:
+                    cur['raw'].append(line)
+                    low = line.lower()
+                    if 'addr' in low and '=' in line:
+                        cur['address'] = line.split('=', 1)[1].strip()
+                    elif 'status' in low:
+                        cur['status'] = line.split(':', 1)[-1].strip() if ':' in line else line
+                    elif 'nodes' in low and '=' in line:
+                        try: cur['nodes'] = int(line.split('=', 1)[1].strip())
+                        except Exception: pass
+            if cur: rings.append(cur)
+            out['corosync'] = {'rings': rings}
+
+        # pvecm status: quorum + votes
+        pvecm = self._ssh_run_command_output(ip, user, 'pvecm status 2>&1', timeout=8)
+        if pvecm:
+            info = {}
+            for line in pvecm.splitlines():
+                low = line.lower()
+                if 'quorate' in low and ':' in line:
+                    info['quorate'] = line.split(':', 1)[1].strip()
+                elif 'expected votes' in low and ':' in line:
+                    try: info['expected_votes'] = int(line.split(':', 1)[1].strip())
+                    except Exception: pass
+                elif 'total votes' in low and ':' in line:
+                    try: info['total_votes'] = int(line.split(':', 1)[1].strip())
+                    except Exception: pass
+                elif 'highest expected' in low and ':' in line:
+                    try: info['highest_expected'] = int(line.split(':', 1)[1].strip())
+                    except Exception: pass
+                elif 'cluster name' in low and ':' in line:
+                    info['cluster_name'] = line.split(':', 1)[1].strip()
+                elif 'config version' in low and ':' in line:
+                    try: info['config_version'] = int(line.split(':', 1)[1].strip())
+                    except Exception: pass
+                elif 'nodes:' == low.strip() or 'membership information' in low:
+                    pass
+            out['pvecm'] = info
+
+        # systemctl per-service state for the cluster-critical units
+        SERVICES = ['pveproxy', 'pvedaemon', 'pve-cluster', 'corosync', 'pvestatd']
+        for svc in SERVICES:
+            # `systemctl show -p ActiveState,SubState,ActiveEnterTimestamp <svc>`
+            out_text = self._ssh_run_command_output(
+                ip, user,
+                f'systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,Result {svc} 2>&1',
+                timeout=8)
+            row = {'name': svc, 'active': None, 'sub': None, 'since': None, 'result': None}
+            if out_text:
+                for line in out_text.splitlines():
+                    if '=' in line:
+                        k, _, v = line.partition('=')
+                        if k == 'ActiveState': row['active'] = v
+                        elif k == 'SubState': row['sub'] = v
+                        elif k == 'ActiveEnterTimestamp': row['since'] = v
+                        elif k == 'Result': row['result'] = v
+            out['services'].append(row)
+
+        return out
+
     def get_node_netstats(self, node: str) -> Dict[str, Any]:
         # MK May 2026 — per-NIC error/drop counters. PVE API has aggregate
         # netin/netout in /rrddata but never per-NIC errors, which is the
