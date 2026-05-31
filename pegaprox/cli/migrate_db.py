@@ -258,8 +258,17 @@ def _row_counts_plain(path: str) -> Dict[str, int]:
         for (t,) in c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name NOT LIKE 'sqlite_%'").fetchall():
+            # MK 2026-05-31 — v0.9.10.1 hotfix added _safe_quote_ident to the
+            # encrypted variant below but missed this plain-text path.
+            # Same defense-in-depth treatment: route table name through the
+            # whitelist+quote helper instead of raw f-stringing into SELECT.
+            quoted = _safe_quote_ident(t)
+            if not quoted:
+                _LOG.warning("[MIGRATE] skipping table with unsafe name: %r", t)
+                out[t] = -1
+                continue
             try:
-                out[t] = c.execute(f"SELECT COUNT(*) FROM \"{t}\"").fetchone()[0]
+                out[t] = c.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
             except Exception:
                 out[t] = -1   # unreadable, will mismatch and trigger error
         return out

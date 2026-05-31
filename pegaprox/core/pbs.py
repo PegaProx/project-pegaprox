@@ -816,28 +816,55 @@ class PBSManager:
         return self.api_delete(f'/nodes/localhost/tasks/{upid}')
     
     # ── Notification CRUD ──
-    
+    # MK 2026-05-31 — defense-in-depth: previous code unpacked `**kwargs`
+    # straight into the PBS API call body. An admin with notification-manage
+    # perm could inject arbitrary field names which PBS might silently store
+    # in the config file. PBS / PVE field-naming convention is
+    # `^[a-z][a-z0-9-]{0,30}$`, values are scalars or None — anything else is
+    # treated as bogus and dropped. The traffic_control methods below already
+    # had explicit whitelisting; this brings notifications inline.
+    @staticmethod
+    def _sanitize_pbs_kwargs(kwargs: dict) -> dict:
+        import re as _re
+        _key_re = _re.compile(r'^[a-z][a-z0-9-]{0,30}$')
+        clean = {}
+        for k, v in (kwargs or {}).items():
+            if not isinstance(k, str) or not _key_re.match(k):
+                continue
+            if v is None:
+                continue
+            if isinstance(v, (list, tuple)):
+                # PBS arrays-as-CSV — only accept lists of scalars
+                if all(isinstance(x, (str, int, bool)) for x in v):
+                    clean[k] = v
+                continue
+            if isinstance(v, (str, int, bool)):
+                clean[k] = v
+        return clean
+
     def create_notification_target(self, target_type: str, name: str, **kwargs) -> dict:
         """Create notification endpoint (sendmail, gotify, smtp, webhook)"""
-        data = {'name': name, **kwargs}
+        data = {'name': name, **self._sanitize_pbs_kwargs(kwargs)}
         return self.api_post(f'/config/notifications/endpoints/{target_type}', data=data)
-    
+
     def update_notification_target(self, target_type: str, name: str, **kwargs) -> dict:
         """Update notification endpoint"""
-        return self.api_put(f'/config/notifications/endpoints/{target_type}/{name}', data=kwargs)
-    
+        return self.api_put(f'/config/notifications/endpoints/{target_type}/{name}',
+                            data=self._sanitize_pbs_kwargs(kwargs))
+
     def delete_notification_target(self, target_type: str, name: str) -> dict:
         """Delete notification endpoint"""
         return self.api_delete(f'/config/notifications/endpoints/{target_type}/{name}')
-    
+
     def create_notification_matcher(self, name: str, **kwargs) -> dict:
         """Create notification matcher rule"""
-        data = {'name': name, **kwargs}
+        data = {'name': name, **self._sanitize_pbs_kwargs(kwargs)}
         return self.api_post('/config/notifications/matchers', data=data)
-    
+
     def update_notification_matcher(self, name: str, **kwargs) -> dict:
         """Update notification matcher"""
-        return self.api_put(f'/config/notifications/matchers/{name}', data=kwargs)
+        return self.api_put(f'/config/notifications/matchers/{name}',
+                            data=self._sanitize_pbs_kwargs(kwargs))
     
     def delete_notification_matcher(self, name: str) -> dict:
         """Delete notification matcher"""

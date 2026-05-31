@@ -85,9 +85,24 @@ def oidc_authorize():
     is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
     # #188: store state + nonce + PKCE code_verifier in cookie
     # NS: Apr 2026 - append redirect_after for portal OIDC flow
+    # MK 2026-05-31 — defense-in-depth: `startswith('/')` allows `//attacker.com`
+    # (protocol-relative URL), bypassing the intent. Require single leading
+    # slash + reject any embedded `//`, `\\`, control chars, or fragment-like
+    # constructs. Net effect: only same-origin internal paths get persisted.
+    def _safe_internal_path(p):
+        if not p or not isinstance(p, str) or len(p) > 200:
+            return False
+        if not p.startswith('/'):
+            return False
+        if p.startswith('//') or p.startswith('/\\'):
+            return False  # protocol-relative
+        if any(c in p for c in ('\r', '\n', '\t', '\\')):
+            return False  # control chars / backslash tricks
+        return True
+
     redirect_after = request.args.get('redirect_after', '')
     cookie_val = f"{state}:{nonce}:{code_verifier}"
-    if redirect_after and redirect_after.startswith('/'):
+    if _safe_internal_path(redirect_after):
         cookie_val += f":{redirect_after}"
     response.set_cookie('oidc_state', cookie_val, httponly=True, secure=is_secure, samesite='Lax', max_age=600)
     return response

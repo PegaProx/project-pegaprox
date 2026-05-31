@@ -39,8 +39,14 @@
                     .then(data => {
                         if (data.success) {
                             // NS: Apr 2026 - redirect to portal if OIDC flow was started from there
-                            if (data.redirect_after && data.redirect_after.startsWith('/')) {
-                                window.location.href = data.redirect_after;
+                            // LW May 2026 — backend filters strictly, but enforce the
+                            // same rule client-side too: single leading /, not //
+                            // (protocol-relative), no backslash, no control chars.
+                            const ra = data.redirect_after;
+                            if (ra && typeof ra === 'string' && ra.length < 200
+                                && ra.charAt(0) === '/' && ra.charAt(1) !== '/' && ra.charAt(1) !== '\\'
+                                && !/[\r\n\t\\]/.test(ra)) {
+                                window.location.href = ra;
                                 return;
                             }
                             // Clear URL params and reload to authenticated state
