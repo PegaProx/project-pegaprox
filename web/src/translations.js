@@ -3998,6 +3998,7 @@
                 tag: 'Tag',
                 noGroupings: 'Noch keine VMs gruppiert.',
                 rollupsHint: 'VMs mit mehreren Tags zählen in jeder Tag-Auswertung. CPU ist die Summe der Momentan-%; RAM/Disk sind Füllraten; Net I/O ist kumulativ seit VM-Start.',
+                clusterHealthSshMissing: 'Cluster Health benötigt SSH-Zugriff von PegaProx auf den Node (corosync-cfgtool, pvecm, systemctl). Bitte die Node-Shell-SSH-Credentials des Clusters konfigurieren und neu laden.',
             },
             en: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -7901,6 +7902,7 @@
                 bulkAction: 'Action',
                 shortcutsHint: 'Press ? for shortcuts',
                 themeToggle: 'Toggle theme',
+                clusterHealthSshMissing: 'Cluster Health needs SSH access to the node from PegaProx (corosync-cfgtool, pvecm, systemctl). Configure the cluster\'s Node-Shell SSH credentials and refresh.',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Rollups',
                 pools: 'pools',
@@ -11630,6 +11632,7 @@
                 tag: 'Tag',
                 noGroupings: 'Aucune VM groupée pour le moment.',
                 rollupsHint: 'Les VM ayant plusieurs tags sont comptées dans chaque agrégation de tag. CPU est la somme des % instantanés ; RAM/Disque sont des ratios de remplissage ; E/S réseau cumulés depuis le démarrage.',
+                clusterHealthSshMissing: 'Cluster Health a besoin d\'un accès SSH au nœud depuis PegaProx (corosync-cfgtool, pvecm, systemctl). Configurez les identifiants SSH Node-Shell du cluster et actualisez.',
             },
             es: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -15464,6 +15467,7 @@
                 tag: 'Etiqueta',
                 noGroupings: 'Aún no hay VMs agrupadas.',
                 rollupsHint: 'Las VMs con múltiples etiquetas cuentan en cada agregación. CPU es la suma de % instantáneos; RAM/Disco son ratios de llenado; E/S de red son acumuladas desde el arranque.',
+                clusterHealthSshMissing: 'Cluster Health requiere acceso SSH al nodo desde PegaProx (corosync-cfgtool, pvecm, systemctl). Configure las credenciales SSH de Node-Shell del clúster y actualice.',
             },
             pt: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -19098,6 +19102,7 @@
                 tag: 'Tag',
                 noGroupings: 'Ainda não há VMs agrupadas.',
                 rollupsHint: 'VMs com vários tags contam em cada agregação. CPU é a soma de % instantâneos; RAM/Disco são rácios de preenchimento; E/S de rede são cumulativas desde o arranque.',
+                clusterHealthSshMissing: 'Cluster Health requer acesso SSH ao nó a partir do PegaProx (corosync-cfgtool, pvecm, systemctl). Configure as credenciais SSH de Node-Shell do cluster e atualize.',
             },
             ko: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -22813,6 +22818,8 @@
                 tag: 'Tag',
                 noGroupings: 'Nessuna VM raggruppata ancora.',
                 rollupsHint: 'Le VM con più tag contano in ogni aggregazione di tag. CPU è la somma delle % istantanee; RAM/Disco sono rapporti di riempimento; I/O di rete è cumulativo dall\'avvio.',
+                clusterHealthSshMissing: '클러스터 상태 확인은 PegaProx에서 노드로의 SSH 접근이 필요합니다 (corosync-cfgtool, pvecm, systemctl). 클러스터의 Node-Shell SSH 자격 증명을 설정하고 새로고침하세요.',
+                clusterHealthSshMissing: 'Cluster Health richiede l\'accesso SSH al nodo da PegaProx (corosync-cfgtool, pvecm, systemctl). Configura le credenziali SSH Node-Shell del cluster e aggiorna.',
             },
             it: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings

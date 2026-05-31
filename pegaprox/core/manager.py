@@ -13008,6 +13008,16 @@ echo "AGENT_INSTALLED_OK"
                         elif k == 'Result': row['result'] = v
             out['services'].append(row)
 
+        # MK 2026-05-31 — if SSH wasn't reachable, every call returns None
+        # and we used to surface that as 5 question-mark service cards which
+        # is just visual noise. Signal it explicitly so the UI can render a
+        # single "credentials not configured" message instead.
+        out['ssh_unavailable'] = (
+            out['corosync'] is None
+            and out['pvecm'] is None
+            and all(s.get('active') is None for s in out['services'])
+        )
+
         return out
 
     def get_node_netstats(self, node: str) -> Dict[str, Any]:

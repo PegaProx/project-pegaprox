@@ -2339,6 +2339,15 @@
                                                             <Icons.RefreshCw className="w-3.5 h-3.5" />
                                                         </button>
                                                     </div>
+                                                    {/* MK May 2026 — SSH unavailable: render a single explainer
+                                                        instead of five question-mark service cards. Surfaces
+                                                        in dev / fresh-install setups where the PegaProx user
+                                                        has no SSH key to the PVE nodes yet. */}
+                                                    {data.clusterHealth.ssh_unavailable ? (
+                                                        <div className="text-sm text-gray-400 italic">
+                                                            {t('clusterHealthSshMissing') || 'Cluster Health needs SSH access to the node from PegaProx (corosync-cfgtool, pvecm, systemctl). Configure the cluster\'s Node-Shell SSH credentials and refresh.'}
+                                                        </div>
+                                                    ) : (<>
                                                     {/* pvecm quorum */}
                                                     {data.clusterHealth.pvecm && (
                                                         <div className="mb-3">
@@ -2377,19 +2386,19 @@
                                                             </table>
                                                         </div>
                                                     )}
-                                                    {/* services */}
-                                                    {data.clusterHealth.services?.length > 0 && (
+                                                    {/* services — only when at least one had a real ActiveState */}
+                                                    {data.clusterHealth.services?.some(s => s.active) && (
                                                         <div>
                                                             <div className="text-xs text-gray-400 mb-1">{t('services') || 'Services'}</div>
                                                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-2">
-                                                                {data.clusterHealth.services.map(s => {
+                                                                {data.clusterHealth.services.filter(s => s.active).map(s => {
                                                                     const ok = s.active === 'active';
                                                                     const bad = s.active === 'failed' || s.result === 'failure';
                                                                     const clr = bad ? '#f54f47' : ok ? '#60b515' : '#efc006';
                                                                     return (
                                                                         <div key={s.name} className="p-2 bg-proxmox-card rounded border border-proxmox-border">
                                                                             <div className="text-xs font-mono text-white">{s.name}</div>
-                                                                            <div className="text-xs" style={{color: clr}}>{s.active || '?'}{s.sub && s.sub !== 'running' ? ` (${s.sub})` : ''}</div>
+                                                                            <div className="text-xs" style={{color: clr}}>{s.active}{s.sub && s.sub !== 'running' ? ` (${s.sub})` : ''}</div>
                                                                             {s.since && <div className="text-[10px] text-gray-500 truncate" title={s.since}>{t('since') || 'since'} {s.since.split(' ').slice(0,2).join(' ')}</div>}
                                                                         </div>
                                                                     );
@@ -2397,6 +2406,7 @@
                                                             </div>
                                                         </div>
                                                     )}
+                                                    </>)}
                                                 </div>
                                             )}
                                             {/* DNS */}
