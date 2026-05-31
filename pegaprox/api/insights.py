@@ -381,6 +381,15 @@ def rollups(cluster_id):
     if group_by not in ('tag', 'pool'):
         return jsonify({'error': 'group_by must be tag or pool'}), 400
 
+    # MK defense-in-depth — bound the rollup payload. Fleets with many
+    # distinct tags would otherwise return an unbounded list. Clamp to
+    # [1, 500] with default 100 — sorted by vm_count desc so the top
+    # groups are kept even when limit kicks in.
+    try:
+        limit = max(1, min(500, int(request.args.get('limit') or 100)))
+    except ValueError:
+        limit = 100
+
     mgr = cluster_managers[cluster_id]
     if not mgr.is_connected:
         return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
@@ -435,12 +444,17 @@ def rollups(cluster_id):
         g['disk_pct'] = round((g['disk_used_bytes'] / g['disk_max_bytes']) * 100, 1) if g['disk_max_bytes'] > 0 else 0
         g['cpu_sum_pct'] = round(g['cpu_sum_pct'], 1)
     rolled.sort(key=lambda r: r['vm_count'], reverse=True)
+    total_group_count = len(rolled)
+    truncated = total_group_count > limit
+    rolled = rolled[:limit]
 
     return jsonify({
         'group_by': group_by,
         'only_running': only_running,
         'total_vms': len(vms),
-        'group_count': len(rolled),
+        'group_count': total_group_count,
+        'truncated': truncated,
+        'limit': limit,
         'groups': rolled,
     })
 

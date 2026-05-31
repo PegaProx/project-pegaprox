@@ -123,6 +123,21 @@ def get_node_network_api(cluster_id, node):
     return jsonify(manager.get_node_network_config(node))
 
 
+# MK May 2026 — node-name regex (mirrors vms.py:2718 hardening). RFC-1035-ish
+# DNS rules: letter-led, then letters/digits/hyphen/dot, max ~63. Everything
+# else gets a 400 before the value flows into _get_node_ip() / PVE API URLs.
+_NODE_NAME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$')
+
+
+def _reject_bad_node(node):
+    """Return (None, None) if node looks valid, (response, 400) otherwise.
+    Used by the SSH-fronted node endpoints below as a defense-in-depth gate
+    even though the SSH commands themselves don't interpolate `node`."""
+    if not node or not _NODE_NAME_RE.match(node):
+        return jsonify({'error': 'Invalid node name'}), 400
+    return None, None
+
+
 # MK May 2026 — per-NIC error/drop counters (SSH /proc/net/dev).
 # PVE's own /network endpoint only carries bridge+bond config; for the
 # actual rx_err/rx_drop/tx_err counters operators need we have to read
@@ -132,6 +147,8 @@ def get_node_network_api(cluster_id, node):
 def get_node_netstats_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     result = cluster_managers[cluster_id].get_node_netstats(node)
@@ -148,6 +165,8 @@ def get_node_netstats_api(cluster_id, node):
 def get_node_cluster_health_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     result = cluster_managers[cluster_id].get_node_cluster_health(node)
@@ -164,6 +183,8 @@ def get_node_cluster_health_api(cluster_id, node):
 def get_node_sensors_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     result = cluster_managers[cluster_id].get_node_sensors(node)
