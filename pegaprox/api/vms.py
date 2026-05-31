@@ -3814,37 +3814,48 @@ def unlock_vm_api(cluster_id, node, vm_type, vmid):
 
 
 # NS: Issue #50 - Guest Agent info (hostname, OS, kernel)
+# MK May 2026 — additive enrichment for the monitoring panel: kernel_version,
+# interfaces[] (with MAC + per-NIC IPs), filesystems[], users[], guest_time_ns.
+# All existing fields stay unchanged — old UI consumers render exactly as before.
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/guest-info', methods=['GET'])
 @require_auth(perms=['vm.view'])
 def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
-    """Get QEMU Guest Agent info (hostname, OS version, kernel)"""
+    """Get QEMU Guest Agent info (hostname, OS, kernel, NICs, filesystems, users, clock)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     if vm_type != 'qemu':
         return jsonify({'agent_running': False}), 200
-    
+
     mgr = cluster_managers[cluster_id]
     result = {'agent_running': False, 'hostname': None, 'os_pretty_name': None,
               'os_id': None, 'os_version': None, 'os_kernel': None, 'os_machine': None,
-              'ip_addresses': []}
-    
+              'ip_addresses': [],
+              'kernel_version': None,
+              'interfaces': [],
+              'users': [],
+              'filesystems': [],
+              'guest_time_ns': None}
+
     try:
         session = mgr._create_session()
         base = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{vmid}/agent"
-        
+
         try:
             resp = session.get(f"{base}/get-host-name", timeout=8)
             if resp.status_code == 200:
                 data = resp.json().get('data', {}).get('result', {})
                 result['hostname'] = data.get('host-name')
                 result['agent_running'] = True
+            elif resp.status_code == 500 and 'not running' in (resp.text or '').lower():
+                # short-circuit: agent down, skip the 5 follow-up calls
+                return jsonify(result)
         except Exception:
             pass
-        
+
         try:
             resp = session.get(f"{base}/get-osinfo", timeout=8)
             if resp.status_code == 200:
@@ -3854,6 +3865,7 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
                 result['os_version'] = data.get('version-id') or data.get('version')
                 result['os_kernel'] = data.get('kernel-release')
                 result['os_machine'] = data.get('machine')
+                result['kernel_version'] = data.get('kernel-version')
                 result['agent_running'] = True
         except Exception:
             pass
@@ -3866,6 +3878,75 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
                 result['agent_running'] = True
         except Exception:
             pass
+
+        # MK: per-NIC detail (name + MAC + IPs from inside the guest)
+        try:
+            resp = session.get(f"{base}/network-get-interfaces", timeout=8)
+            if resp.status_code == 200:
+                nics = resp.json().get('data', {}).get('result', []) or []
+                ifaces = []
+                for nic in nics:
+                    nic_ips = [{'address': ip.get('ip-address'),
+                                'family': ip.get('ip-address-type'),
+                                'prefix': ip.get('prefix')}
+                               for ip in (nic.get('ip-addresses') or [])]
+                    ifaces.append({
+                        'name': nic.get('name'),
+                        'mac': nic.get('hardware-address'),
+                        'ips': nic_ips,
+                    })
+                result['interfaces'] = ifaces
+        except Exception:
+            pass
+
+        # MK: filesystems with real fill — same data as /guest-fsinfo, mirrored
+        # here so the detail panel does one round-trip instead of two.
+        try:
+            resp = session.get(f"{base}/get-fsinfo", timeout=8)
+            if resp.status_code == 200:
+                fsraw = resp.json().get('data', {}).get('result', []) or []
+                fslist = []
+                for fs in fsraw:
+                    total = fs.get('total-bytes'); used = fs.get('used-bytes')
+                    mt = fs.get('mountpoint')
+                    if not mt:
+                        continue
+                    pct = round((used / total) * 100, 1) if (isinstance(total,(int,float)) and total > 0 and isinstance(used,(int,float))) else None
+                    fslist.append({
+                        'name': fs.get('name'),
+                        'mountpoint': mt,
+                        'type': fs.get('type'),
+                        'used_bytes': used,
+                        'total_bytes': total,
+                        'used_pct': pct,
+                    })
+                result['filesystems'] = fslist
+        except Exception:
+            pass
+
+        # MK: logged-in users — "who's on this VM right now"
+        try:
+            resp = session.get(f"{base}/get-users", timeout=8)
+            if resp.status_code == 200:
+                ur = resp.json().get('data', {}).get('result', []) or []
+                if isinstance(ur, list):
+                    result['users'] = [{'user': u.get('user'),
+                                        'domain': u.get('domain'),
+                                        'login_time': u.get('login-time')}
+                                       for u in ur]
+        except Exception:
+            pass
+
+        # MK: guest clock vs host (ns since epoch) — ntp sanity check
+        try:
+            resp = session.get(f"{base}/get-time", timeout=8)
+            if resp.status_code == 200:
+                t = resp.json().get('data', {}).get('result')
+                if isinstance(t, (int, float)):
+                    result['guest_time_ns'] = t
+        except Exception:
+            pass
+
     except Exception as e:
         result['error'] = str(e)
 

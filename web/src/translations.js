@@ -3975,6 +3975,12 @@
                 errOrDropHint: 'Werte ungleich Null bei RX/TX errs / drops rot markiert. Zähler sind kumulativ seit dem Boot.',
                 keyAttributes: 'Wichtige Attribute',
                 allAttributes: 'Alle Attribute',
+                // MK + LW 2026-05-31 — guest-agent enrichment
+                guestDetail: 'Gast-Details',
+                loggedInUsers: 'Angemeldete Benutzer',
+                clockSkew: 'Uhr-Drift',
+                filesystems: 'Dateisysteme',
+                interfaces: 'Interfaces',
             },
             en: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -7878,6 +7884,12 @@
                 bulkAction: 'Action',
                 shortcutsHint: 'Press ? for shortcuts',
                 themeToggle: 'Toggle theme',
+                // MK + LW 2026-05-31 — guest-agent enrichment
+                guestDetail: 'Guest detail',
+                loggedInUsers: 'Logged-in users',
+                clockSkew: 'Clock skew',
+                filesystems: 'Filesystems',
+                interfaces: 'Interfaces',
                 // MK + LW 2026-05-31 — monitoring expansion strings (Top Talkers / Interface Statistics / SMART)
                 topTalkers: 'Top Talkers',
                 topTalkersHint: 'CPU/RAM/Disk are instantaneous; Disk I/O and Net I/O are cumulative since VM boot (active VMs sort to the top).',
@@ -11561,6 +11573,12 @@
                 errOrDropHint: 'Valeurs non nulles RX/TX errs / drops surlignées en rouge. Compteurs cumulés depuis le démarrage.',
                 keyAttributes: 'Attributs clés',
                 allAttributes: 'Tous les attributs',
+                // MK + LW 2026-05-31 — guest-agent enrichment
+                guestDetail: 'Détails de l\'invité',
+                loggedInUsers: 'Utilisateurs connectés',
+                clockSkew: 'Décalage d\'horloge',
+                filesystems: 'Systèmes de fichiers',
+                interfaces: 'Interfaces',
             },
             es: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -15372,6 +15390,12 @@
                 errOrDropHint: 'Valores RX/TX errs / drops distintos de cero resaltados en rojo. Contadores acumulados desde el arranque.',
                 keyAttributes: 'Atributos clave',
                 allAttributes: 'Todos los atributos',
+                // MK + LW 2026-05-31 — guest-agent enrichment
+                guestDetail: 'Detalles del invitado',
+                loggedInUsers: 'Usuarios conectados',
+                clockSkew: 'Desfase del reloj',
+                filesystems: 'Sistemas de archivos',
+                interfaces: 'Interfaces',
             },
             pt: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -18983,6 +19007,12 @@
                 errOrDropHint: 'Valores RX/TX errs / drops não nulos destacados a vermelho. Contadores cumulativos desde o arranque.',
                 keyAttributes: 'Atributos principais',
                 allAttributes: 'Todos os atributos',
+                // MK + LW 2026-05-31 — guest-agent enrichment
+                guestDetail: 'Detalhes do convidado',
+                loggedInUsers: 'Utilizadores ligados',
+                clockSkew: 'Desvio do relógio',
+                filesystems: 'Sistemas de ficheiros',
+                interfaces: 'Interfaces',
             },
             ko: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -22652,6 +22682,18 @@
                 errOrDropHint: 'Valori RX/TX errs / drops diversi da zero evidenziati in rosso. Contatori cumulativi dall\'avvio.',
                 keyAttributes: 'Attributi chiave',
                 allAttributes: 'Tutti gli attributi',
+                // MK + LW 2026-05-31 — guest-agent enrichment
+                guestDetail: '게스트 상세',
+                loggedInUsers: '로그인 사용자',
+                clockSkew: '시간 차이',
+                filesystems: '파일 시스템',
+                interfaces: '인터페이스',
+                // MK + LW 2026-05-31 — guest-agent enrichment
+                guestDetail: 'Dettaglio guest',
+                loggedInUsers: 'Utenti connessi',
+                clockSkew: 'Sfasamento dell\'orologio',
+                filesystems: 'File system',
+                interfaces: 'Interfacce',
             },
             it: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings

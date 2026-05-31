@@ -2076,6 +2076,94 @@
                                                     )}
                                                 </tbody>
                                             </table>
+                                            {/* MK + LW May 2026 — guest agent enrichment: real-FS fill, NIC detail,
+                                                logged-in users, clock drift. Hidden behind <details> so the summary
+                                                stays compact for users who don't care. */}
+                                            {((guestInfo.filesystems && guestInfo.filesystems.length > 0) ||
+                                              (guestInfo.interfaces && guestInfo.interfaces.length > 0) ||
+                                              (guestInfo.users && guestInfo.users.length > 0) ||
+                                              guestInfo.guest_time_ns) && (
+                                                <details className="px-3 py-2" style={{borderTop: '1px solid var(--corp-border-medium)'}}>
+                                                    <summary className="text-[12px] cursor-pointer" style={{color: '#728b9a'}}>
+                                                        {t('guestDetail') || 'Guest detail'} — {t('filesystems') || 'Filesystems'}, {t('interfaces') || 'Interfaces'}, {t('users') || 'Users'}
+                                                    </summary>
+                                                    <div className="mt-2 space-y-2">
+                                                        {guestInfo.filesystems && guestInfo.filesystems.length > 0 && (
+                                                            <div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('filesystems') || 'Filesystems'}</div>
+                                                                <table className="corp-property-grid" style={{fontSize: '11px'}}>
+                                                                    <tbody>
+                                                                        {guestInfo.filesystems.map((fs, idx) => (
+                                                                            <tr key={fs.mountpoint || idx}>
+                                                                                <td style={{fontFamily: 'monospace'}}>{fs.mountpoint}</td>
+                                                                                <td>
+                                                                                    {fs.used_bytes != null && fs.total_bytes != null
+                                                                                        ? `${(fs.used_bytes / 1024 / 1024 / 1024).toFixed(1)} / ${(fs.total_bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
+                                                                                        : '-'}
+                                                                                    {fs.used_pct != null && (
+                                                                                        <span style={{color: fs.used_pct > 90 ? '#f54f47' : fs.used_pct > 75 ? '#efc006' : '#728b9a', marginLeft: '6px'}}>
+                                                                                            ({fs.used_pct}%)
+                                                                                        </span>
+                                                                                    )}
+                                                                                    <span style={{color: '#728b9a', marginLeft: '6px', fontFamily: 'monospace'}}>{fs.type}</span>
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                        {guestInfo.interfaces && guestInfo.interfaces.length > 0 && (
+                                                            <div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('interfaces') || 'Interfaces'}</div>
+                                                                <table className="corp-property-grid" style={{fontSize: '11px'}}>
+                                                                    <tbody>
+                                                                        {guestInfo.interfaces.filter(n => n.name !== 'lo').map((nic, idx) => (
+                                                                            <tr key={nic.name || idx}>
+                                                                                <td style={{fontFamily: 'monospace'}}>{nic.name}</td>
+                                                                                <td>
+                                                                                    {nic.mac && <span style={{color: '#728b9a', fontFamily: 'monospace'}}>{nic.mac}</span>}
+                                                                                    {nic.ips && nic.ips.length > 0 && (
+                                                                                        <span style={{marginLeft: nic.mac ? '8px' : '0', fontFamily: 'monospace'}}>
+                                                                                            {nic.ips.map(ip => `${ip.address}${ip.prefix ? '/' + ip.prefix : ''}`).join(', ')}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                        {guestInfo.users && guestInfo.users.length > 0 && (
+                                                            <div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('loggedInUsers') || 'Logged-in users'}</div>
+                                                                <table className="corp-property-grid" style={{fontSize: '11px'}}>
+                                                                    <tbody>
+                                                                        {guestInfo.users.map((u, idx) => (
+                                                                            <tr key={idx}>
+                                                                                <td style={{fontFamily: 'monospace'}}>{u.domain ? `${u.domain}\\${u.user}` : u.user}</td>
+                                                                                <td style={{color: '#728b9a'}}>{u.login_time ? new Date(u.login_time * 1000).toLocaleString() : '-'}</td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                        {guestInfo.guest_time_ns && (
+                                                            <div className="text-[11px]" style={{color: '#728b9a'}}>
+                                                                {(() => {
+                                                                    const guestMs = guestInfo.guest_time_ns / 1e6;
+                                                                    const hostMs = Date.now();
+                                                                    const skewS = (guestMs - hostMs) / 1000;
+                                                                    const skewClr = Math.abs(skewS) > 60 ? '#f54f47' : Math.abs(skewS) > 5 ? '#efc006' : '#60b515';
+                                                                    return (<span>{t('clockSkew') || 'Clock skew'}: <span style={{color: skewClr, fontFamily: 'monospace'}}>{skewS >= 0 ? '+' : ''}{skewS.toFixed(1)}s</span></span>);
+                                                                })()}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </details>
+                                            )}
                                         </div>
                                     )}
 
