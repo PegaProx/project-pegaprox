@@ -887,9 +887,12 @@
             const isNvme = !!(data?.critical_warning !== undefined || data?.percentage_used !== undefined);
             const attrs = Array.isArray(data?.attributes) ? data.attributes : [];
 
+            // LW: PVE returns 'PASSED' for SATA SMART, 'OK' for some SCSI/QEMU
+            // wrappers, 'FAILED' on actual fail. Anything else → yellow (unknown).
+            const healthUp = String(health || '').toUpperCase();
             const healthColor = !health ? 'bg-gray-500/20 text-gray-400' :
-                                health === 'PASSED' ? 'bg-green-500/20 text-green-400' :
-                                health === 'FAILED' ? 'bg-red-500/20 text-red-400' :
+                                (healthUp === 'PASSED' || healthUp === 'OK') ? 'bg-green-500/20 text-green-400' :
+                                healthUp === 'FAILED' ? 'bg-red-500/20 text-red-400' :
                                 'bg-yellow-500/20 text-yellow-400';
 
             // pick the few attribute IDs that operators actually look at first
