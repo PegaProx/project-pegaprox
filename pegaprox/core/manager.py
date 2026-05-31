@@ -12916,7 +12916,13 @@ echo "AGENT_INSTALLED_OK"
         user = getattr(self.config, 'ssh_user', None) or 'root'
 
         from pegaprox.utils.concurrent import run_concurrent_dict
+        import shlex
 
+        # MK 2026-05-31 (D1) — SERVICES is a hardcoded allow-list today but if
+        # this list ever moves into config or runtime-derivation, an attacker
+        # who can write a service-name would have RCE on the PVE node via the
+        # f-string into a shell-evaluated SSH command. shlex.quote() makes the
+        # path future-proof regardless.
         SERVICES = ['pveproxy', 'pvedaemon', 'pve-cluster', 'corosync', 'pvestatd']
         tasks = {
             'cfg':   (lambda: self._ssh_run_command_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8)),
@@ -12924,9 +12930,10 @@ echo "AGENT_INSTALLED_OK"
         }
         for svc in SERVICES:
             # closure-bind svc explicitly — late-binding bites here otherwise
-            tasks[f'svc:{svc}'] = (lambda s=svc: self._ssh_run_command_output(
+            quoted = shlex.quote(svc)
+            tasks[f'svc:{svc}'] = (lambda q=quoted: self._ssh_run_command_output(
                 ip, user,
-                f'systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,Result {s} 2>&1',
+                f'systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,Result {q} 2>&1',
                 timeout=8))
         results = run_concurrent_dict(tasks, timeout=12)
 

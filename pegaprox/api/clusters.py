@@ -776,9 +776,16 @@ def get_cluster_health(cluster_id):
         # because the connection failed fast, but parallel waits the full
         # timeout. Net: post-parallelise /health was SLOWER on degraded
         # clusters until this filter went in.
+        # MK 2026-05-31 (D2) — also drop any node-name that doesn't pass the
+        # RFC-1035-ish check. PVE controls these but if PVE itself were ever
+        # compromised, a crafted name like `../foo` would be interpolated
+        # into the storage-list URL. Belt-and-suspenders.
+        import re as _re
+        _SAFE_NODE = _re.compile(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$')
         online_node_names = [
             name for name, d in ns.items()
             if (d.get('status') in ('online', 'running') or not d.get('offline'))
+            and name and _SAFE_NODE.match(name)
         ]
         if online_node_names:
             tasks = {n: (lambda nn=n: mgr.get_storage_list(nn) or []) for n in online_node_names}

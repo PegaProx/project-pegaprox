@@ -2452,9 +2452,19 @@ def get_vms_backup_status(cluster_id):
                     continue
         return bumps
 
+    # MK 2026-05-31 (D2) — defense-in-depth: PVE-returned node names get
+    # interpolated into URL paths below. PVE has its own naming rules but
+    # if PVE itself were ever compromised, a crafted node like `../foo`
+    # would let it pivot into other PVE namespaces. Cheap belt-and-suspenders
+    # check at the boundary. Mirrors api/nodes.py:_NODE_NAME_RE.
+    import re as _re
+    _SAFE_NODE = _re.compile(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$')
+
     def _scan_node(node):
         """Returns list of (vmid, ts, encrypted, 0) tuples for one PVE node's vzdump backups."""
         bumps = []
+        if not node or not _SAFE_NODE.match(node):
+            return bumps
         try:
             r = cm._api_get(f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{node}/storage')
             stores = r.json().get('data', []) if r.status_code == 200 else []
@@ -2466,6 +2476,9 @@ def get_vms_backup_status(cluster_id):
             if s.get('type') == 'pbs':
                 continue  # already counted PBS-side
             store_name = s.get('storage')
+            # MK (D2 cont.) — same belt-and-suspenders for storage names
+            if not store_name or not _SAFE_NODE.match(store_name):
+                continue
             try:
                 cr = cm._api_get(f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{node}/storage/{store_name}/content?content=backup')
                 items = cr.json().get('data', []) if cr.status_code == 200 else []
