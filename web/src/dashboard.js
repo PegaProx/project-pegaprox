@@ -5510,15 +5510,89 @@
                         });
                     }
 
+                    // MK + LW May 2026 — Top Talkers + Rollups in the PDF.
+                    // Uses whatever metric / group_by the user has open in the
+                    // UI when they hit "Export" — same logic as the on-screen
+                    // card so the printed snapshot matches what they're looking at.
+                    const fmtBytesPdf = (n) => {
+                        if (!n) return '0';
+                        const u = ['B','KB','MB','GB','TB','PB'];
+                        let i = Math.floor(Math.log10(n) / 3);
+                        if (i < 0) i = 0; if (i >= u.length) i = u.length - 1;
+                        return `${(n / Math.pow(1000, i)).toFixed(1)} ${u[i]}`;
+                    };
+
+                    if (top && Array.isArray(top.top) && top.top.length) {
+                        const metricLabelMap = {
+                            cpu: t('cpuPercent') || 'CPU %',
+                            memory: t('memoryPercent') || 'Memory %',
+                            disk_usage: t('diskUsagePercent') || 'Disk %',
+                            disk_io: t('diskIo') || 'Disk I/O',
+                            net_io: t('netIo') || 'Net I/O',
+                        };
+                        blocks.push({ type: 'spacer', height: 6 });
+                        blocks.push({
+                            type: 'table',
+                            title: safe(`${t('topTalkers') || 'Top Talkers'} — ${metricLabelMap[top.metric] || top.metric} (${top.top.length}/${top.total_vms || 0})`),
+                            columns: [
+                                '#', 'VMID', safe(t('name') || 'Name'), safe(t('node') || 'Node'),
+                                'CPU%', 'RAM%', 'Disk%',
+                                safe(t('diskIo') || 'Disk I/O'),
+                                safe(t('netIo') || 'Net I/O'),
+                            ],
+                            rows: top.top.map((vm, idx) => [
+                                String(idx + 1),
+                                String(vm.vmid ?? ''),
+                                safe(vm.name || String(vm.vmid || '')),
+                                safe(vm.node || ''),
+                                vm.cpu_percent != null ? `${vm.cpu_percent.toFixed(1)}%` : '-',
+                                vm.mem_percent != null ? `${vm.mem_percent.toFixed(1)}%` : '-',
+                                vm.disk_percent != null ? `${vm.disk_percent.toFixed(1)}%` : '-',
+                                fmtBytesPdf(vm.disk_io),
+                                fmtBytesPdf(vm.net_io),
+                            ]),
+                        });
+                    }
+
+                    if (rollups && Array.isArray(rollups.groups) && rollups.groups.length) {
+                        blocks.push({ type: 'spacer', height: 6 });
+                        const groupLabel = rollups.group_by === 'tag'
+                            ? (t('byTag') || 'By Tag')
+                            : (t('byPool') || 'By Pool');
+                        blocks.push({
+                            type: 'table',
+                            title: safe(`${t('rollups') || 'Rollups'} — ${groupLabel} (${rollups.group_count || 0} ${rollups.group_by === 'tag' ? (t('tags') || 'tags') : (t('pools') || 'pools')})`),
+                            columns: [
+                                rollups.group_by === 'tag' ? safe(t('tag') || 'Tag') : safe(t('pool') || 'Pool'),
+                                'VMs',
+                                safe(t('running') || 'Running'),
+                                'Σ CPU%',
+                                'RAM%',
+                                'Disk%',
+                                safe(t('netIo') || 'Net I/O'),
+                            ],
+                            rows: rollups.groups.map(g => [
+                                safe(g.key || '-'),
+                                String(g.vm_count ?? 0),
+                                String(g.running_count ?? 0),
+                                `${(g.cpu_sum_pct ?? 0).toFixed(1)}%`,
+                                `${(g.mem_pct ?? 0).toFixed(1)}%`,
+                                `${(g.disk_pct ?? 0).toFixed(1)}%`,
+                                fmtBytesPdf((g.netin_bytes || 0) + (g.netout_bytes || 0)),
+                            ]),
+                        });
+                    }
+
                     if (!blocks.length) {
                         addToast(t('insightsLoading') || 'Loading…', 'info');
                         return;
                     }
 
                     const dt = new Date().toISOString().slice(0, 10);
+                    // MK: subtitle now reflects the four sections that may appear
                     await generatePegaProxPDF({
                         title: safe(t('insights') || 'Insights'),
-                        subtitle: safe(`${t('rightSizing') || 'Right-sizing'} + ${t('capacityForecast') || 'Capacity Forecast'}`),
+                        subtitle: safe(`${t('capacityForecast') || 'Capacity Forecast'} · ${t('topTalkers') || 'Top Talkers'} · ${t('rollups') || 'Rollups'} · ${t('rightSizing') || 'Right-sizing'}`),
                         clusterName: safe(clusterName || ''),
                         filename: `pegaprox-insights-${(clusterId || 'cluster')}-${dt}.pdf`,
                         content: blocks,
