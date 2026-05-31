@@ -5313,6 +5313,20 @@
 
             React.useEffect(() => { refreshTop(topMetric); /* eslint-disable-line */ }, [clusterId, topMetric]);
 
+            // MK May 2026 — Rollups (per-tag / per-pool aggregation)
+            const [rollups, setRollups] = React.useState(null);
+            const [rollupBy, setRollupBy] = React.useState('tag');
+            const [rollupLoading, setRollupLoading] = React.useState(false);
+            const refreshRollups = async (by) => {
+                if (!clusterId) return;
+                setRollupLoading(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/insights/rollups?group_by=${by}`).then(r => r?.json()).catch(() => null);
+                    if (r && !r.error) setRollups(r);
+                } finally { setRollupLoading(false); }
+            };
+            React.useEffect(() => { refreshRollups(rollupBy); /* eslint-disable-line */ }, [clusterId, rollupBy]);
+
             const forceSnap = async () => {
                 setForcing(true);
                 try {
@@ -5662,6 +5676,70 @@
                         )}
                         <div className="text-xs text-gray-500 mt-2">
                             {t('topTalkersHint') || 'CPU/RAM/Disk are instantaneous; Disk I/O and Net I/O are cumulative since VM boot (active VMs sort to the top).'}
+                        </div>
+                    </div>
+
+                    {/* MK May 2026 — Per-tag / Per-pool rollups */}
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                                <Icons.Tag className="w-4 h-4" />
+                                {t('rollups') || 'Rollups'}
+                                {rollups && <span className="text-xs text-gray-500 font-normal">
+                                    ({rollups.group_count || 0} {rollupBy === 'tag' ? (t('tags') || 'tags') : (t('pools') || 'pools')} · {rollups.total_vms || 0} VMs)
+                                </span>}
+                            </h3>
+                            <select value={rollupBy} onChange={e => setRollupBy(e.target.value)}
+                                className="bg-proxmox-dark border border-proxmox-border rounded px-2 py-1 text-xs text-white">
+                                <option value="tag">{t('byTag') || 'By Tag'}</option>
+                                <option value="pool">{t('byPool') || 'By Pool'}</option>
+                            </select>
+                        </div>
+                        {rollupLoading && !rollups && <div className="text-sm text-gray-500">{t('loading') || 'Loading…'}</div>}
+                        {rollups && Array.isArray(rollups.groups) && rollups.groups.length > 0 && (
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="text-xs text-gray-400">
+                                        <tr>
+                                            <th className="text-left p-2">{rollupBy === 'tag' ? (t('tag') || 'Tag') : (t('pool') || 'Pool')}</th>
+                                            <th className="text-right p-2">VMs</th>
+                                            <th className="text-right p-2">{t('running') || 'Running'}</th>
+                                            <th className="text-right p-2">Σ CPU%</th>
+                                            <th className="text-right p-2">RAM</th>
+                                            <th className="text-right p-2">Disk</th>
+                                            <th className="text-right p-2">Net I/O</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rollups.groups.map(g => {
+                                            const fmtBytes = (n) => {
+                                                if (!n) return '0';
+                                                const u = ['B','KB','MB','GB','TB','PB'];
+                                                let i = Math.floor(Math.log10(n) / 3);
+                                                if (i < 0) i = 0; if (i >= u.length) i = u.length - 1;
+                                                return `${(n / Math.pow(1000, i)).toFixed(1)} ${u[i]}`;
+                                            };
+                                            return (
+                                                <tr key={g.key} className="border-t border-proxmox-border hover:bg-proxmox-dark/40">
+                                                    <td className="p-2 text-white font-medium">{g.key}</td>
+                                                    <td className="p-2 text-right font-mono">{g.vm_count}</td>
+                                                    <td className="p-2 text-right font-mono">{g.running_count}</td>
+                                                    <td className="p-2 text-right font-mono">{g.cpu_sum_pct?.toFixed(1)}%</td>
+                                                    <td className="p-2 text-right font-mono" title={`${fmtBytes(g.mem_used_bytes)} / ${fmtBytes(g.mem_max_bytes)}`}>{g.mem_pct?.toFixed(1)}%</td>
+                                                    <td className="p-2 text-right font-mono" title={`${fmtBytes(g.disk_used_bytes)} / ${fmtBytes(g.disk_max_bytes)}`}>{g.disk_pct?.toFixed(1)}%</td>
+                                                    <td className="p-2 text-right font-mono">{fmtBytes((g.netin_bytes || 0) + (g.netout_bytes || 0))}</td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                        {rollups && rollups.groups?.length === 0 && (
+                            <div className="text-sm text-gray-500">{t('noGroupings') || 'No VMs grouped yet.'}</div>
+                        )}
+                        <div className="text-xs text-gray-500 mt-2">
+                            {t('rollupsHint') || 'VMs with multiple tags count in each tag rollup. CPU is the sum of instantaneous %; RAM/Disk are aggregate fill ratios; Net I/O is cumulative since VM boot.'}
                         </div>
                     </div>
 

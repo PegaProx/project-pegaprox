@@ -3990,6 +3990,14 @@
                 sensors: 'Sensoren',
                 sensor: 'Sensor',
                 sensorsHint: 'Hardware-Sensoren via lm-sensors. Zellen in Rot überschreiten den kritischen Schwellwert, Gelb überschreiten Max.',
+                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
+                rollups: 'Aggregate',
+                pools: 'Pools',
+                byTag: 'Nach Tag',
+                byPool: 'Nach Pool',
+                tag: 'Tag',
+                noGroupings: 'Noch keine VMs gruppiert.',
+                rollupsHint: 'VMs mit mehreren Tags zählen in jeder Tag-Auswertung. CPU ist die Summe der Momentan-%; RAM/Disk sind Füllraten; Net I/O ist kumulativ seit VM-Start.',
             },
             en: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -7893,6 +7901,14 @@
                 bulkAction: 'Action',
                 shortcutsHint: 'Press ? for shortcuts',
                 themeToggle: 'Toggle theme',
+                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
+                rollups: 'Rollups',
+                pools: 'pools',
+                byTag: 'By Tag',
+                byPool: 'By Pool',
+                tag: 'Tag',
+                noGroupings: 'No VMs grouped yet.',
+                rollupsHint: 'VMs with multiple tags count in each tag rollup. CPU is the sum of instantaneous %; RAM/Disk are aggregate fill ratios; Net I/O is cumulative since VM boot.',
                 // MK + LW 2026-05-31 — sensors panel
                 sensors: 'Sensors',
                 sensor: 'Sensor',
@@ -11606,6 +11622,14 @@
                 sensors: 'Capteurs',
                 sensor: 'Capteur',
                 sensorsHint: 'Capteurs matériels via lm-sensors. Les cellules en rouge dépassent le seuil critique, en jaune le maximum.',
+                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
+                rollups: 'Agrégations',
+                pools: 'pools',
+                byTag: 'Par tag',
+                byPool: 'Par pool',
+                tag: 'Tag',
+                noGroupings: 'Aucune VM groupée pour le moment.',
+                rollupsHint: 'Les VM ayant plusieurs tags sont comptées dans chaque agrégation de tag. CPU est la somme des % instantanés ; RAM/Disque sont des ratios de remplissage ; E/S réseau cumulés depuis le démarrage.',
             },
             es: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -15432,6 +15456,14 @@
                 sensors: 'Sensores',
                 sensor: 'Sensor',
                 sensorsHint: 'Sensores de hardware vía lm-sensors. Las celdas rojas superan el umbral crítico, las amarillas superan el máximo.',
+                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
+                rollups: 'Agregaciones',
+                pools: 'pools',
+                byTag: 'Por etiqueta',
+                byPool: 'Por pool',
+                tag: 'Etiqueta',
+                noGroupings: 'Aún no hay VMs agrupadas.',
+                rollupsHint: 'Las VMs con múltiples etiquetas cuentan en cada agregación. CPU es la suma de % instantáneos; RAM/Disco son ratios de llenado; E/S de red son acumuladas desde el arranque.',
             },
             pt: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -19058,6 +19090,14 @@
                 sensors: 'Sensores',
                 sensor: 'Sensor',
                 sensorsHint: 'Sensores de hardware via lm-sensors. Células vermelhas excedem o limite crítico, amarelas excedem o máximo.',
+                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
+                rollups: 'Agregações',
+                pools: 'pools',
+                byTag: 'Por tag',
+                byPool: 'Por pool',
+                tag: 'Tag',
+                noGroupings: 'Ainda não há VMs agrupadas.',
+                rollupsHint: 'VMs com vários tags contam em cada agregação. CPU é a soma de % instantâneos; RAM/Disco são rácios de preenchimento; E/S de rede são cumulativas desde o arranque.',
             },
             ko: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -22757,6 +22797,22 @@
                 sensors: 'Sensori',
                 sensor: 'Sensore',
                 sensorsHint: 'Sensori hardware via lm-sensors. Le celle rosse superano la soglia critica, le gialle superano il massimo.',
+                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
+                rollups: '집계',
+                pools: '풀',
+                byTag: '태그별',
+                byPool: '풀별',
+                tag: '태그',
+                noGroupings: '아직 그룹화된 VM이 없습니다.',
+                rollupsHint: '여러 태그가 있는 VM은 각 태그 집계에 포함됩니다. CPU는 즉시 % 합계, RAM/디스크는 사용률, 네트워크 I/O는 VM 부팅 이후 누적값입니다.',
+                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
+                rollups: 'Aggregazioni',
+                pools: 'pool',
+                byTag: 'Per tag',
+                byPool: 'Per pool',
+                tag: 'Tag',
+                noGroupings: 'Nessuna VM raggruppata ancora.',
+                rollupsHint: 'Le VM con più tag contano in ogni aggregazione di tag. CPU è la somma delle % istantanee; RAM/Disco sono rapporti di riempimento; I/O di rete è cumulativo dall\'avvio.',
             },
             it: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
