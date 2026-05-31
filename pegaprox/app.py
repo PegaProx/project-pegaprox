@@ -1002,8 +1002,13 @@ def main(debug_mode=False):
         print(f"Started additional HTTP -> HTTPS redirect on port {http_redirect_port}")
 
     # Determine workers
+    # MK 2026-05-31 — bump default cap 8 → 16. The old `min(cpu_count*2, 8)` got
+    # cluster operators stuck at 4-8 even on bigger boxes; with the gevent-pool
+    # bugfix making fanouts actually parallel, the real bottleneck shifts to
+    # worker count when /health + /vms-backup-status + a dashboard refresh fire
+    # at the same time. 16 keeps the same 2× scaling but raises the ceiling.
     cpu_count = multiprocessing.cpu_count()
-    workers = int(os.environ.get('PEGAPROX_WORKERS', min(cpu_count * 2, 8)))
+    workers = int(os.environ.get('PEGAPROX_WORKERS', min(cpu_count * 2, 16)))
 
     print(f"System: {cpu_count} CPU cores detected")
     print(f"Memory optimization: Garbage collection tuned for {workers} workers")

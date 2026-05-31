@@ -72,9 +72,12 @@ except ImportError:
     pass
 
 def run_concurrent(tasks: list, timeout: float = 30.0) -> list:
+    # MK 2026-05-31 — paired bugfix with utils/concurrent.py: gevent.pool.Pool's
+    # __bool__ is len(), so `if GEVENT_POOL and ...` was always-False on entry.
+    # `is not None` is the right gate.
     if not tasks:
         return []
-    if GEVENT_POOL and GEVENT_AVAILABLE:
+    if GEVENT_POOL is not None and GEVENT_AVAILABLE:
         try:
             greenlets = [GEVENT_POOL.spawn(task) for task in tasks]
             from gevent import joinall
@@ -12895,6 +12898,11 @@ echo "AGENT_INSTALLED_OK"
         # gives the high-level "are we quorate" answer but not ring latency,
         # service uptime, or per-ring health. operators chasing a flapping
         # cluster want all three on one page.
+        #
+        # MK 2026-05-31 (F5) — parallelised: 7 SSH calls × 8s timeout used to
+        # serialise into ~56s worst-case blocking on one gevent worker. Now
+        # all 7 run as greenlets via run_concurrent_dict; total wall-time
+        # capped at 12s (timeout below).
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return {'error': 'cluster not connected'}
@@ -12903,10 +12911,25 @@ echo "AGENT_INSTALLED_OK"
             return {'error': f'no SSH-reachable IP for node {node}'}
         user = getattr(self.config, 'ssh_user', None) or 'root'
 
+        from pegaprox.utils.concurrent import run_concurrent_dict
+
+        SERVICES = ['pveproxy', 'pvedaemon', 'pve-cluster', 'corosync', 'pvestatd']
+        tasks = {
+            'cfg':   (lambda: self._ssh_run_command_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8)),
+            'pvecm': (lambda: self._ssh_run_command_output(ip, user, 'pvecm status 2>&1', timeout=8)),
+        }
+        for svc in SERVICES:
+            # closure-bind svc explicitly — late-binding bites here otherwise
+            tasks[f'svc:{svc}'] = (lambda s=svc: self._ssh_run_command_output(
+                ip, user,
+                f'systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,Result {s} 2>&1',
+                timeout=8))
+        results = run_concurrent_dict(tasks, timeout=12)
+
         out = {'corosync': None, 'pvecm': None, 'services': []}
 
         # corosync-cfgtool -s : ring status
-        cfg = self._ssh_run_command_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8)
+        cfg = results.get('cfg')
         if cfg:
             rings = []
             cur = None
@@ -12925,16 +12948,17 @@ echo "AGENT_INSTALLED_OK"
                     low = line.lower()
                     if 'addr' in low and '=' in line:
                         cur['address'] = line.split('=', 1)[1].strip()
-                    elif 'status' in low:
-                        cur['status'] = line.split(':', 1)[-1].strip() if ':' in line else line
+                    elif 'status' in low and '=' in line:
+                        # MK: corosync-cfgtool uses `key = value`, not colon
+                        cur['status'] = line.split('=', 1)[1].strip()
                     elif 'nodes' in low and '=' in line:
                         try: cur['nodes'] = int(line.split('=', 1)[1].strip())
                         except Exception: pass
             if cur: rings.append(cur)
             out['corosync'] = {'rings': rings}
 
-        # pvecm status: quorum + votes
-        pvecm = self._ssh_run_command_output(ip, user, 'pvecm status 2>&1', timeout=8)
+        # pvecm status: quorum + votes (parallel result)
+        pvecm = results.get('pvecm')
         if pvecm:
             info = {}
             for line in pvecm.splitlines():
@@ -12959,14 +12983,9 @@ echo "AGENT_INSTALLED_OK"
                     pass
             out['pvecm'] = info
 
-        # systemctl per-service state for the cluster-critical units
-        SERVICES = ['pveproxy', 'pvedaemon', 'pve-cluster', 'corosync', 'pvestatd']
+        # systemctl per-service state for the cluster-critical units (parallel results)
         for svc in SERVICES:
-            # `systemctl show -p ActiveState,SubState,ActiveEnterTimestamp <svc>`
-            out_text = self._ssh_run_command_output(
-                ip, user,
-                f'systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,Result {svc} 2>&1',
-                timeout=8)
+            out_text = results.get(f'svc:{svc}')
             row = {'name': svc, 'active': None, 'sub': None, 'since': None, 'result': None}
             if out_text:
                 for line in out_text.splitlines():

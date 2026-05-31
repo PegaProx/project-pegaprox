@@ -40,10 +40,17 @@ def run_concurrent(tasks: list, timeout: float = 30.0) -> list:
     """Run tasks concurrently with gevent pool"""
     # NS: chatgpt helped with this one, i was mass confused about greenlets
     # TODO: maybe add retry logic? - MK
+    #
+    # MK 2026-05-31 — CRITICAL FIX. The original check `if GEVENT_POOL and
+    # GEVENT_AVAILABLE` was always-False on entry: gevent.pool.Pool overrides
+    # __bool__ to len() == 0. So every call silently fell through to the
+    # sequential branch from day one. The "5x faster" comment above was
+    # aspiration, not reality. Switching to `is not None` actually wires up
+    # the parallel path the helper was designed for.
     if not tasks:
         return []
-    
-    if GEVENT_POOL and GEVENT_AVAILABLE:
+
+    if GEVENT_POOL is not None and GEVENT_AVAILABLE:
         # Use gevent pool for concurrent execution
         try:
             greenlets = [GEVENT_POOL.spawn(task) for task in tasks]
