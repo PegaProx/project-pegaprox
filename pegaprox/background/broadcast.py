@@ -143,13 +143,27 @@ def broadcast_resources_loop():
                     # NS: Feb 2026 - AUTO-RECONNECT disconnected clusters
                     # Without this, a network reload (ifreload) permanently kills the connection
                     # until PegaProx is restarted. Now we retry every 10 seconds.
+                    # MK 2026-05-31 — log backoff. Previously the "is disconnected,
+                    # attempting reconnect..." INFO line fired every 10s while a
+                    # cluster stayed down → ~360 INFO entries per hour per dead
+                    # cluster filling up the log file. Now: INFO on the first
+                    # attempt + once every 50 attempts (~8min) for ongoing
+                    # visibility, DEBUG in between. Reconnect cadence itself is
+                    # unchanged.
                     if not mgr.is_connected:
                         if now - mgr._last_reconnect_attempt >= 10:
                             mgr._last_reconnect_attempt = now
-                            logging.info(f"[SSE] Cluster '{cid}' is disconnected, attempting reconnect...")
+                            attempt_count = getattr(mgr, '_reconnect_attempt_count', 0) + 1
+                            mgr._reconnect_attempt_count = attempt_count
+                            _attempt_log = (logging.info if attempt_count == 1 or attempt_count % 50 == 0
+                                            else logging.debug)
+                            _attempt_log(f"[SSE] Cluster '{cid}' is disconnected, "
+                                         f"attempting reconnect (try #{attempt_count})...")
                             try:
                                 if mgr.connect_to_proxmox():
-                                    logging.info(f"[SSE] Cluster '{cid}' reconnected successfully!")
+                                    logging.info(f"[SSE] Cluster '{cid}' reconnected successfully "
+                                                 f"after {attempt_count} attempt(s)!")
+                                    mgr._reconnect_attempt_count = 0
                                     # only notify if last broadcast was >60s ago (avoid toast spam on WAN)
                                     last_notified = getattr(mgr, '_last_reconnect_broadcast', 0)
                                     if now - last_notified >= 60:

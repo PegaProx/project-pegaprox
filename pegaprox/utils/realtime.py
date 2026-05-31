@@ -199,12 +199,26 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None):
     are sent to all clients.
     """
     try:
-        message = json.dumps({
-            'type': update_type,
-            'data': data,
-            'cluster_id': cluster_id,
-            'timestamp': datetime.now().isoformat()
-        })
+        # MK 2026-05-31 — `default=str` so a datetime / set / bytes / custom
+        # object slipping into `data` doesn't TypeError and silently lose the
+        # broadcast. Caller's intent was "best-effort dispatch", not "verify
+        # data shape" — that's a stability/observability win for broadcasts
+        # like #413 layer 1 where a wrong arg shape killed the publisher.
+        try:
+            message = json.dumps({
+                'type': update_type,
+                'data': data,
+                'cluster_id': cluster_id,
+                'timestamp': datetime.now().isoformat()
+            }, default=str)
+        except (TypeError, ValueError) as _ser_err:
+            # If even default=str can't coerce, log enough context to find
+            # the bad caller, then drop. Don't take the broadcaster down.
+            logging.warning(
+                f"[SSE] broadcast '{update_type}' (cluster={cluster_id}) "
+                f"unserialisable, skipped: {_ser_err}"
+            )
+            return
 
         # Limit message size
         if len(message) > 500000:
