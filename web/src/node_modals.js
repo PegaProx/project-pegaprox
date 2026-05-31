@@ -874,6 +874,168 @@
             );
         }
 
+        // LW May 2026 — SMART data viewer modal. Replaces the alert(JSON.stringify(...))
+        // call site that used to sit on every Disk row's SMART button. PVE returns
+        // one of two shapes from /nodes/<n>/disks/smart:
+        //   - SATA/SAS: { type: 'text'|'attributes', attributes: [...], health: 'PASSED' }
+        //   - NVMe:     { health, critical_warning, temperature, percentage_used, ... }
+        // We render both, with the raw blob in a collapsible <details> fallback.
+        function SmartModal({ modal, onClose, formatBytes }) {
+            const { t } = useTranslation();
+            const { disk, loading, data, error } = modal;
+            const health = data?.health || data?.attributes?.[0]?.health;
+            const isNvme = !!(data?.critical_warning !== undefined || data?.percentage_used !== undefined);
+            const attrs = Array.isArray(data?.attributes) ? data.attributes : [];
+
+            const healthColor = !health ? 'bg-gray-500/20 text-gray-400' :
+                                health === 'PASSED' ? 'bg-green-500/20 text-green-400' :
+                                health === 'FAILED' ? 'bg-red-500/20 text-red-400' :
+                                'bg-yellow-500/20 text-yellow-400';
+
+            // pick the few attribute IDs that operators actually look at first
+            // Reallocated_Sector_Ct, Current_Pending_Sector, Temperature_Celsius, Power_On_Hours,
+            // Wear_Leveling_Count (SSD), Media_Wearout_Indicator (Intel SSD), Reported_Uncorrect
+            const KEY_ATTRS = new Set(['5','187','188','190','194','197','198','233','177','231','202']);
+            const keyAttrs = attrs.filter(a => KEY_ATTRS.has(String(a.id)));
+            const otherAttrs = attrs.filter(a => !KEY_ATTRS.has(String(a.id)));
+
+            return (
+                <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                            <div>
+                                <h3 className="font-medium text-white flex items-center gap-2">
+                                    <Icons.Activity />
+                                    SMART — {disk.devpath}
+                                </h3>
+                                <div className="text-xs text-gray-500 mt-1">
+                                    {disk.model || 'Unknown model'}{disk.size ? ` · ${formatBytes(disk.size)}` : ''}{disk.serial ? ` · S/N ${disk.serial}` : ''}
+                                </div>
+                            </div>
+                            <button onClick={onClose} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                            {loading && (
+                                <div className="flex items-center justify-center h-32 text-gray-400">
+                                    <Icons.RotateCw className="w-5 h-5 animate-spin mr-2" />
+                                    {t('loading') || 'Loading…'}
+                                </div>
+                            )}
+
+                            {!loading && error && (
+                                <div className="bg-red-500/10 border border-red-500/30 rounded p-3 text-red-300 text-sm">
+                                    {t('smartFetchError') || 'Failed to fetch SMART data'}: {error}
+                                </div>
+                            )}
+
+                            {!loading && !error && data && (
+                                <>
+                                    <div className="flex items-center gap-4">
+                                        <span className="text-sm text-gray-400">{t('health') || 'Health'}</span>
+                                        <span className={`px-3 py-1 rounded text-sm font-medium ${healthColor}`}>
+                                            {health || 'N/A'}
+                                        </span>
+                                        {isNvme && <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">NVMe</span>}
+                                    </div>
+
+                                    {isNvme ? (
+                                        <table className="w-full text-sm">
+                                            <tbody>
+                                                {data.critical_warning !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400 w-1/3">Critical warning</td><td className="p-2 font-mono">{data.critical_warning}</td></tr>
+                                                )}
+                                                {data.temperature !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Temperature</td><td className="p-2 font-mono">{data.temperature} °C</td></tr>
+                                                )}
+                                                {data.percentage_used !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Wear used</td><td className="p-2 font-mono">{data.percentage_used}%</td></tr>
+                                                )}
+                                                {data.power_on_hours !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Power-on hours</td><td className="p-2 font-mono">{data.power_on_hours} h</td></tr>
+                                                )}
+                                                {data.power_cycles !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Power cycles</td><td className="p-2 font-mono">{data.power_cycles}</td></tr>
+                                                )}
+                                                {data.unsafe_shutdowns !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Unsafe shutdowns</td><td className="p-2 font-mono">{data.unsafe_shutdowns}</td></tr>
+                                                )}
+                                                {data.media_errors !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Media errors</td><td className="p-2 font-mono" style={{color: data.media_errors > 0 ? '#f87171' : ''}}>{data.media_errors}</td></tr>
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    ) : (
+                                        <>
+                                            {keyAttrs.length > 0 && (
+                                                <div>
+                                                    <div className="text-sm font-medium text-white mb-2">{t('keyAttributes') || 'Key attributes'}</div>
+                                                    <SmartAttrTable rows={keyAttrs} />
+                                                </div>
+                                            )}
+                                            {otherAttrs.length > 0 && (
+                                                <details>
+                                                    <summary className="cursor-pointer text-sm text-gray-400 hover:text-white py-1">
+                                                        {t('allAttributes') || 'All attributes'} ({otherAttrs.length})
+                                                    </summary>
+                                                    <div className="mt-2"><SmartAttrTable rows={otherAttrs} /></div>
+                                                </details>
+                                            )}
+                                            {!attrs.length && data?.type === 'text' && data?.text && (
+                                                <pre className="text-xs bg-proxmox-dark p-3 rounded overflow-x-auto whitespace-pre-wrap text-gray-300">{data.text}</pre>
+                                            )}
+                                        </>
+                                    )}
+
+                                    <details className="text-xs">
+                                        <summary className="cursor-pointer text-gray-500 hover:text-gray-300">Raw JSON</summary>
+                                        <pre className="mt-2 bg-proxmox-dark p-3 rounded overflow-x-auto text-gray-400">{JSON.stringify(data, null, 2)}</pre>
+                                    </details>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function SmartAttrTable({ rows }) {
+            return (
+                <table className="w-full text-sm">
+                    <thead className="bg-proxmox-dark text-xs text-gray-400">
+                        <tr>
+                            <th className="text-left p-2">ID</th>
+                            <th className="text-left p-2">Attribute</th>
+                            <th className="text-right p-2">Value</th>
+                            <th className="text-right p-2">Worst</th>
+                            <th className="text-right p-2">Thresh</th>
+                            <th className="text-left p-2">Raw</th>
+                            <th className="text-left p-2">Flag</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((a, idx) => {
+                            // colour pending / reallocated counts when > 0
+                            const isCount = ['5','197','198'].includes(String(a.id));
+                            const rawNum = parseInt(a.raw || '0', 10);
+                            const danger = isCount && !isNaN(rawNum) && rawNum > 0;
+                            return (
+                                <tr key={a.id || idx} className="border-t border-proxmox-border">
+                                    <td className="p-2 text-gray-500 font-mono">{a.id}</td>
+                                    <td className="p-2 text-white">{a.name || a.attrname || '-'}</td>
+                                    <td className="p-2 text-right font-mono">{a.value ?? '-'}</td>
+                                    <td className="p-2 text-right font-mono text-gray-400">{a.worst ?? '-'}</td>
+                                    <td className="p-2 text-right font-mono text-gray-400">{a.threshold ?? a.thresh ?? '-'}</td>
+                                    <td className="p-2 font-mono" style={{color: danger ? '#f87171' : ''}}>{a.raw ?? '-'}</td>
+                                    <td className="p-2 text-xs text-gray-500">{a.flags || a.flag || ''}</td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            );
+        }
+
         // Node Management Modal Component
         // NS: Full node management - shell, network, disks, etc.
         // Shell tab uses xterm.js (web terminal), pretty cool
@@ -900,6 +1062,8 @@
             });
             const [diskCreating, setDiskCreating] = useState(false);
             const [perfTimeframe, setPerfTimeframe] = useState('hour'); // NS: For performance metrics
+            // LW May 2026 — SMART modal state (replaces ugly alert(JSON.stringify) call site)
+            const [smartModal, setSmartModal] = useState(null); // { disk, loading, data, error }
 
             const authHeaders = getAuthHeaders();  // NS: Get auth headers
 
@@ -2310,18 +2474,23 @@
                                                                     </td>
                                                                     <td className="p-3">
                                                                         <div className="flex gap-1">
-                                                                            <button 
+                                                                            <button
                                                                                 onClick={async () => {
+                                                                                    // LW: open modal in loading state, fetch, then populate
+                                                                                    setSmartModal({ disk: d, loading: true, data: null, error: null });
                                                                                     try {
                                                                                         const diskPath = (d.devpath || '').replace('/dev/', '');
                                                                                         const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/${encodeURIComponent(diskPath)}/smart`, { credentials: 'include', headers: authHeaders });
                                                                                         if (res.ok) {
                                                                                             const smart = await res.json();
-                                                                                            alert(`SMART Data for ${d.devpath}:\n\n${JSON.stringify(smart, null, 2)}`);
+                                                                                            setSmartModal({ disk: d, loading: false, data: smart, error: null });
                                                                                         } else {
-                                                                                            alert(t('smartNotAvailable'));
+                                                                                            const err = await res.json().catch(() => ({}));
+                                                                                            setSmartModal({ disk: d, loading: false, data: null, error: err.error || `HTTP ${res.status}` });
                                                                                         }
-                                                                                    } catch(e) { alert(t('smartFetchError')); }
+                                                                                    } catch (e) {
+                                                                                        setSmartModal({ disk: d, loading: false, data: null, error: e.message || String(e) });
+                                                                                    }
                                                                                 }}
                                                                                 className="p-1.5 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400"
                                                                                 title="SMART Data"
@@ -3147,13 +3316,18 @@
                                 </button>
                             </div>
                             <div className="flex-1">
-                                <NodeShellTerminal 
-                                    node={node} 
-                                    clusterId={clusterId} 
+                                <NodeShellTerminal
+                                    node={node}
+                                    clusterId={clusterId}
                                     addToast={addToast}
                                 />
                             </div>
                         </div>
+                    )}
+
+                    {/* LW May 2026 — SMART Modal (replaces the alert(JSON) call site) */}
+                    {smartModal && (
+                        <SmartModal modal={smartModal} onClose={() => setSmartModal(null)} formatBytes={formatBytes} />
                     )}
                 </div>
             );
