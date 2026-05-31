@@ -1002,13 +1002,24 @@ def main(debug_mode=False):
         print(f"Started additional HTTP -> HTTPS redirect on port {http_redirect_port}")
 
     # Determine workers
-    # MK 2026-05-31 — bump default cap 8 → 16. The old `min(cpu_count*2, 8)` got
-    # cluster operators stuck at 4-8 even on bigger boxes; with the gevent-pool
-    # bugfix making fanouts actually parallel, the real bottleneck shifts to
-    # worker count when /health + /vms-backup-status + a dashboard refresh fire
-    # at the same time. 16 keeps the same 2× scaling but raises the ceiling.
+    # MK 2026-05-31 (v2) — auto-scale with CPU, no hardcoded cap.
+    # Two-part fix:
+    #   (1) `workers` was previously just a log-label — _start_gevent_server
+    #       prints "(N greenlets)" but never passed `spawn=Pool(N)` to
+    #       WSGIServer, so the server actually spawned UNLIMITED greenlets.
+    #       Now plumbed through (see _start_gevent_server below).
+    #   (2) Formula changed: `min(cpu_count*2, 16)` capped huge customer
+    #       boxes at 16. `max(8, cpu_count * 4)` gives:
+    #           1c VM:   8 workers
+    #           4c:     16 workers (same as old default)
+    #           8c:     32 workers
+    #           32c:   128 workers
+    #       gevent greenlets are extremely cheap (a few KB stack) so 100s
+    #       per request handler are fine; the I/O-bound workload benefits
+    #       from a generous pool when /health + /vms-backup-status + a
+    #       dashboard refresh all fire at the same time.
     cpu_count = multiprocessing.cpu_count()
-    workers = int(os.environ.get('PEGAPROX_WORKERS', min(cpu_count * 2, 16)))
+    workers = int(os.environ.get('PEGAPROX_WORKERS', max(8, cpu_count * 4)))
 
     print(f"System: {cpu_count} CPU cores detected")
     print(f"Memory optimization: Garbage collection tuned for {workers} workers")
@@ -1487,7 +1498,14 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                     pass
 
     # Server args - add WebSocket handler if available
-    server_kwargs = {'log': None}
+    # MK 2026-05-31 — actually wire `workers` into the request-handler pool.
+    # gevent.pywsgi.WSGIServer defaults to `spawn=None` which spawns an
+    # unlimited greenlet per request. PEGAPROX_WORKERS was a startup-log
+    # label only — never enforced. Now caps the request-handling pool at
+    # `workers`; per-request fanouts (storage scan, PBS scan, SSH calls)
+    # still spawn inside their own request handler.
+    from gevent.pool import Pool as _RequestPool
+    server_kwargs = {'log': None, 'spawn': _RequestPool(workers)}
     if use_websocket_handler and QuietWebSocketHandler:
         server_kwargs['handler_class'] = QuietWebSocketHandler
 
