@@ -123,6 +123,23 @@ def get_node_network_api(cluster_id, node):
     return jsonify(manager.get_node_network_config(node))
 
 
+# MK May 2026 — per-NIC error/drop counters (SSH /proc/net/dev).
+# PVE's own /network endpoint only carries bridge+bond config; for the
+# actual rx_err/rx_drop/tx_err counters operators need we have to read
+# /proc/net/dev directly. Same auth path the syslog viewer uses.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/netstats', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_netstats_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    result = cluster_managers[cluster_id].get_node_netstats(node)
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify(result), 502
+    return jsonify(result)
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])
 @require_auth(perms=['node.network'])
 def update_node_network_api(cluster_id, node, iface):

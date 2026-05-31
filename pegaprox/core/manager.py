@@ -12830,6 +12830,49 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    def get_node_netstats(self, node: str) -> Dict[str, Any]:
+        # MK May 2026 — per-NIC error/drop counters. PVE API has aggregate
+        # netin/netout in /rrddata but never per-NIC errors, which is the
+        # bit operators actually need when chasing a flapping uplink. We
+        # SSH'd it anyway for syslog so adding /proc/net/dev costs nothing.
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'error': 'cluster not connected'}
+
+        ip = self._get_node_ip(node)
+        if not ip:
+            return {'error': f'no SSH-reachable IP for node {node}'}
+
+        user = getattr(self.config, 'ssh_user', None) or 'root'
+        output = self._ssh_run_command_output(ip, user, 'cat /proc/net/dev', timeout=10)
+        if not output:
+            return {'error': 'SSH read failed (auth, timeout, or empty)'}
+
+        # /proc/net/dev format:
+        #   Inter-|   Receive                                                |  Transmit
+        #    face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+        #     eth0:  1234  5  0  0  ...
+        ifaces = []
+        cols = ['rx_bytes', 'rx_packets', 'rx_errs', 'rx_drop', 'rx_fifo',
+                'rx_frame', 'rx_compressed', 'rx_multicast',
+                'tx_bytes', 'tx_packets', 'tx_errs', 'tx_drop', 'tx_fifo',
+                'tx_colls', 'tx_carrier', 'tx_compressed']
+        for line in output.splitlines():
+            if ':' not in line or 'Inter-' in line or 'face' in line[:6]:
+                continue
+            name, _, rest = line.partition(':')
+            parts = rest.split()
+            if len(parts) < 16:
+                continue
+            row = {'iface': name.strip()}
+            for k, v in zip(cols, parts):
+                try:
+                    row[k] = int(v)
+                except (TypeError, ValueError):
+                    row[k] = 0
+            ifaces.append(row)
+        return {'interfaces': ifaces, 'count': len(ifaces)}
+
     def get_node_lvmthin(self, node: str) -> List[Dict]:
         """Get LVM-Thin pools"""
         if not self.is_connected:

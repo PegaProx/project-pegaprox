@@ -1097,7 +1097,10 @@
                     const endpoints = {
                         summary: [`${API_URL}/clusters/${clusterId}/nodes/${node}/summary`],
                         performance: [`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${perfTimeframe}`],
-                        network: [`${API_URL}/clusters/${clusterId}/nodes/${node}/network`],
+                        network: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/network`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/netstats`,
+                        ],
                         system: [
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/dns`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/hosts`,
@@ -1124,10 +1127,14 @@
                     const urls = endpoints[tab] || [];
                     // NS: Fixed - now using auth headers and credentials!
                     const results = await Promise.all(urls.map(u => fetch(u, { credentials: 'include', headers: authHeaders }).then(r => r.ok ? r.json() : null).catch(() => null)));
-                    
+
                     const newData = { ...data };
                     if (tab === 'summary') newData.summary = results[0];
-                    else if (tab === 'network') newData.network = results[0];
+                    else if (tab === 'network') {
+                        newData.network = results[0];
+                        // MK: netstats may 502 if SSH path is unavailable; fall back to null
+                        newData.netstats = (results[1] && results[1].interfaces) ? results[1].interfaces : null;
+                    }
                     else if (tab === 'system') {
                         newData.dns = results[0] || {};
                         newData.hosts = results[1]?.data || '';
@@ -2002,6 +2009,59 @@
                                                 ))}
                                                 {(!data.network || data.network.length === 0) && <div className="text-center py-8 text-gray-500">{t('noNetworkInterfaces') || 'No network interfaces'}</div>}
                                             </div>
+
+                                            {/* MK May 2026 — Per-NIC traffic + error counters via /netstats (SSH /proc/net/dev) */}
+                                            {data.netstats && data.netstats.length > 0 && (
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden mt-4">
+                                                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                        <h3 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.BarChart />
+                                                            {t('interfaceStatistics') || 'Interface Statistics'}
+                                                        </h3>
+                                                        <span className="text-xs text-gray-500">{t('source') || 'via'} /proc/net/dev</span>
+                                                    </div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead className="bg-proxmox-dark text-xs text-gray-400">
+                                                                <tr>
+                                                                    <th className="text-left p-3">Iface</th>
+                                                                    <th className="text-right p-3">RX bytes</th>
+                                                                    <th className="text-right p-3">RX pkts</th>
+                                                                    <th className="text-right p-3">RX errs</th>
+                                                                    <th className="text-right p-3">RX drop</th>
+                                                                    <th className="text-right p-3">TX bytes</th>
+                                                                    <th className="text-right p-3">TX pkts</th>
+                                                                    <th className="text-right p-3">TX errs</th>
+                                                                    <th className="text-right p-3">TX drop</th>
+                                                                    <th className="text-right p-3">Coll</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {(data.netstats || []).filter(s => s.iface !== 'lo').map((s, idx) => {
+                                                                    const errOrDrop = (n) => n > 0 ? '#f87171' : '';
+                                                                    return (
+                                                                        <tr key={s.iface || idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/40">
+                                                                            <td className="p-3 font-mono text-white">{s.iface}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-300">{formatBytes(s.rx_bytes)}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-400">{(s.rx_packets || 0).toLocaleString()}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.rx_errs)}}>{s.rx_errs || 0}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.rx_drop)}}>{s.rx_drop || 0}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-300">{formatBytes(s.tx_bytes)}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-400">{(s.tx_packets || 0).toLocaleString()}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.tx_errs)}}>{s.tx_errs || 0}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.tx_drop)}}>{s.tx_drop || 0}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.tx_colls)}}>{s.tx_colls || 0}</td>
+                                                                        </tr>
+                                                                    );
+                                                                })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    <div className="px-4 py-2 text-xs text-gray-500 border-t border-proxmox-border">
+                                                        {t('errOrDropHint') || 'Non-zero RX/TX errs / drops highlighted in red. Counters are cumulative since boot.'}
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             {/* Edit/Create Interface Modal */}
                                             {data.editIface && (
