@@ -8345,31 +8345,46 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': str(e)}
 
     def create_api_token(self, token_name: str = 'pegaprox-migrate') -> Dict[str, Any]:
-        
+        # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):
+        # if a prior Planned/Emergency failover crashed or its _delayed_cleanup
+        # hadn't fired yet, the same token_name is still on target → PVE returns
+        # 400 "Token already exists" and the next failover bails before it ever
+        # touches qmigrate. Pre-delete is the cleanest path — we'd issue the
+        # delete on cleanup anyway, doing it up-front makes the create idempotent.
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
-        
-        try:
-            host = self.host
-            user = self.config.user
-            
-            # Create token without privilege separation (privsep=0)
-            url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_name}"
+
+        host = self.host
+        user = self.config.user
+        url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_name}"
+
+        def _do_create():
             data = {
                 'privsep': 0,  # No privilege separation - token has same permissions as user
                 'expire': 0,   # No expiration (we'll delete it manually)
                 'comment': 'PegaProx temporary migration token'
             }
-            
-            response = self._api_post(url, data=data)
-            
+            return self._api_post(url, data=data)
+
+        try:
+            response = _do_create()
+
+            # Stale token from a previous run? Drop it and retry once.
+            if response.status_code != 200 and 'already exists' in (response.text or '').lower():
+                self.logger.warning(f"[create_api_token] stale '{token_name}' on {host}, dropping + retry")
+                try:
+                    self._api_delete(url)
+                except Exception as _e:
+                    self.logger.debug(f"[create_api_token] pre-delete swallowed: {_e}")
+                response = _do_create()
+
             if response.status_code == 200:
                 result = response.json()
                 token_data = result.get('data', {})
                 token_value = token_data.get('value', '')
                 full_token_id = token_data.get('full-tokenid', f"{user}!{token_name}")
-                
+
                 self.logger.info(f"[OK] Created API token: {full_token_id}")
                 return {
                     'success': True,
@@ -8381,7 +8396,7 @@ echo "AGENT_INSTALLED_OK"
                 error_msg = response.text
                 self.logger.error(f"[ERROR] Failed to create API token: {error_msg}")
                 return {'success': False, 'error': error_msg}
-                
+
         except Exception as e:
             self.logger.error(f"[ERROR] Error creating API token: {e}")
             return {'success': False, 'error': str(e)}
