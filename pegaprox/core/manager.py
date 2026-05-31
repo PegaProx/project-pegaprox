@@ -12830,6 +12830,65 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    def get_node_sensors(self, node: str) -> Dict[str, Any]:
+        # MK May 2026 — bare-metal sensors via `sensors -j` (lm-sensors JSON).
+        # Returns a flattened list of measurements:
+        #   [{chip, label, kind: 'temp'|'fan'|'volt', value, max, crit, alarm}]
+        # On VMs / hosts without lm-sensors installed the command fails or
+        # returns empty — surfaces as graceful empty list.
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'error': 'cluster not connected'}
+        ip = self._get_node_ip(node)
+        if not ip:
+            return {'error': f'no SSH-reachable IP for node {node}'}
+        user = getattr(self.config, 'ssh_user', None) or 'root'
+
+        raw = self._ssh_run_command_output(ip, user, 'sensors -j 2>/dev/null', timeout=8)
+        if not raw or not raw.strip():
+            return {'error': 'sensors command unavailable or empty (lm-sensors not installed?)'}
+
+        import json as _json
+        try:
+            data = _json.loads(raw)
+        except Exception as e:
+            return {'error': f'sensors JSON parse failed: {e}'}
+
+        # Flatten the {chip: {sensor: {temp1_input: X, ...}}} structure.
+        # lm-sensors keys follow `tempN_input`, `tempN_max`, `tempN_crit`, `tempN_alarm`
+        # plus `fanN_input` and `inN_input` (voltage).
+        out = []
+        for chip, blob in (data or {}).items():
+            if not isinstance(blob, dict):
+                continue
+            for label, sub in blob.items():
+                if label == 'Adapter' or not isinstance(sub, dict):
+                    continue
+                # find the *_input key + its siblings
+                input_key = None
+                for k in sub.keys():
+                    if k.endswith('_input'):
+                        input_key = k
+                        break
+                if not input_key:
+                    continue
+                prefix = input_key.rsplit('_', 1)[0]  # "temp1", "fan1", "in0"
+                kind = 'temp' if prefix.startswith('temp') else (
+                       'fan' if prefix.startswith('fan') else (
+                       'volt' if prefix.startswith('in') else 'other'))
+                value = sub.get(input_key)
+                row = {
+                    'chip': chip,
+                    'label': label,
+                    'kind': kind,
+                    'value': value,
+                    'max': sub.get(f'{prefix}_max'),
+                    'crit': sub.get(f'{prefix}_crit'),
+                    'alarm': bool(sub.get(f'{prefix}_alarm') or 0),
+                }
+                out.append(row)
+        return {'sensors': out, 'count': len(out)}
+
     def get_node_cluster_health(self, node: str) -> Dict[str, Any]:
         # MK May 2026 — SSH-side cluster health: corosync ring status,
         # pvecm quorum + per-service uptime. PVE's REST `/cluster/status`

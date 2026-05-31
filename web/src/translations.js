@@ -3986,6 +3986,10 @@
                 corosyncRings: 'Corosync-Ringe',
                 address: 'Adresse',
                 services: 'Dienste',
+                // MK + LW 2026-05-31 — sensors panel
+                sensors: 'Sensoren',
+                sensor: 'Sensor',
+                sensorsHint: 'Hardware-Sensoren via lm-sensors. Zellen in Rot überschreiten den kritischen Schwellwert, Gelb überschreiten Max.',
             },
             en: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -7889,6 +7893,10 @@
                 bulkAction: 'Action',
                 shortcutsHint: 'Press ? for shortcuts',
                 themeToggle: 'Toggle theme',
+                // MK + LW 2026-05-31 — sensors panel
+                sensors: 'Sensors',
+                sensor: 'Sensor',
+                sensorsHint: 'Hardware sensors via lm-sensors. Cells in red exceed the critical threshold, yellow exceed max.',
                 // MK + LW 2026-05-31 — cluster health panel
                 configVersion: 'Config v',
                 corosyncRings: 'Corosync Rings',
@@ -11594,6 +11602,10 @@
                 corosyncRings: 'Anneaux Corosync',
                 address: 'Adresse',
                 services: 'Services',
+                // MK + LW 2026-05-31 — sensors panel
+                sensors: 'Capteurs',
+                sensor: 'Capteur',
+                sensorsHint: 'Capteurs matériels via lm-sensors. Les cellules en rouge dépassent le seuil critique, en jaune le maximum.',
             },
             es: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -15416,6 +15428,10 @@
                 corosyncRings: 'Anillos Corosync',
                 address: 'Dirección',
                 services: 'Servicios',
+                // MK + LW 2026-05-31 — sensors panel
+                sensors: 'Sensores',
+                sensor: 'Sensor',
+                sensorsHint: 'Sensores de hardware vía lm-sensors. Las celdas rojas superan el umbral crítico, las amarillas superan el máximo.',
             },
             pt: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -19038,6 +19054,10 @@
                 corosyncRings: 'Anéis Corosync',
                 address: 'Endereço',
                 services: 'Serviços',
+                // MK + LW 2026-05-31 — sensors panel
+                sensors: 'Sensores',
+                sensor: 'Sensor',
+                sensorsHint: 'Sensores de hardware via lm-sensors. Células vermelhas excedem o limite crítico, amarelas excedem o máximo.',
             },
             ko: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
@@ -22729,6 +22749,14 @@
                 corosyncRings: 'Anelli Corosync',
                 address: 'Indirizzo',
                 services: 'Servizi',
+                // MK + LW 2026-05-31 — sensors panel
+                sensors: '센서',
+                sensor: '센서',
+                sensorsHint: 'lm-sensors를 통한 하드웨어 센서. 빨간색 셀은 임계값 초과, 노란색은 최대값 초과를 의미합니다.',
+                // MK + LW 2026-05-31 — sensors panel
+                sensors: 'Sensori',
+                sensor: 'Sensore',
+                sensorsHint: 'Sensori hardware via lm-sensors. Le celle rosse superano la soglia critica, le gialle superano il massimo.',
             },
             it: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings

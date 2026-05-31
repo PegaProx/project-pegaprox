@@ -156,6 +156,22 @@ def get_node_cluster_health_api(cluster_id, node):
     return jsonify(result)
 
 
+# MK May 2026 — lm-sensors readings (CPU temp, fan rpm, voltages).
+# Graceful on hosts without lm-sensors installed (returns error string the
+# UI can show as "not available").
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/sensors', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_sensors_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    result = cluster_managers[cluster_id].get_node_sensors(node)
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify(result), 502
+    return jsonify(result)
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])
 @require_auth(perms=['node.network'])
 def update_node_network_api(cluster_id, node, iface):

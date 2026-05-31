@@ -1111,6 +1111,7 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
                         ],
                         disks: [
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/disks`,
@@ -1146,6 +1147,7 @@
                         newData.syslog = results[3] || [];
                         newData.certificates = results[4] || [];
                         newData.clusterHealth = (results[5] && !results[5].error) ? results[5] : null;
+                        newData.sensors = (results[6] && Array.isArray(results[6].sensors)) ? results[6].sensors : null;
                     }
                     else if (tab === 'disks') {
                         newData.disks = results[0] || [];
@@ -2268,6 +2270,62 @@
 
                                     {activeTab === 'system' && (
                                         <div className="space-y-6">
+                                            {/* MK + LW May 2026 — Sensors panel (lm-sensors) */}
+                                            {data.sensors && data.sensors.length > 0 && (
+                                                <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <h4 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.Activity className="w-4 h-4" />
+                                                            {t('sensors') || 'Sensors'}
+                                                            <span className="text-xs text-gray-500 font-normal">({data.sensors.length})</span>
+                                                        </h4>
+                                                        <button onClick={() => loadTabData('system')}
+                                                            className="p-1.5 hover:bg-proxmox-hover rounded text-gray-400 hover:text-white">
+                                                            <Icons.RefreshCw className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead className="text-xs text-gray-400">
+                                                                <tr>
+                                                                    <th className="text-left p-2">Chip</th>
+                                                                    <th className="text-left p-2">{t('sensor') || 'Sensor'}</th>
+                                                                    <th className="text-right p-2">{t('value') || 'Value'}</th>
+                                                                    <th className="text-right p-2">Max</th>
+                                                                    <th className="text-right p-2">Crit</th>
+                                                                    <th className="text-center p-2">Alarm</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {data.sensors.map((s, idx) => {
+                                                                    const unit = s.kind === 'temp' ? '°C' : s.kind === 'fan' ? 'RPM' : s.kind === 'volt' ? 'V' : '';
+                                                                    // colour: red if alarm OR (temp && >= crit), yellow if temp >= max, green otherwise
+                                                                    let clr = '';
+                                                                    if (s.alarm) clr = '#f54f47';
+                                                                    else if (s.kind === 'temp' && s.crit && s.value >= s.crit) clr = '#f54f47';
+                                                                    else if (s.kind === 'temp' && s.max && s.value >= s.max) clr = '#efc006';
+                                                                    return (
+                                                                        <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-darker/40">
+                                                                            <td className="p-2 text-gray-500 font-mono text-xs">{s.chip}</td>
+                                                                            <td className="p-2 text-white">{s.label}</td>
+                                                                            <td className="p-2 text-right font-mono" style={{color: clr || '#e6edf3'}}>
+                                                                                {s.value != null ? `${typeof s.value === 'number' ? s.value.toFixed(1) : s.value} ${unit}` : '-'}
+                                                                            </td>
+                                                                            <td className="p-2 text-right font-mono text-gray-500">{s.max != null ? `${typeof s.max === 'number' ? s.max.toFixed(0) : s.max} ${unit}` : '-'}</td>
+                                                                            <td className="p-2 text-right font-mono text-gray-500">{s.crit != null ? `${typeof s.crit === 'number' ? s.crit.toFixed(0) : s.crit} ${unit}` : '-'}</td>
+                                                                            <td className="p-2 text-center">{s.alarm ? <span style={{color: '#f54f47'}}>!</span> : <span style={{color: '#60b515'}}>ok</span>}</td>
+                                                                        </tr>
+                                                                    );
+                                                                })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    <div className="px-2 py-2 text-xs text-gray-500 mt-1">
+                                                        {t('sensorsHint') || 'Hardware sensors via lm-sensors. Cells in red exceed the critical threshold, yellow exceed max.'}
+                                                    </div>
+                                                </div>
+                                            )}
+
                                             {/* MK May 2026 — Cluster Health panel (corosync rings + pvecm quorum + service state) */}
                                             {data.clusterHealth && (
                                                 <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
@@ -4240,6 +4298,7 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
                         ],
                         disks: [
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/disks`,
