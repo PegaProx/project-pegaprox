@@ -394,6 +394,17 @@ def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
                 accepted = [client_id] + extra_auds if client_id else extra_auds or None
 
                 # #188: support more algorithms (Authentik uses RS256, but others exist)
+                # MK 2026-05-31 — `verify_iss=False` is INTENTIONAL, not a gap.
+                # Real-world IdPs (Authentik, Keycloak, Entra ID) return `iss`
+                # values that vary from the configured authority URL: trailing
+                # slash, host-vs-FQDN, http-vs-https on internal IdPs. The
+                # channel-binding is enforced at the JWKS layer instead —
+                # `signing_key.key` came from the JWKS endpoint at the
+                # operator-configured authority, so a token signed by someone
+                # else fails signature verification before any claim is read.
+                # `verify_aud=True` + `audience=accepted` still gates audience.
+                # Nonce check below covers replay. Flipping verify_iss to True
+                # breaks legitimate logins on the next IdP config tweak.
                 claims = pyjwt.decode(
                     id_token,
                     signing_key.key,
@@ -402,7 +413,7 @@ def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
                     options={
                         "verify_exp": True,
                         "verify_aud": True,
-                        "verify_iss": False,  # issuer varies by provider config
+                        "verify_iss": False,  # see comment above — intentional
                         "require": ["exp", "iat", "sub"],
                     },
                     leeway=300,  # 5 min clock skew
