@@ -912,6 +912,11 @@ def block_config_dir():
 # Serve images (logos, sponsors, etc.)
 IMAGES_DIR = 'images'
 Path(IMAGES_DIR).mkdir(exist_ok=True)
+# MK 2026-06-01 — customer-uploaded branding lives under BRANDING_DIR (in the
+# config/ volume so it survives `docker compose pull`). The /images/ route
+# below now serves login_bg from there first, falls back to the static
+# images/ folder for everything else (logo, sponsors, etc.).
+from pegaprox.constants import BRANDING_DIR  # config/branding
 
 @bp.route('/favicon.ico')
 def serve_favicon():
@@ -926,7 +931,18 @@ def serve_favicon():
 
 @bp.route('/images/<path:filename>')
 def serve_images(filename):
-    """Serve image files (pegaprox logo, sponsor logos, etc.)"""
+    """Serve image files (pegaprox logo, sponsor logos, login background).
+
+    MK 2026-06-01 (#454 anyblabla + Nico's cert-vanish report): login_bg
+    files are persisted to BRANDING_DIR (config/branding/, in the volume).
+    Check there first, fall back to the static images/ folder for the
+    bundled assets. Path traversal still blocked by Flask's
+    send_from_directory.
+    """
+    if filename.startswith('login_bg.'):
+        branding_path = os.path.join(BRANDING_DIR, filename)
+        if os.path.exists(branding_path):
+            return send_from_directory(BRANDING_DIR, filename)
     return send_from_directory(IMAGES_DIR, filename)
 
 
@@ -1485,6 +1501,9 @@ def update_server_settings():
                         return jsonify({'error': 'Invalid key format'}), 400
 
             # Handle login background upload - NS Mar 2026
+            # MK 2026-06-01: write into BRANDING_DIR (config/branding) so the
+            # upload survives container recreate. The /images/login_bg.*
+            # route at serve_images() checks BRANDING_DIR first.
             if 'login_background' in request.files:
                 bg_file = request.files['login_background']
                 if bg_file.filename:
@@ -1499,8 +1518,11 @@ def update_server_settings():
                     if ext in _magic and not bg_content[:4].startswith(_magic[ext]):
                         return jsonify({'error': 'File content does not match extension'}), 400
                     from pathlib import Path as _Path
-                    bg_path = os.path.join(IMAGES_DIR, 'login_bg' + ext)
-                    # remove old bg files first
+                    _Path(BRANDING_DIR).mkdir(parents=True, exist_ok=True)
+                    bg_path = os.path.join(BRANDING_DIR, 'login_bg' + ext)
+                    # remove old bg files first — both locations (branding + legacy)
+                    for old in _Path(BRANDING_DIR).glob('login_bg.*'):
+                        old.unlink(missing_ok=True)
                     for old in _Path(IMAGES_DIR).glob('login_bg.*'):
                         old.unlink(missing_ok=True)
                     with open(bg_path, 'wb') as f:
@@ -1541,10 +1563,13 @@ def update_server_settings():
 @bp.route('/api/settings/login-background', methods=['DELETE'])
 @require_auth(roles=[ROLE_ADMIN])
 def delete_login_background():
-    """Remove custom login background"""
+    """Remove custom login background — clean both locations (config/branding +
+    legacy images/) in case an old install still has the file in the
+    pre-2026-06-01 layout."""
     from pathlib import Path as _Path
-    for old in _Path(IMAGES_DIR).glob('login_bg.*'):
-        old.unlink(missing_ok=True)
+    for d in (BRANDING_DIR, IMAGES_DIR):
+        for old in _Path(d).glob('login_bg.*'):
+            old.unlink(missing_ok=True)
     settings = load_server_settings()
     settings['login_background'] = ''
     save_server_settings(settings)

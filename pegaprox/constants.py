@@ -41,9 +41,18 @@ CUSTOM_ROLES_FILE = os.path.join(CONFIG_DIR, 'custom_roles.json')
 ESXI_CONFIG_FILE = os.path.join(CONFIG_DIR, 'esxi_storages.json')
 STORAGE_CLUSTERS_FILE = os.path.join(CONFIG_DIR, 'storage_clusters.json')
 
-# Other directories
-SSL_CERT_FILE = 'ssl/cert.pem'
-SSL_KEY_FILE = 'ssl/key.pem'
+# MK 2026-06-01 — SSL certs and customer branding assets used to live under
+# 'ssl/' and 'images/' which both sit in the Docker image layer. On
+# `docker compose pull` the container gets recreated → image layer reset →
+# uploaded certs and login backgrounds vanish. config/ is the only volume
+# mounted by default (Dockerfile:41), so persistent uploads go in
+# config/ssl/ and config/branding/ now. Legacy paths kept as read-only
+# fallbacks + one-time migration runs further down.
+SSL_CERT_FILE = os.path.join(CONFIG_DIR, 'ssl', 'cert.pem')
+SSL_KEY_FILE = os.path.join(CONFIG_DIR, 'ssl', 'key.pem')
+SSL_CERT_FILE_LEGACY = 'ssl/cert.pem'
+SSL_KEY_FILE_LEGACY = 'ssl/key.pem'
+BRANDING_DIR = os.path.join(CONFIG_DIR, 'branding')
 LOG_DIR = 'logs'
 
 # MK May 2026 (#357 SeeJayEmm): expose log level + per-cluster file-handler
@@ -62,7 +71,8 @@ LOG_LEVEL = _parse_log_level(os.environ.get('PEGAPROX_LOG_LEVEL', ''), None)
 FILE_LOG_LEVEL = _parse_log_level(os.environ.get('PEGAPROX_FILE_LOG_LEVEL', ''), _logging.DEBUG)
 FILE_LOG_DISABLED = os.environ.get('PEGAPROX_DISABLE_FILE_LOG', '').strip().lower() in ('1', 'true', 'yes', 'on')
 WEB_DIR = 'web'
-SSL_DIR = 'ssl'
+SSL_DIR = os.path.join(CONFIG_DIR, 'ssl')  # MK 2026-06-01: was 'ssl/' (image layer)
+SSL_DIR_LEGACY = 'ssl'
 STATIC_DIR = 'static'
 IMAGES_DIR = 'images'
 PLUGINS_DIR = 'plugins'
@@ -71,7 +81,39 @@ PLUGINS_DIR = 'plugins'
 Path(LOG_DIR).mkdir(exist_ok=True)
 Path(PLUGINS_DIR).mkdir(exist_ok=True)
 Path(WEB_DIR).mkdir(exist_ok=True)
-Path(SSL_DIR).mkdir(exist_ok=True)
+Path(SSL_DIR).mkdir(parents=True, exist_ok=True)
+Path(BRANDING_DIR).mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(SSL_DIR, 0o700)
+except Exception:
+    pass
+
+# One-time migration: legacy 'ssl/cert.pem' / 'images/login_bg.*' → config/
+# Runs every startup but only when the legacy file exists AND the persistent
+# location is empty. Once migrated, the legacy file is left in place as a
+# read-only fallback so a misconfigured downgrade doesn't lose certs.
+def _migrate_to_config():
+    import shutil
+    try:
+        for src, dst in ((SSL_CERT_FILE_LEGACY, SSL_CERT_FILE),
+                         (SSL_KEY_FILE_LEGACY, SSL_KEY_FILE)):
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+                try:
+                    os.chmod(dst, 0o600)
+                except Exception:
+                    pass
+        # login background: images/login_bg.<ext> → config/branding/login_bg.<ext>
+        for ext in ('.png', '.jpg', '.jpeg', '.webp', '.svg'):
+            src = os.path.join('images', 'login_bg' + ext)
+            dst = os.path.join(BRANDING_DIR, 'login_bg' + ext)
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+    except Exception:
+        # never let migration kill the import — log-only at app boot would be
+        # nicer but constants.py runs pre-logging setup.
+        pass
+_migrate_to_config()
 
 # Session configuration
 # NS: 28800 was originally 36000 (10h) but we had to reduce it after the Traunstein pen-test

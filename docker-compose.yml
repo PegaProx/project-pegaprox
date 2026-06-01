@@ -13,7 +13,11 @@ services:
     volumes:
       - pegaprox-config:/app/config
       - pegaprox-logs:/app/logs
-      # - ./ssl:/app/ssl   # mount custom certs if needed
+      # MK 2026-06-01: SSL certs + login-background uploads now live under
+      # config/ssl and config/branding (auto-migrated from legacy ssl/ +
+      # images/login_bg.* on first boot). The separate ssl/ bind-mount is
+      # no longer needed for persistence — left here as a reference only.
+      # - ./ssl:/app/ssl   # legacy path; only mount if you've got an external cert lifecycle
     restart: unless-stopped
     # environment:
     #   PEGAPROX_BEHIND_PROXY: "true"           # behind nginx/haproxy
