@@ -205,6 +205,23 @@ def _verify_tls_for(target):
     return bool((target.get('settings') or {}).get('verify_tls', True))
 
 
+# MK 2026-05-31 (CodeAnt siem.py:224/226): dedup set so the opt-out warning
+# fires once per target host instead of once per audit event.
+_TLS_DOWNGRADE_WARNED = set()
+
+def _warn_tls_downgrade(url):
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).netloc or url)
+    if host in _TLS_DOWNGRADE_WARNED:
+        return
+    _TLS_DOWNGRADE_WARNED.add(host)
+    logging.warning(
+        "[SIEM] TLS hostname verification DISABLED for %r — admin set "
+        "settings.verify_tls=False on this target. Only safe for self-signed "
+        "SIEMs inside a trusted network.", host
+    )
+
+
 def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
     """Plain urllib HTTPS POST. MK May 2026 — TLS verification on by default;
     admins opt out per target if they're shipping to a self-signed SIEM.
@@ -220,12 +237,19 @@ def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
     except SsrfError as exc:
         raise RuntimeError(f"SIEM endpoint rejected: {exc}")
     req = urllib.request.Request(url, data=body_bytes, method='POST', headers=headers)
-    if verify_tls:
-        ctx = ssl.create_default_context()
-    else:
-        ctx = ssl.create_default_context()
+    # MK 2026-05-31 (CodeAnt siem.py:224/226): ssl.create_default_context()
+    # already returns check_hostname=True + verify_mode=CERT_REQUIRED by
+    # stdlib default — the static analyser doesn't read defaults though.
+    # Set them explicitly so the secure path is self-documenting. The
+    # opt-out path below only fires when the admin set verify_tls=False
+    # on this target (typically a self-signed SIEM in their own infra).
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        _warn_tls_downgrade(url)
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         code = resp.getcode()
         if not (200 <= code < 300):
