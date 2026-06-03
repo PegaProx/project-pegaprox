@@ -59,10 +59,32 @@ def save_metrics_history(history):
     pass
 
 
+# MK 2026-06-03 (#456 — long-term metric history beyond RRD): retention is
+# now env-driven. Default stays at 30 days (8640 snapshots × 5min cadence)
+# so existing installs see no behaviour change. Operators who want longer
+# history for compliance / capacity-planning set
+# PEGAPROX_METRICS_RETENTION_DAYS — clamped to [7, 365] so a typo can't
+# accidentally wipe the table or balloon the DB. 365d on a 50-VM cluster
+# is roughly 200 MB in the data column, well within reason.
+def _retention_snapshots():
+    raw = os.environ.get('PEGAPROX_METRICS_RETENTION_DAYS', '30').strip()
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        days = 30
+    days = max(7, min(days, 365))
+    return days * 288  # 24h × (60/5min)
+
+
 def save_metrics_snapshot(snapshot):
-    """Save a single metrics snapshot to SQLite — MK May 2026:
-    retention bumped from 1000 (3.5d) to 8640 (30d at 5min interval)
-    so right-sizing + capacity forecast have enough history to chew on.
+    """Save a single metrics snapshot to SQLite.
+
+    Cadence: every 5 min. Retention defaults to 30 days; override via
+    PEGAPROX_METRICS_RETENTION_DAYS (7..365). The data column is a JSON
+    blob of the per-cluster snapshot — see collect_metrics_snapshot for
+    the shape. Insights / Cost / Power / Prometheus exporter / the new
+    `/insights/history` endpoint all read from this table so it's a
+    single source of truth.
     """
     try:
         db = get_db()
@@ -76,11 +98,12 @@ def save_metrics_snapshot(snapshot):
             VALUES (?, ?)
         ''', (timestamp, data))
 
-        cursor.execute('''
+        keep = _retention_snapshots()
+        cursor.execute(f'''
             DELETE FROM metrics_history
             WHERE id NOT IN (
                 SELECT id FROM metrics_history
-                ORDER BY timestamp DESC LIMIT 8640
+                ORDER BY timestamp DESC LIMIT {int(keep)}
             )
         ''')
 

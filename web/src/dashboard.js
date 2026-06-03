@@ -21808,6 +21808,51 @@
                                 </div>
                                 
                                 <div className="p-4 overflow-y-auto" style={{ maxHeight: 'calc(85vh - 140px)' }}>
+                                    {/* MK 2026-06-03: HA fence-strategy banner — surfaces the result of
+                                        _ha_detect_fence_strategy from the server. 'wait' = 2-node-no-qdevice,
+                                        we explicitly skip auto-fencing so a planned reboot can't take the cluster
+                                        down. Banner is the load-bearing signal: admins reading the HA dashboard
+                                        now SEE that auto-fencing is disabled and why, instead of having to grep
+                                        /var/log/pegaprox-agent.log on each node. */}
+                                    {(() => {
+                                        const fs = haStatus?.split_brain_prevention?.fence_strategy;
+                                        const warn = haStatus?.split_brain_prevention?.fence_strategy_warning;
+                                        if (!fs && !warn) return null;
+                                        const strat = fs?.strategy || 'unknown';
+                                        const colour = (
+                                            strat === 'wait'    ? 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300' :
+                                            strat === 'quorum'  ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' :
+                                                                  'bg-gray-500/10 border-gray-500/30 text-gray-300'
+                                        );
+                                        const icon = strat === 'wait' ? '⚠️' : strat === 'quorum' ? '🛡️' : 'ℹ️';
+                                        return (
+                                            <div className={`p-4 ${colour} border rounded-xl mb-4`}>
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <span className="text-xl">{icon}</span>
+                                                    <h4 className="font-medium">
+                                                        {t('fenceStrategyLabel') || 'Fence strategy'}: <span className="font-mono text-sm uppercase">{strat}</span>
+                                                    </h4>
+                                                    {fs?.expected_votes != null && (
+                                                        <span className="text-xs opacity-70 ml-auto">
+                                                            {fs.expected_votes} votes · qdevice: {fs.has_qdevice ? 'yes' : 'no'}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                {warn && (
+                                                    <p className="text-sm mb-2">{warn}</p>
+                                                )}
+                                                {fs?.reason && (
+                                                    <p className="text-xs opacity-80">{fs.reason}</p>
+                                                )}
+                                                {fs?.detected_at && (
+                                                    <p className="text-xs opacity-60 mt-2">
+                                                        {t('detectedAt') || 'detected'}: {new Date(fs.detected_at).toLocaleString()}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
+
                                     {/* SELF-FENCE - Main Feature */}
                                     <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-xl mb-4">
                                         <div className="flex items-center gap-2 mb-3">

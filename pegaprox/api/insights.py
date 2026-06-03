@@ -523,6 +523,138 @@ def top_talkers(cluster_id):
     })
 
 
+@bp.route('/api/clusters/<cluster_id>/insights/history', methods=['GET'])
+@require_auth(perms=['insights.view'])
+def long_term_history(cluster_id):
+    """Return cluster-aggregate + per-node time-series from the
+    metrics_history snapshots. Powers the long-term-history chart
+    on the dashboard.
+
+    MK 2026-06-03 (#456): existing right-sizing / forecast / rollups
+    endpoints all read the same metrics_history table, but they
+    return computed values (percentiles, forecasts, top-N). This
+    endpoint returns the raw time-series so the UI can render line
+    charts of CPU%/RAM%/disk% per node and aggregated per cluster.
+
+    Query params:
+      days     int  default 7,  max retention_days (= PEGAPROX_METRICS_RETENTION_DAYS)
+      step     int  default 0   bucket size in seconds. 0 = no bucketing
+                                (return every snapshot); >0 = average the
+                                snapshots inside each step-second window
+                                (server-side downsample for long windows).
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    try:
+        days = int(request.args.get('days', 7))
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 365))
+
+    try:
+        step = int(request.args.get('step', 0))
+    except (TypeError, ValueError):
+        step = 0
+    step = max(0, min(step, 86400))  # 1d bucket cap
+
+    raw = _load_history(cluster_id, days=days)
+    if not raw:
+        return jsonify({
+            'cluster_id': cluster_id,
+            'days_requested': days,
+            'step_seconds': step,
+            'samples': [],
+            'note': 'No snapshots in window yet — collector runs every 5 min',
+        })
+
+    # Build a flat list of (ts, cluster_pct_cpu, cluster_pct_mem, nodes_map)
+    samples = []
+    for ts_unix, cd in raw:
+        totals = cd.get('totals') or {}
+        cpu_total = totals.get('cpu_total') or 0
+        cpu_used = totals.get('cpu_used') or 0
+        mem_total = totals.get('mem_total') or 0
+        mem_used = totals.get('mem_used') or 0
+        cpu_pct = round((cpu_used / cpu_total * 100), 2) if cpu_total else 0
+        mem_pct = round((mem_used / mem_total * 100), 2) if mem_total else 0
+        nodes = {}
+        for nname, ndata in (cd.get('nodes') or {}).items():
+            nodes[nname] = {
+                'cpu': ndata.get('cpu', 0),
+                'mem_percent': ndata.get('mem_percent', 0),
+            }
+        samples.append({
+            'ts': ts_unix,
+            'cpu_pct': cpu_pct,
+            'mem_pct': mem_pct,
+            'vms_running': totals.get('vms_running', 0),
+            'cts_running': totals.get('cts_running', 0),
+            'nodes': nodes,
+        })
+
+    # Optional server-side downsample. Useful when asking for 90d / 365d
+    # so the response isn't 100k+ points the chart library would choke on.
+    if step > 0 and len(samples) > 1:
+        bucketed = []
+        cur_bucket_start = samples[0]['ts'] - (samples[0]['ts'] % step)
+        cur = []
+        for s in samples:
+            if s['ts'] >= cur_bucket_start + step:
+                # flush current bucket
+                if cur:
+                    bucketed.append(_avg_samples(cur, cur_bucket_start))
+                cur_bucket_start = s['ts'] - (s['ts'] % step)
+                cur = []
+            cur.append(s)
+        if cur:
+            bucketed.append(_avg_samples(cur, cur_bucket_start))
+        samples = bucketed
+
+    return jsonify({
+        'cluster_id': cluster_id,
+        'days_requested': days,
+        'step_seconds': step,
+        'sample_count': len(samples),
+        'samples': samples,
+    })
+
+
+def _avg_samples(samples, bucket_ts):
+    """Average a list of samples into a single bucketed sample.
+    bucket_ts is the bucket's leftmost timestamp."""
+    n = max(len(samples), 1)
+    cpu = sum(s['cpu_pct'] for s in samples) / n
+    mem = sum(s['mem_pct'] for s in samples) / n
+    vms = max(s['vms_running'] for s in samples)
+    cts = max(s['cts_running'] for s in samples)
+    # node-level averaging — union of node names, mean of values
+    node_avgs = {}
+    for s in samples:
+        for nname, nd in (s.get('nodes') or {}).items():
+            slot = node_avgs.setdefault(nname, {'cpu_sum': 0, 'mem_sum': 0, 'count': 0})
+            slot['cpu_sum'] += nd.get('cpu', 0) or 0
+            slot['mem_sum'] += nd.get('mem_percent', 0) or 0
+            slot['count'] += 1
+    nodes_out = {
+        nname: {
+            'cpu': round(slot['cpu_sum'] / slot['count'], 4),
+            'mem_percent': round(slot['mem_sum'] / slot['count'], 2),
+        }
+        for nname, slot in node_avgs.items()
+    }
+    return {
+        'ts': bucket_ts,
+        'cpu_pct': round(cpu, 2),
+        'mem_pct': round(mem, 2),
+        'vms_running': vms,
+        'cts_running': cts,
+        'nodes': nodes_out,
+    }
+
+
 @bp.route('/api/insights/force-snapshot', methods=['POST'])
 @require_auth(perms=['admin.api'])
 def force_snapshot():
