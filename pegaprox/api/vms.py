@@ -7484,6 +7484,28 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
     pve_ws = None
     running = True
     
+    def build_validated_vnc_url(base_url: str, node: str, vm_type: str, vmid: str) -> str:
+        try:
+            from urllib.parse import urlparse, urlunparse
+            
+            if "/../" in base_url or re.search(r"/%2e%2e/", base_url, re.IGNORECASE):
+                raise ValueError("Invalid path")
+            
+            parsed = urlparse(base_url)
+            
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", node):
+                raise ValueError("Invalid parameter")
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", vm_type):
+                raise ValueError("Invalid parameter")
+            if not re.fullmatch(r"[0-9]+", str(vmid)):
+                raise ValueError("Invalid parameter")
+            
+            parsed = parsed._replace(path=f"/api2/json/nodes/{node}/{vm_type}/{vmid}/vncproxy")
+            
+            return urlunparse(parsed)
+        except Exception:
+            raise ValueError("Invalid URL")
+    
     try:
         import urllib.parse
         import urllib.request
@@ -7526,10 +7548,8 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             print(f"Reusing JS-issued vncproxy ticket port={port}")
         else:
             print(f"Step 2: Get VNC ticket...")
-            if vm_type == 'qemu':
-                vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
-            else:
-                vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
+            base_url = f"https://{host}:{port}"
+            vnc_url = build_validated_vnc_url(base_url, node, vm_type, str(vmid))
             vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
             vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
             vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
