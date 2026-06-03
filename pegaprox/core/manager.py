@@ -5211,12 +5211,22 @@ echo "AGENT_UNINSTALLED"
         Defaults to 'quorum' when detection fails — keeps the historical
         behaviour for users who already had self-fence working, rather than
         silently switching them into a more permissive mode without intent.
+
+        MK 2026-06-03 (followup, admin-visibility): result is cached on
+        `self.ha_config['fence_strategy']` (dict with strategy / reason /
+        expected_votes / has_qdevice / detected_at). UI's get_ha_status
+        poll reads from there so we don't re-SSH on every dashboard refresh.
+        Wait-mode also fires an audit-event so admins see it in the audit
+        log / SIEM forward.
         """
+        decision = {'strategy': 'quorum', 'reason': 'detection-default',
+                    'expected_votes': None, 'has_qdevice': None}
         try:
             host = self.host
             url = f"https://{host}:{self.api_port}/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             if resp.status_code != 200:
+                self._ha_persist_fence_strategy(decision, 'detection-skipped: list-nodes failed')
                 return 'quorum'
 
             ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
@@ -5247,23 +5257,72 @@ echo "AGENT_UNINSTALLED"
                 flags = flags_m.group(1) if flags_m else ''
                 has_qdevice = 'Qdevice' in flags
 
+                decision['expected_votes'] = expected
+                decision['has_qdevice'] = has_qdevice
+
                 if expected >= 3 or has_qdevice:
+                    decision['strategy'] = 'quorum'
+                    decision['reason'] = (
+                        f"3+ nodes ({expected} expected votes) — corosync quorum is meaningful"
+                        if expected >= 3 else
+                        "2 nodes with qdevice — quorum survives a single-node reboot"
+                    )
                     self.logger.info(
                         f"[HA] fence_strategy=quorum (expected_votes={expected}, qdevice={has_qdevice})"
                     )
+                    self._ha_persist_fence_strategy(decision, 'detected')
                     return 'quorum'
                 else:
-                    self.logger.warning(
-                        f"[HA] 2-node cluster WITHOUT qdevice detected (expected_votes={expected}) — "
-                        f"fence_strategy=wait. The agent will NOT auto-stop VMs on isolation, "
-                        f"because corosync loses quorum on every single-node reboot in this "
-                        f"topology. Add a qdevice to enable safe automatic fencing."
+                    decision['strategy'] = 'wait'
+                    decision['reason'] = (
+                        f"2-node cluster (expected_votes={expected}) WITHOUT qdevice — "
+                        "corosync loses quorum on every single-node reboot in this topology, "
+                        "so auto-fencing would take the whole cluster down on planned "
+                        "maintenance. Add a qdevice to upgrade to quorum-mode."
                     )
+                    self.logger.warning(
+                        f"[HA] 2-node WITHOUT qdevice detected (expected_votes={expected}) — "
+                        f"fence_strategy=wait. The agent will NOT auto-stop VMs on isolation. "
+                        f"Add a qdevice for safe automatic fencing."
+                    )
+                    self._ha_persist_fence_strategy(decision, 'detected')
                     return 'wait'
+            self._ha_persist_fence_strategy(decision, 'detection-skipped: no node returned pvecm output')
             return 'quorum'
         except Exception as e:
             self.logger.warning(f"[HA] fence-strategy detection failed: {e} — defaulting to 'quorum'")
+            self._ha_persist_fence_strategy(decision, f'detection-error: {str(e)[:120]}')
             return 'quorum'
+
+    def _ha_persist_fence_strategy(self, decision: dict, reason: str) -> None:
+        """Cache the strategy decision on self.ha_config so the UI's
+        get_ha_status() poll can render it without re-SSHing. Emits an
+        audit event in wait-mode so the signal propagates to the audit
+        log + any configured SIEM/email forwarders."""
+        from datetime import datetime as _dt
+        decision = dict(decision)
+        decision['detected_at'] = _dt.utcnow().isoformat() + 'Z'
+        decision['detection_reason'] = reason
+        self.ha_config['fence_strategy'] = decision
+
+        # Wait-mode is the one the admin really needs to see — fire an
+        # audit event so it appears in the audit log feed + reaches any
+        # configured SIEM/email forwarder. Quorum-mode is the default
+        # so we skip the noise.
+        if decision['strategy'] == 'wait':
+            try:
+                from pegaprox.utils.audit import log_audit
+                log_audit(
+                    'system', 'ha.fence_strategy_wait',
+                    f"Cluster {self.config.name}: agent installed in WAIT-mode "
+                    f"({decision['reason'][:240]}). Auto-fencing disabled — "
+                    f"add a qdevice for safe automatic fencing.",
+                    cluster=self.config.name
+                )
+            except Exception:
+                # Audit logging is best-effort — the warning log line
+                # above is the load-bearing surface.
+                pass
 
     def _ha_cleanup_storage_heartbeat(self) -> dict:
         """Wipe the `.pegaprox` heartbeat directory on the shared storage path
@@ -7029,6 +7088,28 @@ echo "AGENT_INSTALLED_OK"
                     'strict_fencing': self.ha_config.get('strict_fencing', False),
                     'last_heartbeat_write': self.ha_last_heartbeat_write.isoformat() if self.ha_last_heartbeat_write else None,
                     'pegaprox_vmid': self.ha_config.get('pegaprox_vmid', ''),
+                    # MK 2026-06-03 (admin-visibility) — surfaces the fence
+                    # strategy the agent was installed with so the UI can
+                    # render a clear "this cluster is in wait-mode, add a
+                    # qdevice" banner instead of admins having to grep
+                    # /var/log/pegaprox-agent.log on each node.
+                    'fence_strategy': self.ha_config.get('fence_strategy', {
+                        'strategy': 'unknown',
+                        'reason': 'agents not yet installed in this session',
+                        'expected_votes': None,
+                        'has_qdevice': None,
+                        'detected_at': None,
+                        'detection_reason': 'never-run',
+                    }),
+                    'fence_strategy_warning': (
+                        "2-node cluster without qdevice — auto-fencing is "
+                        "disabled to avoid taking the whole cluster down on "
+                        "planned single-node reboots. Add a qdevice "
+                        "(corosync-qnetd on a third reachable host) to enable "
+                        "quorum-based fencing."
+                        if (self.ha_config.get('fence_strategy') or {}).get('strategy') == 'wait'
+                        else None
+                    ),
                 },
                 
                 # Cluster health summary
