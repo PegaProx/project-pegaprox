@@ -313,10 +313,28 @@ def _run_v2p_migration(task):
 
         # MK: pre-flight check — which disk transfer tools are installed on the PVE node
         import shutil
+        # MK 2026-06-04 (#520 ijaggi1974): old preflight ran `which qemu-img`
+        # via non-interactive SSH and got false-negatives on PVE 9.x where
+        # /usr/bin/qemu-img IS present (shipped by pve-qemu-kvm 11.x) but
+        # the SSH shell's PATH didn't surface `which` correctly. Switched
+        # to `command -v` (POSIX shell builtin, no PATH-resolution
+        # dependency) plus an absolute-path fallback against the four
+        # standard binary dirs. Either path success counts.
         _preflight = {}
+        _probe_dirs = '/usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin'
         for _tool in ['qemu-img', 'qemu-nbd', 'sshfs', 'sshpass']:
-            rc_pf, out_pf, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"which {_tool} 2>/dev/null", timeout=5)
+            # Belt-and-suspenders probe: `command -v` (POSIX builtin, honours
+            # PATH) wins fast, else walk the canonical bin/sbin dirs and
+            # check for executable absolute paths. The `&& exit 0` pattern
+            # avoids the bash-precedence trap where `A || B; exit 1` runs
+            # `exit 1` unconditionally because `;` isn't a `||`-continuation.
+            probe = (
+                f"command -v {_tool} >/dev/null 2>&1 && exit 0; "
+                f"for d in {_probe_dirs}; do "
+                f"  [ -x \"$d/{_tool}\" ] && exit 0; "
+                f"done; exit 1"
+            )
+            rc_pf, out_pf, _ = _pve_node_exec(pve_mgr, task.target_node, probe, timeout=5)
             _preflight[_tool] = rc_pf == 0
         avail = [t for t, ok in _preflight.items() if ok]
         missing = [t for t, ok in _preflight.items() if not ok]
@@ -325,7 +343,18 @@ def _run_v2p_migration(task):
         if missing:
             task.log(f"Tools missing: {', '.join(missing)} (install for more transfer methods)")
         if not _preflight.get('qemu-img'):
-            task.set_phase('failed', 'qemu-img not found on target node. Install qemu-utils: apt install qemu-utils')
+            # MK 2026-06-04 (#520): rewrote the error message. The old text
+            # advised `apt install qemu-utils`, which on PVE 9.x conflicts
+            # with `pve-qemu-kvm` and can break the Proxmox install. PVE
+            # itself ships qemu-img via pve-qemu-kvm; absence here usually
+            # means a broken/incomplete PVE install, not a missing apt pkg.
+            task.set_phase('failed',
+                'qemu-img not detected on target node. On PVE this binary is '
+                'shipped by `pve-qemu-kvm`; if `/usr/bin/qemu-img` is missing '
+                'the PVE install is incomplete — `apt install pve-qemu-kvm` '
+                'reinstalls it. Do NOT run `apt install qemu-utils` on PVE 9.x: '
+                'that package conflicts with pve-qemu-kvm and can break '
+                'Proxmox.')
             return
 
         # Find VM directory on ESXi datastore
