@@ -10435,7 +10435,15 @@
                     const resp = await authFetch(`${API_URL}/pbs`);
                     if (resp && resp.ok) {
                         const data = await resp.json();
-                        setPbsServers(data);
+                        // LW 2026-06-04 (#527 jostrasser): /api/pbs returns servers in DB
+                        // insertion order, so the sidebar showed PBS01/PBS02/... unsorted.
+                        // Sort by name here at the single source so every consumer (left
+                        // nav + cluster-detail + topology) gets a stable, name-sorted list.
+                        // numeric:true so PBS01 < PBS02 < PBS10 instead of lexical PBS1,PBS10,PBS2.
+                        const sorted = Array.isArray(data)
+                            ? [...data].sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' }))
+                            : data;
+                        setPbsServers(sorted);
                     }
                 } catch (e) { console.warn('PBS fetch error:', e); }
             };
