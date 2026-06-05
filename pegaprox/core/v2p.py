@@ -1083,6 +1083,9 @@ def _run_v2p_migration(task):
 
             _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
 
+            # honour qcow2 selection while the VM is still stopped (disks at rest)
+            _maybe_convert_disks_to_qcow2(pve_mgr, task)
+
             if task.start_after:
                 task.log("Starting Proxmox VM...")
                 try:
@@ -1092,7 +1095,7 @@ def _run_v2p_migration(task):
                     task.log(f"VM {task.proxmox_vmid} started")
                 except Exception as e:
                     task.log(f"Start failed: {e}")
-            
+
             task.set_phase('completed')
             task.log(f"COMPLETED: {task.vm_name} -> VMID {task.proxmox_vmid} (offline copy)")
             return
@@ -5250,6 +5253,64 @@ exit $((S + R))
         task.log("Migration used offline copy (QEMU SSH not available for this ESXi version)")
 
 
+def _maybe_convert_disks_to_qcow2(pve_mgr, task):
+    """Honour a requested qcow2 disk format AFTER the (raw) copy is done.
+
+    The migration copy paths all write raw (dd / qemu-img / importdisk --format
+    raw) — correct, and works on every storage. When the user picked qcow2 we
+    convert the freshly-copied data disks in place via `qm move-disk
+    --format qcow2`, letting PVE handle the raw→qcow2 conversion + config swap
+    (incl. PVE 9 qcow2-on-LVM). Fail-safe by design: any problem leaves the disk
+    as raw and the migration still succeeds — qcow2 is a nicety, never a hard
+    gate. MUST only run with the disks at rest (offline modes), never while a
+    background copy is still writing. MK 2026-06-05 (#529).
+    """
+    import re
+    fmt = str(getattr(task, 'disk_format', 'raw') or 'raw').lower()
+    if fmt != 'qcow2':
+        return
+    vmid = task.proxmox_vmid
+    storage = task.target_storage
+    try:
+        rc, out, _ = _pve_node_exec(pve_mgr, task.target_node,
+            f"qm config {vmid} 2>&1", timeout=20)
+        if rc != 0 or not out:
+            task.log("  qcow2: couldn't read VM config — leaving disks as raw")
+            return
+        keys = []
+        for line in str(out).splitlines():
+            line = line.strip()
+            m = re.match(r'^(scsi\d+|virtio\d+|sata\d+|ide\d+):\s*(\S+)', line)
+            if not m or 'media=cdrom' in line:
+                continue
+            key, volspec = m.group(1), m.group(2)
+            # only our just-migrated data volumes on the target storage
+            if volspec.startswith(f"{storage}:") and 'vm-' in volspec and 'disk' in volspec:
+                keys.append(key)
+        if not keys:
+            return
+        for key in keys:
+            task.log(f"  Converting {key} → qcow2 (requested format)…")
+            moved = False
+            # PVE renamed the subcommand over versions; try both forms. A wrong
+            # form errors instantly (usage error, no copy started), so this is cheap.
+            for cmd in (f"qm move-disk {vmid} {key} {shlex.quote(storage)} --format qcow2 --delete 1 2>&1",
+                        f"qm disk move {vmid} {key} {shlex.quote(storage)} --format qcow2 --delete 1 2>&1"):
+                rcm, outm, _ = _pve_node_exec(pve_mgr, task.target_node, cmd, timeout=21600)
+                o = str(outm or '').strip(); ol = o.lower()
+                if rcm == 0 and 'error' not in ol and 'unable' not in ol:
+                    task.log(f"  {key} is now qcow2"); moved = True; break
+                if 'unknown command' in ol or 'no such' in ol or 'usage:' in ol or 'implement' in ol:
+                    continue  # wrong subcommand spelling for this PVE — try the other
+                # real error (e.g. storage can't do qcow2) — stop, keep raw
+                task.log(f"  {key} kept as raw — qcow2 not available here ({o[:120]})")
+                break
+            if not moved:
+                task.log(f"  {key} left as raw")
+    except Exception as e:
+        task.log(f"  qcow2 conversion skipped (kept raw): {str(e)[:150]}")
+
+
 def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
                               datastore, vm_dir, descriptor_files, disk_bus, mnt_path):
     """Fallback: copy disks via SSH (key or sshpass), then start VM."""
@@ -5317,6 +5378,9 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
                 timeout=15)
             task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
         task.log(f"  BIOS: ovmf, Machine: q35 ✓")
+
+    # honour qcow2 selection while the VM is still stopped (disks at rest)
+    _maybe_convert_disks_to_qcow2(pve_mgr, task)
 
     if task.start_after:
         task.log("Starting VM on local storage...")
