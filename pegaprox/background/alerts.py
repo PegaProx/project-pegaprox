@@ -227,10 +227,12 @@ def check_and_send_alerts():
                                 # regardless of whether an alert fired) + fan the per-node
                                 # walk out over the pool.
                                 _bk_ent = getattr(manager, '_backup_sla_cache', None)
+                                last_bk = None
                                 if _bk_ent and (_t.time() - _bk_ent[0]) < 600:
                                     last_bk = _bk_ent[1]
                                 else:
-                                    last_bk = {}
+                                    _fresh = {}
+                                    _scan_ok = False
                                     try:
                                         sess = manager._create_session()
                                         nr = sess.get(f"https://{manager.host}:{manager.api_port}/api2/json/nodes", timeout=10)
@@ -271,27 +273,37 @@ def check_and_send_alerts():
                                         for _res in run_concurrent([lambda n=nd: _scan_node(n) for nd in nodes], timeout=120):
                                             if not _res: continue
                                             for k, ts in _res.items():
-                                                if k not in last_bk or ts > last_bk[k]:
-                                                    last_bk[k] = ts
+                                                if k not in _fresh or ts > _fresh[k]:
+                                                    _fresh[k] = ts
+                                        # R1 (regression fix): only authoritative if we actually reached
+                                        # the cluster. Caching an empty map from a failed/zero-node walk
+                                        # fired a false "100% breached" SLA alert for the full 10-min TTL.
+                                        _scan_ok = (nr.status_code == 200 and bool(nodes))
                                     except Exception:
-                                        pass
-                                    manager._backup_sla_cache = (_t.time(), last_bk)
-                                breached = 0
-                                ok_cnt = 0
-                                total = 0
-                                for r in vms:
-                                    if r.get('type') not in ('qemu', 'lxc'): continue
-                                    total += 1
-                                    ts = last_bk.get((r.get('type'), str(r.get('vmid', ''))), 0)
-                                    if not ts or (_now - ts) >= _max_s:
-                                        breached += 1
-                                    else:
-                                        ok_cnt += 1
-                                if total > 0:
-                                    if metric == 'backup_sla_breached_pct':
-                                        current_value = round(100 * breached / total, 1)
-                                    else:
-                                        current_value = round(100 * ok_cnt / total, 1)
+                                        _scan_ok = False
+                                    if _scan_ok:
+                                        last_bk = _fresh
+                                        manager._backup_sla_cache = (_t.time(), _fresh)
+                                    elif _bk_ent:
+                                        last_bk = _bk_ent[1]  # fall back to last good result, never alert on bad data
+                                    # else: scan failed + no prior result → last_bk stays None → skip eval this tick
+                                if last_bk is not None:
+                                    breached = 0
+                                    ok_cnt = 0
+                                    total = 0
+                                    for r in vms:
+                                        if r.get('type') not in ('qemu', 'lxc'): continue
+                                        total += 1
+                                        ts = last_bk.get((r.get('type'), str(r.get('vmid', ''))), 0)
+                                        if not ts or (_now - ts) >= _max_s:
+                                            breached += 1
+                                        else:
+                                            ok_cnt += 1
+                                    if total > 0:
+                                        if metric == 'backup_sla_breached_pct':
+                                            current_value = round(100 * breached / total, 1)
+                                        else:
+                                            current_value = round(100 * ok_cnt / total, 1)
                         except Exception as _e:
                             logging.debug(f"[AlertCheck] backup_sla eval failed: {_e}")
                     try:
