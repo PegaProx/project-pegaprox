@@ -236,6 +236,19 @@ class VMwareManager:
     def _connect_soap(self) -> bool:
         """Fallback connection via pyvmomi SOAP API (works on all ESXi/vCenter versions)."""
         try:
+            # H6 (scale audit): SmartConnect takes no connect timeout, so a dark
+            # host makes it hang on the ~127s OS TCP connect. Pre-flight a TCP probe
+            # with a short timeout and bail fast if the host is unreachable.
+            import socket as _sock
+            try:
+                _probe = _sock.create_connection(
+                    (self.host, int(self.port or 443)),
+                    timeout=float(os.environ.get('PEGAPROX_VMWARE_CONNECT_TIMEOUT', '8')))
+                _probe.close()
+            except Exception as _pe:
+                self.last_error = f"host unreachable ({_pe})"
+                logging.debug(f"[VMware:{self.id}] SOAP pre-flight TCP probe failed: {_pe}")
+                return False
             from pyVim.connect import SmartConnect
             from pyVmomi import vim
             import ssl
@@ -1911,11 +1924,20 @@ def load_vmware_servers():
             }
             
             mgr = VMwareManager(vmware_id, config)
-            if config['enabled']:
-                mgr.connect()
             vmware_managers[vmware_id] = mgr
-            
-        logging.info(f"[VMware] Loaded {len(rows)} VMware servers ({sum(1 for m in vmware_managers.values() if m.connected)} connected)")
+            if config['enabled']:
+                # H6 (scale audit): connect in the background. A serial connect()
+                # per host on the startup thread blocked BEFORE the web port opened,
+                # so one unreachable ESXi host delayed login for every admin. Spawn
+                # it like the PVE daemon loop; the manager is already registered so
+                # the UI shows it connecting.
+                try:
+                    import gevent
+                    gevent.spawn(mgr.connect)
+                except Exception:
+                    mgr.connect()
+
+        logging.info(f"[VMware] Loaded {len(rows)} VMware servers (connecting in background)")
     except Exception as e:
         logging.warning(f"[VMware] Failed to load VMware servers: {e}")
 
