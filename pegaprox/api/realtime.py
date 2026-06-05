@@ -347,7 +347,24 @@ def update_sse_subscription():
             return jsonify({'ok': False, 'reason': 'client_not_found'})
         if client.get('user') != username:
             return jsonify({'error': 'Unauthorized'}), 403
+        old_sub = client.get('clusters')
         client['clusters'] = new_sub
+
+    # R2 (regression fix): the IP/disk refresh loop is gated on watched-clusters
+    # and only re-runs ~every 40s, so a freshly-selected cluster would show stale
+    # guest IPs/disk for that window. Kick a one-shot refresh for clusters that
+    # just became watched (explicit→explicit transition only; all-access already
+    # refreshes everything).
+    if old_sub is not None and new_sub is not None:
+        newly = set(new_sub) - set(old_sub)
+        for cid in newly:
+            mgr = cluster_managers.get(cid)
+            if mgr and getattr(mgr, 'is_connected', False) and hasattr(mgr, 'refresh_ip_cache'):
+                try:
+                    import gevent
+                    gevent.spawn(mgr.refresh_ip_cache)
+                except Exception:
+                    pass
 
     logging.debug(f"[SSE] Subscription updated for {client_id}: {new_sub}")
     return jsonify({'ok': True, 'clusters': new_sub})
