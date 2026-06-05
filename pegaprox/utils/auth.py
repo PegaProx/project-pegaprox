@@ -908,8 +908,25 @@ def require_auth(roles: list = None, perms: list = None):
             # check permissions if specified
             if perms:
                 from pegaprox.utils.rbac import has_permission
+                # H-3 (security audit): for API-token auth, evaluate perms against the
+                # token's effective (floored) ROLE — never the owner's. has_permission()
+                # short-circuits True for an admin user, so checking the owner dict let an
+                # admin-owned 'viewer' token inherit every permission on perms=-guarded
+                # routes (priv-esc). fresh_role already floors token_role to the owner's
+                # current role (can't escalate, follows demotions). We scope to the role's
+                # own permissions only — the owner's interactive extra perms / group grants
+                # do NOT extend to a token — while still honouring the owner's denials.
+                if session.get('api_token'):
+                    perm_user = {
+                        'role': fresh_role,
+                        'permissions': [],
+                        'denied_permissions': user.get('denied_permissions', []),
+                        'tenant_id': user.get('tenant_id'),
+                    }
+                else:
+                    perm_user = user
                 for p in perms:
-                    if not has_permission(user, p):
+                    if not has_permission(perm_user, p):
                         return jsonify({'error': 'Permission denied', 'code': 'MISSING_PERMISSION', 'required': p}), 403
             
             # Add session info to request context
