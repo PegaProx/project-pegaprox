@@ -13056,6 +13056,8 @@
                     maintenanceToggle: handleMaintenanceToggle,       // (nodeName, enable)
                     startUpdate: handleStartUpdate,                   // (nodeName, reboot)
                     configNode: (node) => setConfigNode(node),
+                    openSettings: () => setShowSettings(true),
+                    openProfile: () => setShowProfile(true),
                     refresh: () => {
                         if (!selectedCluster) return;
                         fetchClusterMetrics(selectedCluster.id);
@@ -13088,6 +13090,9 @@
                             currentUser={user}
                             t={t}
                             onExitCloud={() => updatePreferences({ ui_layout: 'modern', theme: 'proxmoxDark' })}
+                            onOpenSettings={() => setShowSettings(true)}
+                            onOpenProfile={() => setShowProfile(true)}
+                            onLogout={logout}
                         />
                         {/* Resource-action modals — shared dashboard state, mounted here too so
                             they surface over the cloud shell. The classic copies live in the main
@@ -13127,6 +13132,11 @@
                         {corpMetricsVm && selectedCluster && (
                             <VmMetricsModal vm={corpMetricsVm} clusterId={selectedCluster.id} onClose={() => setCorpMetricsVm(null)} />
                         )}
+                        {/* full admin settings + per-user profile — the SAME standalone modals the
+                            classic layout uses, mounted here so the Cloud skin has full config parity
+                            (they self-gate on isOpen + pull all context from the app providers). */}
+                        <UserProfileModal isOpen={showProfile} onClose={() => setShowProfile(false)} addToast={addToast} />
+                        <PegaProxSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} addToast={addToast} onGroupsChanged={fetchClusterGroups} />
                     </div>
                 );
             }

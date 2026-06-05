@@ -199,7 +199,7 @@
         }
 
         // kebab dropdown — fixed-position so it never gets clipped by the table scroll. -- NS
-        function CloudActionMenu({ items, label }) {
+        function CloudActionMenu({ items, label, triggerLabel, triggerNode }) {
             const [open, setOpen] = React.useState(false);
             const [pos, setPos] = React.useState({ top: 0, left: 0 });
             const btnRef = React.useRef(null);
@@ -231,9 +231,19 @@
             const visible = (items || []).filter(Boolean);
             return (
                 <>
-                    <button type="button" ref={btnRef} className="cloud-icon-btn" onClick={toggle} title={label || 'Actions'}>
-                        <Icons.MoreVertical />
-                    </button>
+                    {triggerNode ? (
+                        <button type="button" ref={btnRef} className="cloud-menu-trigger-plain" onClick={toggle} title={label || 'Actions'}>
+                            {triggerNode}
+                        </button>
+                    ) : triggerLabel ? (
+                        <button type="button" ref={btnRef} className="cloud-btn" onClick={toggle} title={label || 'Actions'}>
+                            {triggerLabel} <Icons.ChevronDown />
+                        </button>
+                    ) : (
+                        <button type="button" ref={btnRef} className="cloud-icon-btn" onClick={toggle} title={label || 'Actions'}>
+                            <Icons.MoreVertical />
+                        </button>
+                    )}
                     {open && (
                         <div ref={menuRef} className="cloud-menu cloud-menu-fixed" style={{ top: pos.top, left: pos.left }} onClick={(e) => e.stopPropagation()}>
                             {visible.map((it, i) => it.divider ? <div className="cloud-menu-sep" key={'s' + i} /> : (
@@ -280,13 +290,14 @@
             );
         }
 
-        function CloudEmpty({ icon, title, text }) {
+        function CloudEmpty({ icon, title, text, action }) {
             const Ico = Icons[icon] || Icons.Box;
             return (
                 <div className="cloud-empty-state">
                     <div className="cloud-empty-icon"><Ico /></div>
                     <div className="cloud-empty-title">{title}</div>
                     {text && <div className="cloud-empty-text">{text}</div>}
+                    {action && <div className="cloud-empty-action">{action}</div>}
                 </div>
             );
         }
@@ -419,8 +430,8 @@
             );
         }
 
-        // ── top bar ────────────────────────────────────────────────
-        function CloudTopbar({ crumbs, clusters, selectedCluster, setSelectedCluster, theme, onToggleTheme, onRefresh, onExitCloud, t }) {
+        // ── top bar (masthead) ─────────────────────────────────────
+        function CloudTopbar({ crumbs, clusters, selectedCluster, setSelectedCluster, theme, onToggleTheme, onRefresh, onExitCloud, onOpenSettings, onOpenProfile, onLogout, isAdmin, currentUser, t }) {
             const safe = Array.isArray(clusters) ? clusters : [];
             const selId = selectedCluster && (selectedCluster.id != null ? selectedCluster.id : selectedCluster.name);
             const onChange = (e) => {
@@ -428,6 +439,16 @@
                 const match = safe.find(c => String(c && (c.id != null ? c.id : c.name)) === String(val));
                 if (match && typeof setSelectedCluster === 'function') setSelectedCluster(match);
             };
+            const uname = (currentUser && (currentUser.username || currentUser.name)) || 'User';
+            const initial = (uname[0] || 'U').toUpperCase();
+            const userMenu = [
+                { label: t('cloud.profile') || 'Profile & preferences', icon: 'User', onClick: () => onOpenProfile && onOpenProfile() },
+                isAdmin && { label: t('cloud.settings') || 'Settings', icon: 'Settings', onClick: () => onOpenSettings && onOpenSettings() },
+                { divider: true },
+                (typeof onExitCloud === 'function') && { label: t('cloud.exit') || 'Exit Cloud (Modern view)', icon: 'Grid', onClick: onExitCloud },
+                (typeof onLogout === 'function') && { label: t('logout') || 'Sign out', icon: 'LogOut', danger: true, onClick: onLogout },
+            ].filter(Boolean);
+
             return (
                 <div className="cloud-topbar">
                     <div className="cloud-breadcrumb">
@@ -450,13 +471,21 @@
                                 </select>
                             </div>
                         )}
+                        <div className="cloud-lang"><LanguageSwitcher /></div>
                         <CloudIconBtn icon={theme === 'light' ? 'Moon' : 'Sun'} title={theme === 'light' ? 'Dark theme' : 'Light theme'} onClick={onToggleTheme} />
                         <CloudIconBtn icon="RefreshCw" title={t('cloud.refresh') || 'Refresh'} onClick={onRefresh} />
-                        {typeof onExitCloud === 'function' && (
-                            <button type="button" className="cloud-btn cloud-btn-ghost" onClick={onExitCloud} title={t('cloud.exit') || 'Exit Preview'}>
-                                <Icons.LogOut /> {t('cloud.exit') || 'Exit'}
-                            </button>
-                        )}
+                        {isAdmin && <CloudIconBtn icon="Settings" title={t('cloud.settings') || 'Settings'} onClick={() => onOpenSettings && onOpenSettings()} />}
+                        <CloudActionMenu
+                            items={userMenu}
+                            label={uname}
+                            triggerNode={
+                                <span className="cloud-user-btn">
+                                    <span className="cloud-user-avatar">{initial}</span>
+                                    <span className="cloud-user-name">{uname}</span>
+                                    <Icons.ChevronDown />
+                                </span>
+                            }
+                        />
                     </div>
                 </div>
             );
@@ -664,8 +693,35 @@
                             </div>
                         </div>
 
+                        {(q || statusFilter !== 'all') && (
+                            <div className="cloud-filterchips">
+                                {statusFilter !== 'all' && (
+                                    <span className="cloud-filterchip">
+                                        {(t('cloud.colStatus') || 'Status')}: {statusFilter === 'running' ? (t('cloud.running') || 'Running') : (t('cloud.stopped') || 'Stopped')}
+                                        <button type="button" onClick={() => { setStatusFilter('all'); setPage(0); }} aria-label="Remove filter"><Icons.X /></button>
+                                    </span>
+                                )}
+                                {q && (
+                                    <span className="cloud-filterchip">
+                                        {(t('cloud.search') || 'Search')}: “{query}”
+                                        <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label="Remove filter"><Icons.X /></button>
+                                    </span>
+                                )}
+                                <button type="button" className="cloud-clearfilters" onClick={() => { setStatusFilter('all'); setQuery(''); setPage(0); }}>{t('cloud.clearFilters') || 'Clear all filters'}</button>
+                            </div>
+                        )}
+
                         {total === 0 ? (
-                            <CloudEmpty icon={kind === 'lxc' ? 'Box' : 'Server'} title={q || statusFilter !== 'all' ? (t('cloud.noMatch') || 'No matches') : (kind === 'lxc' ? (t('cloud.noContainers') || 'No containers') : (t('cloud.noVms') || 'No virtual machines'))} />
+                            <CloudEmpty
+                                icon={kind === 'lxc' ? 'Box' : 'Server'}
+                                title={(q || statusFilter !== 'all') ? (t('cloud.noMatch') || 'No matches') : (kind === 'lxc' ? (t('cloud.noContainers') || 'No containers yet') : (t('cloud.noVms') || 'No virtual machines yet'))}
+                                text={(q || statusFilter !== 'all') ? (t('cloud.adjustFilters') || 'Try adjusting your search or filters.') : null}
+                                action={!(q || statusFilter !== 'all') ? (
+                                    <button type="button" className="cloud-btn cloud-btn-primary" onClick={() => onCreate(kind === 'lxc' ? 'lxc' : 'qemu')}>
+                                        <Icons.Plus /> {kind === 'lxc' ? (t('newContainer') || 'New Container') : (t('newVm') || 'New VM')}
+                                    </button>
+                                ) : null}
+                            />
                         ) : (
                             <div className="cloud-table-scroll">
                                 <table className="cloud-table cloud-table-selectable">
@@ -776,7 +832,7 @@
                                 </button>
                             ))}
                             <button type="button" className="cloud-btn" onClick={() => act.openConsole(r)}><Icons.Monitor /> {t('console') || 'Console'}</button>
-                            <CloudActionMenu items={cloudVmActionItems(r, act, t)} label="More actions" />
+                            <CloudActionMenu items={cloudVmActionItems(r, act, t)} triggerLabel={t('cloud.actions') || 'Actions'} label="Actions" />
                         </div>
                     </div>
 
@@ -1141,7 +1197,7 @@
         }
 
         // ── shell (top-level entry) ────────────────────────────────
-        function CloudShell({ clusters, selectedCluster, setSelectedCluster, clusterResources, clusterMetrics, allClusterMetrics, clusterDatastores, clusterNetworks, clusterPools, tasks, knownNodes, actions, isAdmin, currentUser, t, onExitCloud }) {
+        function CloudShell({ clusters, selectedCluster, setSelectedCluster, clusterResources, clusterMetrics, allClusterMetrics, clusterDatastores, clusterNetworks, clusterPools, tasks, knownNodes, actions, isAdmin, currentUser, t, onExitCloud, onOpenSettings, onOpenProfile, onLogout }) {
             const [section, setSection] = React.useState('overview');
             const [detailRes, setDetailRes] = React.useState(null);
             const [collapsed, setCollapsed] = React.useState(false);
@@ -1233,7 +1289,13 @@
                 settings: T('cloud.settings') || 'Settings',
             };
 
-            const selectSection = (id) => { setSection(id); setDetailRes(null); };
+            const selectSection = (id) => {
+                // Settings + Users open the full admin modal (same one classic uses) rather
+                // than a placeholder page — keep the current content underneath. -- NS
+                if (id === 'settings' || id === 'users') { onOpenSettings && onOpenSettings(); return; }
+                setSection(id);
+                setDetailRes(null);
+            };
             const openDetail = (r) => setDetailRes(r);
 
             // detail crumb when open
@@ -1296,6 +1358,11 @@
                             onToggleTheme={() => setTheme(th => th === 'light' ? 'dark' : 'light')}
                             onRefresh={() => actions?.refresh?.()}
                             onExitCloud={onExitCloud}
+                            onOpenSettings={onOpenSettings}
+                            onOpenProfile={onOpenProfile}
+                            onLogout={onLogout}
+                            isAdmin={isAdmin}
+                            currentUser={currentUser}
                             t={T}
                         />
                         <div className="cloud-content-scroll">

@@ -3359,6 +3359,27 @@
         body[data-layout="cloud"][data-cloud-theme="light"] .cloud-btn-primary { color:#ffffff; }
         body[data-layout="cloud"][data-cloud-theme="light"] .cloud-detail-icon,
         body[data-layout="cloud"][data-cloud-theme="light"] .cloud-stat-icon { background:rgba(0,152,195,0.12); }
+
+        /* ── masthead user menu + labelled Actions trigger + language ── */
+        .cloud-menu-trigger-plain { background:transparent; border:none; padding:0; cursor:pointer; display:inline-flex; }
+        .cloud-user-btn { display:inline-flex; align-items:center; gap:8px; padding:4px 9px 4px 4px; border-radius:var(--radius-pill); background:var(--cloud-surface-2); border:1px solid var(--cloud-border-medium); color:var(--cloud-text-secondary); transition:border-color .12s, color .12s; }
+        .cloud-user-btn:hover { color:var(--color-text); border-color:var(--cloud-border-strong); }
+        .cloud-user-avatar { width:26px; height:26px; border-radius:50%; background:var(--cloud-accent); color:#04141c; font-weight:700; font-size:0.8rem; display:flex; align-items:center; justify-content:center; flex:0 0 auto; }
+        .cloud-user-name { font-size:0.84rem; font-weight:500; max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .cloud-user-btn svg { width:14px; height:14px; }
+        .cloud-lang { display:inline-flex; align-items:center; font-size:0.8rem; }
+        .cloud-lang select { background:var(--cloud-surface-2); color:var(--color-text); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-md); padding:5px 6px; font-size:0.8rem; }
+        .cloud-lang button { color:var(--cloud-text-muted); }
+
+        /* filter chips row (list toolbar) */
+        .cloud-filterchips { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:0 var(--space-md) var(--space-sm); }
+        .cloud-filterchip { display:inline-flex; align-items:center; gap:6px; font-size:0.76rem; color:var(--cloud-text-secondary); background:var(--cloud-surface-1); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-pill); padding:3px 6px 3px 10px; }
+        .cloud-filterchip button { background:transparent; border:none; color:var(--cloud-text-muted); cursor:pointer; display:inline-flex; padding:1px; border-radius:50%; }
+        .cloud-filterchip button:hover { color:var(--color-text); background:var(--cloud-surface-3); }
+        .cloud-filterchip svg { width:12px; height:12px; }
+        .cloud-clearfilters { background:none; border:none; color:var(--cloud-accent); cursor:pointer; font-size:0.78rem; }
+        .cloud-clearfilters:hover { text-decoration:underline; }
+        .cloud-empty-action { margin-top:var(--space-sm); }
     </style>
 </head>
 <body class="dark notranslate">
