@@ -52,6 +52,44 @@
             }
         }
 
+        // status -> filled-chip palette (text + tinted bg + border). The tinted
+        // background is what gives the table that "console" feel vs plain coloured
+        // text -- MK. rgba literals (not the css vars) so the tint reads right.
+        function cloudStatusMeta(status) {
+            switch (status) {
+                case 'running':   return { label: 'Running',   color: '#34e2b6', bg: 'rgba(45,212,167,0.15)',  border: 'rgba(45,212,167,0.38)' };
+                case 'stopped':   return { label: 'Stopped',   color: '#9fb4c6', bg: 'rgba(138,164,184,0.12)', border: 'rgba(138,164,184,0.26)' };
+                case 'paused':    return { label: 'Paused',    color: '#f5b945', bg: 'rgba(245,185,69,0.15)',  border: 'rgba(245,185,69,0.38)' };
+                case 'suspended': return { label: 'Suspended', color: '#f5b945', bg: 'rgba(245,185,69,0.15)',  border: 'rgba(245,185,69,0.38)' };
+                default: {
+                    const s = (status || 'unknown');
+                    return { label: s.charAt(0).toUpperCase() + s.slice(1), color: '#56c7f5', bg: 'rgba(56,189,248,0.13)', border: 'rgba(56,189,248,0.32)' };
+                }
+            }
+        }
+
+        // small reusable filled pill (dot optional). used for VM status + cluster reachability
+        function CloudPill({ color, bg, border, dot, children }) {
+            return (
+                <span className="cloud-chip cloud-chip-status" style={{ color, background: bg, borderColor: border }}>
+                    {dot && <span className="cloud-status-dot" style={{ background: color }} />}
+                    {children}
+                </span>
+            );
+        }
+
+        function CloudStatusChip({ status }) {
+            const m = cloudStatusMeta(status);
+            return <CloudPill color={m.color} bg={m.bg} border={m.border} dot>{m.label}</CloudPill>;
+        }
+
+        // online/offline reachability chip (cluster + node level)
+        function CloudConnChip({ connected, t }) {
+            return connected
+                ? <CloudPill color="#34e2b6" bg="rgba(45,212,167,0.15)" border="rgba(45,212,167,0.38)" dot>{(t && t('cloud.online')) || 'Online'}</CloudPill>
+                : <CloudPill color="#f4868a" bg="rgba(248,113,113,0.13)" border="rgba(248,113,113,0.34)" dot>{(t && t('cloud.offline')) || 'Offline'}</CloudPill>;
+        }
+
         // ─── side nav ──────────────────────────────────────────────
         // MK: section ids drive both nav highlight and which body renders
         function CloudSideNav({ active, onSelect, isAdmin }) {
@@ -121,7 +159,7 @@
                 <div className="cloud-gauge-wrap">
                     <div
                         className="cloud-gauge"
-                        style={{ background: `conic-gradient(${c} ${safePct * 3.6}deg, var(--cloud-surface-1) 0)` }}
+                        style={{ background: `conic-gradient(${c} ${safePct * 3.6}deg, var(--cloud-border-medium) 0)` }}
                     >
                         <div className="cloud-gauge-inner">
                             <span className="cloud-gauge-num">{Math.round(safePct)}%</span>
@@ -183,6 +221,14 @@
 
             return (
                 <div className="cloud-body">
+                    <div className="cloud-page-header">
+                        <div>
+                            <h1 className="cloud-page-title">{t('cloud.overview') || 'Overview'}</h1>
+                            <div className="cloud-page-sub">
+                                {connected} / {safeClusters.length} {t('cloud.clustersConnected') || 'clusters connected'} · {safeRes.length} {t('cloud.guestsShort') || 'guests'}
+                            </div>
+                        </div>
+                    </div>
                     <div className="cloud-stat-grid">
                         {tiles.map(tile => {
                             const Ico = Icons[tile.icon] || Icons.Box;
@@ -198,12 +244,17 @@
                         })}
                     </div>
 
-                    <div className="cloud-gauge-row">
-                        <div className="cloud-card cloud-gauge-card">
+                    <div className="cloud-section-title">{t('cloud.utilization') || 'Utilization'}</div>
+                    <div className="cloud-card cloud-util-card">
+                        <div className="cloud-util-gauges">
                             <CloudGauge pct={avgCpu} color="var(--cloud-accent)" label={t('cloud.avgCpu') || 'Avg CPU (running)'} />
-                        </div>
-                        <div className="cloud-card cloud-gauge-card">
                             <CloudGauge pct={ramPct} color="var(--cloud-info)" label={t('cloud.ramUsed') || 'RAM used / allocated'} />
+                        </div>
+                        <div className="cloud-util-breakdown">
+                            <div className="cloud-util-row"><span>{t('cloud.running') || 'Running'}</span><span>{running.length} / {safeRes.length}</span></div>
+                            <div className="cloud-util-row"><span>{t('cloud.vcpu') || 'vCPU allocated'}</span><span>{vcpuSum}</span></div>
+                            <div className="cloud-util-row"><span>{t('cloud.ram') || 'RAM allocated'}</span><span>{ramGiB.toFixed(1)} GiB</span></div>
+                            <div className="cloud-util-row"><span>{t('cloud.ramInUse') || 'RAM in use'}</span><span>{cloudFmtBytes(memUsed)}</span></div>
                         </div>
                     </div>
 
@@ -219,12 +270,7 @@
                                     <div className="cloud-card cloud-cluster-card" key={String(cid)}>
                                         <div className="cloud-cluster-head">
                                             <span className="cloud-cluster-name">{(c && (c.display_name || c.name)) || 'cluster'}</span>
-                                            <span
-                                                className="cloud-chip"
-                                                style={{ color: (c && c.connected) ? 'var(--cloud-success)' : 'var(--cloud-error)' }}
-                                            >
-                                                {(c && c.connected) ? (t('cloud.online') || 'Online') : (t('cloud.offline') || 'Offline')}
-                                            </span>
+                                            <CloudConnChip connected={!!(c && c.connected)} t={t} />
                                         </div>
                                         <div className="cloud-cluster-host">{(c && c.host) || '—'}</div>
                                         {guestsHere > 0 && (
@@ -244,68 +290,142 @@
 
         function CloudResourceTable({ rows, kind, onRowClick, selectedId, t }) {
             const safe = Array.isArray(rows) ? rows : [];
-            const truncated = safe.length > CLOUD_TABLE_LIMIT;
-            const view = truncated ? safe.slice(0, CLOUD_TABLE_LIMIT) : safe;
+            const [query, setQuery] = React.useState('');
+            const [checked, setChecked] = React.useState({});
+
+            // clear transient table state when we flip between VMs/containers
+            React.useEffect(() => { setChecked({}); setQuery(''); }, [kind]);
+
+            const RowIcon = kind === 'lxc' ? (Icons.Box || Icons.Container) : Icons.Server;
+            const title = kind === 'lxc' ? (t('cloud.containers') || 'Containers') : (t('cloud.vms') || 'Virtual Machines');
+
+            const q = query.trim().toLowerCase();
+            const filtered = q
+                ? safe.filter(r => r && (
+                    (r.name || '').toLowerCase().includes(q) ||
+                    String(r.vmid != null ? r.vmid : '').includes(q) ||
+                    (r.node || '').toLowerCase().includes(q)))
+                : safe;
+            const truncated = filtered.length > CLOUD_TABLE_LIMIT;
+            const view = truncated ? filtered.slice(0, CLOUD_TABLE_LIMIT) : filtered;
+
+            const rowKey = (r, idx) => `${r._clusterId || ''}-${r.vmid != null ? r.vmid : idx}`;
+            const selCount = view.reduce((n, r, idx) => n + (checked[rowKey(r, idx)] ? 1 : 0), 0);
+            const allOn = view.length > 0 && selCount === view.length;
+
+            const toggleAll = () => {
+                if (allOn) { setChecked({}); return; }
+                const next = {};
+                view.forEach((r, idx) => { next[rowKey(r, idx)] = true; });
+                setChecked(next);
+            };
+            const toggleOne = (k) => setChecked(prev => {
+                const n = Object.assign({}, prev);
+                if (n[k]) delete n[k]; else n[k] = true;
+                return n;
+            });
+
+            // toolbar: title + live count + (selection note) on the left, search on the right
+            const toolbar = (
+                <div className="cloud-toolbar">
+                    <div className="cloud-toolbar-left">
+                        <span className="cloud-toolbar-icon"><RowIcon /></span>
+                        <span className="cloud-toolbar-title">{title}</span>
+                        <span className="cloud-count-chip">{filtered.length}{(q && filtered.length !== safe.length) ? ` / ${safe.length}` : ''}</span>
+                        {selCount > 0 && (
+                            <span className="cloud-sel-note">
+                                {selCount} {t('cloud.selected') || 'selected'}
+                                <button type="button" className="cloud-sel-clear" onClick={() => setChecked({})}>{t('cloud.clear') || 'Clear'}</button>
+                            </span>
+                        )}
+                    </div>
+                    <div className="cloud-toolbar-right">
+                        <div className="cloud-search">
+                            <span className="cloud-search-icon"><Icons.Search /></span>
+                            <input
+                                type="text"
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                                placeholder={t('cloud.searchGuests') || 'Search name, ID or node…'}
+                            />
+                            {q && <button type="button" className="cloud-search-clear" onClick={() => setQuery('')} aria-label="Clear search"><Icons.X /></button>}
+                        </div>
+                    </div>
+                </div>
+            );
 
             if (safe.length === 0) {
                 const word = kind === 'lxc' ? (t('cloud.noContainers') || 'No containers found.') : (t('cloud.noVms') || 'No virtual machines found.');
-                return <div className="cloud-card cloud-empty">{word}</div>;
+                return (
+                    <div className="cloud-card cloud-table-card">
+                        {toolbar}
+                        <div className="cloud-empty">{word}</div>
+                    </div>
+                );
             }
-
-            const RowIcon = kind === 'lxc' ? (Icons.Box || Icons.Container) : Icons.Server;
 
             return (
                 <div className="cloud-card cloud-table-card">
-                    <table className="cloud-table">
-                        <thead>
-                            <tr>
-                                <th>{t('cloud.colName') || 'Name'}</th>
-                                <th>{t('cloud.colId') || 'ID'}</th>
-                                <th>{t('cloud.colStatus') || 'Status'}</th>
-                                <th>{t('cloud.colNode') || 'Node'}</th>
-                                <th>{t('cloud.colCpu') || 'CPU'}</th>
-                                <th>{t('cloud.colRam') || 'RAM'}</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {view.map((r, idx) => {
-                                if (!r) return null;
-                                const id = r.vmid != null ? r.vmid : idx;
-                                const key = `${r._clusterId || ''}-${id}`;
-                                const cpuP = cloudPct(r.cpu);
-                                const memMax = Number(r.maxmem) || 0;
-                                const memUse = Number(r.mem) || 0;
-                                const ramP = memMax > 0 ? Math.round((memUse / memMax) * 100) : 0;
-                                const isSel = selectedId != null && String(selectedId) === String(id);
-                                return (
-                                    <tr
-                                        key={key}
-                                        className={'cloud-table-row' + (isSel ? ' cloud-table-row-active' : '')}
-                                        onClick={() => onRowClick && onRowClick(r)}
-                                    >
-                                        <td>
-                                            <span className="cloud-table-name">
-                                                <span className="cloud-table-name-icon"><RowIcon /></span>
-                                                {r.name || ('guest-' + id)}
-                                            </span>
-                                        </td>
-                                        <td className="cloud-table-mono">{r.vmid != null ? r.vmid : '—'}</td>
-                                        <td>
-                                            <span className="cloud-chip" style={{ color: cloudStatusColor(r.status) }}>
-                                                {r.status || 'unknown'}
-                                            </span>
-                                        </td>
-                                        <td>{r.node || '—'}</td>
-                                        <td><CloudMiniMeter pct={cpuP} color="var(--cloud-accent)" /></td>
-                                        <td><CloudMiniMeter pct={ramP} color="var(--cloud-info)" /></td>
+                    {toolbar}
+                    {filtered.length === 0 ? (
+                        <div className="cloud-empty">{t('cloud.noMatch') || 'No guests match your search.'}</div>
+                    ) : (
+                        <div className="cloud-table-scroll">
+                            <table className="cloud-table cloud-table-selectable">
+                                <thead>
+                                    <tr>
+                                        <th className="cloud-th-check">
+                                            <input type="checkbox" checked={allOn} onChange={toggleAll} aria-label="Select all" />
+                                        </th>
+                                        <th>{t('cloud.colName') || 'Name'}</th>
+                                        <th>{t('cloud.colId') || 'ID'}</th>
+                                        <th>{t('cloud.colStatus') || 'Status'}</th>
+                                        <th>{t('cloud.colNode') || 'Node'}</th>
+                                        <th>{t('cloud.colCpu') || 'CPU'}</th>
+                                        <th>{t('cloud.colRam') || 'RAM'}</th>
                                     </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
+                                </thead>
+                                <tbody>
+                                    {view.map((r, idx) => {
+                                        if (!r) return null;
+                                        const id = r.vmid != null ? r.vmid : idx;
+                                        const k = rowKey(r, idx);
+                                        const cpuP = cloudPct(r.cpu);
+                                        const memMax = Number(r.maxmem) || 0;
+                                        const memUse = Number(r.mem) || 0;
+                                        const ramP = memMax > 0 ? Math.round((memUse / memMax) * 100) : 0;
+                                        const isSel = selectedId != null && String(selectedId) === String(id);
+                                        const isChecked = !!checked[k];
+                                        return (
+                                            <tr
+                                                key={k}
+                                                className={'cloud-table-row' + (isSel ? ' cloud-table-row-active' : '') + (isChecked ? ' cloud-table-row-checked' : '')}
+                                                onClick={() => onRowClick && onRowClick(r)}
+                                            >
+                                                <td className="cloud-td-check" onClick={(e) => { e.stopPropagation(); toggleOne(k); }}>
+                                                    <input type="checkbox" checked={isChecked} onChange={() => {}} tabIndex={-1} aria-label={'Select ' + (r.name || id)} />
+                                                </td>
+                                                <td>
+                                                    <span className="cloud-table-name">
+                                                        <span className="cloud-table-name-icon"><RowIcon /></span>
+                                                        {r.name || ('guest-' + id)}
+                                                    </span>
+                                                </td>
+                                                <td className="cloud-table-mono">{r.vmid != null ? r.vmid : '—'}</td>
+                                                <td><CloudStatusChip status={r.status} /></td>
+                                                <td>{r.node || '—'}</td>
+                                                <td><CloudMiniMeter pct={cpuP} color="var(--cloud-accent)" /></td>
+                                                <td><CloudMiniMeter pct={ramP} color="var(--cloud-info)" /></td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
                     {truncated && (
                         <div className="cloud-table-note">
-                            {t('cloud.truncated') || `Showing first ${CLOUD_TABLE_LIMIT} of ${safe.length} — refine in the classic layout.`}
+                            {t('cloud.truncated') || `Showing first ${CLOUD_TABLE_LIMIT} of ${filtered.length} — refine with the search above.`}
                         </div>
                     )}
                 </div>
@@ -342,11 +462,7 @@
                                                 {(c && (c.display_name || c.name)) || 'cluster'}
                                             </span>
                                         </td>
-                                        <td>
-                                            <span className="cloud-chip" style={{ color: (c && c.connected) ? 'var(--cloud-success)' : 'var(--cloud-error)' }}>
-                                                {(c && c.connected) ? (t('cloud.online') || 'Online') : (t('cloud.offline') || 'Offline')}
-                                            </span>
-                                        </td>
+                                        <td><CloudConnChip connected={!!(c && c.connected)} t={t} /></td>
                                         <td className="cloud-table-mono">{(c && c.host) || '—'}</td>
                                         <td>{count}</td>
                                     </tr>
@@ -479,7 +595,7 @@
                                 <Row label={t('cloud.type') || 'Type'} value={r.type === 'lxc' ? 'Container' : 'Virtual Machine'} />
                                 <Row
                                     label={t('cloud.colStatus') || 'Status'}
-                                    value={<span className="cloud-chip" style={{ color: cloudStatusColor(r.status) }}>{r.status || 'unknown'}</span>}
+                                    value={<CloudStatusChip status={r.status} />}
                                 />
                                 <Row label={t('cloud.colNode') || 'Node'} value={r.node || '—'} />
                                 <Row label={t('cloud.uptime') || 'Uptime'} value={cloudFmtUptime(r.uptime)} />
@@ -571,12 +687,39 @@
             const [selectedRes, setSelectedRes] = React.useState(null);
             const [panelOpen, setPanelOpen] = React.useState(false);
 
+            // NS: guarantee the cloud token scope (body[data-layout="cloud"]) is active
+            // while the shell is mounted — don't rely on useLayout's effect timing.
+            React.useEffect(() => {
+                const prev = document.body.getAttribute('data-layout');
+                document.body.setAttribute('data-layout', 'cloud');
+                return () => { if (prev != null) document.body.setAttribute('data-layout', prev); };
+            }, []);
+
+            // NS: cloud mode bypasses the tree-sidebar's auto-select, so on a fresh
+            // login nothing loads resources -> overview/tables read all-zeros. Pick the
+            // first connected cluster so its resources populate (the dashboard's
+            // selectedCluster effect does the fetch).
+            React.useEffect(() => {
+                if (!selectedCluster && typeof setSelectedCluster === 'function') {
+                    const arr = Array.isArray(clusters) ? clusters : [];
+                    const first = arr.find(c => c && c.connected) || arr[0];
+                    if (first) setSelectedCluster(first);
+                }
+            }, [selectedCluster, clusters]);
+
             // never trust these to be arrays
             const safeClusters = Array.isArray(clusters) ? clusters : [];
             const safeResources = Array.isArray(clusterResources) ? clusterResources : [];
 
             // i18n helper that always yields a string -- LW
-            const tx = (typeof t === 'function') ? t : (() => undefined);
+            // NS: PegaProx's t() ECHOES the key back when a translation is missing
+            // (it does not return undefined), so `t('cloud.x') || 'Fallback'` was
+            // rendering raw keys like "cloud.clustersTitle". Treat key-echo as no
+            // translation so the English fallbacks kick in. (Cloud is Preview/EN-first.)
+            const tx = (k) => {
+                const v = (typeof t === 'function') ? t(k) : undefined;
+                return (v && v !== k) ? v : undefined;
+            };
 
             const vms = safeResources.filter(r => r && r.type === 'qemu');
             const cts = safeResources.filter(r => r && r.type === 'lxc');
@@ -655,11 +798,15 @@
                             t={tx}
                             onExitCloud={onExitCloud}
                         />
-                        <div className="cloud-content-scroll">
-                            {body}
+                        {/* main region is the panel's positioning context so the slide-in
+                            sits *under* the topbar, not over it -- LW */}
+                        <div className="cloud-content-main">
+                            <div className="cloud-content-scroll">
+                                {body}
+                            </div>
+                            <CloudDetailPanel resource={selectedRes} open={panelOpen} onClose={closePanel} t={tx} />
                         </div>
                     </div>
-                    <CloudDetailPanel resource={selectedRes} open={panelOpen} onClose={closePanel} t={tx} />
                 </div>
             );
         }
