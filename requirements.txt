@@ -101,3 +101,4 @@ defusedxml>=0.7.1
 # floor that doesn't carry known CVEs. Newer versions are pulled automatically.
 setuptools>=78.1.1  # CVE-2024-6345 RCE in package_index, CVE-2025-47273 ReDoS
 zipp>=3.19.1        # CVE-2024-5569 infinite loop in Path._next
+idna>=3.15 # not directly required, pinned by Snyk to avoid a vulnerability
