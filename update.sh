@@ -96,23 +96,30 @@ echo -e "${GREEN}OK${NC}"
 echo -e "Latest version:  ${GREEN}$LATEST_VERSION${NC}"
 echo ""
 
-# Compare versions (skip if --force)
-if [ "$1" != "--force" ] && [ "$CURRENT_VERSION" == "$LATEST_VERSION" ]; then
-    echo -e "${GREEN}✓ You're already on the latest version!${NC}"
+# MK 2026-06-07: never skip on version-equality. A prior interrupted/partial
+# update can leave version.json bumped while some code files stayed stale — and
+# the old "already on latest → exit" path then meant `./update.sh` could NEVER
+# heal it (you had to know about --force). We now ALWAYS download the archive and
+# re-apply the FULL tree, so every run guarantees every file is actually in sync.
+RESYNC=0
+if [ "$CURRENT_VERSION" == "$LATEST_VERSION" ]; then
+    RESYNC=1
+    echo -e "${GREEN}✓ Already on $LATEST_VERSION${NC} — re-syncing all files anyway so nothing can be left stale."
     echo ""
-    echo "Use ./update.sh --force to re-download anyway"
-    exit 0
 fi
 
-# Confirm update
-echo -e "${YELLOW}Ready to update from $CURRENT_VERSION to $LATEST_VERSION${NC}"
-echo ""
-read -p "Continue? [y/N] " -n 1 -r
-echo ""
+# Confirm only for an actual version change. A same-version re-sync just proceeds
+# (you explicitly ran the updater and re-applying the full tree is idempotent).
+if [ "$RESYNC" -eq 0 ]; then
+    echo -e "${YELLOW}Ready to update from $CURRENT_VERSION to $LATEST_VERSION${NC}"
+    echo ""
+    read -p "Continue? [y/N] " -n 1 -r
+    echo ""
 
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Update cancelled."
-    exit 0
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Update cancelled."
+        exit 0
+    fi
 fi
 
 echo ""
@@ -149,6 +156,10 @@ else
     # NS: try GitHub first, fall back to mirror
     download_file() {
         local file=$1
+        # never overwrite user data / secrets, even if they show up in the tree
+        case "$file" in
+            config/*|ssl/*|logs/*|backups/*|.git/*|*.db|*.pem|*.key|*.crt|*.enc) return 0 ;;
+        esac
         local dir=$(dirname "$file")
         [ "$dir" != "." ] && mkdir -p "$dir"
         echo -n "  $file... "
@@ -167,9 +178,26 @@ else
         fi
     }
 
-    # Get full file list from version.json (includes pegaprox/ package)
-    echo "Fetching file list..."
-    PACKAGE_FILES=$(curl -s "$GITHUB_RAW/version.json" 2>/dev/null | python3 -c "
+    # MK 2026-06-07: fetch the FULL repo tree (GitHub Trees API) so the fallback
+    # misses nothing — same completeness as the archive path. version.json's
+    # hand-maintained update_files list (no globs) used to drop any file not on
+    # it (e.g. a freshly-added sponsor logo). update_files is now only the
+    # degraded-degraded path when the Trees API itself is unreachable.
+    echo "Fetching file list (full tree)..."
+    PACKAGE_FILES=$(curl -s "https://api.github.com/repos/PegaProx/project-pegaprox/git/trees/${GITHUB_BRANCH}?recursive=1" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for it in data.get('tree', []):
+        if it.get('type') == 'blob':
+            print(it['path'])
+except:
+    pass
+" 2>/dev/null)
+
+    if [ -z "$PACKAGE_FILES" ]; then
+        # Trees API unreachable → fall back to version.json's update_files list
+        PACKAGE_FILES=$(curl -s "$GITHUB_RAW/version.json" 2>/dev/null | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -178,6 +206,7 @@ try:
 except:
     pass
 " 2>/dev/null)
+    fi
 
     if [ -z "$PACKAGE_FILES" ]; then
         # Mirror fallback
@@ -294,6 +323,15 @@ if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ]; then
     fi
 
     rm -rf "$TMPDIR"
+fi
+
+# MK 2026-06-07: post-copy sanity check — confirm the new version.json actually
+# landed on disk. Catches a half-applied copy AND a stale CDN tarball (GitHub can
+# serve an old cached <branch>.tar.gz as a 200 right after a push).
+APPLIED=$(grep -o '"version": *"[^"]*"' version.json 2>/dev/null | cut -d'"' -f4)
+if [ -n "$LATEST_VERSION" ] && [ "$APPLIED" != "$LATEST_VERSION" ]; then
+    echo -e "${YELLOW}⚠ Post-update check: version.json says '$APPLIED' but expected '$LATEST_VERSION'.${NC}"
+    echo -e "${YELLOW}  The download may be incomplete or a stale cache — re-run ./update.sh --force in a minute.${NC}"
 fi
 
 # Make scripts executable
