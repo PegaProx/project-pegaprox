@@ -400,6 +400,13 @@ def perform_pegaprox_update():
         new_version = remote_version.get('version', '0.0')
 
         # Version check
+        # MK 2026-06-07: never SKIP on version-equality. A prior interrupted/partial update
+        # can leave version.json bumped while some code files stayed stale — and the old
+        # "Already up to date → return" path then meant the in-app updater could never heal
+        # it. Always download + re-apply the FULL tree so it pulls the newest code every run
+        # (mirrors update.sh + Nico's "immer die neuste Version laden"). We still note when
+        # it's a re-sync (already current) vs a real upgrade for the response message.
+        resync = False
         if not force:
             current = PEGAPROX_VERSION.replace('Alpha ', '').replace('Beta ', '')
             def parse_ver(v):
@@ -410,10 +417,7 @@ def perform_pegaprox_update():
                     return (0, 0)
 
             if parse_ver(current) >= parse_ver(new_version):
-                return jsonify({
-                    'success': False, 'message': 'Already up to date',
-                    'current_version': PEGAPROX_VERSION, 'latest_version': new_version
-                })
+                resync = True  # already on this version → re-apply the full tree anyway to heal any stale files
 
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'pegaprox.update_started', f"Update to version {new_version} initiated")
@@ -798,14 +802,16 @@ def perform_pegaprox_update():
             logging.warning(f"[update] post-copy version mismatch: on-disk {on_disk_version}, expected {new_version}")
 
         partial = len(failed_files) > 0 or version_mismatch
+        _verb = 'Re-synced all files for' if resync else 'Update to'
         return jsonify({
             'success': True,
             'partial': partial,
+            'resync': resync,
             'on_disk_version': on_disk_version,
             'version_mismatch': version_mismatch,
-            'message': (f'Update to {new_version} complete! Restarting in {restart_delay}s...'
+            'message': (f'{_verb} {new_version} complete! Restarting in {restart_delay}s...'
                         if not partial else
-                        f'Update to {new_version} partially applied — '
+                        f'{_verb} {new_version} partially applied — '
                         f'{len(failed_files)} file(s) failed to write'
                         f'{", on-disk version mismatch" if version_mismatch else ""}. '
                         f'Restarting in {restart_delay}s...'),
