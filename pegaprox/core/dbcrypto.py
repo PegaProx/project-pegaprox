@@ -411,6 +411,8 @@ def _shred_file(path: str) -> bool:
     NS 2026-06-05 (audit H-5). A plain unlink leaves the cleartext blocks on
     disk; overwrite first so a plaintext DB copy (= all cluster passwords) can't
     be carved back. Falls back to a plain remove if the overwrite fails."""
+    if '..' in path:
+        raise Exception('Invalid file path')
     try:
         sz = os.path.getsize(path)
         with open(path, 'r+b', buffering=0) as fh:
