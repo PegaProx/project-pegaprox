@@ -2798,6 +2798,16 @@
             background: none; border: 1px solid transparent; border-radius: 3px; color: #728b9a; cursor: pointer; }
         .corp-action-btn:hover { background: rgba(73,175,217,0.12); color: #e9ecef; border-color: var(--corp-border-subtle); }
         .corp-action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        /* MK 2026-06-09: unify the hover/active feel across corporate controls — most
+           had no transition, so they snapped while datagrid rows faded. One light touch. */
+        body[data-layout="corporate"] .corp-action-btn,
+        body[data-layout="corporate"] .corp-toolbar button,
+        body[data-layout="corporate"] .corp-subnav-item,
+        body[data-layout="corporate"] .corp-ctx-item,
+        body[data-layout="corporate"] .corp-tab-strip button,
+        body[data-layout="corporate"] .corp-dropdown button {
+            transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+        }
         .corp-action-btn.danger:hover { background: rgba(245,79,71,0.12); color: #f54f47; }
         .corp-action-group { display: inline-flex; gap: 1px; }
 
