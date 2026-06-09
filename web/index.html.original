@@ -2817,8 +2817,8 @@
         .corp-consumer-name { flex: 1; color: #e9ecef; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .corp-consumer-name:hover { color: #49afd9; }
         .corp-consumer-node { color: #5a7a8a; font-size: 11px; width: 70px; text-align: right; overflow: hidden; text-overflow: ellipsis; }
-        .corp-consumer-bar { width: 50px; height: 3px; background: #1b2a32; border-radius: 1px; flex-shrink: 0; }
-        .corp-consumer-bar-fill { height: 100%; border-radius: 1px; }
+        .corp-consumer-bar { width: 50px; height: 4px; background: var(--corp-bar-track); border-radius: 2px; flex-shrink: 0; }
+        .corp-consumer-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
         .corp-consumer-val { width: 52px; text-align: right; color: #adbbc4; font-variant-numeric: tabular-nums; }
         .corp-tasks-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12px; border-bottom: 1px solid var(--corp-border-subtle, #283844); }
         .corp-tasks-item:last-child { border-bottom: none; }
