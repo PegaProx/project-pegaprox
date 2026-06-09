@@ -321,7 +321,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
 
 _node_ip_cache = {}  # (cluster_id, node) -> (ip, timestamp)
 
-def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True):
+def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
+                   ignore_node_backoff=False):
     """Execute a command on a Proxmox node via the Proxmox API.
     Uses POST /nodes/{node}/execute or falls back to SSH.
 
@@ -335,14 +336,18 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True):
     MK May 2026 (dead-node UI hang) — short-circuit if the per-node circuit
     breaker says this node is unreachable; register failure on SSH errors so
     repeated calls don't burn a full timeout every time."""
-    # MK — fail-fast if the breaker is open
-    try:
-        blocked, remaining = pve_mgr._is_node_blocked(node)
-        if blocked:
-            return 1, '', f"node '{node}' in circuit-breaker backoff ({remaining}s remaining)"
-    except Exception:
-        # Older managers without the breaker — proceed as before
-        pass
+    # MK — fail-fast if the breaker is open, unless the caller is already in a
+    # controlled workflow that needs to probe the node to recover from a stale
+    # breaker. V2P migration uses this for short local checks on the target node:
+    # a failed remote ESXi backend probe must not block SSHFS/NBD fallbacks.
+    if not ignore_node_backoff:
+        try:
+            blocked, remaining = pve_mgr._is_node_blocked(node)
+            if blocked:
+                return 1, '', f"node '{node}' in circuit-breaker backoff ({remaining}s remaining)"
+        except Exception:
+            # Older managers without the breaker — proceed as before
+            pass
 
     # Method 1: Try Proxmox API exec (PVE 7.4+)
     try:
