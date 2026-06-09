@@ -8421,7 +8421,7 @@ async def main():
     # crcro on issue #388 reported the exact SSH-WS InvalidUpgrade trace this fixes.
     _lpr_ssh = None
     try:
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        sys.path.insert(0, os.environ.get('PEGAPROX_PKG_BASE') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_ssh
     except Exception as _e:
         print(f"[SSH-WS] WARNING: lenient_process_request not importable ({_e}) — strict handshake only")
@@ -8445,8 +8445,18 @@ if __name__ == '__main__':
     asyncio.run(main())
 '''
     
-    # Write the script to a file
+    # Write the helper script where the service user can actually write.
+    # MK 2026-06-09 (#528 akagoldsmith): the Debian package lives under
+    # /usr/lib/pegaprox (root-owned, read-only for the pegaprox service user), so
+    # writing into the package's api/ dir failed with EACCES and the SSH-WS
+    # subprocess never started — port 5002 stayed dead. Fall back to a writable dir;
+    # the subprocess gets the package base via PEGAPROX_PKG_BASE below so its
+    # `import pegaprox.*` still resolves from wherever the script ends up.
+    import tempfile
+    pkg_base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.access(script_dir, os.W_OK):
+        script_dir = tempfile.gettempdir()
     script_path = os.path.join(script_dir, '.ssh_ws_server.py')
     
     try:
@@ -8486,6 +8496,7 @@ if __name__ == '__main__':
         
         # Set environment variables for the subprocess
         env = os.environ.copy()
+        env['PEGAPROX_PKG_BASE'] = pkg_base  # #528: subprocess may live outside the pkg dir now
         env['SSH_WS_PORT'] = str(port)
         env['SSH_WS_HOST'] = host  # Issue #71: IPv6 support
         main_port = port - 2
