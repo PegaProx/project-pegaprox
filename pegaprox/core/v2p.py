@@ -2861,6 +2861,14 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes, errb
                 f"pvesm path {shlex.quote(vol_id)} 2>&1", timeout=10)
             dev_path = str(out_p or '').strip().split('\n')[0]
             if dev_path.startswith('/') and rc_p == 0:
+                # MK 2026-06-10 (#538 oetti77 / #272): `pvesm path` only computes the path
+                # string; for RBD (and other block storages) the kernel device isn't mapped
+                # until the volume is ACTIVATED. Without this, dd opened the resolved
+                # /dev/rbd-pve/<uuid>/... and got "No such file or directory". activate-volume
+                # krbd-maps RBD / activates the LV (no-op if already up). Best-effort — don't
+                # fail the alloc if activation errors (file storages don't need it).
+                _pve_node_exec(pve_mgr, node,
+                    f"pvesm activate-volume {shlex.quote(vol_id)} 2>/dev/null", timeout=30)
                 logging.info(f"[V2P] Disk allocated: {vol_id} → {dev_path} (via: {attempt_cmd[:60]})")
                 return vol_id, dev_path
 
