@@ -6797,9 +6797,13 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
     
     NS: Auth via query param since WebSocket can't send custom headers
     """
-    ok, err = check_cluster_access(cluster_id)
-    if not ok:
-        return err
+    # MK 2026-06-10: don't call check_cluster_access() here. This route has no
+    # @require_auth (it authenticates via the ?token=/?session= query param below,
+    # because a WebSocket can't send custom headers), so request.session isn't
+    # populated yet and check_cluster_access() would blow up with
+    # AttributeError: 'Request' object has no attribute 'session' on every GET.
+    # The cluster gate is enforced by _console_authz() below — it does the same
+    # get_user_clusters() + VM-ACL fallback against the resolved query-param user.
     # NS: Mar 2026 - prefer WS token, session as fallback
     from pegaprox.utils.realtime import validate_ws_token
     ws_token = request.args.get('token')
@@ -6836,8 +6840,10 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
 
     # This route is just a fallback - actual WebSocket handling is done by the
     # dedicated WebSocket server started in start_vnc_websocket_server()
-    from flask import request
-    
+    # MK 2026-06-10: removed a redundant local `from flask import request` here —
+    # request is already module-level, and the local re-import made `request` a
+    # function-local, so the request.args.get(...) auth lookup above raised
+    # UnboundLocalError once check_cluster_access (which used to crash first) was gone.
     print(f"\n*** VNC ROUTE HIT (HTTP): {vm_type}/{vmid} on {node} ***")
     print(f"HTTP_UPGRADE: {request.environ.get('HTTP_UPGRADE', 'NONE')}")
     print(f"wsgi.websocket: {request.environ.get('wsgi.websocket', 'NONE')}")
