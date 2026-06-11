@@ -1238,10 +1238,29 @@
             return children;
         }
         function cloudHead(p) { return <div className="cloud-toolbar"><div className="cloud-toolbar-left"><span className="cloud-toolbar-icon">{p.icon}</span><span className="cloud-toolbar-title">{p.title}</span><span className="cloud-count-chip">{p.count}</span></div>{p.right ? <div className="cloud-toolbar-right">{p.right}</div> : null}</div>; }
+        // NS 2026-06-11 — mutation helper for the cloud sections (phase 3). POST/PUT/
+        // DELETE with auth, optional confirm() for destructive ops, reload on success.
+        function useCloudMutate(reload) {
+            const { getAuthHeaders } = useAuth();
+            const [busy, setBusy] = React.useState('');
+            const run = React.useCallback((key, method, path, body, confirmMsg) => {
+                if (confirmMsg && !window.confirm(confirmMsg)) return;
+                setBusy(key);
+                const opts = { method, headers: Object.assign({}, getAuthHeaders(), { 'Content-Type': 'application/json' }) };
+                if (body !== undefined) opts.body = JSON.stringify(body);
+                fetch(path, opts)
+                    .then(r => r.ok ? r.json().catch(() => ({})) : Promise.reject(new Error('HTTP ' + r.status)))
+                    .then(() => { setBusy(''); if (reload) reload(); })
+                    .catch(e => { setBusy(''); window.alert('Action failed: ' + (e && e.message || e)); });
+            }, [reload]);
+            return { busy, run };
+        }
+        function CloudRowActions({ children }) { return <td><div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>{children}</div></td>; }
 
         // ── Backups (vzdump jobs) ──────────────────────────────────
         function CloudBackups({ clusterId, t }) {
             const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/datacenter/backup` : null);
+            const mut = useCloudMutate(reload);
             const jobs = Array.isArray(data) ? data : [];
             const active = jobs.filter(j => Number(j.enabled) === 1 || j.enabled === true).length;
             const failed = jobs.filter(j => (j['last-run-status'] || '').toLowerCase().indexOf('err') >= 0).length;
@@ -1260,7 +1279,7 @@
                         <div className="cloud-card cloud-table-card">
                             {cloudHead({ icon: <Icons.Archive />, title: t('cloud.backups') || 'Backups', count: jobs.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colGuests') || 'Guests'}</th><th>{t('cloud.colStorage') || 'Storage'}</th><th>{t('cloud.colMode') || 'Mode'}</th><th>{t('cloud.colStatus') || 'Status'}</th><th>{t('cloud.colState') || 'State'}</th></tr></thead>
+                                <thead><tr><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colGuests') || 'Guests'}</th><th>{t('cloud.colStorage') || 'Storage'}</th><th>{t('cloud.colMode') || 'Mode'}</th><th>{t('cloud.colStatus') || 'Status'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
                                 <tbody>{jobs.map((j, i) => {
                                     const st = (j['last-run-status'] || '').toLowerCase();
                                     const ok = st === 'ok' || st === 'OK'.toLowerCase();
@@ -1271,6 +1290,11 @@
                                         <td className="cloud-cell-muted">{j.mode || 'snapshot'}{j.compress && j.compress !== '0' ? ' · ' + j.compress : ''}</td>
                                         <td>{st ? (ok ? <span className="cloud-chip cloud-chip-ok">OK</span> : <span className="cloud-chip cloud-chip-err">{j['last-run-status']}</span>) : <span className="cloud-cell-muted">—</span>}</td>
                                         <td>{(Number(j.enabled) === 1 || j.enabled === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
+                                        <CloudRowActions>
+                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + j.id, 'POST', `/api/clusters/${clusterId}/datacenter/backup/${j.id}/run`)} />
+                                            <CloudIconBtn icon="Power" title={(Number(j.enabled) === 1 || j.enabled === true) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + j.id, 'PUT', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, { enabled: (Number(j.enabled) === 1 || j.enabled === true) ? 0 : 1 })} />
+                                            <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + j.id, 'DELETE', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, undefined, (t('cloud.confirmDelBackup') || 'Delete this backup job?'))} />
+                                        </CloudRowActions>
                                     </tr>);
                                 })}</tbody>
                             </table></div>
@@ -1283,6 +1307,7 @@
         // ── Firewall (datacenter rules) ────────────────────────────
         function CloudFirewall({ clusterId, t }) {
             const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/datacenter/firewall/rules` : null);
+            const mut = useCloudMutate(reload);
             const rules = Array.isArray(data) ? data : (data && Array.isArray(data.rules) ? data.rules : []);
             const inn = rules.filter(r => (r.type || '').toLowerCase() === 'in').length;
             const out = rules.filter(r => (r.type || '').toLowerCase() === 'out').length;
@@ -1302,7 +1327,7 @@
                         <div className="cloud-card cloud-table-card">
                             {cloudHead({ icon: <Icons.Shield />, title: t('cloud.firewall') || 'Firewall', count: rules.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>#</th><th>{t('cloud.colDir') || 'Dir'}</th><th>{t('cloud.colAction') || 'Action'}</th><th>{t('cloud.colProto') || 'Proto'}</th><th>{t('cloud.colPort') || 'Port'}</th><th>{t('cloud.colSource') || 'Source'}</th><th>{t('cloud.colDest') || 'Dest'}</th><th>{t('cloud.colComment') || 'Comment'}</th><th>{t('cloud.colState') || 'State'}</th></tr></thead>
+                                <thead><tr><th>#</th><th>{t('cloud.colDir') || 'Dir'}</th><th>{t('cloud.colAction') || 'Action'}</th><th>{t('cloud.colProto') || 'Proto'}</th><th>{t('cloud.colPort') || 'Port'}</th><th>{t('cloud.colSource') || 'Source'}</th><th>{t('cloud.colDest') || 'Dest'}</th><th>{t('cloud.colComment') || 'Comment'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
                                 <tbody>{rules.map((r, i) => (<tr className="cloud-table-row cloud-table-row-static" key={r.pos != null ? r.pos : i}>
                                     <td className="cloud-cell-muted">{r.pos != null ? r.pos : i}</td>
                                     <td><span className="cloud-chip cloud-chip-soft">{(r.type || '').toUpperCase() || '—'}</span></td>
@@ -1313,6 +1338,10 @@
                                     <td className="cloud-table-mono">{r.dest || '—'}</td>
                                     <td className="cloud-cell-muted">{r.comment || ''}</td>
                                     <td>{(Number(r.enable) === 1 || r.enable === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
+                                    <CloudRowActions>
+                                        <CloudIconBtn icon="Power" title={(Number(r.enable) === 1 || r.enable === true) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + r.pos, 'PUT', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, { enable: (Number(r.enable) === 1 || r.enable === true) ? 0 : 1 })} />
+                                        <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + r.pos, 'DELETE', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, undefined, (t('cloud.confirmDelRule') || 'Delete this firewall rule?'))} />
+                                    </CloudRowActions>
                                 </tr>))}</tbody>
                             </table></div>
                         </div>
@@ -1562,6 +1591,7 @@
         function CloudReplication({ clusterId, t }) {
             const native = useCloudData(clusterId ? `/api/clusters/${clusterId}/datacenter/replication` : null);
             const cross = useCloudData('/api/cross-cluster-replications');
+            const mut = useCloudMutate(native.reload);
             const njobs = Array.isArray(native.data) ? native.data : [];
             const cjobs = Array.isArray(cross.data) ? cross.data : [];
             const failing = njobs.filter(j => Number(j.fail_count) > 0 || (j.error && String(j.error).trim())).length;
@@ -1581,13 +1611,16 @@
                             <div className="cloud-card cloud-table-card">
                                 {cloudHead({ icon: <Icons.Copy />, title: t('cloud.replNative') || 'Native replication', count: njobs.length })}
                                 <div className="cloud-table-scroll"><table className="cloud-table">
-                                    <thead><tr><th>{t('cloud.colJob') || 'Job'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colLastSync') || 'Last sync'}</th><th>{t('cloud.colState') || 'State'}</th></tr></thead>
+                                    <thead><tr><th>{t('cloud.colJob') || 'Job'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colLastSync') || 'Last sync'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
                                     <tbody>{njobs.map((j, i) => (<tr className="cloud-table-row cloud-table-row-static" key={j.id || i}>
                                         <td className="cloud-table-mono">{j.id || '—'}</td>
                                         <td className="cloud-table-mono">{j.target || '—'}</td>
                                         <td className="cloud-table-mono">{j.schedule || '—'}</td>
                                         <td>{j.last_sync ? cloudRelTime(j.last_sync) : '—'}</td>
                                         <td>{(j.error && String(j.error).trim()) ? <span className="cloud-chip cloud-chip-err">error</span> : (Number(j.disable) === 1 ? <CloudConnChip connected={false} t={t} /> : <CloudConnChip connected={true} t={t} />)}</td>
+                                        <CloudRowActions>
+                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + j.id, 'POST', `/api/clusters/${clusterId}/replication/${j.id}/run`)} />
+                                        </CloudRowActions>
                                     </tr>))}</tbody>
                                 </table></div>
                             </div>
