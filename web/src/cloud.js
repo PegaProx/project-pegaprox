@@ -1197,6 +1197,26 @@
         }
 
         // ── shell (top-level entry) ────────────────────────────────
+        // NS 2026-06-11 — sponsors show in every layout, Cloud included. Same slots
+        // + OC button as the classic footer, just sized for the cloud content area.
+        // Reuses the global SponsorSlot so the mirror/GitHub self-heal applies here too.
+        function CloudSponsorFooter({ t }) {
+            const label = (typeof t === 'function' && t('thanksToSponsors')) || 'Thanks to our Sponsors';
+            return (
+                <footer className="cloud-sponsors" style={{ marginTop: 28, paddingTop: 18, borderTop: '1px solid rgba(127,127,127,0.18)', textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 12 }}>❤️ {label}</div>
+                    <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap' }}>
+                        {[1, 2, 3, 4, 5, 6, 7, 8].map(num => <SponsorSlot key={num} num={num} />)}
+                    </div>
+                    <div style={{ marginTop: 14 }}>
+                        <a href="https://opencollective.com/pegaprox" target="_blank" rel="noopener noreferrer" title="Contribute on Open Collective">
+                            <img src="/images/oc_contribute_button.png" alt="Contribute on Open Collective" style={{ height: 26, opacity: 0.9 }} />
+                        </a>
+                    </div>
+                </footer>
+            );
+        }
+
         function CloudShell({ clusters, selectedCluster, setSelectedCluster, clusterResources, clusterMetrics, allClusterMetrics, clusterDatastores, clusterNetworks, clusterPools, tasks, knownNodes, actions, isAdmin, currentUser, t, onExitCloud, onOpenSettings, onOpenProfile, onLogout }) {
             const [section, setSection] = React.useState('overview');
             const [detailRes, setDetailRes] = React.useState(null);
@@ -1367,6 +1387,7 @@
                         />
                         <div className="cloud-content-scroll">
                             {body}
+                            <CloudSponsorFooter t={T} />
                         </div>
                     </div>
                 </div>
