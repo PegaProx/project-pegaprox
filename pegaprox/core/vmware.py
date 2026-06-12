@@ -370,12 +370,20 @@ class VMwareManager:
         weaponise it. URL is reconstructed via urlparse() to drop any sneaky
         query/fragment that might be inside `path`.
         """
-        if not path.startswith('/'):
-            raise ValueError('path must start with /')
-        if '/../' in path or re.search(r'/%2e%2e/', path, re.IGNORECASE):
-            raise ValueError('path traversal blocked')
-        parsed = urlparse(self._base_url)._replace(path=path, query='', fragment='')
-        return urlunparse(parsed)
+        try:
+            if not path.startswith('/'):
+                raise ValueError('path must start with /')
+            if '/../' in path or re.search(r'/%2e%2e/', path, re.IGNORECASE):
+                raise ValueError('path traversal blocked')
+            parsed = urlparse(self._base_url)
+            if parsed.scheme not in ('http', 'https'):
+                raise ValueError('Invalid protocol')
+            if not parsed.hostname:
+                raise ValueError('Invalid host')
+            parsed = parsed._replace(path=path, query='', fragment='')
+            return urlunparse(parsed)
+        except Exception:
+            raise ValueError('Invalid URL')
 
     def api_get(self, path: str, params: dict = None) -> dict:
         """GET request to vSphere REST API"""
