@@ -61,14 +61,14 @@ def get_node_ip_api(cluster_id, node):
     source = None
 
     # NS Mar 2026: XCP-ng uses XAPI host.get_address instead of Proxmox REST
-    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
+    if getattr(mgr, 'cluster_type', 'proxmox') in ('xcpng', 'sylve'):
         try:
             node_ip = mgr._get_host_ip(node)
-            source = 'xapi_host_address'
+            source = 'alt_cluster_host_address'
         except Exception as e:
-            logging.error(f"XCP-ng get_node_ip: {e}")
+            logging.error(f"Alt cluster get_node_ip: {e}")
             node_ip = cluster_host
-            source = 'xcpng_fallback'
+            source = 'alt_cluster_fallback'
     else:
         # NS Apr 2026 (PR #324): let manager._get_node_ip do the heavy lifting
         # (scores interfaces, filters corosync IPs out of the mgmt net, probes
