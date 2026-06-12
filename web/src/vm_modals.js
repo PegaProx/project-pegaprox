@@ -2031,6 +2031,20 @@
                                                 <span style={{color: '#e9ecef'}}>{vmHwInfo.net}</span>
                                             </div>
                                         )}
+                                        {/* IP (from QEMU guest agent) */}
+                                        {isQemu && isRunning && guestInfo?.ip_addresses?.length > 0 && (
+                                            <div className="flex items-start gap-2 text-[12px]">
+                                                <Icons.Globe className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" style={{color: '#49afd9'}} />
+                                                <span className="flex-shrink-0" style={{color: '#adbbc4', width: '60px'}}>IP</span>
+                                                <span
+                                                    className="flex-1 min-w-0 break-all"
+                                                    style={{color: '#e9ecef', fontFamily: 'monospace', fontSize: '11px'}}
+                                                    title={guestInfo.ip_addresses.join(', ')}
+                                                >
+                                                    {guestInfo.ip_addresses.join(', ')}
+                                                </span>
+                                            </div>
+                                        )}
                                         {/* BIOS/Machine */}
                                         {vmHwInfo && (
                                             <div className="flex items-center gap-2 text-[12px]">
