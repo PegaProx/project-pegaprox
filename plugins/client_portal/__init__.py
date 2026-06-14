@@ -31,6 +31,13 @@ def _load_config():
 def _get_portal_config():
     """Return portal configuration (public, no secrets)"""
     cfg = _load_config()
+    # MK #547 — the portal console needs to know if a reverse proxy is in front
+    # so it routes the VNC websocket through the main port instead of port+1.
+    try:
+        from pegaprox.api.helpers import load_server_settings
+        rp_enabled = bool(load_server_settings().get('reverse_proxy_enabled', False))
+    except Exception:
+        rp_enabled = False
     return {
         'portal_title': cfg.get('portal_title', 'Client Portal'),
         'allowed_actions': cfg.get('allowed_actions', []),
@@ -40,6 +47,7 @@ def _get_portal_config():
         'allow_snapshots': cfg.get('allow_snapshots', False),
         'custom_logo_url': cfg.get('custom_logo_url', ''),
         'theme_color': cfg.get('theme_color', '#e57000'),
+        'reverse_proxy_enabled': rp_enabled,
     }
 
 

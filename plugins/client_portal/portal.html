@@ -680,8 +680,14 @@ function renderConsoleModal(){
     const m=S.modal;
     const proto=window.location.protocol==='https:'?'wss:':'ws:';
     const port=parseInt(window.location.port)||(window.location.protocol==='https:'?443:80);
-    const wsPort=port+1;
-    const wsUrl=`${proto}//${window.location.hostname}:${wsPort}/api/clusters/${encodeURIComponent(m.vm.cluster_id)}/vms/${encodeURIComponent(m.vm.node)}/${encodeURIComponent(m.vm.type)}/${m.vm.vmid}/vncwebsocket?token=${encodeURIComponent(m.ws_token||'')}`;
+    // MK #547 — mirror the main-UI console: behind a reverse proxy the VNC
+    // websocket rides the main port, otherwise port+1. And pass the vncproxy
+    // ticket/port through so the WS handler reuses it instead of issuing a 2nd
+    // vncproxy — on PVE 9.1.x every vncproxy call mints a fresh random VNC
+    // password, so a second one breaks RFB auth (console just hangs/times out).
+    const wsPort = S.cfg.reverse_proxy_enabled ? port : port+1;
+    const pvePass = (m.ticket && m.port) ? `&pve_ticket=${encodeURIComponent(m.ticket)}&pve_port=${encodeURIComponent(m.port)}` : '';
+    const wsUrl=`${proto}//${window.location.hostname}:${wsPort}/api/clusters/${encodeURIComponent(m.vm.cluster_id)}/vms/${encodeURIComponent(m.vm.node)}/${encodeURIComponent(m.vm.type)}/${m.vm.vmid}/vncwebsocket?token=${encodeURIComponent(m.ws_token||'')}${pvePass}`;
     const statusLabel = m.vncStatus === 'connected' ? 'Connected' : m.vncStatus === 'connecting' ? 'Connecting...' : 'Disconnected';
     const dotClass = m.vncStatus === 'connected' ? 'connected' : m.vncStatus === 'connecting' ? 'connecting' : 'disconnected';
     // LW: #283 — larger console modal, responsive to viewport
