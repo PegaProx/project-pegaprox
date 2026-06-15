@@ -9816,6 +9816,36 @@
                 }
             };
 
+            // NS #386: restore selected controls to their pre-apply snapshot.
+            const rollbackHardening = async () => {
+                if (!selectedCluster?.id || !hardenNode) return;
+                const toRoll = Object.keys(hardenSelected).filter(k => hardenSelected[k]);
+                if (!toRoll.length) { addToast(t('noControlsSelected') || 'No controls selected', 'warning'); return; }
+                if (!confirm(t('hardenRollbackConfirm') || `↩️ Restore ${toRoll.length} control(s) on "${hardenNode}" to their pre-apply state?\n\nOnly controls applied through PegaProx (with a saved snapshot) can be rolled back.`)) return;
+                setHardenApplying(true);
+                try {
+                    const resp = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/nodes/${hardenNode}/hardening/rollback`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ controls: toRoll })
+                    });
+                    if (resp && resp.ok) {
+                        const data = await resp.json();
+                        setHardenResults({ ...(data.results || {}) });
+                        const n = data.restored || 0;
+                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`, n === toRoll.length ? 'success' : 'warning');
+                        checkHardening(hardenNode, hardenVerbose, hardenProfile);
+                    } else {
+                        const errData = await resp?.json().catch(() => ({}));
+                        addToast('Error: ' + (errData?.error || `HTTP ${resp?.status}`), 'error');
+                    }
+                } catch (e) {
+                    addToast('Error: ' + e.message, 'error');
+                } finally {
+                    setHardenApplying(false);
+                }
+            };
+
             // Load favorites and summary on mount
             useEffect(() => {
                 if (user) {
@@ -15913,6 +15943,8 @@
                                                                 journald: { ref: '4.2.1.1-4.2.1.4', title: t('cisJournald') || 'Journald Hardening', desc: t('cisJournaldDesc') || 'Configures persistent, compressed logging that survives reboots for forensic analysis', impact: t('cisJournaldImpact') || 'Better forensic capabilities' },
                                                                 ssh_perms: { ref: '5.1.1-5.1.3', title: t('cisSshPerms') || 'SSH File Permissions', desc: t('cisSshPermsDesc') || 'Sets secure permissions (600) on SSH config and host keys', impact: t('cisSshPermsImpact') || 'None - SSH works normally' },
                                                                 ssh_crypto: { ref: '5.1.4-5.1.22', title: t('cisSshCrypto') || 'SSH Cryptographic Hardening', desc: t('cisSshCryptoDesc') || 'Configures SSH to use only strong ciphers (AES-GCM/CTR), secure key exchange (Curve25519), and strong MACs (SHA2-ETM)', impact: t('cisSshCryptoImpact') || 'Very old SSH clients may not connect' },
+                                                                sshd_hardening: { ref: '5.1.x (#433)', title: t('cisSshdHardening') || 'SSH Access Hardening', desc: t('cisSshdHardeningDesc') || 'Key-only root (PermitRootLogin prohibit-password), MaxAuthTries 4, X11Forwarding off, idle timeout, no empty passwords. PasswordAuthentication is left untouched so password users are not locked out.', impact: t('cisSshdHardeningImpact') || 'Root password login disabled (key login keeps working). Reversible via Rollback Selected.' },
+                                                                pam_nullok_removal: { ref: '5.4.x (#434)', title: t('cisPamNullok') || 'Remove PAM nullok (block empty passwords)', desc: t('cisPamNullokDesc') || 'Strips the nullok flag from every /etc/pam.d/* file so accounts with a blank password can no longer authenticate.', impact: t('cisPamNullokImpact') || 'Accounts with empty passwords can no longer log in. Reversible via Rollback Selected.' },
                                                                 pam_faillock: { ref: '5.3.3.1', title: t('cisPam') || 'Account Lockout (pam_faillock)', desc: t('cisPamDesc') || 'Locks accounts after 5 failed login attempts, auto-unlocks after 10 minutes. Root excluded.', impact: t('cisPamImpact') || 'Works alongside Fail2Ban for defense in depth' },
                                                                 shell_timeout: { ref: '5.4.3.2', title: t('cisTimeout') || 'Shell Timeout', desc: t('cisTimeoutDesc') || 'Automatically logs out inactive shell sessions after 15 minutes', impact: t('cisTimeoutImpact') || 'Only interactive SSH sessions affected' },
                                                                 file_perms: { ref: '6.1', title: t('cisFilePerms') || 'System File Permissions', desc: t('cisFilePermsDesc') || 'Sets correct permissions on /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow', impact: t('cisFilePermsImpact') || 'No impact - standard Linux hardening' },
@@ -16224,6 +16256,16 @@
                                                                                 ? <><Icons.RotateCw className="w-4 h-4 animate-spin" /> {hardenApplyProgress.done}/{hardenApplyProgress.total}: <span className="font-mono text-[11px]">{hardenApplyProgress.current}</span></>
                                                                                 : <><Icons.RotateCw className="w-4 h-4 animate-spin" /> {t('applying') || 'Applying...'}</>
                                                                         ) : <><Icons.Shield className="w-4 h-4" /> {t('applySelected') || 'Apply Selected'} ({selectedCount})</>}
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={rollbackHardening}
+                                                                        disabled={hardenApplying || selectedCount === 0}
+                                                                        title={t('hardenRollbackHint') || 'Restore the selected controls to their pre-apply state (only controls applied via PegaProx)'}
+                                                                        className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 whitespace-nowrap ${
+                                                                            hardenApplying || selectedCount === 0 ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-amber-600 hover:bg-amber-500 text-white'
+                                                                        }`}
+                                                                    >
+                                                                        <Icons.RotateCcw className="w-4 h-4" /> {t('rollbackSelected') || 'Rollback Selected'} ({selectedCount})
                                                                     </button>
                                                                 </div>
 

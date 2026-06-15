@@ -727,6 +727,39 @@ def apply_hardening(cluster_id, node):
     })
 
 
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardening/rollback', methods=['POST'])
+@require_auth(perms=['node.maintenance'])
+def rollback_hardening(cluster_id, node):
+    """Restore selected CIS controls to their pre-apply state (#386)"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not mgr.is_connected:
+        return jsonify({'error': 'Cluster offline'}), 503
+
+    data = request.get_json() or {}
+    controls = data.get('controls', [])
+    if not controls:
+        return jsonify({'error': 'No controls specified'}), 400
+
+    results = mgr.rollback_node_hardening(node, controls)
+    ok_count = sum(1 for v in results.values() if v.get('success'))
+
+    from pegaprox.utils.audit import log_audit
+    log_audit('node.hardening_rolled_back', {
+        'node': node, 'controls': controls,
+        'restored': ok_count, 'total': len(controls)
+    })
+
+    return jsonify({
+        'node': node, 'results': results,
+        'restored': ok_count, 'total': len(controls)
+    })
+
+
 # ============================================
 # Compliance framework mapping  -  MK Apr 2026
 # Frontend pulls these to render the compliance PDFs with real

@@ -14429,6 +14429,52 @@ else
   systemctl restart sshd
 fi
 echo DONE""",
+            'backup_files': ['/etc/ssh/sshd_config'],
+            'rollback_post': "sshd -t 2>/dev/null && (systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null) || true",
+        },
+        # NS #433 — SSH access hardening (key-only root, auth tries, idle timeout).
+        # PermitRootLogin=prohibit-password, NOT 'no': PVE manages its nodes as
+        # root@pam, so key-based root must keep working; we also leave
+        # PasswordAuthentication alone for the same lockout reason. Rollback (#386)
+        # restores the pre-apply sshd_config via backup_files.
+        'sshd_hardening': {
+            'check': """grep -qiE '^[[:space:]]*PermitRootLogin[[:space:]]+(no|prohibit-password)' /etc/ssh/sshd_config 2>/dev/null && grep -qiE '^[[:space:]]*MaxAuthTries[[:space:]]+[1-4]([[:space:]]|$)' /etc/ssh/sshd_config 2>/dev/null && grep -qiE '^[[:space:]]*X11Forwarding[[:space:]]+no' /etc/ssh/sshd_config 2>/dev/null && echo OK || echo FAIL""",
+            'verbose_check': """grep -iE '^[[:space:]]*(PermitRootLogin|MaxAuthTries|X11Forwarding|ClientAliveInterval|ClientAliveCountMax|LoginGraceTime|AllowTcpForwarding|PermitEmptyPasswords)' /etc/ssh/sshd_config 2>/dev/null || echo '(no access-hardening directives found)'""",
+            'apply': """cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.cis-sshd
+sed -i -E -e '/^[[:space:]]*PermitRootLogin[[:space:]]/Id' -e '/^[[:space:]]*MaxAuthTries[[:space:]]/Id' -e '/^[[:space:]]*X11Forwarding[[:space:]]/Id' -e '/^[[:space:]]*ClientAliveInterval[[:space:]]/Id' -e '/^[[:space:]]*ClientAliveCountMax[[:space:]]/Id' -e '/^[[:space:]]*LoginGraceTime[[:space:]]/Id' -e '/^[[:space:]]*AllowTcpForwarding[[:space:]]/Id' -e '/^[[:space:]]*PermitEmptyPasswords[[:space:]]/Id' /etc/ssh/sshd_config
+cat >> /etc/ssh/sshd_config << 'SSHDHEOF'
+
+# CIS SSH access hardening (#433) - applied by PegaProx
+PermitRootLogin prohibit-password
+MaxAuthTries 4
+X11Forwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 3
+LoginGraceTime 60
+AllowTcpForwarding no
+PermitEmptyPasswords no
+SSHDHEOF
+if sshd -t 2>/dev/null; then
+  systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+else
+  cp /etc/ssh/sshd_config.bak.cis-sshd /etc/ssh/sshd_config
+  systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+fi
+echo DONE""",
+            'backup_files': ['/etc/ssh/sshd_config'],
+            'rollback_post': "sshd -t 2>/dev/null && (systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null) || true",
+        },
+        # NS #434 — strip the `nullok` flag (PAM accepting empty passwords) from
+        # every /etc/pam.d file. Rollback (#386) restores the common-* files.
+        'pam_nullok_removal': {
+            'check': """grep -rlE 'nullok' /etc/pam.d/ >/dev/null 2>&1 && echo FAIL || echo OK""",
+            'verbose_check': """grep -rlE 'nullok' /etc/pam.d/ 2>/dev/null || echo '(no nullok flags in /etc/pam.d)'""",
+            'apply': """for pf in $(grep -rlE 'nullok' /etc/pam.d/ 2>/dev/null); do
+  cp -p "$pf" "${pf}.bak.cis-nullok"
+  sed -i -E 's/[[:space:]]nullok([[:space:]]|$)/ /g' "$pf"
+done
+echo DONE""",
+            'backup_files': ['/etc/pam.d/common-auth', '/etc/pam.d/common-password', '/etc/pam.d/common-account'],
         },
         'pam_faillock': {
             'check': """[ -f /etc/security/faillock.conf.d/cis-faillock.conf ] && echo OK || echo FAIL""",
@@ -15412,11 +15458,56 @@ echo DONE""",
                             vals[k] = v
                         # else: silently dropped (defaults remain)
                 cmd = cmd.format(**vals)
+            # NS #386: snapshot the files this control edits BEFORE applying, so the
+            # change can be rolled back. Only the first apply backs up (preserves
+            # the true pre-hardening state); a re-apply won't clobber the original.
+            bf = check.get('backup_files')
+            if bf:
+                pre = '; '.join(
+                    '{ [ -f %s ] && [ ! -f %s ] && cp -p %s %s; } || true' % (
+                        shlex.quote(f), shlex.quote(f + '.pegaprox-bak.' + ctrl_id),
+                        shlex.quote(f), shlex.quote(f + '.pegaprox-bak.' + ctrl_id))
+                    for f in bf
+                )
+                cmd = pre + '; ' + cmd
             result = self._ssh_node_output(node_name, cmd, timeout=60)
             if result is not None and 'DONE' in result:
                 out[ctrl_id] = {'success': True}
             else:
                 out[ctrl_id] = {'success': False, 'error': result or 'SSH command failed'}
+        return out
+
+    def rollback_node_hardening(self, node_name, controls):
+        """Restore the config files a CIS control changed, from the snapshot taken
+        at apply time (#386). Only controls that declare backup_files can roll back."""
+        all_checks = self._all_hardening_controls()
+        out = {}
+        for ctrl_id in controls:
+            ctrl = all_checks.get(ctrl_id)
+            if not ctrl:
+                out[ctrl_id] = {'success': False, 'error': 'unknown control'}
+                continue
+            bf = ctrl.get('backup_files')
+            if not bf:
+                out[ctrl_id] = {'success': False, 'error': 'control has no rollback snapshot (not reversible)'}
+                continue
+            steps = []
+            for f in bf:
+                bak = f + '.pegaprox-bak.' + ctrl_id
+                qf, qb = shlex.quote(f), shlex.quote(bak)
+                steps.append('if [ -f %s ]; then cp -p %s %s && rm -f %s && echo RESTORED:%s; else echo NOBACKUP:%s; fi'
+                             % (qb, qb, qf, qb, ctrl_id, ctrl_id))
+            post = ctrl.get('rollback_post')
+            if post:
+                steps.append('{ %s ; } || true' % post)
+            steps.append('echo DONE')
+            result = self._ssh_node_output(node_name, ' ; '.join(steps), timeout=60)
+            if result and 'DONE' in result and 'RESTORED:' in result:
+                out[ctrl_id] = {'success': True}
+            elif result and 'NOBACKUP:' in result and 'RESTORED:' not in result:
+                out[ctrl_id] = {'success': False, 'error': 'no snapshot found — control was never applied (or already rolled back)'}
+            else:
+                out[ctrl_id] = {'success': False, 'error': (result or 'SSH command failed')[:300]}
         return out
 
     def _fetch_qemu_ips(self, node: str, vmid: int) -> list:
