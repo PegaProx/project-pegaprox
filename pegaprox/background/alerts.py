@@ -821,12 +821,15 @@ def process_alert_lifecycle():
         steps = (rules_by_id.get(rule_id) or {}).get('escalation') or []
         if not isinstance(steps, list) or not steps:
             continue
+        steps = steps[:10]  # F1 defense-in-depth: bound runaway/legacy chains (matches write-time cap)
         try:
             trg = datetime.fromisoformat(triggered_at) if triggered_at else now
         except Exception:
             trg = now
         elapsed_min = (now - trg).total_seconds() / 60.0
         for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
             if idx < (esc_step or 0):
                 continue
             try:
