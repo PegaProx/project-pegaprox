@@ -3938,7 +3938,9 @@
             const openInProxmox = () => {
                 // NS: IPv6 needs brackets in URLs
                 const h = consoleInfo.host.includes(':') && !consoleInfo.host.startsWith('[') ? `[${consoleInfo.host}]` : consoleInfo.host;
-                const url = `https://${h}:8006/?console=${vm.type}&novnc=1&vmid=${vm.vmid}&node=${vm.node}`;
+                // #551: PVE noVNC expects console=kvm for QEMU VMs (vm.type is 'qemu'); lxc stays as-is
+                const consoleType = vm.type === 'qemu' ? 'kvm' : vm.type;
+                const url = `https://${h}:8006/?console=${consoleType}&novnc=1&vmid=${vm.vmid}&node=${vm.node}`;
                 window.open(url, '_blank');
             };
 
