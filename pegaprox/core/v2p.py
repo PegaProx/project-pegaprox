@@ -5745,6 +5745,21 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
                             written = int(disk_size * pct / 100)
                         except ValueError:
                             pass
+                # MK Jun 2026 — thick LVM and raw RBD have no data_percent, so the
+                # lvs probe above stays empty and the transfer looked frozen at 0%
+                # the whole time (the LVM-thick + #538 RBD case). Fall back to the
+                # dd progress log instead — dd now runs with status=progress, so
+                # whichever transfer method is active is dripping "N bytes copied"
+                # into one of these three logs on the node.
+                if written < 0:
+                    _idx = disk_key.replace('disk', '') or '0'
+                    rc2, out2, _ = _pve_node_exec(pve_mgr, node,
+                        f"cat /tmp/v2p-{task.id}-sshdd-{_idx}.log /tmp/v2p-{task.id}-dl-{_idx}.log "
+                        f"/tmp/v2p-{task.id}-dd3-{_idx}.log 2>/dev/null | tr '\\r' '\\n' "
+                        f"| grep -oE '[0-9]+ bytes' | tail -1", timeout=8)
+                    m = re.search(r'(\d+)', str(out2 or ''))
+                    if m:
+                        written = int(m.group(1))
             else:
                 rc, out, _ = _pve_node_exec(pve_mgr, node,
                     f"stat -c '%s' '{vol_path}' 2>/dev/null || echo 0", timeout=8)
@@ -5778,6 +5793,14 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
                     task.log(f"    {disk_key}: monitor alive, 0 bytes written so far ({elapsed:.0f}s elapsed)")
                     last_log_t = now
             last_written = written
+        elif is_block_dev:
+            # written never rose above -1 (no data_percent, dd log not writing yet)
+            # — emit a liveness heartbeat so a block-device transfer doesn't look
+            # frozen during the clone/pre-dd window. MK Jun 2026.
+            now = _time.monotonic()
+            if now - last_log_t >= 60:
+                task.log(f"    {disk_key}: transferring… (live % not yet available for this storage type, {now - start_t:.0f}s elapsed)")
+                last_log_t = now
         stop_evt.wait(5)
 
 
@@ -5964,7 +5987,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) "
                 f"--connect-timeout 30 --max-time 86400 "
                 f"'{url}' 2>/dev/null "
-                f"| dd of='{vol_path}' bs=4M 2>{dd_log}; "
+                f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log}; "
                 f"echo RC=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
                 f"cat {dd_log}; rm -f {dd_log}"
             )
@@ -6014,7 +6037,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
                 f"{esxi_user}@{esxi_host} "
                 f"\"dd if={shlex.quote(esxi_flat_path)} bs=4M\" 2>/dev/null "
-                f"| dd of='{vol_path}' bs=4M 2>{dd_log2}; "
+                f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log2}; "
                 f"echo PIPE=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
                 f"cat {dd_log2}; rm -f {dd_log2}"
             )
@@ -6053,7 +6076,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 # MK May 2026 (#438 follow-up): capture stderr for the dd-via-SSHFS
                 # path too — same anti-pattern as METHOD 1 + 2 above.
                 rc_dd, out_dd, err_dd = _pve_node_exec(pve_mgr, task.target_node,
-                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M 2>{dd_log3}; "
+                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; "
                     f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
                 dd_out = str(out_dd or '').strip()
                 task.log(f"  SSHFS: {dd_out[-200:]}")
