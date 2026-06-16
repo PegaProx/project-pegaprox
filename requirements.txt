@@ -35,7 +35,12 @@ dnspython>=2.7.0
 # === Encryption & Security ===
 # NS May 2026 — cryptography 46.0.6/.0.7 patches CVE-2026-34073 + -39892,
 # pyopenssl 26.x patches CVE-2026-27448 + -27459. argon2-cffi unchanged.
-cryptography>=46.0.7
+# MK Jun 2026 — held below 49 on purpose: fido2 (WebAuthn/hardware-key 2FA) caps
+# cryptography <49 in every published release, so bumping to 49 (Aikido autofix PR
+# #550 / AIKIDO-2026-94131, raw-ChaCha20 counter overflow) would force-drop fido2.
+# We use zero raw ChaCha20 (AES-GCM + Fernet only) → not exposed; risk-accepted.
+# Revisit 49 once a fido2 release lifts the <49 cap.
+cryptography>=48.0.1,<49
 pyopenssl>=26.0.0
 argon2-cffi>=23.0.0
 # pyasn1 0.6.3 fixes the recursion + resource-allocation vulns; transitive
