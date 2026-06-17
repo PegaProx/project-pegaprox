@@ -5533,6 +5533,70 @@ def run_replication_now_api(cluster_id, job_id):
 # NS: Mar 2026 - same-cluster snapshot replication for non-ZFS storage (#103)
 # Proxmox native replication needs ZFS, this works with any storage backend
 # Flow: snapshot -> clone to target storage -> migrate clone to target node -> cleanup
+def _resolve_vm_node(mgr, vmid, vm_type='qemu'):
+    """Authoritatively locate which node a VMID lives on by probing each node's
+    status endpoint directly. /cluster/resources is fed by pmxcfs and lags by
+    several seconds — right after a migrate it can still point at the old node,
+    which is fatal for a destructive op (we'd delete the wrong/empty side and
+    leave the real replica behind). Returns (node, info_dict) or (None, None).
+    MK Jun 2026 (#552)."""
+    try:
+        nresp = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes")
+        nodes = [n.get('node') for n in nresp.json().get('data', [])] if nresp.status_code == 200 else []
+    except Exception:
+        nodes = []
+    for node in nodes:
+        if not node:
+            continue
+        try:
+            r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/status/current")
+            if r.status_code == 200:
+                info = r.json().get('data', {}) or {}
+                info['node'] = node
+                return (node, info)
+        except Exception:
+            continue
+    return (None, None)
+
+
+def _free_local_target_vmid(mgr, tgt_vmid, src_vmid, vm_type):
+    """For a pinned local-replication target VMID: if a VM already sits on it,
+    remove it ONLY when it's a prior replica of this source (name starts with
+    `repl-<src_vmid>-`). Refuse to touch anything else so we never clobber an
+    unrelated VM. Returns (ok, error_message). #552
+    """
+    try:
+        node, existing = _resolve_vm_node(mgr, tgt_vmid, vm_type)
+        if not existing:
+            return (True, '')  # free, go ahead
+
+        vname = existing.get('name', '') or ''
+        if not vname.startswith(f'repl-{src_vmid}-'):
+            return (False, (f'Target VMID {tgt_vmid} is in use by "{vname or "unknown"}" which is not a '
+                            f'replica of VM {src_vmid}. Pick a free VMID or remove that VM first.'))
+
+        # it's our old replica — stop (if running) and delete
+        if existing.get('status') == 'running':
+            try:
+                mgr._api_post(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{tgt_vmid}/status/stop", data={})
+                time.sleep(5)
+            except Exception:
+                pass
+        del_resp = mgr._api_delete(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{tgt_vmid}",
+                                   params={'purge': 1, 'destroy-unreferenced-disks': 1})
+        if del_resp.status_code != 200:
+            return (False, f'Could not remove old replica {tgt_vmid}: {del_resp.text[:200]}')
+        del_task = del_resp.json().get('data')
+        if del_task:
+            ok, detail = _wait_for_task(mgr, del_task, timeout=600)
+            if not ok:
+                return (False, f'Delete of old replica {tgt_vmid} failed: {detail}')
+        logging.info(f"[REPL] Freed pinned target VMID {tgt_vmid} (old replica '{vname}' removed)")
+        return (True, '')
+    except Exception as e:
+        return (False, f'Error freeing target VMID {tgt_vmid}: {e}')
+
+
 def _execute_local_replication(job):
     """Run snapshot-based replication within the same cluster (no ZFS needed)."""
     db = get_db()
@@ -5594,14 +5658,26 @@ def _execute_local_replication(job):
             _update_repl_status(db, job_id, 'error', f'Snapshot failed: {snap_detail}')
             return
 
-        # 3. get next free VMID
-        nextid_resp = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/nextid")
-        if nextid_resp.status_code != 200:
-            _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
-            _update_repl_status(db, job_id, 'error', 'Could not get next VMID')
-            return
-
-        clone_vmid = int(nextid_resp.json().get('data'))
+        # 3. pick the replica VMID
+        # #552 - if the operator pinned a target VMID, reuse it every run (so the
+        # replica keeps a stable ID) instead of leaking a fresh nextid each time.
+        # A pinned ID means last run's replica is sitting on it -> clear it first,
+        # but only if it's actually one of ours (name-matched, never a foreign VM).
+        tgt_vmid = int(job.get('target_vmid') or 0)
+        if tgt_vmid:
+            freed, free_err = _free_local_target_vmid(mgr, tgt_vmid, vmid, vm_type)
+            if not freed:
+                _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
+                _update_repl_status(db, job_id, 'error', free_err)
+                return
+            clone_vmid = tgt_vmid
+        else:
+            nextid_resp = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/nextid")
+            if nextid_resp.status_code != 200:
+                _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
+                _update_repl_status(db, job_id, 'error', 'Could not get next VMID')
+                return
+            clone_vmid = int(nextid_resp.json().get('data'))
 
         # 4. clone — check storage type for snapshot compatibility (#192)
         clone_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{source_node}/{vm_type}/{vmid}/clone"
@@ -5920,6 +5996,9 @@ def _execute_replication(job):
     target_storage = job.get('target_storage', '') or 'local-lvm'
     target_bridge = job.get('target_bridge', 'vmbr0') or 'vmbr0'
     target_node = job.get('target_node', '')
+    # #552 - replica VMID is operator-pinned if set, else mirror the source VMID
+    # (PVE remote-migrate still needs an explicit target-vmid either way).
+    tgt_vmid = int(job.get('target_vmid') or 0) or vmid
 
     source_mgr = cluster_managers.get(source_cid)
     target_mgr = cluster_managers.get(target_cid)
@@ -6124,7 +6203,7 @@ def _execute_replication(job):
                 )
                 if tgt_res.status_code == 200:
                     for r in tgt_res.json().get('data', []):
-                        if int(r.get('vmid', 0)) == vmid:
+                        if int(r.get('vmid', 0)) == tgt_vmid:
                             existing_target_node = r.get('node')
                             break
             except Exception as e:
@@ -6134,10 +6213,10 @@ def _execute_replication(job):
                 # MK May 2026 (#413 @blackshocks) — refuse to delete unless the existing
                 # target VM is tagged as a replica of THIS job. Without this gate, freshly
                 # paired clusters with an unrelated VM at the matching VMID lose data.
-                if not _is_replica_of_job(target_mgr, existing_target_node, vmid, vm_type, job_id):
+                if not _is_replica_of_job(target_mgr, existing_target_node, tgt_vmid, vm_type, job_id):
                     target_mgr.delete_api_token(token_name)
                     _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
-                    err_msg = (f"Target VM {vmid} on node {existing_target_node} is not tagged as a replica "
+                    err_msg = (f"Target VM {tgt_vmid} on node {existing_target_node} is not tagged as a replica "
                                f"of this job ({_job_tag(job_id)} tag missing). Refusing to overwrite to "
                                f"prevent data loss. If this is a stranded replica from a previous run or "
                                f"manual clone, tag it with `{_job_tag(job_id)}` and re-run. If it is an "
@@ -6146,12 +6225,12 @@ def _execute_replication(job):
                     logging.error(f"[XCREPL] Job {job_id}: ABORT — {err_msg}")
                     return
 
-                logging.info(f"[XCREPL] Job {job_id}: VM {vmid} already on target node {existing_target_node}, removing old replica (tag verified)")
+                logging.info(f"[XCREPL] Job {job_id}: VM {tgt_vmid} already on target node {existing_target_node}, removing old replica (tag verified)")
                 try:
                     # stop first so PVE lets us delete it (ignore errors if already stopped)
                     stop_url = (
                         f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/nodes/{existing_target_node}"
-                        f"/{vm_type}/{vmid}/status/stop"
+                        f"/{vm_type}/{tgt_vmid}/status/stop"
                     )
                     try:
                         stop_resp = target_mgr._api_post(stop_url, data={})
@@ -6165,7 +6244,7 @@ def _execute_replication(job):
                     # delete the VM and its disks (purge removes replication jobs, destroy removes unreferenced disks)
                     del_url = (
                         f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/nodes/{existing_target_node}"
-                        f"/{vm_type}/{vmid}"
+                        f"/{vm_type}/{tgt_vmid}"
                     )
                     del_resp = target_mgr._api_delete(del_url, params={'purge': 1, 'destroy-unreferenced-disks': 1})
                     if del_resp.status_code == 200:
@@ -6174,7 +6253,7 @@ def _execute_replication(job):
                             del_ok, del_detail = _wait_for_task(target_mgr, del_task, timeout=600)
                             if not del_ok:
                                 raise RuntimeError(f"delete task failed: {del_detail}")
-                        logging.info(f"[XCREPL] Job {job_id}: old replica {vmid} removed from target")
+                        logging.info(f"[XCREPL] Job {job_id}: old replica {tgt_vmid} removed from target")
                     else:
                         raise RuntimeError(f"delete request failed: {del_resp.status_code} {del_resp.text[:200]}")
                 except Exception as e:
@@ -6188,7 +6267,7 @@ def _execute_replication(job):
             result = source_mgr.remote_migrate_vm(
                 node=source_node, vmid=clone_vmid, vm_type=vm_type,
                 target_endpoint=endpoint, target_storage=storage_mapping,
-                target_bridge=target_bridge, target_vmid=vmid,
+                target_bridge=target_bridge, target_vmid=tgt_vmid,
                 online=False, delete_source=True,
             )
 
@@ -6201,13 +6280,13 @@ def _execute_replication(job):
                     # DR failover lands on the right hostname + DHCP-MAC. Best-effort —
                     # don't fail the whole replication if this trips.
                     try:
-                        _restore_vm_identity(target_mgr, target_node, vmid, vm_type, source_identity)
+                        _restore_vm_identity(target_mgr, target_node, tgt_vmid, vm_type, source_identity)
                     except Exception as e:
                         logging.warning(f"[XCREPL] Job {job_id}: identity restoration failed: {e}")
                     # MK May 2026 (#413) — tag the replica so the safety gate on the next
                     # run recognises it as ours and can cycle it without operator action.
                     try:
-                        _tag_as_replica(target_mgr, target_node, vmid, vm_type, job_id)
+                        _tag_as_replica(target_mgr, target_node, tgt_vmid, vm_type, job_id)
                     except Exception as e:
                         logging.warning(f"[XCREPL] Job {job_id}: replica-tag write failed: {e}")
                     _update_repl_status(db, job_id, 'ok', '')
@@ -6232,7 +6311,7 @@ def _execute_replication(job):
 
         # LW: handle retention - delete oldest replicas on target if over limit
         retention = int(job.get('retention', 3) or 3)
-        _enforce_retention(target_mgr, vmid, vm_type, snap_name, retention)
+        _enforce_retention(target_mgr, tgt_vmid, vm_type, snap_name, retention)
 
     except Exception as e:
         logging.error(f"[XCREPL] Job {job_id}: unexpected error: {e}")
@@ -6461,11 +6540,26 @@ def create_cross_cluster_replication():
     now = datetime.now().isoformat()
     db = get_db()
 
+    # MatthieuTr #532 — per-NIC bridge mapping. PVE's target-bridge takes a
+    # "src:tgt,src:tgt" list, so a multi-NIC VM keeps each card on its own
+    # destination bridge (same encoding the cross-cluster migration endpoint uses).
+    bridge_map = data.get('target_bridge_map')
+    if bridge_map and isinstance(bridge_map, dict):
+        target_bridge = ','.join(f"{s}:{t}" for s, t in bridge_map.items())
+    else:
+        target_bridge = data.get('target_bridge', 'vmbr0')
+
+    # helppp #552 — optional fixed replica VMID (NULL = let PVE pick at run time)
+    tv = data.get('target_vmid')
+    target_vmid = int(tv) if tv not in (None, '', 0, '0') else None
+    delete_target = 1 if data.get('delete_target') else 0
+
     db.execute('''
         INSERT INTO cross_cluster_replications
         (id, source_cluster, target_cluster, vmid, vm_type, schedule, retention,
-         target_storage, target_bridge, target_node, enabled, created_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         target_storage, target_bridge, target_node, target_vmid, delete_target,
+         enabled, created_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
     ''', (
         job_id,
         source_cluster,
@@ -6475,8 +6569,10 @@ def create_cross_cluster_replication():
         data.get('schedule', '0 */6 * * *'),
         int(data.get('retention', 3)),
         data.get('target_storage', ''),
-        data.get('target_bridge', 'vmbr0'),
+        target_bridge,
         target_node,
+        target_vmid,
+        delete_target,
         getattr(request, 'session', {}).get('user', 'system'),
         now, now,
     ))
@@ -6488,21 +6584,97 @@ def create_cross_cluster_replication():
     return jsonify({'success': True, 'id': job_id})
 
 
+def _delete_replica_target(job):
+    """#552 - tear down the replica VM for a job. Only removes a VM we can prove
+    is this job's replica (xcrepl: job-tag; local: repl-<src>- name prefix), so a
+    mis-set target VMID never nukes a bystander. Returns (ok, detail)."""
+    src_vmid = int(job['vmid'])
+    tgt_vmid = int(job.get('target_vmid') or 0) or src_vmid
+    vm_type = job.get('vm_type', 'qemu') or 'qemu'
+    job_id = job['id']
+    is_local = job.get('source_cluster') == job.get('target_cluster')
+    mgr = cluster_managers.get(job.get('target_cluster'))
+    if not mgr:
+        return (False, 'target cluster not found')
+    if not mgr.is_connected:
+        return (False, 'target cluster not connected')
+    try:
+        # authoritative node lookup — cluster/resources lags after a migrate (#552)
+        node, found = _resolve_vm_node(mgr, tgt_vmid, vm_type)
+        if not found:
+            return (True, 'replica not present')
+        # ownership check — never delete a VM that isn't provably ours
+        if is_local:
+            vname = found.get('name', '') or ''
+            owned = vname.startswith(f'repl-{src_vmid}-')
+        else:
+            owned = _is_replica_of_job(mgr, node, tgt_vmid, vm_type, job_id)
+        if not owned:
+            return (False, f'VMID {tgt_vmid} is not tagged/named as this job\'s replica — left untouched')
+
+        if found.get('status') == 'running':
+            try:
+                stop = mgr._api_post(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{tgt_vmid}/status/stop", data={})
+                st = stop.json().get('data') if stop.status_code == 200 else None
+                if st:
+                    _wait_for_task(mgr, st, timeout=60)
+            except Exception:
+                pass
+        dr = mgr._api_delete(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{tgt_vmid}",
+                             params={'purge': 1, 'destroy-unreferenced-disks': 1})
+        if dr.status_code != 200:
+            return (False, f'delete failed: {dr.text[:160]}')
+        dt = dr.json().get('data')
+        if dt:
+            ok, detail = _wait_for_task(mgr, dt, timeout=600)
+            if not ok:
+                return (False, f'delete task failed: {detail}')
+        return (True, f'VM {tgt_vmid} removed')
+    except Exception as e:
+        return (False, str(e))
+
+
+def _wants_delete_target(job):
+    """Resolve whether the replica VM should be torn down on job delete.
+    Per-request override (query ?delete_target=1 or JSON body) wins; otherwise
+    fall back to the flag stored on the job."""
+    raw = request.args.get('delete_target')
+    if raw is None and request.is_json:
+        body = request.json or {}
+        if isinstance(body, dict) and 'delete_target' in body:
+            raw = body.get('delete_target')
+    if raw is None:
+        raw = job.get('delete_target')
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 @bp.route('/api/cross-cluster-replications/<job_id>', methods=['DELETE'])
 @require_auth(perms=['cluster.config'])
 def delete_cross_cluster_replication(job_id):
-    """Delete a cross-cluster replication job."""
+    """Delete a cross-cluster replication job (optionally its replica VM too)."""
     db = get_db()
-    existing = db.query_one('SELECT id FROM cross_cluster_replications WHERE id = ?', (job_id,))
+    existing = db.query_one('SELECT * FROM cross_cluster_replications WHERE id = ?', (job_id,))
     if not existing:
         return jsonify({'error': 'Replication job not found'}), 404
+    job = dict(existing)
+
+    target_detail = ''
+    target_deleted = False
+    if _wants_delete_target(job):
+        ok, detail = _delete_replica_target(job)
+        target_deleted = ok
+        target_detail = f' (replica: {detail})'
+        if not ok:
+            logging.warning(f"[XCREPL] Job {job_id}: replica teardown reported: {detail}")
 
     db.execute('DELETE FROM cross_cluster_replications WHERE id = ?', (job_id,))
 
     usr = getattr(request, 'session', {}).get('user', 'system')
-    log_audit(usr, 'replication.deleted', f"Cross-cluster replication {job_id} deleted")
+    log_audit(usr, 'replication.deleted', f"Cross-cluster replication {job_id} deleted{target_detail}")
 
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'target_deleted': target_deleted, 'target_detail': target_detail.strip()})
 
 
 @bp.route('/api/cross-cluster-replications/<job_id>/run', methods=['POST'])

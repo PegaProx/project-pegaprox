@@ -1228,6 +1228,15 @@ class PegaProxDB:
             if 'target_node' not in cols:
                 cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN target_node TEXT DEFAULT ''")
                 logging.info("Added target_node column to cross_cluster_replications")
+            # MK Jun 2026 (#552 @helppp) — let the operator pin the replica's VMID
+            # (keeps src/replica IDs in sync) and optionally tear the replica VM down
+            # when the job is removed, instead of orphaning a fresh VMID every recreate.
+            if 'target_vmid' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN target_vmid INTEGER")
+                logging.info("Added target_vmid column to cross_cluster_replications")
+            if 'delete_target' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN delete_target INTEGER DEFAULT 0")
+                logging.info("Added delete_target column to cross_cluster_replications")
         except Exception:
             pass
 

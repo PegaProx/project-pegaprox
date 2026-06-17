@@ -191,11 +191,13 @@
             const [allClusterNodes, setAllClusterNodes] = useState([]);
             const [crossClusterRepls, setCrossClusterRepls] = useState([]); // MK: cross-cluster DR jobs
             const [showCreateXRepl, setShowCreateXRepl] = useState(false);
-            const [xReplForm, setXReplForm] = useState({ target_cluster: '', target_storage: '', target_bridge: 'vmbr0', schedule: '0 */6 * * *', retention: 3 });
+            const [xReplForm, setXReplForm] = useState({ target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
             // NS: Target cluster resources for cross-cluster replication dropdowns
             const [xReplTargetStorages, setXReplTargetStorages] = useState([]);
             const [xReplTargetBridges, setXReplTargetBridges] = useState([]);
             const [xReplLoadingResources, setXReplLoadingResources] = useState(false);
+            // MK #532 - per-source-bridge -> target-bridge map so a multi-NIC VM keeps each card on its own net
+            const [xReplBridgeMap, setXReplBridgeMap] = useState({});
             
             // Modal states for sub-dialogs
             const [showAddDisk, setShowAddDisk] = useState(false);
@@ -611,6 +613,14 @@
                             const bridges = (Array.isArray(netData) ? netData : netData.networks || [])
                                 .filter(n => n.type === 'bridge' || n.type === 'OVSBridge' || n.source === 'sdn');
                             setXReplTargetBridges(bridges);
+                            // #532 - seed the per-NIC bridge map: default each source bridge to the
+                            // same-named target bridge (they usually exist on both), else first avail.
+                            const avail = bridges.map(b => b.iface);
+                            const fallback = avail[0] || 'vmbr0';
+                            const srcBridges = [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))];
+                            const seeded = {};
+                            srcBridges.forEach(sb => { seeded[sb] = avail.includes(sb) ? sb : fallback; });
+                            setXReplBridgeMap(seeded);
                         }
                     } catch (err) {
                         console.error('Error fetching target cluster resources:', err);
@@ -1035,20 +1045,28 @@
             // MK: cross-cluster replication handlers
             const handleCreateXRepl = async () => {
                 try {
+                    const srcBridges = [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))];
+                    const payload = {
+                        source_cluster: clusterId,
+                        vmid: vm.vmid,
+                        vm_type: vm.type || 'qemu',
+                        ...xReplForm,
+                        target_vmid: xReplForm.target_vmid ? parseInt(xReplForm.target_vmid, 10) : null,
+                    };
+                    // #532 - per-NIC bridge map when the VM has NICs, single bridge otherwise
+                    if (srcBridges.length > 0 && Object.keys(xReplBridgeMap).length > 0) {
+                        payload.target_bridge_map = xReplBridgeMap;
+                    }
                     const response = await authFetch(`${API_URL}/cross-cluster-replications`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            source_cluster: clusterId,
-                            vmid: vm.vmid,
-                            vm_type: vm.type || 'qemu',
-                            ...xReplForm
-                        })
+                        body: JSON.stringify(payload)
                     });
                     if (response && response.ok) {
                         addToast(t('xReplCreated'), 'success');
                         setShowCreateXRepl(false);
-                        setXReplForm({ target_cluster: '', target_storage: '', target_bridge: 'vmbr0', schedule: '0 */6 * * *', retention: 3 });
+                        setXReplForm({ target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
+                        setXReplBridgeMap({});
                         await fetchCrossClusterRepls();
                     } else if (response) {
                         const err = await response.json();
@@ -1061,8 +1079,11 @@
 
             const handleDeleteXRepl = async (jobId) => {
                 if (!confirm(t('confirmDeleteXRepl'))) return;
+                // #552 - second prompt: optionally tear down the replica VM on the target too
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
                 try {
-                    const response = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}`, { method: 'DELETE' });
+                    const url = `${API_URL}/cross-cluster-replications/${jobId}${alsoDeleteTarget ? '?delete_target=1' : ''}`;
+                    const response = await authFetch(url, { method: 'DELETE' });
                     if (response && response.ok) {
                         addToast(t('xReplDeleted'), 'success');
                         await fetchCrossClusterRepls();
@@ -3274,14 +3295,46 @@
                                                                     <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
                                                                 )}
                                                             </div>
-                                                            <div>
-                                                                <label className="block text-xs text-gray-400 mb-1">{t('targetBridge')}</label>
+                                                            <div className="col-span-2">
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('networkMappings') || t('targetBridge')}</label>
                                                                 {xReplLoadingResources ? (
                                                                     <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                                                         <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
                                                                         {t('loading')}...
                                                                     </div>
-                                                                ) : xReplForm.target_cluster ? (
+                                                                ) : !xReplForm.target_cluster ? (
+                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                                ) : [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))].length > 0 ? (
+                                                                    // #532 - map each source NIC's bridge to a target bridge of choice
+                                                                    <div className="space-y-2">
+                                                                        {[...new Set((config.networks || []).map(n => n.bridge).filter(Boolean))].map(sb => (
+                                                                            <div key={sb} className="flex items-center gap-2">
+                                                                                <span className="text-xs text-gray-400 w-28 shrink-0 truncate" title={sb}>{sb}</span>
+                                                                                <span className="text-gray-600">→</span>
+                                                                                <select
+                                                                                    value={xReplBridgeMap[sb] || ''}
+                                                                                    onChange={e => setXReplBridgeMap(prev => ({ ...prev, [sb]: e.target.value }))}
+                                                                                    className="flex-1 px-2 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-white text-sm"
+                                                                                >
+                                                                                    {xReplTargetBridges.filter(b => b.source !== 'sdn').length > 0 && (
+                                                                                        <optgroup label="Local Bridges">
+                                                                                            {xReplTargetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                    {xReplTargetBridges.filter(b => b.source === 'sdn').length > 0 && (
+                                                                                        <optgroup label="SDN VNets">
+                                                                                            {xReplTargetBridges.filter(b => b.source === 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                </select>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                ) : (
                                                                     <select
                                                                         value={xReplForm.target_bridge}
                                                                         onChange={e => setXReplForm(f => ({ ...f, target_bridge: e.target.value }))}
@@ -3302,9 +3355,18 @@
                                                                             </optgroup>
                                                                         )}
                                                                     </select>
-                                                                ) : (
-                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
                                                                 )}
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                                <input
+                                                                    type="number"
+                                                                    min="100"
+                                                                    value={xReplForm.target_vmid}
+                                                                    onChange={e => setXReplForm(f => ({ ...f, target_vmid: e.target.value }))}
+                                                                    placeholder={t('autoNextId') || 'auto'}
+                                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                />
                                                             </div>
                                                             <div>
                                                                 <label className="block text-xs text-gray-400 mb-1">{t('scheduleCron')}</label>

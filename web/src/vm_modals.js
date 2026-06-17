@@ -5397,7 +5397,7 @@
             const [xReplJobs, setXReplJobs] = useState([]);
             const [xReplLoading, setXReplLoading] = useState(false);
             const [showCreateXRepl, setShowCreateXRepl] = useState(false);
-            const [xReplForm, setXReplForm] = useState({ source_cluster: '', vmid: '', vm_type: 'qemu', target_cluster: '', target_storage: '', target_bridge: 'vmbr0', schedule: '0 */6 * * *', retention: 3 });
+            const [xReplForm, setXReplForm] = useState({ source_cluster: '', vmid: '', vm_type: 'qemu', target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
             const [xReplSourceVMs, setXReplSourceVMs] = useState([]);
             const [xReplLoadingVMs, setXReplLoadingVMs] = useState(false);
             const [xReplTargetStorages, setXReplTargetStorages] = useState([]);
@@ -5698,12 +5698,14 @@
                             target_bridge: xReplForm.target_bridge,
                             schedule: xReplForm.schedule,
                             retention: parseInt(xReplForm.retention) || 3,
+                            // #552 - optional pinned replica VMID
+                            target_vmid: xReplForm.target_vmid ? parseInt(xReplForm.target_vmid, 10) : null,
                         })
                     });
                     if (res && res.ok) {
                         if (addToast) addToast(t('xReplCreated') || 'Replication job created', 'success');
                         setShowCreateXRepl(false);
-                        setXReplForm({ source_cluster: '', vmid: '', vm_type: 'qemu', target_cluster: '', target_storage: '', target_bridge: 'vmbr0', schedule: '0 */6 * * *', retention: 3 });
+                        setXReplForm({ source_cluster: '', vmid: '', vm_type: 'qemu', target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
                         await fetchXReplJobs();
                     } else if (res) {
                         const err = await res.json();
@@ -5716,8 +5718,10 @@
 
             const handleDeleteXRepl = async (jobId) => {
                 if (!confirm(t('confirmDeleteXRepl') || 'Delete this replication job?')) return;
+                // #552 - second prompt: also tear down the replica VM on the target?
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
                 try {
-                    const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}`, { method: 'DELETE' });
+                    const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}${alsoDeleteTarget ? '?delete_target=1' : ''}`, { method: 'DELETE' });
                     if (res && res.ok) {
                         if (addToast) addToast(t('xReplDeleted') || 'Replication job deleted', 'success');
                         await fetchXReplJobs();
@@ -6339,6 +6343,19 @@
                                                     ) : (
                                                         <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
                                                     )}
+                                                </div>
+
+                                                {/* Target VMID (optional) - #552 */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                    <input
+                                                        type="number"
+                                                        min="100"
+                                                        value={xReplForm.target_vmid || ''}
+                                                        onChange={e => setXReplForm(f => ({ ...f, target_vmid: e.target.value }))}
+                                                        placeholder={t('autoNextId') || 'auto'}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    />
                                                 </div>
 
                                                 {/* Schedule */}

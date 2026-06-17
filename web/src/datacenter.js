@@ -48,7 +48,7 @@
             const [showAddReplication, setShowAddReplication] = useState(false);
             const [replVms, setReplVms] = useState([]);  // available VMs for replication
             const [replType, setReplType] = useState('snapshot');  // 'zfs' or 'snapshot'
-            const [newReplication, setNewReplication] = useState({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
+            const [newReplication, setNewReplication] = useState({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '', target_vmid: '' });
             const [replLoading, setReplLoading] = useState(false);
             const [firewallOptions, setFirewallOptions] = useState({});
             const [firewallRules, setFirewallRules] = useState([]);
@@ -1279,7 +1279,7 @@
                         });
                         if (res.ok) {
                             setShowAddReplication(false);
-                            setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
+                            setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '', target_vmid: '' });
                             addToast(t('replicationJobCreated'), 'success');
                             refreshReplication();
                         } else {
@@ -1298,6 +1298,8 @@
                             target_storage: newReplication.target_storage || '',
                             schedule: newReplication.schedule || '*/15',
                             retention: 1,  // keep one replica
+                            // #552 - optional pinned replica VMID (else PVE nextid)
+                            target_vmid: newReplication.target_vmid ? parseInt(newReplication.target_vmid, 10) : null,
                         };
                         const res = await fetch(`${API_URL}/cross-cluster-replications`, {
                             method: 'POST', credentials: 'include',
@@ -1306,7 +1308,7 @@
                         });
                         if (res.ok) {
                             setShowAddReplication(false);
-                            setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
+                            setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '', target_vmid: '' });
                             addToast(t('replicationJobCreated'), 'success');
                             refreshReplication();
                         } else {
@@ -1343,8 +1345,10 @@
             // delete snapshot-based job
             const deleteSnapshotReplJob = async (jobId) => {
                 if (!confirm(t('confirmDeleteReplication') || `Delete replication job ${jobId}?`)) return;
+                // #552 - optionally also remove the replica VM on the target node
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
                 try {
-                    const res = await fetch(`${API_URL}/cross-cluster-replications/${jobId}`, {
+                    const res = await fetch(`${API_URL}/cross-cluster-replications/${jobId}${alsoDeleteTarget ? '?delete_target=1' : ''}`, {
                         method: 'DELETE', credentials: 'include',
                         headers: authHeaders
                     });
@@ -5097,7 +5101,7 @@
                                                     }
                                                 } catch(e) { console.error('Failed to load VMs:', e); }
                                                 setReplType('zfs');
-                                                setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '' });
+                                                setNewReplication({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '', target_vmid: '' });
                                                 setShowAddReplication(true);
                                             }} className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm transition-colors">
                                                 <Icons.Plus className="w-4 h-4" />
@@ -5356,6 +5360,20 @@
                                                                 <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
                                                             ))}
                                                         </select>
+                                                    </div>
+                                                )}
+                                                {/* Target VMID - snapshot mode only (#552) */}
+                                                {replType === 'snapshot' && (
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                        <input
+                                                            type="number"
+                                                            min="100"
+                                                            value={newReplication.target_vmid || ''}
+                                                            onChange={e => setNewReplication({...newReplication, target_vmid: e.target.value})}
+                                                            placeholder={t('autoNextId') || 'auto'}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
+                                                        />
                                                     </div>
                                                 )}
                                                 {/* Schedule */}
