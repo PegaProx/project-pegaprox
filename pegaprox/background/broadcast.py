@@ -241,9 +241,11 @@ def broadcast_resources_loop():
                         broadcast_sse('tasks', task_list, cid)
                     
                     # Get metrics every loop
+                    metrics_ok = False
                     try:
                         metrics = mgr.get_node_status()
                         if metrics:
+                            metrics_ok = True
                             broadcast_sse('metrics', metrics, cid)
                     except Exception as e:
                         # NS May 2026 — surface this in debug; cooldown if frequent
@@ -258,6 +260,15 @@ def broadcast_resources_loop():
                         if resources:
                             broadcast_sse('resources', resources, cid)
                             # NS: Feb 2026 - Reset stale counter on success
+                            mgr._consecutive_empty_responses = 0
+                        elif metrics_ok:
+                            # MK Jun 2026 (#554 Thermal-spearhead): get_vm_resources()
+                            # also returns [] for a node that simply has no VMs/CTs — not
+                            # only for a stale ticket. If node-status came back this same
+                            # loop the ticket is clearly valid, so an empty guest list is
+                            # legitimate. Don't churn an endless ~33s re-auth loop on an
+                            # idle/empty node; only treat empty as stale when metrics are
+                            # ALSO empty (the real 401-without-exception case).
                             mgr._consecutive_empty_responses = 0
                         else:
                             # NS: Feb 2026 - Track empty responses while "connected"
