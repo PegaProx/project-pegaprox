@@ -1023,6 +1023,195 @@ def _run_v2p_migration(task):
                                      v2p_tmpdir=v2p_tmpdir)
             return
         
+        if task.transfer_mode == 'vmkfstools_clone':
+            # NS Jun 2026 — VDDK-free near-zero-downtime. We snapshot the running VM (freezes the
+            # base, writes go to the delta), then vmkfstools-clone the *frozen base* ON the ESXi
+            # host. vmkfstools is vmkernel-aware, so it reads the active-chain base extent that a
+            # raw dd/HTTP/SSHFS open cannot ("Device or resource busy"). The static clone then
+            # rides PegaProx's existing transfer + per-storage import path (CEPH/RBD krbd, LVM,
+            # LVM-thin, dir/qcow2) verbatim — so this branch is just the clone front-end + cutover.
+            # v1 = single snapshot + short cutover (no iterative CBT delta yet).
+            task.log("=== TRANSFER MODE: vmkfstools_clone (VDDK-free near-zero downtime) ===")
+            clone_bases = []  # basenames to rm on every exit path
+
+            def _vc_cleanup_clones():
+                for b in clone_bases:
+                    try: _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, b)
+                    except Exception: pass
+
+            try:
+                # --- freeze the base (VM keeps running) ---
+                task.log("Creating clone snapshot (freezes base VMDKs; VM stays up)...")
+                # quiesce=False on purpose — see the snapshot_zero note above (Tools can stall).
+                snap = vmware_mgr.create_snapshot(
+                    task.vm_id, '_pegaprox_clone_snap',
+                    'PegaProx vmkfstools clone - do not delete', memory=False, quiesce=False)
+                if 'error' in snap:
+                    task.set_phase('failed', f'vmkfstools_clone snapshot failed: {snap.get("error")}')
+                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                    return
+                time.sleep(3)
+                vsnaps = vmware_mgr.get_snapshots(task.vm_id).get('data', []) or []
+                if not any(s.get('name') == '_pegaprox_clone_snap' for s in vsnaps):
+                    task.set_phase('failed',
+                        'Clone snapshot was reported created but is not present on ESXi. '
+                        'Likely VMware Tools unresponsive (reboot the source VM cleanly first) '
+                        'or ESXi rejected it.')
+                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                    return
+                # register for the outer-except recovery (resumes source + drops the snapshot)
+                task._extra_snapshots.append('_pegaprox_clone_snap')
+                task.log("  Snapshot confirmed — base frozen, writes now hit the delta")
+                task.log("  Waiting 10s for ESXi to settle...")
+                time.sleep(10)
+
+                task.set_phase('pre_sync')
+                task.log("=== CLONE + COPY base VMDKs while the VM keeps running ===")
+                for i, desc_file in enumerate(descriptor_files):
+                    dk = f'disk{i}'
+                    disk_size = task.disk_progress[dk]['total']
+                    cb = f"_pegaprox_clone_{task.proxmox_vmid}_{i}"
+
+                    # source-datastore free-space check (clone consumes source space; -d thin caps
+                    # it at used blocks, but still warn loudly if the datastore is near-full)
+                    rc_df, out_df, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
+                        f"df -k /vmfs/volumes/{shlex.quote(datastore)} 2>/dev/null | tail -1", timeout=15)
+                    try:
+                        free_kb = int(str(out_df or '').split()[3])
+                        if free_kb * 1024 < disk_size * 0.25:
+                            task.log(f"  ! source datastore low on space ({free_kb//(1024*1024)} GB free) — thin clone may still fit")
+                    except Exception:
+                        pass
+
+                    task.log(f"Cloning frozen base of disk {i}: {desc_file} ({disk_size/(1024**3):.1f} GB)")
+                    cdesc, cflat = _esxi_vmkfstools_clone(
+                        esxi_host, esxi_user, esxi_pass, datastore, vm_dir, desc_file, cb, task=task)
+                    if not cdesc:
+                        task.set_phase('failed', f'vmkfstools clone failed for disk {i} ({desc_file})')
+                        _vc_cleanup_clones()
+                        _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, cb)
+                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                        return
+                    clone_bases.append(cb)
+
+                    # RDM / raw-LUN guard: a RawDiskMapping descriptor clones only the tiny stub,
+                    # NOT the LUN data. If the clone extent is way under the disk capacity, bail
+                    # rather than silently importing an empty disk.
+                    rc_sz, out_sz, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
+                        f"stat -c '%s' {shlex.quote(cflat)} 2>/dev/null", timeout=15)
+                    csz = int(out_sz.strip()) if str(out_sz or '').strip().isdigit() else 0
+                    if disk_size and csz < disk_size * 0.5:
+                        task.set_phase('failed',
+                            f'Disk {i} clone is implausibly small ({csz} vs {disk_size} bytes) — '
+                            f'likely a raw-device-mapped (RDM) disk, which vmkfstools cannot clone. '
+                            f'Use offline transfer mode for this VM.')
+                        _vc_cleanup_clones()
+                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                        return
+
+                    # --- transfer the static clone via the existing pipe ---
+                    # _ssh_pipe_transfer derives "<cb>-flat.vmdk", allocates the target volume for
+                    # WHATEVER storage type (RBD/LVM/LVM-thin/dir via _pvesm_alloc_disk incl. krbd
+                    # map) and streams it in. We feed it the clone descriptor name, same datastore/dir.
+                    vol_id, vol_path = _ssh_pipe_transfer(
+                        pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                        datastore, vm_dir, f"{cb}.vmdk", i)
+                    if not vol_id:
+                        task.set_phase('failed', f'Transfer/import of clone for disk {i} failed')
+                        _vc_cleanup_clones()
+                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                        return
+
+                    # --- attach (offline pattern; keep the #438 tail) ---
+                    rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node,
+                        f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id} 2>&1", timeout=30)
+                    if rc_a != 0:
+                        out_full = str(out_a or '').strip()
+                        task.log(f"  ✗ qm set --{disk_bus}{i} failed (rc={rc_a}): {out_full}")
+                        task.set_phase('failed', f'qm set --{disk_bus}{i} → {out_full[-300:]}')
+                        _vc_cleanup_clones()
+                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                        return
+                    task.log(f"  Disk {i}: cloned → transferred → attached as {disk_bus}{i}")
+                    task.update_progress(dk, disk_size, disk_size)
+
+                # --- post-copy fix chain (mirror offline/snapshot_zero) ---
+                _pve_node_exec(pve_mgr, task.target_node,
+                    f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=15)
+                if bios == 'ovmf':
+                    pending = getattr(task, '_pending_efidisk', None) or {'pre_enrolled_keys': '1'}
+                    pre_keys = pending.get('pre_enrolled_keys', '1')
+                    # NS: efidisk added AFTER the system disk so it doesn't grab vm-X-disk-0
+                    _pve_node_exec(pve_mgr, task.target_node,
+                        f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
+                        timeout=15)
+                _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
+                _register_uefi_fallback_loader(pve_mgr, task)
+                # must run while the VM is STILL stopped (live-NTFS guard inside)
+                try: _inject_virtio_drivers(pve_mgr, task)
+                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                try: _maybe_convert_disks_to_qcow2(pve_mgr, task)
+                except Exception as _qe: task.log(f"  qcow2 convert skipped: {_qe}")
+
+                # --- cutover (short downtime: stop source, start target) ---
+                # v1 has no delta replay; the delta_sync→cutover transitions just bracket the
+                # cutover so the downtime metric (downtime_start/end) is recorded.
+                task.set_phase('delta_sync')
+                task.set_phase('cutover')
+                cut_t0 = time.time()
+                task.log("=== CUTOVER: suspending source, starting target ===")
+                pwr = vmware_mgr.vm_power_action(task.vm_id, 'suspend')
+                if 'error' in pwr:
+                    task.log(f"  Suspend failed ({pwr.get('error')}), powering off instead")
+                    vmware_mgr.vm_power_action(task.vm_id, 'stop')
+                else:
+                    task._source_suspended = True
+                time.sleep(3)
+                if task.start_after:
+                    pve_mgr._api_post(
+                        f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
+                        f"/qemu/{task.proxmox_vmid}/status/start")
+                actual_downtime = time.time() - cut_t0
+                task.total_downtime_seconds = actual_downtime
+                task.log(f"=== CUTOVER DONE (downtime ~{actual_downtime:.1f}s) ===")
+
+                # --- cleanup (clone artifacts + snapshot + source) ---
+                task.set_phase('verify')
+                time.sleep(3)
+                task.set_phase('cleanup')
+                try:
+                    vmware_mgr.vm_power_action(task.vm_id, 'stop')
+                    time.sleep(2)
+                except Exception:
+                    pass
+                _vc_cleanup_clones()
+                try:
+                    sl = vmware_mgr.get_snapshots(task.vm_id).get('data', []) or []
+                    tgt = next((s for s in sl if s.get('name') == '_pegaprox_clone_snap'), None)
+                    if tgt:
+                        vmware_mgr.delete_snapshot(task.vm_id, str(tgt.get('snapshot') or tgt.get('id') or ''))
+                except Exception as _ce:
+                    task.log(f"  snapshot cleanup failed: {_ce}")
+                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
+                except: pass
+                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                if task.remove_source:
+                    task.log("Deleting source VM on ESXi (remove_source=true)")
+                    try: vmware_mgr.delete_vm(task.vm_id)
+                    except Exception as _e: task.log(f"  delete_vm failed: {_e}")
+
+                task.set_phase('completed')
+                task.log(f"COMPLETED (vmkfstools_clone, downtime ~{actual_downtime:.1f}s): "
+                         f"{task.vm_name} -> VMID {task.proxmox_vmid}")
+                return
+            except Exception as _vce:
+                task.set_phase('failed', f'vmkfstools_clone exception: {_vce}')
+                _vc_cleanup_clones()
+                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
+                except: pass
+                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                return
+
         if task.transfer_mode == 'offline':
             task.log(f"=== TRANSFER MODE: Offline Copy ===")
             task.log("Stopping VM first, then full disk copy via SSH")
@@ -2171,6 +2360,64 @@ def _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, cmd, timeout=30):
         return r.returncode, r.stdout, r.stderr
     except Exception as e:
         return 1, '', str(e)
+
+
+def _esxi_vmkfstools_clone(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, desc_file, clone_basename, task=None, timeout=86400):
+    """Clone the FROZEN BASE of a snapshotted (still-running) VMDK on the ESXi host.
+
+    NS Jun 2026 — vmkfstools is vmkernel-aware, so it can read the active snapshot-chain
+    base extent that a raw `dd`/HTTP/SSHFS open cannot ('Device or resource busy'). This is
+    the VDDK-free way to copy a running VM's disk. Runs in the BACKGROUND on the host + polls,
+    so a single long-held SSH session can't strand the clone (and survives ESXi-SSH flaps).
+    MUST clone into the same <datastore>/<vm_dir> — the transfer helper derives the flat path
+    there. Returns (clone_desc_path, clone_flat_path) or (None, None)."""
+    import time as _t
+    base = f"/vmfs/volumes/{datastore}/{vm_dir}"
+    src = f"{base}/{desc_file}"
+    dst = f"{base}/{clone_basename}.vmdk"
+    dst_flat = f"{base}/{clone_basename}-flat.vmdk"
+    logf = f"{base}/{clone_basename}.clonelog"
+    pidf = f"{base}/{clone_basename}.clonepid"
+    def _log(m):
+        if task: task.log(m)
+    launch = ("rm -f {d} {f} {l} {p}; "
+              "nohup vmkfstools -i {s} {d} -d thin > {l} 2>&1 & echo $! > {p}; cat {p}").format(
+        d=shlex.quote(dst), f=shlex.quote(dst_flat), l=shlex.quote(logf),
+        p=shlex.quote(pidf), s=shlex.quote(src))
+    rc, out, err = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, launch, timeout=60)
+    pid = (str(out or '').strip().splitlines() or [''])[-1].strip()
+    if rc != 0 or not pid.isdigit():
+        _log(f"  vmkfstools clone launch failed (rc={rc}): {(err or out or '')[:200]}")
+        return None, None
+    _log(f"  vmkfstools cloning frozen base -> {clone_basename}.vmdk (PID {pid})")
+    waited = 0
+    while waited < timeout:
+        rc_p, out_p, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
+            f"kill -0 {pid} 2>/dev/null && echo RUN || echo DONE", timeout=20)
+        if 'DONE' in (out_p or ''):
+            break
+        _t.sleep(10); waited += 10
+    # success = log reports 100% done, no error keyword
+    rc_l, out_l, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
+        f"sed 's/\\r/\\n/g' {shlex.quote(logf)} 2>/dev/null | tail -3", timeout=20)
+    txt = out_l or ''
+    if '100% done' not in txt or 'Failed' in txt or 'rror' in txt:
+        _log(f"  vmkfstools clone did not confirm success: {txt.strip()[:200]}")
+        return None, None
+    return dst, dst_flat
+
+
+def _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, clone_basename):
+    """Remove a vmkfstools clone (descriptor + extent + run files). Best-effort; called on
+    EVERY exit path so a clone never fills the source datastore."""
+    base = f"/vmfs/volumes/{datastore}/{vm_dir}"
+    dst = f"{base}/{clone_basename}.vmdk"
+    extras = " ".join(shlex.quote(f"{base}/{clone_basename}{suf}")
+                      for suf in ('-flat.vmdk', '.clonelog', '.clonepid'))
+    # vmkfstools -U cleanly drops the descriptor+extent pair; rm catches leftovers
+    _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
+        f"vmkfstools -U {shlex.quote(dst)} 2>/dev/null; rm -f {shlex.quote(dst)} {extras}",
+        timeout=30)
 
 
 def _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, descriptor_files):
@@ -5498,6 +5745,21 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
                             written = int(disk_size * pct / 100)
                         except ValueError:
                             pass
+                # MK Jun 2026 — thick LVM and raw RBD have no data_percent, so the
+                # lvs probe above stays empty and the transfer looked frozen at 0%
+                # the whole time (the LVM-thick + #538 RBD case). Fall back to the
+                # dd progress log instead — dd now runs with status=progress, so
+                # whichever transfer method is active is dripping "N bytes copied"
+                # into one of these three logs on the node.
+                if written < 0:
+                    _idx = disk_key.replace('disk', '') or '0'
+                    rc2, out2, _ = _pve_node_exec(pve_mgr, node,
+                        f"cat /tmp/v2p-{task.id}-sshdd-{_idx}.log /tmp/v2p-{task.id}-dl-{_idx}.log "
+                        f"/tmp/v2p-{task.id}-dd3-{_idx}.log 2>/dev/null | tr '\\r' '\\n' "
+                        f"| grep -oE '[0-9]+ bytes' | tail -1", timeout=8)
+                    m = re.search(r'(\d+)', str(out2 or ''))
+                    if m:
+                        written = int(m.group(1))
             else:
                 rc, out, _ = _pve_node_exec(pve_mgr, node,
                     f"stat -c '%s' '{vol_path}' 2>/dev/null || echo 0", timeout=8)
@@ -5531,6 +5793,14 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
                     task.log(f"    {disk_key}: monitor alive, 0 bytes written so far ({elapsed:.0f}s elapsed)")
                     last_log_t = now
             last_written = written
+        elif is_block_dev:
+            # written never rose above -1 (no data_percent, dd log not writing yet)
+            # — emit a liveness heartbeat so a block-device transfer doesn't look
+            # frozen during the clone/pre-dd window. MK Jun 2026.
+            now = _time.monotonic()
+            if now - last_log_t >= 60:
+                task.log(f"    {disk_key}: transferring… (live % not yet available for this storage type, {now - start_t:.0f}s elapsed)")
+                last_log_t = now
         stop_evt.wait(5)
 
 
@@ -5717,7 +5987,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) "
                 f"--connect-timeout 30 --max-time 86400 "
                 f"'{url}' 2>/dev/null "
-                f"| dd of='{vol_path}' bs=4M 2>{dd_log}; "
+                f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log}; "
                 f"echo RC=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
                 f"cat {dd_log}; rm -f {dd_log}"
             )
@@ -5767,7 +6037,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
                 f"{esxi_user}@{esxi_host} "
                 f"\"dd if={shlex.quote(esxi_flat_path)} bs=4M\" 2>/dev/null "
-                f"| dd of='{vol_path}' bs=4M 2>{dd_log2}; "
+                f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log2}; "
                 f"echo PIPE=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
                 f"cat {dd_log2}; rm -f {dd_log2}"
             )
@@ -5806,7 +6076,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 # MK May 2026 (#438 follow-up): capture stderr for the dd-via-SSHFS
                 # path too — same anti-pattern as METHOD 1 + 2 above.
                 rc_dd, out_dd, err_dd = _pve_node_exec(pve_mgr, task.target_node,
-                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M 2>{dd_log3}; "
+                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; "
                     f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
                 dd_out = str(out_dd or '').strip()
                 task.log(f"  SSHFS: {dd_out[-200:]}")
