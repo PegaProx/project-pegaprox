@@ -12988,6 +12988,10 @@
                             label: t('fixQemuArgs') || 'Fix QEMU args (after disk-bus change)',
                             icon: <Icons.Wrench className="w-3.5 h-3.5" />,
                             onClick: async () => {
+                                // LW #424 - the args: line PVE writes here blocks live- and
+                                // cross-cluster migration, and the old version gave zero feedback
+                                // that it had changed anything. Make the trade-off explicit.
+                                if (!window.confirm(t('fixQemuArgsConfirm') || 'This writes custom QEMU args (args:) onto the VM config to repair disk sector sizes after a bus change. Heads-up: VMs that carry custom args can no longer be live- or cross-cluster-migrated by Proxmox. Continue?')) return;
                                 try {
                                     const res = await authFetch(`${API_URL}/clusters/${cId}/vms/${vm.node}/qemu/${vm.vmid}/fix-args`, { method: 'POST' });
                                     const data = await res?.json().catch(() => ({}));
