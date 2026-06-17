@@ -7781,7 +7781,7 @@
             const [vmwareMigrations, setVmwareMigrations] = useState([]);
             const [vmwareMigrateForm, setVmwareMigrateForm] = useState({
                 target_cluster:'',target_node:'',target_storage:'',esxi_password:'',network_bridge:'vmbr0',
-                start_after:true,remove_source:false,transfer_mode:'auto',bios:'auto',preserve_mac:true,
+                start_after:true,remove_source:false,transfer_mode:'vmkfstools_clone',bios:'auto',preserve_mac:true,
                 // hardware overrides (#222)
                 ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'vmware',net_driver:'auto',
                 sockets:0,cores_per_socket:0,memory:0,cpu_type:'host',
@@ -20258,9 +20258,9 @@
                                                                 <div>
                                                                     <label className="text-xs text-gray-500 mb-1 block">{t('transferMode') || 'Transfer Mode'}</label>
                                                                     <select value={vmwareMigrateForm.transfer_mode} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, transfer_mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                                                        <option value="vmkfstools_clone">{t('transferModeVmkClone') || 'Live Clone — Near-Zero Downtime (recommended)'}</option>
                                                                         <option value="auto">{t('transferModeAuto') || 'Auto (Pre-Sync + Delta)'}</option>
-                                                                        <option value="sshfs_boot">{t('transferModeSshfsBoot') || 'Live Mirror — Near-Zero Downtime (recommended)'}</option>
-                                                                        <option value="vmkfstools_clone">{t('transferModeVmkClone') || 'Live Clone — Near-Zero Downtime (new)'}</option>
+                                                                        <option value="sshfs_boot">{t('transferModeSshfsBoot') || 'Live Mirror — Near-Zero Downtime'}</option>
                                                                         <option value="snapshot_zero">{t('transferModeSnapshotZero') || 'Snapshot-Iterative — Zero Downtime (experimental)'}</option>
                                                                         <option value="offline">{t('transferModeOffline') || 'Offline Copy (Full Downtime)'}</option>
                                                                     </select>
