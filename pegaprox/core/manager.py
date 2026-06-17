@@ -11982,8 +11982,22 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': 'Not connected'}
         try:
             host = self.host
-            resp = self._api_delete(f"https://{host}:{self.api_port}/api2/json/pools/{poolid}")
-            return {'success': True} if resp.status_code == 200 else {'success': False, 'error': f'PVE {resp.status_code}'}
+            base = f"https://{host}:{self.api_port}/api2/json/pools/{poolid}"
+            # MK Jun 2026 (#555 follow-up) — PVE refuses to delete a non-empty pool
+            # ("pool 'X' is not empty (contains VM ...)") and the API surfaced that as a
+            # bare 'PVE 500'. Un-pool any members first (the VMs themselves are untouched),
+            # so deleting a pool works the way operators expect.
+            try:
+                members = (self.get_pool_members(poolid) or {}).get('members', []) or []
+                member_ids = [str(m.get('vmid')) for m in members if m.get('vmid') is not None]
+                if member_ids:
+                    self._api_put(base, data={'vms': ','.join(member_ids), 'delete': 1})
+            except Exception as e:
+                self.logger.warning(f"delete_pool({poolid}): member cleanup failed: {e}")
+            resp = self._api_delete(base)
+            if resp.status_code == 200:
+                return {'success': True}
+            return {'success': False, 'error': f'PVE {resp.status_code}: {(resp.text or "").strip()[:200]}'}
         except Exception as e:
             self.logger.error(f"delete_pool({poolid}): {e}")
             return {'success': False, 'error': str(e)}

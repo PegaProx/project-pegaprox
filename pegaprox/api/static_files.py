@@ -78,7 +78,7 @@ def create_pool(cluster_id):
         # Invalidate cache
         invalidate_pool_cache(cluster_id)
         
-        audit_log(request.session.get('user'), 'pool.create', f'Created pool {poolid}', {'cluster': cluster_id, 'poolid': poolid})
+        log_audit(request.session.get('user'), 'pool.create', f'Created pool {poolid}', cluster=cluster_id)
         
         return jsonify({'success': True, 'poolid': poolid, 'message': f'Pool "{poolid}" created successfully'})
     except Exception as e:
@@ -115,7 +115,7 @@ def update_pool(cluster_id, pool_id):
         if response.status_code != 200:
             return jsonify({'error': f'Proxmox API error: {parse_pve_error(response.text)}'}), 500
         
-        audit_log(request.session.get('user'), 'pool.update', f'Updated pool {pool_id}', {'cluster': cluster_id, 'poolid': pool_id})
+        log_audit(request.session.get('user'), 'pool.update', f'Updated pool {pool_id}', cluster=cluster_id)
         
         return jsonify({'success': True, 'message': f'Pool "{pool_id}" updated successfully'})
     except Exception as e:
@@ -141,14 +141,26 @@ def delete_pool(cluster_id, pool_id):
     
     try:
         host, port = manager.host, manager.api_port
+        # MK Jun 2026 (#555 follow-up) — PVE refuses to delete a non-empty pool
+        # ("pool 'X' is not empty (contains VM ...)"), which surfaced as an opaque
+        # 500. Un-pool any members first (the VMs themselves are untouched), so the
+        # delete just works the way operators expect.
+        try:
+            members = (manager.get_pool_members(pool_id) or {}).get('members', []) or []
+            member_ids = [str(m.get('vmid')) for m in members if m.get('vmid') is not None]
+            if member_ids:
+                manager._api_put(f"https://{host}:{port}/api2/json/pools/{pool_id}",
+                                 data={'vms': ','.join(member_ids), 'delete': 1})
+        except Exception as _me:
+            logging.warning(f"[POOL] pre-delete member cleanup for {pool_id} failed: {_me}")
         url = f"https://{host}:{port}/api2/json/pools/{pool_id}"
         response = manager._api_delete(url)
-        
+
         if response.status_code != 200:
-            error_text = response.text
+            error_text = response.text or ''
             if 'not empty' in error_text.lower() or 'contains' in error_text.lower():
                 return jsonify({'error': 'Cannot delete pool - it still contains VMs or storage. Remove all members first.'}), 400
-            return jsonify({'error': f'Proxmox API error: {error_text}'}), 500
+            return jsonify({'error': f'Proxmox API error: {parse_pve_error(error_text)}'}), 500
         
         # Invalidate cache
         invalidate_pool_cache(cluster_id)
@@ -160,7 +172,7 @@ def delete_pool(cluster_id, pool_id):
         conn.commit()
         conn.close()
         
-        audit_log(request.session.get('user'), 'pool.delete', f'Deleted pool {pool_id}', {'cluster': cluster_id, 'poolid': pool_id})
+        log_audit(request.session.get('user'), 'pool.delete', f'Deleted pool {pool_id}', cluster=cluster_id)
         
         return jsonify({'success': True, 'message': f'Pool "{pool_id}" deleted successfully'})
     except Exception as e:
@@ -241,8 +253,7 @@ def add_pool_member(cluster_id, pool_id):
             return jsonify({'error': f'Proxmox API error: {error_text}'}), 500
 
         invalidate_pool_cache(cluster_id)
-        audit_log(request.session.get('user'), 'pool.member.add', f'Added VM {vmid} to pool {pool_id}',
-                  {'cluster': cluster_id, 'poolid': pool_id, 'vmid': vmid})
+        log_audit(request.session.get('user'), 'pool.member.add', f'Added VM {vmid} to pool {pool_id}', cluster=cluster_id)
         return jsonify({'success': True, 'message': f'VM {vmid} added to pool "{pool_id}"'})
     except Exception as e:
         # Surface the actual exception class/message so the UI doesn't have to
@@ -283,8 +294,7 @@ def remove_pool_member(cluster_id, pool_id, vmid):
         # Invalidate cache
         invalidate_pool_cache(cluster_id)
         
-        audit_log(request.session.get('user'), 'pool.member.remove', f'Removed VM {vmid} from pool {pool_id}', 
-                  {'cluster': cluster_id, 'poolid': pool_id, 'vmid': vmid})
+        log_audit(request.session.get('user'), 'pool.member.remove', f'Removed VM {vmid} from pool {pool_id}', cluster=cluster_id)
         
         return jsonify({'success': True, 'message': f'VM {vmid} removed from pool "{pool_id}"'})
     except Exception as e:
