@@ -1039,11 +1039,11 @@ def _run_v2p_migration(task):
             class _VmkFallback(Exception):
                 pass
             task.log(f"=== TRANSFER MODE: {'Auto -> vmkfstools_clone' if _vmk_auto else 'vmkfstools_clone'} (VDDK-free near-zero downtime) ===")
-            clone_bases = []  # basenames to rm on every exit path
+            clone_bases = []  # (datastore, vm_dir, basename) to rm on every exit path (#561: per-disk)
 
             def _vc_cleanup_clones():
-                for b in clone_bases:
-                    try: _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, b)
+                for _cb_ds, _cb_dir, b in clone_bases:
+                    try: _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, _cb_ds, _cb_dir, b)
                     except Exception: pass
 
             try:
@@ -1103,15 +1103,58 @@ def _run_v2p_migration(task):
 
                 task.set_phase('pre_sync')
                 task.log("=== CLONE + COPY base VMDKs while the VM keeps running ===")
-                for i, desc_file in enumerate(descriptor_files):
+
+                # MK Jun 2026 (#561 @ajoergensen) — a VM with disks across >1 datastore: the
+                # descriptor discovery above only globs the BOOT disk's datastore folder, so any
+                # disk living on another datastore was silently dropped (task still reported OK).
+                # Resolve each disk from the source VM's real backing path ("[ds] dir/disk.vmdk")
+                # so it's cloned + transferred from ITS OWN datastore/folder.
+                disk_specs = []  # [(datastore, vm_dir, desc_file, capacity_bytes), ...]
+                for _i, _dsk in enumerate(disks):
+                    _m = re.match(r'^\[([^\]]+)\]\s+(.+\.vmdk)$', (_dsk.get('vmdk_file') or '').strip())
+                    if _m:
+                        _ds_i = _m.group(1).strip()
+                        _rest = _m.group(2).strip()
+                        _vmdir_i = os.path.dirname(_rest) or vm_dir
+                        _desc_i = os.path.basename(_rest)
+                    else:
+                        # unparseable backing — fall back to boot datastore + the globbed list
+                        # (single-datastore VMs keep behaving exactly as before)
+                        _ds_i, _vmdir_i = datastore, vm_dir
+                        _desc_i = descriptor_files[_i] if _i < len(descriptor_files) else None
+                    if not _desc_i:
+                        continue
+                    # security (C-2/M-2): each component is shell-interpolated as root on ESXi
+                    if not validate_esxi_path_component(_ds_i) or not validate_esxi_path_component(_desc_i) \
+                       or not all(validate_esxi_path_component(p) for p in _vmdir_i.split('/') if p):
+                        _vc_cleanup_clones()
+                        task.set_phase('failed', f'Unsafe ESXi path for disk {_i}: [{_ds_i}] {_vmdir_i}/{_desc_i}')
+                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path); return
+                    disk_specs.append((_ds_i, _vmdir_i, _desc_i, _dsk.get('capacity_bytes', 0) or 0))
+
+                # never migrate a partial disk set silently — that was the #561 symptom
+                if len(disk_specs) != len(disks):
+                    _vc_cleanup_clones()
+                    task.set_phase('failed',
+                        f'Disk enumeration mismatch: VM has {len(disks)} disk(s) but only {len(disk_specs)} '
+                        f'could be resolved — refusing to migrate a partial set (#561).')
+                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path); return
+                _ds_set = sorted({s[0] for s in disk_specs})
+                if len(_ds_set) > 1:
+                    task.log(f"Multi-datastore VM: disks span {_ds_set} — each cloned from its own datastore")
+                # rebuild per-disk progress from the authoritative set (the earlier init keyed off
+                # the boot-folder glob, which is short for a multi-datastore VM)
+                task.disk_progress = {f'disk{_i}': {'copied': 0, 'total': _c or 1, 'pct': 0, 'file': _d}
+                                      for _i, (_a, _b, _d, _c) in enumerate(disk_specs)}
+
+                for i, (ds_i, vmdir_i, desc_file, disk_size) in enumerate(disk_specs):
                     dk = f'disk{i}'
-                    disk_size = task.disk_progress[dk]['total']
                     cb = f"_pegaprox_clone_{task.proxmox_vmid}_{i}"
 
                     # source-datastore free-space check (clone consumes source space; -d thin caps
                     # it at used blocks, but still warn loudly if the datastore is near-full)
                     rc_df, out_df, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
-                        f"df -k /vmfs/volumes/{shlex.quote(datastore)} 2>/dev/null | tail -1", timeout=15)
+                        f"df -k /vmfs/volumes/{shlex.quote(ds_i)} 2>/dev/null | tail -1", timeout=15)
                     try:
                         free_kb = int(str(out_df or '').split()[3])
                         if free_kb * 1024 < disk_size * 0.25:
@@ -1119,12 +1162,12 @@ def _run_v2p_migration(task):
                     except Exception:
                         pass
 
-                    task.log(f"Cloning frozen base of disk {i}: {desc_file} ({disk_size/(1024**3):.1f} GB)")
+                    task.log(f"Cloning frozen base of disk {i}: [{ds_i}] {vmdir_i}/{desc_file} ({disk_size/(1024**3):.1f} GB)")
                     cdesc, cflat = _esxi_vmkfstools_clone(
-                        esxi_host, esxi_user, esxi_pass, datastore, vm_dir, desc_file, cb, task=task)
+                        esxi_host, esxi_user, esxi_pass, ds_i, vmdir_i, desc_file, cb, task=task)
                     if not cdesc:
                         _vc_cleanup_clones()
-                        _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, cb)
+                        _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, ds_i, vmdir_i, cb)
                         if _vmk_auto and i == 0:
                             # disk 0 clone failed and nothing has been transferred/attached yet —
                             # safe to fall back. Drop the snapshot we took, hand to legacy flow.
@@ -1138,7 +1181,7 @@ def _run_v2p_migration(task):
                         task.set_phase('failed', f'vmkfstools clone failed for disk {i} ({desc_file})')
                         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
                         return
-                    clone_bases.append(cb)
+                    clone_bases.append((ds_i, vmdir_i, cb))
 
                     # RDM / raw-LUN guard: a RawDiskMapping descriptor clones only the tiny stub,
                     # NOT the LUN data. If the clone extent is way under the disk capacity, bail
@@ -1161,7 +1204,7 @@ def _run_v2p_migration(task):
                     # map) and streams it in. We feed it the clone descriptor name, same datastore/dir.
                     vol_id, vol_path = _ssh_pipe_transfer(
                         pve_mgr, task, esxi_host, esxi_user, esxi_pass,
-                        datastore, vm_dir, f"{cb}.vmdk", i)
+                        ds_i, vmdir_i, f"{cb}.vmdk", i)
                     if not vol_id:
                         task.set_phase('failed', f'Transfer/import of clone for disk {i} failed')
                         _vc_cleanup_clones()
@@ -1191,7 +1234,7 @@ def _run_v2p_migration(task):
                     _pve_node_exec(pve_mgr, task.target_node,
                         f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                         timeout=15)
-                _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
+                _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(disk_specs))
                 _register_uefi_fallback_loader(pve_mgr, task)
                 # must run while the VM is STILL stopped (live-NTFS guard inside)
                 try: _inject_virtio_drivers(pve_mgr, task)
