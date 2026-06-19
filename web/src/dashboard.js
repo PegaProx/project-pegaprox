@@ -9,13 +9,6 @@
         // generates these; nothing moves until an operator approves (or partial-auto).
         function LbRecommendations({ clusterId, connected, mode, partialThreshold, isCorporate, addToast, onModeChange, onThresholdChange }) {
             const { t } = useTranslation();
-            const { getAuthHeaders } = useAuth();
-            // authFetch is a closure in the parent App component, not a global — bring
-            // our own (same shape) so this standalone component can call the API.
-            const authFetch = async (url, opts = {}) => {
-                try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...(opts.headers || {}), ...getAuthHeaders() } }); }
-                catch (e) { return null; }
-            };
             const [recs, setRecs] = useState([]);
             const [busy, setBusy] = useState(false);
             const load = React.useCallback(() => {
