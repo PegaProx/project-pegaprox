@@ -1468,6 +1468,39 @@
             const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
             const isRunning = vm.status === 'running';
 
+            // NS Jun 2026 — console-tile preview. Pull one VNC frame off the running
+            // VM server-side (no SSH, no agent) and show it in place of the generic
+            // monitor icon. Falls back silently to the icon when the grab can't run
+            // (stopped, headless, behind a tunnel that's down, perm). Cached ~30s
+            // server-side so re-renders don't keep hitting vncproxy.
+            const [consoleShot, setConsoleShot] = useState(null);
+            const [shotLoading, setShotLoading] = useState(false);
+            const [shotNonce, setShotNonce] = useState(0);  // bump = force fresh grab
+            const shotUrlRef = useRef(null);
+            useEffect(() => {
+                if (!isQemu || !isRunning) { setConsoleShot(null); return; }
+                let cancelled = false;
+                setShotLoading(true);
+                const q = `?n=${shotNonce}` + (shotNonce > 0 ? '&fresh=1' : '');
+                fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/screenshot${q}`,
+                      { headers: getAuthHeaders() })
+                    .then(r => (r && r.ok ? r.blob() : null))
+                    .then(blob => {
+                        if (cancelled) return;
+                        const next = (blob && blob.size) ? URL.createObjectURL(blob) : null;
+                        if (shotUrlRef.current) URL.revokeObjectURL(shotUrlRef.current);  // drop the old frame
+                        shotUrlRef.current = next;
+                        setConsoleShot(next);
+                    })
+                    .catch(() => { if (!cancelled) setConsoleShot(null); })
+                    .finally(() => { if (!cancelled) setShotLoading(false); });
+                return () => { cancelled = true; };
+            }, [vm.vmid, vm.status, clusterId, shotNonce]);
+            // revoke the last object URL when we leave the view
+            useEffect(() => () => {
+                if (shotUrlRef.current) { URL.revokeObjectURL(shotUrlRef.current); shotUrlRef.current = null; }
+            }, []);
+
             // LW Apr 2026 (#250) — per-VM web link (browser-local; keyed by cluster:vmid)
             const webLinkKey = `${clusterId}:${vm.vmid}`;
             const loadVmLinks = () => {
@@ -1876,14 +1909,33 @@
                             <div className="flex gap-5">
                                 {/* Left: Console Preview Area */}
                                 <div className="flex-shrink-0" style={{width: '280px'}}>
-                                    <div className="flex items-center justify-center" style={{height: '180px', background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
-                                        <div className="text-center">
-                                            {isQemu
-                                                ? <Icons.Monitor className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
-                                                : <Icons.Box className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
-                                            }
-                                            <div className="text-[11px]" style={{color: '#728b9a'}}>{isRunning ? t('consoleAvailable') || 'Console available' : t('vmStopped') || 'VM is powered off'}</div>
-                                        </div>
+                                    <div className="relative flex items-center justify-center overflow-hidden" style={{height: '180px', background: consoleShot ? '#000' : 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
+                                        {consoleShot ? (
+                                            <React.Fragment>
+                                                <img src={consoleShot} alt={t('consolePreview') || 'Console preview'}
+                                                     onClick={() => onOpenConsole(vm)}
+                                                     title={t('launchWebConsole') || 'Launch Web Console'}
+                                                     style={{width: '100%', height: '100%', objectFit: 'contain', cursor: 'pointer'}} />
+                                                <button onClick={(e) => { e.stopPropagation(); setShotNonce(n => n + 1); }}
+                                                        title={t('refresh') || 'Refresh'} disabled={shotLoading}
+                                                        className="absolute top-1 right-1 p-1"
+                                                        style={{background: 'rgba(0,0,0,0.5)', color: '#fff', borderRadius: '3px', lineHeight: 0}}>
+                                                    <Icons.RefreshCw className={`w-3.5 h-3.5 ${shotLoading ? 'animate-spin' : ''}`} />
+                                                </button>
+                                            </React.Fragment>
+                                        ) : (
+                                            <div className="text-center">
+                                                {isQemu
+                                                    ? <Icons.Monitor className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
+                                                    : <Icons.Box className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
+                                                }
+                                                <div className="text-[11px]" style={{color: '#728b9a'}}>
+                                                    {!isRunning ? (t('vmStopped') || 'VM is powered off')
+                                                        : (shotLoading && isQemu ? (t('loadingPreview') || 'Loading preview…')
+                                                                                 : (t('consoleAvailable') || 'Console available'))}
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                     {isRunning && (
                                         <button onClick={() => onOpenConsole(vm)} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-accent)'}}>

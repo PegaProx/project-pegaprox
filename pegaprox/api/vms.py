@@ -14,7 +14,7 @@ import shlex
 import ssl
 import socket
 from datetime import datetime, timedelta, timezone
-from flask import Blueprint, jsonify, request, g
+from flask import Blueprint, jsonify, request, g, current_app
 
 from pegaprox.constants import *
 from pegaprox.globals import *
@@ -3452,6 +3452,133 @@ def get_console_ticket(cluster_id, node, vm_type, vmid):
 
         return jsonify(result)
     return jsonify({'error': result.get('error', 'Failed')}), 500
+
+
+# NS Jun 2026 — server-side VNC framebuffer grab for the "Console Available"
+# tile preview. Grabs one frame off the running VM via the same vncproxy+WSS
+# path as the live console (no SSH, no qemu-agent), thumbnails it to a PNG and
+# caches ~30s so the tile isn't hammering vncproxy on every render.
+_vm_screenshot_cache = {}          # {f"{cid}:{vmid}": (mono_ts, png_bytes)}
+_vm_screenshot_lock = threading.Lock()
+_VM_SCREENSHOT_TTL = 30.0
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/screenshot', methods=['GET'])
+@require_auth()
+def get_vm_screenshot(cluster_id, node, vm_type, vmid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    if vm_type != 'qemu':
+        # LXC consoles are a terminal, not a framebuffer — nothing to screenshot
+        return jsonify({'error': 'screenshot only available for qemu'}), 400
+
+    users = load_users()
+    user = users.get(request.session['user'], {})
+    user['username'] = request.session['user']
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'screenshot only available on proxmox'}), 400
+    if not user_can_access_vm(user, cluster_id, vmid, 'vm.console', vm_type):
+        return jsonify({'error': 'Permission denied: vm.console'}), 403
+
+    cache_key = f"{cluster_id}:{vmid}"
+    now = time.monotonic()
+    if request.args.get('fresh') != '1':
+        with _vm_screenshot_lock:
+            hit = _vm_screenshot_cache.get(cache_key)
+        if hit and (now - hit[0]) < _VM_SCREENSHOT_TTL:
+            resp = current_app.response_class(hit[1], mimetype='image/png')
+            resp.headers['Cache-Control'] = 'private, max-age=30'
+            resp.headers['X-Screenshot-Cache'] = 'hit'
+            return resp
+
+    import urllib.request, urllib.parse, json as _json, ssl as _ssl
+    import websocket as ws_client
+    from pegaprox.utils import vnc_grab
+
+    host, port = mgr.host, mgr.api_port
+    ssl_ctx = _ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = _ssl.CERT_NONE
+
+    tunnel_endpoint = None
+    pve_ws = None
+    try:
+        # PVE auth + vncproxy (mirrors vnc_poll's open path)
+        login_data = urllib.parse.urlencode({'username': mgr.config.user, 'password': mgr.config.pass_}).encode('utf-8')
+        login_req = urllib.request.Request(f"https://{host}:{port}/api2/json/access/ticket", data=login_data, method='POST')
+        with urllib.request.urlopen(login_req, context=ssl_ctx, timeout=10) as r:
+            login_result = _json.loads(r.read().decode('utf-8'))
+        pve_ticket = login_result['data']['ticket']
+        csrf_token = login_result['data']['CSRFPreventionToken']
+
+        vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/vncproxy"
+        vnc_req = urllib.request.Request(vnc_url, data=urllib.parse.urlencode({'websocket': '1'}).encode('utf-8'), method='POST')
+        vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
+        vnc_req.add_header('CSRFPreventionToken', csrf_token)
+        with urllib.request.urlopen(vnc_req, context=ssl_ctx, timeout=10) as r:
+            vnc_result = _json.loads(r.read().decode('utf-8'))
+        vnc_ticket = vnc_result['data']['ticket']
+        vnc_port = vnc_result['data']['port']
+    except Exception as e:
+        # most commonly a stopped VM (vncproxy refuses) — let the tile fall back
+        return jsonify({'error': f'vncproxy failed: {e}'}), 502
+
+    encoded_ticket = url_quote(vnc_ticket, safe='')
+    pve_ws_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid}/vncwebsocket?port={vnc_port}&vncticket={encoded_ticket}"
+    target_host, target_port = host, 8006
+    try:
+        if bool(getattr(mgr.config, 'vnc_tunnel', False)):
+            from pegaprox.utils import vnc_tunnel as _vt
+            _ssh_user = getattr(mgr.config, 'ssh_user', None) or (mgr.config.user or 'root').split('@')[0]
+            _ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
+            tunnel_endpoint = _vt.acquire(
+                cluster_id=cluster_id, pve_host=host, ssh_user=_ssh_user, ssh_port=_ssh_port,
+                ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
+                ssh_password=getattr(mgr.config, 'pass_', '') or '',
+                target_host='127.0.0.1', target_port=8006,
+            )
+            target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
+    except Exception as te:
+        logging.warning(f"[Screenshot] tunnel setup failed ({te}) — direct WSS")
+        tunnel_endpoint = None
+        target_host, target_port = host, 8006
+
+    try:
+        pve_ws = ws_client.create_connection(
+            f"wss://{target_host}:{target_port}{pve_ws_path}",
+            sslopt={"cert_reqs": _ssl.CERT_NONE},
+            header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:{port}"},
+            timeout=VNC_PVE_CONNECT_TIMEOUT,
+        )
+        _apply_vnc_socket_options(pve_ws.sock)
+        img = vnc_grab.grab_frame(pve_ws, vnc_ticket, timeout=10)
+        png = vnc_grab.to_png_thumbnail(img, max_width=480)
+    except Exception as e:
+        logging.info(f"[Screenshot] grab failed {vm_type}/{vmid}@{node}: {e}")
+        return jsonify({'error': f'screenshot failed: {e}'}), 502
+    finally:
+        try:
+            if pve_ws: pve_ws.close()
+        except Exception: pass
+        try:
+            if tunnel_endpoint: tunnel_endpoint.stop()
+        except Exception: pass
+
+    with _vm_screenshot_lock:
+        _vm_screenshot_cache[cache_key] = (time.monotonic(), png)
+        # keep the cache from growing unbounded on big estates
+        if len(_vm_screenshot_cache) > 512:
+            oldest = sorted(_vm_screenshot_cache.items(), key=lambda kv: kv[1][0])[:128]
+            for k, _ in oldest:
+                _vm_screenshot_cache.pop(k, None)
+
+    resp = current_app.response_class(png, mimetype='image/png')
+    resp.headers['Cache-Control'] = 'private, max-age=30'
+    resp.headers['X-Screenshot-Cache'] = 'miss'
+    return resp
 
 
 # MK Apr 2026 — HTTP-polling fallback for the VNC proxy. Used when the WS
