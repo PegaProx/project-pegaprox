@@ -2,6 +2,12 @@
         // PegaProx - VM Modals
         // Delete, Clone, Detail, Migrate, Snapshots, Replication
         // ═══════════════════════════════════════════════
+
+        // LW: keep last-known guest-agent info per VM so a transient poll-miss
+        // (agent briefly busy / call times out) doesn't flip the indicator
+        // Running<->Not installed. Nico saw it "springen" in the corporate layout.
+        const _guestInfoCache = {};
+
         // Delete VM Modal Component
         // NS: Added confirmation input after someone accidentally deleted prod VM
         // Better safe than sorry...
@@ -867,11 +873,15 @@
 
             // NS: Issue #50 - Fetch guest agent info
             useEffect(() => {
-                if (!isQemu || vm.status !== 'running') { setGuestInfo(null); return; }
+                const gkey = `${clusterId}:${vm.vmid}`;
+                if (!isQemu || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
                     .then(r => r && r.ok ? r.json() : null)
-                    .then(data => { if (data && data.agent_running) setGuestInfo(data); else setGuestInfo(null); })
-                    .catch(() => setGuestInfo(null));
+                    .then(data => {
+                        if (data && data.agent_running) { _guestInfoCache[gkey] = data; setGuestInfo(data); }
+                        else setGuestInfo(_guestInfoCache[gkey] || null);  // keep last-known on transient miss, don't flip
+                    })
+                    .catch(() => setGuestInfo(_guestInfoCache[gkey] || null));
             }, [vm.vmid, vm.status, clusterId]);
 
             // MK #334 — fsinfo; same chain as the corporate panel, only polled when the
@@ -1625,11 +1635,15 @@
 
             // Fetch guest agent info
             useEffect(() => {
-                if (!isQemu || vm.status !== 'running') { setGuestInfo(null); return; }
+                const gkey = `${clusterId}:${vm.vmid}`;
+                if (!isQemu || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
                     .then(r => r && r.ok ? r.json() : null)
-                    .then(data => { if (data && data.agent_running) setGuestInfo(data); else setGuestInfo(null); })
-                    .catch(() => setGuestInfo(null));
+                    .then(data => {
+                        if (data && data.agent_running) { _guestInfoCache[gkey] = data; setGuestInfo(data); }
+                        else setGuestInfo(_guestInfoCache[gkey] || null);  // keep last-known on transient miss, don't flip
+                    })
+                    .catch(() => setGuestInfo(_guestInfoCache[gkey] || null));
             }, [vm.vmid, vm.status, clusterId]);
 
             // MK #334 — fsinfo. Only polls when guest agent is alive to avoid hammering the
