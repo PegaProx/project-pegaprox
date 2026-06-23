@@ -868,14 +868,12 @@ def execute_storage_migration(cluster_id):
     
     # Security: Verify user has access to the specific VM before allowing disk operations
     # This prevents users with storage.config + any VM ACL from manipulating arbitrary VMs
-    users = load_users()
-    username = request.session.get('user', '')
-    user = users.get(username, {})
-    user['username'] = username
+    from pegaprox.utils.auth import get_user_with_effective_role
+    user = get_user_with_effective_role(request.session.get('user', ''), request.session)
     
     # Require vm.config permission for the specific VM (disk operations are configuration changes)
     if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.config'):
-        log_audit(username, 'storage_balancing.disk_move_denied', 
+        log_audit(user['username'], 'storage_balancing.disk_move_denied', 
                   f"Denied attempt to move disk {disk} of VM {vmid} (no VM access)")
         return jsonify({'error': 'Access denied: you do not have permission to modify this VM'}), 403
     

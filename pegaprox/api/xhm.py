@@ -47,9 +47,8 @@ def xhm_plan():
         return err
 
     # Authorization: check source VM access
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    from pegaprox.utils.auth import get_user_with_effective_role
+    user = get_user_with_effective_role(request.session['user'], request.session)
     try:
         vmid_int = int(source_vmid)
     except (ValueError, TypeError):
@@ -119,9 +118,8 @@ def xhm_start():
         return err
 
     # Authorization: check source VM access
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    from pegaprox.utils.auth import get_user_with_effective_role
+    user = get_user_with_effective_role(request.session['user'], request.session)
     try:
         vmid_int = int(data['source_vmid'])
     except (ValueError, TypeError):

@@ -285,11 +285,9 @@ def add_plan_vm(plan_id):
     # Without this a user with cluster-view but no specific-VM access could add
     # the VM to a recovery plan and trigger an authorized failover/test against
     # a VM they shouldn't touch.
-    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.auth import get_user_with_effective_role
     from pegaprox.utils.rbac import user_can_access_vm
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = get_user_with_effective_role(request.session['user'], request.session)
     vm_type = data.get('vm_type', 'qemu')
     if not user_can_access_vm(user, plan['source_cluster'], data['vmid'], 'vm.view', vm_type):
         return jsonify({'error': 'Access denied: you do not have permission to add this VM to the plan'}), 403

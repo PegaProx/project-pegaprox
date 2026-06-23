@@ -241,6 +241,9 @@ def get_user_permissions(user: dict, tenant_id: str = None) -> list:
             "tenant_b": {"role": "viewer"}
         }
     }
+    
+    Security: When checking API token auth, use effective_role (token's scoped role)
+    instead of the account's stored role to prevent scope escalation.
     """
     # figure out which tenant we're checking for
     if not tenant_id:
@@ -257,7 +260,8 @@ def get_user_permissions(user: dict, tenant_id: str = None) -> list:
         denied = tp.get('denied', [])
     else:
         # use global user settings
-        role = user.get('role', ROLE_VIEWER)
+        # Use effective_role if provided (for API token scope enforcement), otherwise fall back to user's role
+        role = user.get('effective_role', user.get('role', ROLE_VIEWER))
         extra = user.get('permissions', [])
         denied = user.get('denied_permissions', [])
     
@@ -278,11 +282,16 @@ def has_permission(user: dict, permission: str, tenant_id: str = None) -> bool:
     """check if user has a specific permission
     
     NS: now tenant-aware
+    
+    Security: When checking API token auth, use effective_role (token's scoped role)
+    instead of the account's stored role to prevent scope escalation.
     """
     if not user:
         return False
+    # Use effective_role if provided (for API token scope enforcement), otherwise fall back to user's role
+    effective_role = user.get('effective_role', user.get('role'))
     # admin always has access (safety net) - unless checking tenant-specific
-    if user.get('role') == ROLE_ADMIN and not tenant_id:
+    if effective_role == ROLE_ADMIN and not tenant_id:
         return True
     return permission in get_user_permissions(user, tenant_id)
 
@@ -748,8 +757,13 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
     
     LW: Changed inherit_role=True to mean "full VM access" instead of "use role perms"
     This is more intuitive - adding someone to a VM ACL should grant them access to that VM
+    
+    Security: When checking API token auth, use effective_role (token's scoped role)
+    instead of the account's stored role to prevent scope escalation (CVE-2026-XXXX).
     """
-    if user.get('role') == ROLE_ADMIN:
+    # Use effective_role if provided (for API token scope enforcement), otherwise fall back to user's role
+    effective_role = user.get('effective_role', user.get('role'))
+    if effective_role == ROLE_ADMIN:
         return True
     
     username = user.get('username', '')
@@ -844,8 +858,13 @@ def get_user_vms(user: dict, cluster_id: str) -> list:
     """Get list of VMIDs user can access in a cluster
     
     Returns None if user can access all VMs (admin or no restrictions)
+    
+    Security: When checking API token auth, use effective_role (token's scoped role)
+    instead of the account's stored role to prevent scope escalation.
     """
-    if user.get('role') == ROLE_ADMIN:
+    # Use effective_role if provided (for API token scope enforcement), otherwise fall back to user's role
+    effective_role = user.get('effective_role', user.get('role'))
+    if effective_role == ROLE_ADMIN:
         return None
     
     username = user.get('username', '')

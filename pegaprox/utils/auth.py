@@ -309,6 +309,32 @@ def load_users(readonly: bool = False) -> dict:
     return {}
 
 
+def get_user_with_effective_role(username: str, session: dict) -> dict:
+    """Load user from database and apply effective role from session for API token auth.
+    
+    Security: When an API token is used, the session contains the token's scoped role,
+    not the account's stored role. This function ensures the effective role is preserved
+    to prevent scope escalation during object-level authorization checks.
+    
+    Args:
+        username: Username to load
+        session: Session dict from request.session (contains 'api_token' flag and 'role')
+    
+    Returns:
+        User dict with 'effective_role' set if API token auth is used
+    """
+    users = load_users()
+    user = users.get(username, {})
+    user['username'] = username
+    
+    # If this is an API token session, pass the token's scoped role as effective_role
+    # to prevent admin-owned tokens scoped to ROLE_USER from regaining admin access
+    if session.get('api_token'):
+        user['effective_role'] = session.get('role')
+    
+    return user
+
+
 def is_initialized() -> bool:
     """True if first-run setup has been completed.
 
