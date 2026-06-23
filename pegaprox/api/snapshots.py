@@ -33,10 +33,11 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
-from pegaprox.utils.auth import require_auth
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.api.helpers import check_cluster_access
 from pegaprox.core.db import get_db
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.models.permissions import ROLE_ADMIN
 
 bp = Blueprint('snapshot_schedule', __name__)
@@ -230,6 +231,7 @@ def _execute_policy(policy_id):
     created = 0
     failed = 0
     pruned_total = 0
+    skipped_authz = 0
 
     mgr = cluster_managers.get(policy['cluster_id'])
     if not mgr:
@@ -243,7 +245,30 @@ def _execute_policy(policy_id):
     targets = _resolve_targets(mgr, policy)
     log_lines.append(f"resolved {len(targets)} target VMs")
 
+    # MK Jun 2026 (sec-review): a tag/all-VMs policy must only snapshot VMs its creator
+    # can actually touch — otherwise a vm.snapshot holder could tag-target VMs they can't
+    # see. Resolve the creator once; legacy policies with no recorded creator keep running
+    # unfiltered (don't break existing automation), we just can't scope them.
+    policy_creator = None
+    creator_name = policy.get('created_by', '')
+    if creator_name:
+        try:
+            policy_creator = load_users().get(creator_name)
+            if policy_creator:
+                policy_creator['username'] = creator_name
+            else:
+                log_lines.append(f"creator '{creator_name}' no longer exists — per-VM authz not applied")
+        except Exception as e:
+            log_lines.append(f"could not load creator for authz (running unfiltered): {e}")
+            policy_creator = None
+    else:
+        log_lines.append('policy has no recorded creator — per-VM authz not applied (legacy policy)')
+
     for node, vmid, vm_type in targets:
+        if policy_creator and not user_can_access_vm(policy_creator, policy['cluster_id'], vmid, 'vm.snapshot', vm_type):
+            skipped_authz += 1
+            log_lines.append(f"  ⊘ {vm_type}/{vmid}@{node}: skipped (creator lacks vm.snapshot)")
+            continue
         snap = _snap_name(policy['id'])
         create_ok = False
         try:
@@ -291,7 +316,7 @@ def _execute_policy(policy_id):
 
     finished_at = datetime.now().isoformat()
     status = 'completed' if failed == 0 else ('partial' if created > 0 else 'failed')
-    summary = f"{created} created · {failed} failed · {pruned_total} pruned · {len(targets)} targets"
+    summary = f"{created} created · {failed} failed · {pruned_total} pruned · {skipped_authz} authz-skipped · {len(targets)} targets"
 
     c.execute('''UPDATE snapshot_runs SET status=?, finished_at=?, log=?, summary=?,
                  snapshots_created=?, snapshots_failed=?, snapshots_pruned=?
@@ -393,6 +418,21 @@ def create_policy(cluster_id):
     if schedule not in ('hourly', 'daily', 'weekly'):
         return jsonify({'error': 'schedule must be hourly / daily / weekly'}), 400
 
+    # MK: a creator can only point a policy at VMs they could snapshot by hand
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'cluster manager not found'}), 404
+    creator = build_authz_user(request.session.get('user', ''), request.session)
+    try:
+        denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, {
+                      'target_type': target_type, 'target_value': target_value, 'cluster_id': cluster_id})
+                  if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
+    except Exception as e:
+        return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    if denied:
+        return jsonify({'error': 'Permission denied: you lack vm.snapshot on some target VMs',
+                        'unauthorized_vms': denied[:10]}), 403
+
     pid = uuid.uuid4().hex[:12]
     try:
         c = get_db().conn.cursor()
@@ -418,6 +458,31 @@ def update_policy(cluster_id, pid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     body = request.get_json(silent=True) or {}
+
+    # re-validate target authz if the policy's targeting is being changed
+    if 'target_type' in body or 'target_value' in body:
+        mgr = cluster_managers.get(cluster_id)
+        if not mgr:
+            return jsonify({'error': 'cluster manager not found'}), 404
+        cc = get_db().conn.cursor()
+        cc.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+        row0 = cc.fetchone()
+        if not row0:
+            return jsonify({'error': 'not found'}), 404
+        cur = _row_to_policy(row0)
+        tt = body.get('target_type', cur['target_type'])
+        tv = body.get('target_value', cur['target_value'])
+        creator = build_authz_user(request.session.get('user', ''), request.session)
+        try:
+            denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, {
+                          'target_type': tt, 'target_value': tv, 'cluster_id': cluster_id})
+                      if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
+        except Exception as e:
+            return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+        if denied:
+            return jsonify({'error': 'Permission denied: you lack vm.snapshot on some target VMs',
+                            'unauthorized_vms': denied[:10]}), 403
+
     fields = []; params = []
     for k, t in (('name', str), ('target_type', str), ('target_value', str),
                  ('schedule', str), ('schedule_at', str), ('notes', str)):

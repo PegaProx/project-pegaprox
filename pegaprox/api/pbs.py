@@ -12,7 +12,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import safe_error, check_pbs_access
+from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -2648,6 +2648,10 @@ def restore_backup(cluster_id):
 
     Body: {volid, target_node, target_vmid, mode, target_storage?}
     """
+    # MK: restore is destructive (qmrestore into a VMID) — gate on cluster access, not just vm.backup
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     cm = cluster_managers[cluster_id]
