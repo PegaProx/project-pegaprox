@@ -18,6 +18,7 @@ from pegaprox.utils.audit import log_audit
 # vmware_id from URL. Sanitise both before logging for consistency.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import user_can_access_vmware_vm
+from pegaprox.api.helpers import check_cluster_access
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server
 from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
 from pegaprox.background.broadcast import broadcast_resources_loop
@@ -893,10 +894,15 @@ def get_vmware_migration_plan(vmware_id, vm_id):
         return jsonify(result), 400
     vm_data = result['data']
     
-    # Available Proxmox targets
+    # Available Proxmox targets - filter by cluster access authorization
     targets = []
     for cid, cmgr in cluster_managers.items():
         if cmgr.is_connected:
+            # Security: Check cluster-level authorization before exposing cluster details
+            allowed, _ = check_cluster_access(cid)
+            if not allowed:
+                continue
+            
             nodes = list(cmgr.nodes.keys()) if cmgr.nodes else []
             node_storages = {}
             for n in nodes:
@@ -981,6 +987,11 @@ def start_vmware_migration(vmware_id, vm_id):
         return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
     if data['target_cluster'] not in cluster_managers:
         return jsonify({'error': 'Target cluster not found'}), 404
+    
+    # Security: Check cluster-level authorization before allowing migration to target cluster
+    allowed, err_response = check_cluster_access(data['target_cluster'])
+    if not allowed:
+        return err_response
     
     mgr = vmware_managers[vmware_id]
     vm_detail = mgr.get_vm(vm_id)
