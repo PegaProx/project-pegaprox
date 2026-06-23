@@ -145,7 +145,7 @@ jobs:
           targets:
             lxc:
               create_message: |
-                PegaProx Appliance - Login: root / PegaProx2026!
+                PegaProx Appliance - Run 'pegaprox-setup' on first login to configure
               config:
                 - type: all
                   before: 5
@@ -189,8 +189,8 @@ jobs:
                 apt-get update
                 apt-get -y install pegaprox
                 systemctl enable pegaprox || true
-                # --- Root-Login setzen ---
-                echo 'root:PegaProx2026!' | chpasswd
+                # --- Lock root account until password is set on first boot ---
+                passwd -l root
 
           mappings:
             architecture_map: debian
@@ -334,13 +334,17 @@ jobs:
             useradd -m -s /bin/bash pegaprox_admin
           fi
           usermod -aG sudo pegaprox_admin || true
-          echo 'pegaprox_admin:PegaProx2026!' | chpasswd
-          echo 'root:7eF9$&JHVspAmjWKcGmD!6QypzBsbmyA' | chpasswd
+          # Lock accounts until passwords are set via setup wizard
+          passwd -l pegaprox_admin 2>/dev/null || true
+          passwd -l root 2>/dev/null || true
 
-          # --- SSH: Passwort-Login erlauben ---
+          # --- SSH: Key-based authentication only (secure by default) ---
           mkdir -p /etc/ssh/sshd_config.d
-          printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin yes\n' \
-            > /etc/ssh/sshd_config.d/99-pegaprox.conf
+          cat > /etc/ssh/sshd_config.d/99-pegaprox.conf <<SSHEOF
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+SSHEOF
           systemctl reload ssh 2>/dev/null \
             || systemctl restart ssh 2>/dev/null \
             || systemctl restart sshd 2>/dev/null || true
@@ -516,11 +520,24 @@ jobs:
             || echo -e "${R}PegaProx failed to start - check: journalctl -u pegaprox${N}"
 
           echo ""
+          echo -e "${Y}IMPORTANT: Set passwords for system accounts${N}"
+          echo -e "${Y}(Accounts are locked until passwords are set)${N}"
+          echo ""
           echo -e "${Y}Set a password for the login user 'pegaprox_admin':${N}"
-          read -p "Set it now? [Y/n]: " sp
-          case "${sp:-y}" in
-            [Nn]*) echo -e "${Y}Later with: passwd pegaprox_admin${N}";;
-            *) passwd pegaprox_admin || echo -e "${Y}Password change skipped.${N}";;
+          while true; do
+            if passwd pegaprox_admin; then
+              break
+            else
+              echo -e "${R}Password setting failed. Please try again.${N}"
+            fi
+          done
+          
+          echo ""
+          echo -e "${Y}Set a password for the root account:${N}"
+          read -p "Set root password now? [Y/n]: " sr
+          case "${sr:-y}" in
+            [Nn]*) echo -e "${Y}Root remains locked. Set later with: sudo passwd root${N}";;
+            *) passwd root || echo -e "${Y}Root password change skipped - root remains locked.${N}";;
           esac
 
           mkdir -p /etc/pegaprox
