@@ -28,6 +28,32 @@ bp = Blueprint('vmware', __name__)
 _vmware_migrations = {}
 _migration_lock_v2p = threading.Lock()
 
+# SSRF protection: allowlist of trusted VMware/vCenter hosts
+ALLOWED_VMWARE_HOSTS = ['example.com']  # add your allowed VMware/vCenter hosts here
+
+
+def validate_vmware_host(host):
+    """Validate that the VMware host is in the allowlist.
+    
+    Returns True if the host is allowed, False otherwise.
+    This prevents SSRF attacks where an attacker changes the host to point
+    to their own server while preserving stored credentials.
+    """
+    if not host:
+        return False
+    
+    # Extract hostname (remove any protocol prefix if present)
+    hostname = host.lower().strip()
+    if '://' in hostname:
+        hostname = hostname.split('://', 1)[1]
+    
+    # Remove port if present
+    if ':' in hostname:
+        hostname = hostname.split(':', 1)[0]
+    
+    # Check against allowlist (exact match only, no subdomains)
+    return hostname in ALLOWED_VMWARE_HOSTS
+
 # =============================================================================
 
 @bp.route('/api/vmware', methods=['GET'])
@@ -174,6 +200,13 @@ def diagnose_vmware_connection(vmware_id):
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
+    
+    # SSRF protection: validate that the host is in the allowlist before
+    # attempting to connect with stored credentials
+    if not validate_vmware_host(mgr.host):
+        return jsonify({
+            'error': 'VMware host not in allowlist. Configure ALLOWED_VMWARE_HOSTS to enable diagnostics.'
+        }), 403
     
     # Get stored encrypted password from DB
     db = get_db()
