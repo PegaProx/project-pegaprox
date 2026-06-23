@@ -350,6 +350,11 @@ def perform_pegaprox_update():
     PRIMARY: downloads GitHub source archive, extracts, copies.
     FALLBACK: expands update_files globs via GitHub API, downloads individually.
 
+    Security: Archive integrity is verified via SHA256 hash from version.json
+    (archive_sha256 field). If the hash mismatches, the update is aborted to
+    prevent code execution from tampered archives. If no hash is provided,
+    a security warning is logged but the update proceeds for backward compatibility.
+
     Protected paths (NEVER overwritten):
     - config/, ssl/, certs/   (settings, encrypted data)
     - *.db, *.enc             (databases, encrypted files)
@@ -463,6 +468,7 @@ def perform_pegaprox_update():
         try:
             import tarfile
             import tempfile
+            import hashlib
 
             resp = None
             for aurl in archive_urls:
@@ -479,9 +485,39 @@ def perform_pegaprox_update():
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 archive_path = os.path.join(tmpdir, 'repo.tar.gz')
+                
+                # Download archive and compute SHA256 hash simultaneously
+                sha256_hash = hashlib.sha256()
                 with open(archive_path, 'wb') as f:
                     for chunk in resp.iter_content(8192):
                         f.write(chunk)
+                        sha256_hash.update(chunk)
+                
+                computed_hash = sha256_hash.hexdigest()
+                
+                # Verify archive integrity via SHA256 hash
+                # Security: Cryptographic verification prevents code execution from tampered archives
+                expected_hash = remote_version.get('archive_sha256')
+                if expected_hash:
+                    if computed_hash != expected_hash.lower():
+                        raise RuntimeError(
+                            f"Archive integrity check failed: SHA256 mismatch. "
+                            f"Expected {expected_hash}, got {computed_hash}. "
+                            f"The update archive may have been tampered with."
+                        )
+                    logging.info(f"Archive integrity verified: SHA256 {computed_hash[:16]}...")
+                else:
+                    # No hash provided - log security warning but continue for backward compatibility
+                    # Operators should configure update sources to provide archive_sha256 in version.json
+                    logging.warning(
+                        f"[SECURITY] Archive downloaded without cryptographic verification. "
+                        f"The update source should provide 'archive_sha256' in version.json. "
+                        f"Downloaded archive SHA256: {computed_hash}"
+                    )
+                    log_audit(
+                        user, 'pegaprox.update_security_warning',
+                        f"Update archive downloaded without hash verification (SHA256: {computed_hash[:16]}...)"
+                    )
 
                 # MK: extractall with filter='data' to block path traversal
                 with tarfile.open(archive_path, 'r:gz') as tar:

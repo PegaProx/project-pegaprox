@@ -335,4 +335,81 @@ exactly this case.
 
 ---
 
-*Maintainers: NS / MK. Last revised on the 0.9.9.3 SQLCipher rollout.*
+## 7. Update Archive Integrity Verification
+
+PegaProx 0.9.13.2+ verifies the cryptographic integrity of update archives
+before extraction to prevent code execution from tampered archives.
+
+### How it works
+
+When the updater downloads an archive from GitHub or a mirror, it:
+
+1. **Downloads** the archive while computing its SHA256 hash
+2. **Verifies** the computed hash against `archive_sha256` from `version.json`
+3. **Rejects** the archive if the hash mismatches (falls back to per-file download)
+4. **Extracts** only if the hash matches or if no hash is provided (backward compatibility)
+
+### Security posture
+
+| Scenario | Behavior | Security level |
+|----------|----------|----------------|
+| `archive_sha256` present + match | ✅ Archive extracted | **Cryptographically verified** |
+| `archive_sha256` present + mismatch | ❌ Archive rejected, fallback to per-file | **Protected** |
+| `archive_sha256` absent | ⚠️ Archive extracted with warning logged | **Backward compatible** (unverified) |
+
+### For update server operators
+
+If you host a custom update mirror, add the `archive_sha256` field to your
+`version.json`:
+
+```bash
+# Generate SHA256 hash of your archive
+sha256sum main.tar.gz
+# Output: a1b2c3d4... main.tar.gz
+```
+
+Add to `version.json`:
+
+```json
+{
+  "version": "0.9.13.2",
+  "update_archive": "https://your-mirror.example.com/archive/main.tar.gz",
+  "archive_sha256": "a1b2c3d4e5f6...",
+  ...
+}
+```
+
+### Audit trail
+
+When an archive is downloaded without verification, PegaProx logs:
+
+- **Application log**: `[SECURITY] Archive downloaded without cryptographic verification`
+- **Audit log**: `pegaprox.update_security_warning` with the computed SHA256
+
+Operators should monitor for these warnings and configure their update sources
+to provide hashes.
+
+### Threat model
+
+This mitigation addresses:
+
+- **Man-in-the-middle attacks** on the update channel
+- **Compromised update mirrors** serving tampered archives
+- **CDN cache poisoning** with malicious content
+
+It does **not** protect against:
+
+- **Compromised signing keys** (digital signatures would be needed)
+- **Malicious updates from the official source** (requires trust in the vendor)
+- **Per-file download fallback** (individual files are not hash-verified)
+
+For maximum security, operators should:
+
+1. Use HTTPS-only update sources (enforced by default)
+2. Configure update sources to provide `archive_sha256`
+3. Monitor audit logs for `update_security_warning` events
+4. Consider pinning to specific versions in air-gapped environments
+
+---
+
+*Maintainers: NS / MK. Last revised on the 0.9.13.2 update security hardening.*
