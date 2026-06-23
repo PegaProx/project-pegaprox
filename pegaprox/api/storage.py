@@ -20,7 +20,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.audit import log_audit
-from pegaprox.utils.rbac import user_can_access_vm
+from pegaprox.utils.rbac import user_can_access_vm, get_vm_acls, get_vm_pool_cached
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection
@@ -1272,6 +1272,28 @@ def run_auto_storage_balance():
                                     continue
                                 
                                 if value.startswith(source_storage + ':'):
+                                    # Security: Check if VM has ACL restrictions or pool membership before auto-migration
+                                    # VMs with specific ACLs or in pools should only be migrated via manual endpoint
+                                    # where per-VM authorization is enforced with user context
+                                    try:
+                                        vm_acls = get_vm_acls()
+                                        cluster_acls = vm_acls.get(cluster_id, {})
+                                        if str(vmid) in cluster_acls:
+                                            # VM has specific ACL - skip auto-migration
+                                            logging.info(f"Auto-balance: Skipping VM {vmid} - has specific ACL restrictions")
+                                            break
+                                        
+                                        # Check if VM is in a pool (pools have specific access controls)
+                                        pool_id = get_vm_pool_cached(cluster_id, vmid, vm_type)
+                                        if pool_id:
+                                            # VM is in a pool - skip auto-migration
+                                            logging.info(f"Auto-balance: Skipping VM {vmid} - is in pool '{pool_id}'")
+                                            break
+                                    except Exception as e:
+                                        logging.warning(f"Auto-balance: Could not check VM ACLs/pool for {vmid}: {e}")
+                                        # Fail-safe: skip migration if we can't verify ACLs/pool
+                                        break
+                                    
                                     # Execute migration
                                     if not _api_rate_limiter.acquire(cluster_id, timeout=5):
                                         break
