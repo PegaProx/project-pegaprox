@@ -242,6 +242,15 @@ def admin_disable_2fa(username):
         return jsonify({'error': 'User not found'}), 404
     
     user = users_db[username]
+    
+    # Security: Prevent cross-tenant 2FA management unless caller is global admin
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+        target_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+        if target_tenant != caller_tenant:
+            return jsonify({'error': 'Access denied: cannot manage 2FA for users in other tenants'}), 403
+    
     user['totp_enabled'] = False
     user.pop('totp_secret', None)
     user.pop('totp_pending_secret', None)
@@ -278,6 +287,14 @@ def admin_change_password(username):
         return jsonify({'error': error_msg}), 400
     
     user = users_db[username]
+    
+    # Security: Prevent cross-tenant password management unless caller is global admin
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+        target_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+        if target_tenant != caller_tenant:
+            return jsonify({'error': 'Access denied: cannot change passwords for users in other tenants'}), 403
     
     # NS: Block password reset for LDAP/OIDC users - their password is managed externally
     if user.get('auth_source', 'local') in ('ldap', 'oidc', 'entra'):
@@ -327,9 +344,21 @@ def get_users():
     """Get list of all users (admin only)"""
     users_db = load_users()
     
+    # Security: Filter users by tenant unless caller is global admin
+    caller_tenant = None
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+    
     # Return users without password info
     users_list = []
     for username, user in users_db.items():
+        # Skip users from other tenants if caller is not global admin
+        if caller_tenant is not None:
+            user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+            if user_tenant != caller_tenant:
+                continue
+        
         users_list.append({
             'username': username,
             'role': user['role'],
@@ -365,6 +394,13 @@ def get_locked_ips():
     locked_ips = []
     locked_users = []
     
+    # Security: Determine caller's tenant for filtering
+    caller_tenant = None
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+        users_db = load_users()
+    
     # Get locked IPs
     for ip, info in login_attempts_by_ip.items():
         locked_until = info.get('locked_until', 0)
@@ -376,10 +412,17 @@ def get_locked_ips():
                 'attempt_count': len(info.get('attempts', []))
             })
     
-    # Get locked usernames
+    # Get locked usernames (filter by tenant if not global admin)
     for username, info in login_attempts_by_user.items():
         locked_until = info.get('locked_until', 0)
         if locked_until > current_time:
+            # Filter by tenant if caller is not global admin
+            if caller_tenant is not None:
+                if username in users_db:
+                    user_tenant = users_db[username].get('tenant_id', DEFAULT_TENANT_ID)
+                    if user_tenant != caller_tenant:
+                        continue
+            
             locked_users.append({
                 'username': username,
                 'locked_until': locked_until,
@@ -423,6 +466,17 @@ def unlock_user(username):
     global login_attempts_by_user
     
     username = username.lower()
+    
+    # Security: Prevent cross-tenant lockout management unless caller is global admin
+    if request.session.get('role') != ROLE_ADMIN:
+        users_db = load_users()
+        if username in users_db:
+            target_user = users_db[username]
+            _caller = get_db().get_user(request.session.get('user', '')) or {}
+            caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+            target_tenant = target_user.get('tenant_id', DEFAULT_TENANT_ID)
+            if target_tenant != caller_tenant:
+                return jsonify({'error': 'Access denied: cannot unlock users in other tenants'}), 403
     
     if username in login_attempts_by_user:
         del login_attempts_by_user[username]
@@ -711,6 +765,14 @@ def create_user():
     if tenant_id not in tenants:
         return jsonify({'error': 'Invalid tenant_id'}), 400
     
+    # Security: Prevent cross-tenant user creation unless caller is global admin
+    # A tenant-scoped admin with admin.users can only create users in their own tenant
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+        if tenant_id != caller_tenant:
+            return jsonify({'error': 'Access denied: cannot create users in other tenants'}), 403
+    
     # validate permissions are valid
     for p in permissions + denied_permissions:
         if p not in PERMISSIONS:
@@ -771,6 +833,22 @@ def update_user(username):
     
     data = request.get_json()
     user = users_db[username]
+    
+    # Security: Prevent cross-tenant user modification unless caller is global admin
+    # Check both the current tenant and any requested tenant_id change
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+        current_user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+        requested_tenant = data.get('tenant_id', current_user_tenant)
+        
+        # Block if trying to modify a user in another tenant
+        if current_user_tenant != caller_tenant:
+            return jsonify({'error': 'Access denied: cannot modify users in other tenants'}), 403
+        
+        # Block if trying to move user to another tenant
+        if requested_tenant != caller_tenant:
+            return jsonify({'error': 'Access denied: cannot move users to other tenants'}), 403
     
     # Update fields
     if 'role' in data:
@@ -873,6 +951,15 @@ def delete_user(username):
     
     # Prevent deleting last admin
     user = users_db[username]
+    
+    # Security: Prevent cross-tenant user deletion unless caller is global admin
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        caller_tenant = _caller.get('tenant_id', DEFAULT_TENANT_ID)
+        target_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+        if target_tenant != caller_tenant:
+            return jsonify({'error': 'Access denied: cannot delete users in other tenants'}), 403
+    
     if user['role'] == ROLE_ADMIN:
         admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN)
         if admin_count <= 1:
