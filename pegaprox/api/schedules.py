@@ -15,11 +15,31 @@ from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users
+from pegaprox.utils.rbac import has_permission
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import check_cluster_access, safe_error
 from pegaprox.api.nodes import cleanup_deleted_scripts, cleanup_orphaned_excluded_vms
 
 bp = Blueprint('schedules', __name__)
+
+# ============================================
+# Helper function to map schedule actions to required permissions
+# ============================================
+
+def get_required_permission_for_action(action):
+    """Map a scheduled action to its required permission.
+    
+    This ensures that scheduling an action requires the same permission
+    as executing that action manually would require.
+    """
+    perm_map = {
+        'start': 'vm.start',
+        'stop': 'vm.stop',
+        'shutdown': 'vm.stop',
+        'reboot': 'vm.restart',
+        'snapshot': 'vm.snapshot',
+    }
+    return perm_map.get(action, 'vm.start')
 
 # ============================================
 
@@ -511,7 +531,7 @@ def get_schedules():
 
 
 @bp.route('/api/schedules', methods=['POST'])
-@require_auth(perms=['vm.start'])  # Need at least VM start permission
+@require_auth()  # Permission check is done per-action below
 def create_schedule():
     """Create a new scheduled action
     
@@ -548,6 +568,17 @@ def create_schedule():
     valid_actions = ['start', 'stop', 'shutdown', 'reboot', 'snapshot']
     if data['action'] not in valid_actions:
         return jsonify({'error': f'Action must be one of: {valid_actions}'}), 400
+    
+    # Security: Check that user has permission for the requested action
+    # Scheduling an action requires the same permission as executing it manually
+    required_perm = get_required_permission_for_action(data['action'])
+    users = load_users()
+    username = request.session.get('user', '')
+    user = users.get(username, {})
+    
+    if not has_permission(user, required_perm):
+        logging.warning(f"[SCHEDULE] Permission denied for {username}: {required_perm} required to schedule action '{data['action']}'")
+        return jsonify({'error': f'Permission denied: {required_perm} required to schedule {data["action"]} action'}), 403
     
     # Validate schedule type
     valid_types = ['once', 'daily', 'weekly', 'weekdays', 'weekends']
@@ -599,7 +630,7 @@ def create_schedule():
 
 
 @bp.route('/api/schedules/<int:schedule_id>', methods=['PUT'])
-@require_auth(perms=['vm.start'])
+@require_auth()  # Permission check is done per-action below
 def update_schedule(schedule_id):
     """Update a scheduled action"""
     data = request.json or {}
@@ -619,6 +650,17 @@ def update_schedule(schedule_id):
         valid_actions = ['start', 'stop', 'shutdown', 'reboot', 'snapshot']
         if data['action'] not in valid_actions:
             return jsonify({'error': f'Action must be one of: {valid_actions}'}), 400
+        
+        # Security: Check that user has permission for the new action
+        # Changing a schedule's action requires the same permission as executing that action
+        required_perm = get_required_permission_for_action(data['action'])
+        users = load_users()
+        username = request.session.get('user', '')
+        user = users.get(username, {})
+        
+        if not has_permission(user, required_perm):
+            logging.warning(f"[SCHEDULE] Permission denied for {username}: {required_perm} required to change schedule to action '{data['action']}'")
+            return jsonify({'error': f'Permission denied: {required_perm} required to schedule {data["action"]} action'}), 403
     
     # Validate time format if being updated
     if 'time' in data:
@@ -657,7 +699,7 @@ def update_schedule(schedule_id):
 
 
 @bp.route('/api/schedules/<int:schedule_id>', methods=['DELETE'])
-@require_auth(perms=['vm.start'])
+@require_auth()  # Permission check is done per-action below
 def delete_schedule(schedule_id):
     """Delete a scheduled action"""
     schedules = load_schedules()
@@ -668,6 +710,18 @@ def delete_schedule(schedule_id):
         return jsonify({'error': 'Schedule not found'}), 404
     ok, err = check_cluster_access(schedule.get('cluster_id', ''))
     if not ok: return err
+
+    # Security: Check that user has permission for the scheduled action
+    # Deleting a schedule requires the same permission as the action it would execute
+    action = schedule.get('action', 'start')
+    required_perm = get_required_permission_for_action(action)
+    users = load_users()
+    username = request.session.get('user', '')
+    user = users.get(username, {})
+    
+    if not has_permission(user, required_perm):
+        logging.warning(f"[SCHEDULE] Permission denied for {username}: {required_perm} required to delete schedule with action '{action}'")
+        return jsonify({'error': f'Permission denied: {required_perm} required to manage {action} schedules'}), 403
 
     schedules['actions'] = [s for s in schedules.get('actions', []) if s.get('id') != schedule_id]
     
