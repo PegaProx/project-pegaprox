@@ -681,6 +681,16 @@ def get_vmware_console(vmware_id, vm_id):
     """get console ticket -- tries WebMKS, MKS, direct URL"""
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    users = load_users()
+    user = users.get(request.session.get('user', ''), {})
+    user['username'] = request.session.get('user', '')
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
     mgr = vmware_managers[vmware_id]
     mgr.ensure_connected()
     
