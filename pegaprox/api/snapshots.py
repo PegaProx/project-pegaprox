@@ -33,11 +33,12 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
-from pegaprox.utils.auth import require_auth
+from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.api.helpers import check_cluster_access
 from pegaprox.core.db import get_db
 from pegaprox.utils.audit import log_audit
 from pegaprox.models.permissions import ROLE_ADMIN
+from pegaprox.utils.rbac import user_can_access_vm
 
 bp = Blueprint('snapshot_schedule', __name__)
 
@@ -230,6 +231,7 @@ def _execute_policy(policy_id):
     created = 0
     failed = 0
     pruned_total = 0
+    skipped_authz = 0
 
     mgr = cluster_managers.get(policy['cluster_id'])
     if not mgr:
@@ -240,10 +242,48 @@ def _execute_policy(policy_id):
         db.conn.commit()
         return
 
+    # MK Jun 2026 (sec-audit): load the policy creator's user object to check per-VM
+    # authorization. A policy may only snapshot VMs the creator has vm.snapshot on.
+    policy_creator_username = policy.get('created_by', '')
+    if not policy_creator_username:
+        log_lines.append('policy has no created_by user; cannot verify per-VM authorization')
+        c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?, summary=?
+                     WHERE id=?''',
+                  (datetime.now().isoformat(), '\n'.join(log_lines), 'no creator', run_id))
+        db.conn.commit()
+        return
+    
+    try:
+        users = load_users()
+        policy_creator = users.get(policy_creator_username, {})
+        if not policy_creator:
+            log_lines.append(f"policy creator '{policy_creator_username}' not found in users")
+            c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?, summary=?
+                         WHERE id=?''',
+                      (datetime.now().isoformat(), '\n'.join(log_lines), 'creator not found', run_id))
+            db.conn.commit()
+            return
+        policy_creator['username'] = policy_creator_username
+    except Exception as e:
+        log_lines.append(f"failed to load policy creator: {e}")
+        c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?, summary=?
+                     WHERE id=?''',
+                  (datetime.now().isoformat(), '\n'.join(log_lines), 'load user failed', run_id))
+        db.conn.commit()
+        return
+
     targets = _resolve_targets(mgr, policy)
     log_lines.append(f"resolved {len(targets)} target VMs")
 
     for node, vmid, vm_type in targets:
+        # MK Jun 2026 (sec-audit): per-VM authorization check. The policy creator must
+        # have vm.snapshot permission on each resolved VM. Without this, a user with
+        # cluster access + vm.snapshot on VM A could create a policy targeting tag X
+        # and snapshot VM B (also tagged X) even if they lack access to VM B.
+        if not user_can_access_vm(policy_creator, policy['cluster_id'], vmid, 'vm.snapshot', vm_type):
+            skipped_authz += 1
+            log_lines.append(f"  ⊘ {vm_type}/{vmid}@{node}: skipped (policy creator lacks vm.snapshot)")
+            continue
         snap = _snap_name(policy['id'])
         create_ok = False
         try:
@@ -291,7 +331,7 @@ def _execute_policy(policy_id):
 
     finished_at = datetime.now().isoformat()
     status = 'completed' if failed == 0 else ('partial' if created > 0 else 'failed')
-    summary = f"{created} created · {failed} failed · {pruned_total} pruned · {len(targets)} targets"
+    summary = f"{created} created · {failed} failed · {pruned_total} pruned · {skipped_authz} authz-skipped · {len(targets)} targets"
 
     c.execute('''UPDATE snapshot_runs SET status=?, finished_at=?, log=?, summary=?,
                  snapshots_created=?, snapshots_failed=?, snapshots_pruned=?
@@ -393,6 +433,46 @@ def create_policy(cluster_id):
     if schedule not in ('hourly', 'daily', 'weekly'):
         return jsonify({'error': 'schedule must be hourly / daily / weekly'}), 400
 
+    # MK Jun 2026 (sec-audit): validate that the policy creator has vm.snapshot on
+    # all VMs that would be resolved by this policy. This prevents a user from
+    # creating a policy that targets VMs they don't have access to.
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'cluster manager not found'}), 404
+    
+    try:
+        users = load_users()
+        current_username = request.session.get('user', '')
+        current_user = users.get(current_username, {})
+        current_user['username'] = current_username
+    except Exception as e:
+        logging.exception('failed to load current user for policy validation')
+        return jsonify({'error': 'internal error loading user'}), 500
+    
+    # Resolve what VMs this policy would target
+    temp_policy = {
+        'target_type': target_type,
+        'target_value': target_value,
+        'cluster_id': cluster_id
+    }
+    try:
+        targets = _resolve_targets(mgr, temp_policy)
+    except Exception as e:
+        logging.warning(f"[snap-policy] target resolution failed during creation: {e}")
+        return jsonify({'error': f'failed to resolve targets: {str(e)}'}), 400
+    
+    # Check authorization for each target VM
+    unauthorized_vms = []
+    for node, vmid, vm_type in targets:
+        if not user_can_access_vm(current_user, cluster_id, vmid, 'vm.snapshot', vm_type):
+            unauthorized_vms.append(f"{vm_type}/{vmid}@{node}")
+    
+    if unauthorized_vms:
+        return jsonify({
+            'error': 'Permission denied: you lack vm.snapshot on some target VMs',
+            'unauthorized_vms': unauthorized_vms[:10]  # limit to first 10 for readability
+        }), 403
+
     pid = uuid.uuid4().hex[:12]
     try:
         c = get_db().conn.cursor()
@@ -418,6 +498,60 @@ def update_policy(cluster_id, pid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     body = request.get_json(silent=True) or {}
+    
+    # MK Jun 2026 (sec-audit): if target_type or target_value are being updated,
+    # validate that the current user has vm.snapshot on all newly-resolved VMs.
+    targets_changed = 'target_type' in body or 'target_value' in body
+    if targets_changed:
+        # Fetch the existing policy to get current values
+        c = get_db().conn.cursor()
+        c.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+        existing_row = c.fetchone()
+        if not existing_row:
+            return jsonify({'error': 'not found'}), 404
+        existing_policy = _row_to_policy(existing_row)
+        
+        # Build the updated policy with new target values
+        new_target_type = body.get('target_type', existing_policy['target_type'])
+        new_target_value = body.get('target_value', existing_policy['target_value'])
+        
+        mgr = cluster_managers.get(cluster_id)
+        if not mgr:
+            return jsonify({'error': 'cluster manager not found'}), 404
+        
+        try:
+            users = load_users()
+            current_username = request.session.get('user', '')
+            current_user = users.get(current_username, {})
+            current_user['username'] = current_username
+        except Exception as e:
+            logging.exception('failed to load current user for policy update validation')
+            return jsonify({'error': 'internal error loading user'}), 500
+        
+        # Resolve what VMs the updated policy would target
+        temp_policy = {
+            'target_type': new_target_type,
+            'target_value': new_target_value,
+            'cluster_id': cluster_id
+        }
+        try:
+            targets = _resolve_targets(mgr, temp_policy)
+        except Exception as e:
+            logging.warning(f"[snap-policy] target resolution failed during update: {e}")
+            return jsonify({'error': f'failed to resolve targets: {str(e)}'}), 400
+        
+        # Check authorization for each target VM
+        unauthorized_vms = []
+        for node, vmid, vm_type in targets:
+            if not user_can_access_vm(current_user, cluster_id, vmid, 'vm.snapshot', vm_type):
+                unauthorized_vms.append(f"{vm_type}/{vmid}@{node}")
+        
+        if unauthorized_vms:
+            return jsonify({
+                'error': 'Permission denied: you lack vm.snapshot on some target VMs',
+                'unauthorized_vms': unauthorized_vms[:10]
+            }), 403
+    
     fields = []; params = []
     for k, t in (('name', str), ('target_type', str), ('target_value', str),
                  ('schedule', str), ('schedule_at', str), ('notes', str)):
