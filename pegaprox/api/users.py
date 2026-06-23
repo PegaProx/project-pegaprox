@@ -1226,13 +1226,14 @@ def create_custom_role():
     user = users.get(request.session['user'], {})
     if user.get('role') != ROLE_ADMIN:
         user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
-        # Force tenant_id to user's own tenant for non-admins
+        # Non-admins cannot create global roles or roles in other tenants
         if tenant_id and tenant_id != user_tenant:
             log_audit(request.session['user'], 'role.create_denied', 
                      f"Access denied: attempted to create role '{role_id}' in tenant '{tenant_id}' (user tenant: '{user_tenant}')",
                      ip_address=request.remote_addr)
             return jsonify({'error': 'Access denied - cannot create roles in other tenants'}), 403
-        tenant_id = user_tenant if tenant_id else None  # Allow global roles only if explicitly None
+        # Always force tenant_id to user's own tenant for non-admins (prevents global role creation)
+        tenant_id = user_tenant
     
     custom = get_custom_roles()
     
@@ -1292,15 +1293,14 @@ def update_custom_role(role_id):
     user = users.get(request.session['user'], {})
     if user.get('role') != ROLE_ADMIN:
         user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
-        # Check if trying to update a role in a different tenant
+        # Non-admins cannot update global roles or roles in other tenants
         if tenant_id and tenant_id != user_tenant:
             log_audit(request.session['user'], 'role.update_denied',
                      f"Access denied: attempted to update role '{role_id}' in tenant '{tenant_id}' (user tenant: '{user_tenant}')",
                      ip_address=request.remote_addr)
             return jsonify({'error': 'Access denied - cannot update roles in other tenants'}), 403
-        # Force tenant_id to user's own tenant for non-admins
-        if tenant_id:
-            tenant_id = user_tenant
+        # Always force tenant_id to user's own tenant for non-admins (prevents global role updates)
+        tenant_id = user_tenant
     
     custom = get_custom_roles()
     
@@ -1354,15 +1354,14 @@ def delete_custom_role(role_id):
     user = users.get(request.session['user'], {})
     if user.get('role') != ROLE_ADMIN:
         user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
-        # Check if trying to delete a role in a different tenant
+        # Non-admins cannot delete global roles or roles in other tenants
         if tenant_id and tenant_id != user_tenant:
             log_audit(request.session['user'], 'role.delete_denied',
                      f"Access denied: attempted to delete role '{role_id}' in tenant '{tenant_id}' (user tenant: '{user_tenant}')",
                      ip_address=request.remote_addr)
             return jsonify({'error': 'Access denied - cannot delete roles in other tenants'}), 403
-        # Force tenant_id to user's own tenant for non-admins
-        if tenant_id:
-            tenant_id = user_tenant
+        # Always force tenant_id to user's own tenant for non-admins (prevents global role deletion)
+        tenant_id = user_tenant
     
     custom = get_custom_roles()
     found = False
