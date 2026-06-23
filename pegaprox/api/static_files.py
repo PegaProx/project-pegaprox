@@ -453,6 +453,21 @@ def set_user_perms(username):
     tenant_id = data.get('tenant_id')  # if set, update tenant-specific perms
     
     if tenant_id:
+        # SECURITY: Validate caller can manage the target tenant
+        # Only global admins can manage permissions across all tenants
+        caller_username = request.session.get('user', '')
+        caller = users_db.get(caller_username, {})
+        caller_role = request.session.get('role', ROLE_VIEWER)
+        caller_tenant = caller.get('tenant_id', DEFAULT_TENANT_ID)
+        
+        # Global admins can manage any tenant
+        if caller_role != ROLE_ADMIN:
+            # Non-admin users with admin.users can only manage their own tenant
+            if tenant_id != caller_tenant:
+                log_audit(caller_username, 'security.tenant_access_denied',
+                         f"Attempted to modify tenant permissions for {username} in tenant {tenant_id} (caller tenant: {caller_tenant})")
+                return jsonify({'error': 'Access denied: cannot manage permissions for other tenants'}), 403
+        
         # per-tenant permissions
         role = data.get('role')
         extra = data.get('extra', [])
@@ -506,6 +521,21 @@ def remove_user_tenant_perms(username, tenant_id):
     
     if username not in users_db:
         return jsonify({'error': 'User not found'}), 404
+    
+    # SECURITY: Validate caller can manage the target tenant
+    # Only global admins can manage permissions across all tenants
+    caller_username = request.session.get('user', '')
+    caller = users_db.get(caller_username, {})
+    caller_role = request.session.get('role', ROLE_VIEWER)
+    caller_tenant = caller.get('tenant_id', DEFAULT_TENANT_ID)
+    
+    # Global admins can manage any tenant
+    if caller_role != ROLE_ADMIN:
+        # Non-admin users with admin.users can only manage their own tenant
+        if tenant_id != caller_tenant:
+            log_audit(caller_username, 'security.tenant_access_denied',
+                     f"Attempted to remove tenant permissions for {username} in tenant {tenant_id} (caller tenant: {caller_tenant})")
+            return jsonify({'error': 'Access denied: cannot manage permissions for other tenants'}), 403
     
     tp = users_db[username].get('tenant_permissions', {})
     if tenant_id in tp:
