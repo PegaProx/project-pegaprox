@@ -1391,7 +1391,9 @@
                 // #552 - optionally also remove the replica VM on the target node
                 const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
                 try {
-                    const res = await fetch(`${API_URL}/cross-cluster-replications/${jobId}${alsoDeleteTarget ? '?delete_target=1' : ''}`, {
+                    // MK #564 — explicit choice; omitting it let the stored delete_target
+                    // flag override "keep replica" and wedge the job on a failed teardown.
+                    const res = await fetch(`${API_URL}/cross-cluster-replications/${jobId}?delete_target=${alsoDeleteTarget ? '1' : '0'}`, {
                         method: 'DELETE', credentials: 'include',
                         headers: authHeaders
                     });

@@ -5825,7 +5825,10 @@
                 // #552 - second prompt: also tear down the replica VM on the target?
                 const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
                 try {
-                    const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}${alsoDeleteTarget ? '?delete_target=1' : ''}`, { method: 'DELETE' });
+                    // MK #564 — send the choice explicitly so "keep replica" can't be
+                    // overridden by the job's stored delete_target flag (a failed teardown
+                    // would otherwise wedge the job as undeletable).
+                    const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}?delete_target=${alsoDeleteTarget ? '1' : '0'}`, { method: 'DELETE' });
                     if (res && res.ok) {
                         if (addToast) addToast(t('xReplDeleted') || 'Replication job deleted', 'success');
                         await fetchXReplJobs();
