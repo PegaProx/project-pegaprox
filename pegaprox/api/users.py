@@ -698,6 +698,17 @@ def create_user():
     if not is_valid_role(role):
         return jsonify({'error': 'Invalid role'}), 400
     
+    # Security: Enforce role hierarchy - users can only create users with roles at or below their own level
+    # This prevents privilege escalation via delegated user management permissions
+    current_user_obj = load_users().get(request.session['user'], {})
+    current_user_role = current_user_obj.get('role', ROLE_VIEWER)
+    role_hierarchy = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
+    current_level = role_hierarchy.get(current_user_role, 2 if current_user_role not in role_hierarchy else 1)
+    target_level = role_hierarchy.get(role, 2 if role not in role_hierarchy else 1)
+    
+    if target_level > current_level:
+        return jsonify({'error': 'Cannot create a user with a role higher than your own'}), 403
+    
     # MK: Auto-set tenant_id if role belongs to a specific tenant
     if role not in BUILTIN_ROLES:
         custom_roles = load_custom_roles()
@@ -771,12 +782,29 @@ def update_user(username):
     
     data = request.get_json()
     user = users_db[username]
+    current_user = request.session['user']
+    current_user_obj = users_db.get(current_user, {})
+    current_user_role = current_user_obj.get('role', ROLE_VIEWER)
     
     # Update fields
     if 'role' in data:
         # NS: Updated to support custom roles
         if not is_valid_role(data['role']):
             return jsonify({'error': 'Invalid role'}), 400
+        
+        # Security: Prevent users from modifying their own role (privilege escalation)
+        if username == current_user:
+            return jsonify({'error': 'Cannot modify your own role'}), 403
+        
+        # Security: Enforce role hierarchy - users can only assign roles at or below their own level
+        # This prevents privilege escalation via delegated user management permissions
+        role_hierarchy = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
+        current_level = role_hierarchy.get(current_user_role, 2 if current_user_role not in role_hierarchy else 1)
+        target_level = role_hierarchy.get(data['role'], 2 if data['role'] not in role_hierarchy else 1)
+        
+        if target_level > current_level:
+            return jsonify({'error': 'Cannot assign a role with higher privileges than your own'}), 403
+        
         # Prevent last admin from losing admin role
         if user['role'] == ROLE_ADMIN and data['role'] != ROLE_ADMIN:
             admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
