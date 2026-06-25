@@ -37,6 +37,9 @@ from pegaprox.globals import (
 from pegaprox.core.db import get_db, ENCRYPTION_AVAILABLE
 from pegaprox.core.config import get_fernet
 from pegaprox.models.permissions import ROLE_ADMIN, ROLE_USER, ROLE_VIEWER, PERMISSIONS, ROLE_PERMISSIONS
+# MK: record the real client IP (XFF/X-Real-IP via trusted-proxy) for sessions/tokens,
+# not request.remote_addr which is the reverse-proxy/Docker IP behind a proxy (#583)
+from pegaprox.utils.audit import get_client_ip
 
 
 def get_session_timeout():
@@ -540,7 +543,7 @@ def create_session(username: str, role: str, remember: bool = False) -> str:
             'role': role,
             'created_at': time.time(),
             'last_activity': time.time(),
-            'ip': request.remote_addr if request else None,
+            'ip': get_client_ip() if request else None,
             'user_agent': request.headers.get('User-Agent', '')[:200] if request else None,
             'remember': remember,  # NS: persistent session (30 days instead of default)
         }
@@ -590,7 +593,7 @@ def validate_session(session_id: str) -> dict:
     try:
         from flask import request as _req
         if _req and hasattr(_req, 'remote_addr'):
-            current_ip = _req.remote_addr
+            current_ip = get_client_ip()  # MK: must match what create_session stored (#583), else proxy-vs-real false-trips
             session_ip = session.get('ip')
             if session_ip and current_ip and session_ip != current_ip:
                 # MK: treat IPv4 vs IPv4-mapped-IPv6 of the same host as equal
@@ -763,7 +766,7 @@ def validate_api_token(token: str) -> dict:
         # Update last used timestamp
         cursor.execute('''
             UPDATE api_tokens SET last_used_at = ?, last_used_ip = ? WHERE id = ?
-        ''', (datetime.now().isoformat(), request.remote_addr, row_dict['id']))
+        ''', (datetime.now().isoformat(), get_client_ip(), row_dict['id']))
         db.conn.commit()
         
         # Return session-compatible dict
