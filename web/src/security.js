@@ -2819,9 +2819,12 @@
                                                     )}
                                                     {pbsJob && (pbsJob.output_lines || []).length > 0 && (
                                                         <div className="p-3 bg-black/50 max-h-48 overflow-y-auto font-mono text-xs">
-                                                            {(pbsJob.output_lines || []).map((line, i) => (
-                                                                <div key={i} className={`${line.includes('[ERROR]') ? 'text-red-400' : line.includes('[OK]') ? 'text-green-400' : 'text-gray-300'}`}>{line}</div>
-                                                            ))}
+                                                            {(pbsJob.output_lines || []).map((line, i) => {
+                                                                // LW: output_lines can carry a non-string entry (e.g. an exit code) — String() it
+                                                                // so .includes() can't blow up the whole page (#584 white-screen)
+                                                                const s = String(line);
+                                                                return <div key={i} className={`${s.includes('[ERROR]') ? 'text-red-400' : s.includes('[OK]') ? 'text-green-400' : 'text-gray-300'}`}>{s}</div>;
+                                                            })}
                                                             {pbsJob.error && <div className="text-red-400 mt-2">⚠ {pbsJob.error}</div>}
                                                         </div>
                                                     )}
