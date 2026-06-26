@@ -593,19 +593,48 @@ def get_cluster_tags(cluster_id):
     tags_db = load_vm_tags()
     cluster_tags = tags_db.get(cluster_id, {})
 
-    # Count tag usage
-    tag_counts = {}
+    # MK Jun 2026 (#585 cybrwerk): this only ever knew tags assigned through our own UI
+    # (the load_vm_tags store). PVE-native tags set in the VM config never showed up here.
+    # Build a per-VM union of stored + live PVE tags so each VM counts once per tag.
+    per_vm = {}      # vmid -> set(tag names)
+    colors = {}      # tag name -> explicit colour (stored tags may carry one)
     for vm_key, vm_tags in cluster_tags.items():
-        for tag in vm_tags:
-            tag_name = tag.get('name', tag) if isinstance(tag, dict) else tag
-            if tag_name not in tag_counts:
-                tag_counts[tag_name] = {
-                    'name': tag_name,
-                    'color': tag.get('color', TAG_COLORS[hash(tag_name) % len(TAG_COLORS)]) if isinstance(tag, dict) else TAG_COLORS[hash(tag_name) % len(TAG_COLORS)],
-                    'count': 0
-                }
-            tag_counts[tag_name]['count'] += 1
-    
+        bucket = per_vm.setdefault(str(vm_key), set())
+        for tag in (vm_tags or []):
+            name = ((tag.get('name') if isinstance(tag, dict) else tag) or '').strip()
+            if not name:
+                continue
+            bucket.add(name)
+            if isinstance(tag, dict) and tag.get('color'):
+                colors[name] = tag['color']
+
+    # merge the live PVE tags (semicolon-separated on each guest)
+    try:
+        mgr = cluster_managers.get(cluster_id)
+        if mgr:
+            for r in (mgr.get_vm_resources() or []):
+                raw = r.get('tags')
+                if not raw:
+                    continue
+                parts = raw if isinstance(raw, list) else str(raw).split(';')
+                bucket = per_vm.setdefault(str(r.get('vmid')), set())
+                for p in parts:
+                    p = (p or '').strip()
+                    if p:
+                        bucket.add(p)
+    except Exception as e:
+        logging.debug(f"[tags] could not merge live PVE tags for {cluster_id}: {e}")
+
+    tag_counts = {}
+    for bucket in per_vm.values():
+        for name in bucket:
+            entry = tag_counts.setdefault(name, {
+                'name': name,
+                'color': colors.get(name, TAG_COLORS[hash(name) % len(TAG_COLORS)]),
+                'count': 0,
+            })
+            entry['count'] += 1
+
     return jsonify(list(tag_counts.values()))
 
 
