@@ -88,6 +88,7 @@ def is_safe_outbound_url(
     *,
     allowed_schemes: Iterable[str] = ('https',),
     allow_private: bool = False,
+    trusted_hosts: Iterable[str] = (),
     require_resolution: bool = True,
 ) -> Tuple[bool, str]:
     """Return (ok, reason).
@@ -106,6 +107,12 @@ def is_safe_outbound_url(
             we only reject IP-literal hosts that are obviously bad
             (faster, but vulnerable to DNS rebinding).
     """
+    trusted_hosts = {
+        h.strip().lower().strip("[]")
+        for h in trusted_hosts
+        if h
+    }
+
     if not isinstance(url, str) or not url:
         return False, 'empty url'
     # CR/LF/NUL anywhere in the URL → header smuggling vector
@@ -141,7 +148,11 @@ def is_safe_outbound_url(
     if ip_literal is not None:
         if str(ip_literal) in _METADATA_HOSTS:
             return False, f'IP {ip_literal} is metadata endpoint'
-        if not allow_private and _is_private_or_special(ip_literal):
+        if (
+            not allow_private
+            and _is_private_or_special(ip_literal)
+            and str(ip_literal) not in trusted_hosts
+        ):
             return False, f'IP {ip_literal} is private / loopback / metadata'
         return True, 'ok (ip literal)'
 
@@ -159,7 +170,12 @@ def is_safe_outbound_url(
     for ip in resolved:
         if str(ip) in _METADATA_HOSTS:
             return False, f'host {host!r} resolves to metadata IP {ip}'
-        if not allow_private and _is_private_or_special(ip):
+        if (
+            not allow_private
+            and _is_private_or_special(ip)
+            and host.lower() not in trusted_hosts
+            and str(ip) not in trusted_hosts
+        ):
             return False, f'host {host!r} resolves to private/loopback {ip}'
 
     return True, 'ok'
