@@ -12090,6 +12090,7 @@
                         fetchClusterMetrics(selectedCluster.id);
                         fetchClusterResources(selectedCluster.id);
                         fetchClusterPools(selectedCluster.id);  // NS: piggyback pool refresh
+                        fetchClusterDatastores(selectedCluster.id);  // NS: storage figures went stale — datastores weren't in the refresh loop, only fetched on select
                     }, 15000);
 
                     const logsInterval = setInterval(() => {
