@@ -520,9 +520,12 @@ def _run_v2p_migration(task):
         if task.disk_bus == 'scsi' and scsihw not in ('pvscsi', 'lsi', 'lsi53c810', 'megasas', 'virtio-scsi-pci', 'virtio-scsi-single'):
             scsihw = 'virtio-scsi-single'
         
-        # Disk bus: match VMware (SCSI, SATA, IDE)
+        # Disk bus: honor the user's wizard pick, else match VMware.
+        # MK #597 — 'virtio' was missing from this allowlist, so an explicit virtio
+        # choice silently fell back to the detected bus (scsi). virtio0 attaches +
+        # boots fine via the generic --{disk_bus} path below.
         detected_bus = hw.get('disk_bus', 'scsi')
-        disk_bus = task.disk_bus if task.disk_bus in ('scsi', 'sata', 'ide') else detected_bus
+        disk_bus = task.disk_bus if task.disk_bus in ('scsi', 'sata', 'ide', 'virtio') else detected_bus
         
         # Network: match VMware (vmxnet3, E1000, E1000e)
         detected_nic = hw.get('nic_type_pve', 'e1000')
