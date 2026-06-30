@@ -3684,12 +3684,17 @@ class PegaProxDB:
             perms = json.loads(row[1]) if row[1] else []
             result[pool_id] = perms
         
-        # Get group permissions
+        # Get group permissions.
+        # MK #555 — match the group name case-INSENSITIVELY. LDAP/AD (and PVE realms)
+        # hand group names back in varying case vs how the grant was typed in the UI, so
+        # an exact match silently missed and the pool user saw zero VMs. User grants stay
+        # case-sensitive (usernames are). Caveat: two groups differing only by case would
+        # collide here — realm group names are unique case-wise in practice.
         if groups:
             for group in groups:
                 cursor.execute('''
-                    SELECT pool_id, permissions FROM pool_permissions 
-                    WHERE cluster_id = ? AND subject_type = 'group' AND subject_id = ?
+                    SELECT pool_id, permissions FROM pool_permissions
+                    WHERE cluster_id = ? AND subject_type = 'group' AND LOWER(subject_id) = LOWER(?)
                 ''', (cluster_id, group))
                 
                 for row in cursor.fetchall():
@@ -3713,9 +3718,16 @@ class PegaProxDB:
             subjects.append(('group', g))
         out = set()
         for stype, sid in subjects:
-            cursor.execute(
-                "SELECT DISTINCT cluster_id FROM pool_permissions WHERE subject_type = ? AND subject_id = ?",
-                (stype, sid))
+            # MK #555 — group names match case-insensitively (see get_user_pool_permissions),
+            # users stay exact.
+            if stype == 'group':
+                cursor.execute(
+                    "SELECT DISTINCT cluster_id FROM pool_permissions WHERE subject_type = 'group' AND LOWER(subject_id) = LOWER(?)",
+                    (sid,))
+            else:
+                cursor.execute(
+                    "SELECT DISTINCT cluster_id FROM pool_permissions WHERE subject_type = ? AND subject_id = ?",
+                    (stype, sid))
             for row in cursor.fetchall():
                 out.add(row[0])
         return list(out)
