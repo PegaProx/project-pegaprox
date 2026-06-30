@@ -12365,6 +12365,20 @@
                 } catch (e) { /* not critical for sidebar */ }
             };
 
+            // NS: keep storage fresh for clusters expanded in the sidebar (not just the
+            // selected one) — datastores were otherwise fetched once on expand and went
+            // stale when storage was grown/added. Refs so it always sees the current set.
+            React.useEffect(() => {
+                const iv = setInterval(() => {
+                    const exp = expandedSidebarClustersRef.current || {};
+                    const sel = selectedClusterRef.current?.id;
+                    Object.keys(exp).forEach(cid => {
+                        if (exp[cid] && cid !== sel) fetchClusterDatastores(cid);
+                    });
+                }, 30000);
+                return () => clearInterval(iv);
+            }, []);
+
             const fetchClusterNetworks = async (clusterId) => {
                 setLoadingNetworks(true);
                 try {
