@@ -3256,6 +3256,232 @@
             );
         }
 
+        // LW #430 — one place to see every replication job's health: local PVE jobs
+        // across all connected clusters + PegaProx cross-cluster jobs, instead of
+        // drilling into each VM. CSV + PDF export.
+        function ReplicationOverviewTab({ clusters, authFetch, addToast, t }) {
+            const [local, setLocal] = React.useState([]);
+            const [xcluster, setXcluster] = React.useState([]);
+            const [loading, setLoading] = React.useState(false);
+
+            const clusterName = (id) => {
+                const c = (clusters || []).find(x => x.id === id);
+                return c ? (c.display_name || c.name) : id;
+            };
+
+            const refresh = async () => {
+                setLoading(true);
+                try {
+                    const connected = (clusters || []).filter(c => c.connected);
+                    // local repl per cluster — timeout each so a slow cluster can't wedge the tab (#594)
+                    const loc = await Promise.all(connected.map(async (c) => {
+                        try {
+                            const r = await authFetch(`${API_URL}/clusters/${c.id}/datacenter/replication`, { timeout: POLL_TIMEOUT_MS });
+                            const j = (r && r.ok) ? await r.json() : [];
+                            return { id: c.id, name: c.display_name || c.name, jobs: Array.isArray(j) ? j : [] };
+                        } catch (_) {
+                            return { id: c.id, name: c.display_name || c.name, jobs: [] };
+                        }
+                    }));
+                    setLocal(loc);
+                    const xr = await authFetch(`${API_URL}/cross-cluster-replications`, { timeout: POLL_TIMEOUT_MS }).then(x => x?.json()).catch(() => null);
+                    setXcluster(Array.isArray(xr) ? xr : []);
+                } finally { setLoading(false); }
+            };
+            React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [(clusters || []).length]);
+
+            const ago = (v) => {
+                if (!v) return '—';
+                const ts = typeof v === 'number' ? v * 1000 : Date.parse(v);
+                if (!ts || isNaN(ts)) return '—';
+                const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+                if (s < 60) return `${s}s`;
+                if (s < 3600) return `${Math.floor(s / 60)}m`;
+                if (s < 86400) return `${Math.floor(s / 3600)}h`;
+                return `${Math.floor(s / 86400)}d`;
+            };
+            const localState = (j) => {
+                if (j.error || (j.fail_count && j.fail_count > 0) || j.state === 'error') return 'failed';
+                if (!j.last_sync) return 'never';
+                return 'ok';
+            };
+            const xState = (j) => {
+                const s = (j.last_status || '').toLowerCase();
+                if (j.last_error || s === 'failed' || s === 'error') return 'failed';
+                if (!j.last_run) return 'never';
+                return 'ok';
+            };
+
+            const allRows = React.useMemo(() => {
+                const rows = [];
+                for (const cl of local) {
+                    for (const j of (cl.jobs || [])) {
+                        rows.push({ kind: 'local', cluster: cl.name, vmid: j.guest,
+                                    from: j.source || cl.name, to: j.target || '',
+                                    schedule: j.schedule || '', last: j.last_sync,
+                                    status: localState(j), error: j.error || '' });
+                    }
+                }
+                for (const j of (xcluster || [])) {
+                    rows.push({ kind: 'xcluster', cluster: clusterName(j.source_cluster), vmid: j.vmid,
+                                from: clusterName(j.source_cluster), to: clusterName(j.target_cluster),
+                                schedule: j.schedule || '', last: j.last_run, status: xState(j),
+                                error: j.last_error || '', enabled: !!j.enabled });
+                }
+                return rows;
+            }, [local, xcluster]);
+
+            const counts = React.useMemo(() => {
+                const c = { total: allRows.length, ok: 0, failed: 0, never: 0 };
+                for (const r of allRows) { if (r.status === 'ok') c.ok++; else if (r.status === 'failed') c.failed++; else c.never++; }
+                return c;
+            }, [allRows]);
+
+            const badge = (st) => ({
+                ok: 'bg-green-500/15 text-green-400',
+                failed: 'bg-red-500/15 text-red-400',
+                never: 'bg-gray-500/15 text-gray-400',
+            }[st] || 'bg-gray-500/15 text-gray-400');
+            const stLabel = (st) => ({ ok: t('replStateOk') || 'OK', failed: t('replStateFailed') || 'Failed', never: t('replStateNever') || 'Never run' }[st] || st);
+
+            const exportCsv = () => {
+                const head = ['Type', 'Cluster', 'VMID', 'From', 'To', 'Schedule', 'LastRun', 'Status', 'Error'];
+                const esc = (s) => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
+                const lines = [head.join(',')];
+                for (const r of allRows) {
+                    lines.push([r.kind, r.cluster, r.vmid, r.from, r.to, r.schedule,
+                                (r.last ? new Date(typeof r.last === 'number' ? r.last * 1000 : r.last).toISOString() : ''),
+                                r.status, r.error].map(esc).join(','));
+                }
+                const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = 'replication-status.csv'; a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const exportPdf = async () => {
+                if (typeof generatePegaProxPDF !== 'function') { addToast(t('pdfNotLoaded') || 'PDF library not loaded', 'error'); return; }
+                const fmt = (r) => [String(r.vmid ?? ''), `${r.from} -> ${r.to}`, r.schedule || '',
+                                    (r.last ? ago(r.last) + ' ago' : 'never'), stLabel(r.status)];
+                const localRows = allRows.filter(r => r.kind === 'local');
+                const xRows = allRows.filter(r => r.kind === 'xcluster');
+                const blocks = [{ type: 'stats', data: [
+                    { value: String(counts.total), label: t('replTotal') || 'Total jobs', color: '#3b82f6' },
+                    { value: String(counts.ok), label: 'OK', color: '#16a34a' },
+                    { value: String(counts.failed), label: t('replStateFailed') || 'Failed', color: '#dc2626' },
+                    { value: String(counts.never), label: t('replStateNever') || 'Never run', color: '#6b7280' },
+                ] }];
+                if (localRows.length) blocks.push({ type: 'spacer', height: 4 }, { type: 'table', title: t('replLocal') || 'Local replication',
+                    columns: ['VMID', 'Source -> Target', 'Schedule', 'Last sync', 'Status'], rows: localRows.map(fmt) });
+                if (xRows.length) blocks.push({ type: 'spacer', height: 4 }, { type: 'table', title: t('replCross') || 'Cross-cluster replication',
+                    columns: ['VMID', 'Source -> Target', 'Schedule', 'Last run', 'Status'], rows: xRows.map(fmt) });
+                try {
+                    await generatePegaProxPDF({ title: t('replicationOverview') || 'Replication Status',
+                        subtitle: `${counts.total} jobs · ${counts.failed} failed`, content: blocks,
+                        filename: 'replication-status.pdf', orientation: 'landscape' });
+                } catch (e) { addToast(t('pdfFailed') || 'PDF export failed', 'error'); }
+            };
+
+            const Table = ({ rows, lastLabel }) => (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                        <thead>
+                            <tr className="text-left text-xs text-gray-500 border-b border-proxmox-border">
+                                <th className="py-1.5 pr-3">{t('cluster') || 'Cluster'}</th>
+                                <th className="py-1.5 pr-3">VMID</th>
+                                <th className="py-1.5 pr-3">{t('replFromTo') || 'Source → Target'}</th>
+                                <th className="py-1.5 pr-3">{t('snapSchedule') || 'Schedule'}</th>
+                                <th className="py-1.5 pr-3">{lastLabel}</th>
+                                <th className="py-1.5 pr-3">{t('status') || 'Status'}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.map((r, i) => (
+                                <tr key={i} className="border-b border-proxmox-border/40">
+                                    <td className="py-1.5 pr-3 text-gray-400">{r.cluster}</td>
+                                    <td className="py-1.5 pr-3 font-mono text-white">{r.vmid}</td>
+                                    <td className="py-1.5 pr-3 text-gray-300 font-mono text-xs">{r.from} → {r.to}</td>
+                                    <td className="py-1.5 pr-3 text-gray-400 font-mono text-xs">{r.schedule || '—'}</td>
+                                    <td className="py-1.5 pr-3 text-gray-400" title={r.error || ''}>{r.last ? `${ago(r.last)} ${t('ago') || 'ago'}` : '—'}</td>
+                                    <td className="py-1.5 pr-3">
+                                        <span className={`px-2 py-0.5 rounded text-xs ${badge(r.status)}`} title={r.error || ''}>{stLabel(r.status)}</span>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            );
+
+            const localRows = allRows.filter(r => r.kind === 'local');
+            const xRows = allRows.filter(r => r.kind === 'xcluster');
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.RefreshCw className="w-5 h-5 text-blue-400" />
+                                {t('replicationOverview') || 'Replication'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('replicationOverviewDesc') || 'Status of every replication job — local (per cluster) and cross-cluster — at a glance.'}
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={refresh} disabled={loading}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                {loading ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                            <button onClick={exportCsv} disabled={!allRows.length}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                <Icons.Download className="w-3.5 h-3.5" /> CSV
+                            </button>
+                            <button onClick={exportPdf} disabled={!allRows.length}
+                                className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
+                                <Icons.FileText className="w-3.5 h-3.5" /> {t('exportPdf') || 'PDF'}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {[['replTotal', 'Total', counts.total, 'text-blue-400'],
+                          ['replStateOk', 'OK', counts.ok, 'text-green-400'],
+                          ['replStateFailed', 'Failed', counts.failed, 'text-red-400'],
+                          ['replStateNever', 'Never run', counts.never, 'text-gray-400']].map(([k, fb, v, col]) => (
+                            <div key={k} className="bg-proxmox-card border border-proxmox-border rounded-xl p-3">
+                                <div className={`text-2xl font-semibold ${col}`}>{v}</div>
+                                <div className="text-xs text-gray-500">{t(k) || fb}</div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {!allRows.length ? (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center text-sm text-gray-500">
+                            {loading ? (t('loading') || 'Loading…') : (t('replNoJobs') || 'No replication jobs found.')}
+                        </div>
+                    ) : (
+                        <>
+                            {localRows.length > 0 && (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <h3 className="text-sm font-semibold text-gray-300 mb-2">{t('replLocal') || 'Local replication'} <span className="text-gray-500">({localRows.length})</span></h3>
+                                    <Table rows={localRows} lastLabel={t('replLastSync') || 'Last sync'} />
+                                </div>
+                            )}
+                            {xRows.length > 0 && (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                    <h3 className="text-sm font-semibold text-gray-300 mb-2">{t('replCross') || 'Cross-cluster replication'} <span className="text-gray-500">({xRows.length})</span></h3>
+                                    <Table rows={xRows} lastLabel={t('replLastRun') || 'Last run'} />
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+            );
+        }
+
         // MK May 2026 — Network Topology Visualization. Plain SVG, no D3 dep.
         // Three rows: cluster → nodes → bridges → VMs (grouped under bridge).
         function TopologyTab({ clusterId, authFetch, addToast, t }) {
@@ -15567,6 +15793,7 @@
                                                         { id: 'affinity', label: t('affinityRules') || 'Affinity', icon: Icons.Link },
                                                         { id: 'scripts', label: t('customScripts') || 'Scripts', icon: Icons.Terminal },
                                                         { id: 'snapshots', label: t('snapPoliciesTitle') || 'Snapshots', icon: Icons.Camera },
+                                                        { id: 'replication', label: t('replicationOverview') || 'Replication', icon: Icons.RefreshCw },
                                                         { id: 'templates', label: t('templateLibrary') || 'Templates', icon: Icons.Package },
                                                         { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield }
                                                     ].map(sub => (
@@ -15989,6 +16216,16 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                    />
+                                                )}
+
+                                                {/* LW #430 — Replication status overview (all clusters, local + cross-cluster) */}
+                                                {automationSubTab === 'replication' && (
+                                                    <ReplicationOverviewTab
+                                                        clusters={clusters}
+                                                        authFetch={authFetch}
+                                                        addToast={addToast}
+                                                        t={t}
                                                     />
                                                 )}
 
