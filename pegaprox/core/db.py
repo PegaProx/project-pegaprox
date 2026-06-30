@@ -1641,6 +1641,18 @@ class PegaProxDB:
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_snap_pol_cluster ON snapshot_policies(cluster_id)')
+            # MK #586 — richer schedules (cron / monthly / once) + prune-only mode.
+            # additive on existing installs, hence the PRAGMA guard.
+            cursor.execute("PRAGMA table_info(snapshot_policies)")
+            _spcols = {row[1] for row in cursor.fetchall()}
+            for _cn, _cd in (
+                ('schedule_cron', "TEXT DEFAULT ''"),
+                ('schedule_day', "INTEGER DEFAULT 1"),
+                ('run_once_at', "TEXT DEFAULT ''"),
+                ('prune_only', "INTEGER DEFAULT 0"),
+            ):
+                if _cn not in _spcols:
+                    cursor.execute(f"ALTER TABLE snapshot_policies ADD COLUMN {_cn} {_cd}")
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS snapshot_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

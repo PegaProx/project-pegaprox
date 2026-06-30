@@ -10,10 +10,15 @@ for "give me the last 24h of hourly snapshots on my prod DB without
 copying GBs to PBS every hour."
 
 Schedules:
-  - hourly: every full hour
-  - daily:  once per day at schedule_at (HH:MM)
-  - weekly: once per Sunday at schedule_at
-  - cron:   placeholder for future expansion
+  - hourly:  every full hour
+  - daily:   once per day at schedule_at (HH:MM)
+  - weekly:  once per Sunday at schedule_at
+  - monthly: once per month on schedule_day at schedule_at   (#586)
+  - once:    a single run at run_once_at (ISO datetime), then never again   (#586)
+  - cron:    a 5-field cron expression in schedule_cron       (#586)
+
+Mode:
+  - prune_only: skip creating snapshots, only run retention pruning   (#586)
 
 Targets:
   - vm:  comma-separated list of VMIDs
@@ -28,6 +33,7 @@ import json
 import time
 import uuid
 import logging
+import calendar
 import threading
 from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request
@@ -65,6 +71,10 @@ def _row_to_policy(r):
         'target_value': r['target_value'],
         'schedule': r['schedule'],
         'schedule_at': r['schedule_at'] or '03:00',
+        'schedule_cron': (r['schedule_cron'] or '') if 'schedule_cron' in r.keys() else '',
+        'schedule_day': (r['schedule_day'] or 1) if 'schedule_day' in r.keys() else 1,
+        'run_once_at': (r['run_once_at'] or '') if 'run_once_at' in r.keys() else '',
+        'prune_only': bool(r['prune_only']) if 'prune_only' in r.keys() else False,
         'retention_count': r['retention_count'] or 0,
         'retention_days': r['retention_days'] or 0,
         'include_ram': bool(r['include_ram']),
@@ -106,6 +116,88 @@ def _resolve_targets(mgr, policy):
     return targets
 
 
+# NS #586 — small self-contained cron matcher so we don't pull in croniter.
+# 5 fields: "min hour dom month dow". Supports *, lists (a,b), ranges (a-b),
+# and steps (*/n, a-b/n). dow: 0 or 7 = Sunday.
+def _cron_field(field, value, lo, hi):
+    field = field.strip()
+    if field == '*':
+        return True
+    for part in field.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        rng = part
+        if '/' in part:
+            rng, _, st = part.partition('/')
+            try:
+                step = int(st)
+            except ValueError:
+                continue
+            if step <= 0:
+                continue
+        if rng == '*':
+            start, end = lo, hi
+        elif '-' in rng:
+            a, _, b = rng.partition('-')
+            try:
+                start, end = int(a), int(b)
+            except ValueError:
+                continue
+        else:
+            try:
+                start = end = int(rng)
+            except ValueError:
+                continue
+        if start > end:
+            continue
+        if value < start or value > end:
+            continue
+        if (value - start) % step == 0:
+            return True
+    return False
+
+
+def _cron_match(expr, dt):
+    """True if dt matches the 5-field cron expr. A malformed expr never fires."""
+    if not expr:
+        return False
+    parts = expr.split()
+    if len(parts) != 5:
+        return False
+    mn, hr, dom, mon, dow = parts
+    cron_dow = (dt.weekday() + 1) % 7  # python Mon=0..Sun=6 -> cron Sun=0..Sat=6
+    if not _cron_field(mn, dt.minute, 0, 59):
+        return False
+    if not _cron_field(hr, dt.hour, 0, 23):
+        return False
+    if not _cron_field(mon, dt.month, 1, 12):
+        return False
+    dom_restricted = dom.strip() != '*'
+    dow_restricted = dow.strip() != '*'
+    dom_ok = _cron_field(dom, dt.day, 1, 31)
+    dow_ok = _cron_field(dow, cron_dow, 0, 7) or (cron_dow == 0 and _cron_field(dow, 7, 0, 7))
+    # standard cron rule: if both DOM and DOW are restricted, match either
+    if dom_restricted and dow_restricted:
+        return dom_ok or dow_ok
+    if dom_restricted:
+        return dom_ok
+    if dow_restricted:
+        return dow_ok
+    return True
+
+
+def _valid_cron(expr):
+    """Structural check for a 5-field cron expr (charset only — _cron_match does
+    the real evaluation, and a non-matching/garbage expr simply never fires)."""
+    parts = (expr or '').split()
+    if len(parts) != 5:
+        return False
+    allowed = set('0123456789*,/-')
+    return all(p and set(p) <= allowed for p in parts)
+
+
 def _is_due(policy, now=None):
     """Check whether the policy should fire right now. Idempotent: also reads
     last_run_at to avoid double-fires when the scheduler wakes during the
@@ -126,7 +218,23 @@ def _is_due(policy, now=None):
         if last_dt and (now - last_dt).total_seconds() < 3000: return False  # 50 min guard
         return True
 
-    # daily / weekly use schedule_at HH:MM
+    # #586 — cron + once don't use schedule_at, so handle them before that gate
+    if sch == 'cron':
+        if not _cron_match(policy.get('schedule_cron') or '', now): return False
+        # loop ticks ~every 60s — guard a double-fire inside the same minute
+        if last_dt and (now - last_dt).total_seconds() < 55: return False
+        return True
+    if sch == 'once':
+        once_at = (policy.get('run_once_at') or '').strip()
+        if not once_at: return False
+        if last_dt is not None: return False  # already fired once → never again
+        try:
+            once_dt = datetime.fromisoformat(once_at)
+        except Exception:
+            return False
+        return now >= once_dt
+
+    # daily / weekly / monthly use schedule_at HH:MM
     schedule_at = (policy['schedule_at'] or '03:00').strip()
     try:
         hh, mm = [int(x) for x in schedule_at.split(':', 1)]
@@ -141,6 +249,19 @@ def _is_due(policy, now=None):
         # fire on Sunday (weekday == 6)
         if now.weekday() != 6: return False
         if last_dt and (now - last_dt).total_seconds() < 6 * 24 * 3600: return False
+        return True
+    if sch == 'monthly':
+        # #586 — once per month on schedule_day (hour/minute already gated above).
+        # clamp to the month's length so day=31 still fires on Feb 28/29, Apr 30, etc.
+        # (otherwise "run on the 31st" silently skips ~5 months a year).
+        try:
+            day = int(policy.get('schedule_day') or 1)
+        except Exception:
+            day = 1
+        day = max(1, min(31, day))
+        dim = calendar.monthrange(now.year, now.month)[1]
+        if now.day != min(day, dim): return False
+        if last_dt and (now - last_dt).total_seconds() < 27 * 24 * 3600: return False
         return True
     return False
 
@@ -206,8 +327,9 @@ def _prune(mgr, node, vmid, vm_type, policy):
     return pruned
 
 
-def _execute_policy(policy_id):
-    """Run one policy. Persists a row in snapshot_runs."""
+def _execute_policy(policy_id, force=False):
+    """Run one policy. Persists a row in snapshot_runs. force=True runs even a
+    disabled policy (used by the manual 'run now' button — #586)."""
     db = get_db()
     c = db.conn.cursor()
     c.execute('SELECT * FROM snapshot_policies WHERE id = ?', (policy_id,))
@@ -215,8 +337,20 @@ def _execute_policy(policy_id):
     if not row:
         return
     policy = _row_to_policy(row)
-    if not policy['enabled']:
+    if not policy['enabled'] and not force:
         return
+
+    # #586 — a 'once' policy must fire exactly once. Stamp last_run_at up front so
+    # an early exit below (e.g. the cluster manager being temporarily gone) can't
+    # leave it un-stamped and have the 60s scheduler re-dispatch it every tick.
+    # The final UPDATE just refreshes last_run_at with the real finish time/status.
+    if policy['schedule'] == 'once':
+        try:
+            c.execute("UPDATE snapshot_policies SET last_run_at=? WHERE id=?",
+                      (datetime.now().isoformat(), policy_id))
+            db.conn.commit()
+        except Exception:
+            pass
 
     started_at = datetime.now().isoformat()
     c.execute(
@@ -264,10 +398,23 @@ def _execute_policy(policy_id):
     else:
         log_lines.append('policy has no recorded creator — per-VM authz not applied (legacy policy)')
 
+    prune_only = bool(policy.get('prune_only'))
+    if prune_only:
+        log_lines.append('prune-only policy — not creating new snapshots, retention sweep only')
     for node, vmid, vm_type in targets:
         if policy_creator and not user_can_access_vm(policy_creator, policy['cluster_id'], vmid, 'vm.snapshot', vm_type):
             skipped_authz += 1
             log_lines.append(f"  ⊘ {vm_type}/{vmid}@{node}: skipped (creator lacks vm.snapshot)")
+            continue
+        # #586 — prune-only: skip create, just sweep this policy's old snapshots
+        if prune_only:
+            try:
+                pruned = _prune(mgr, node, vmid, vm_type, policy)
+                if pruned:
+                    pruned_total += pruned
+                    log_lines.append(f"  ⌫ {vm_type}/{vmid}@{node}: pruned {pruned} old snapshot(s)")
+            except Exception as e:
+                log_lines.append(f"  ✗ {vm_type}/{vmid}@{node}: prune err: {e}")
             continue
         snap = _snap_name(policy['id'])
         create_ok = False
@@ -405,6 +552,13 @@ def create_policy(cluster_id):
     target_value = (body.get('target_value') or '').strip()[:300]
     schedule = body.get('schedule') or 'daily'
     schedule_at = (body.get('schedule_at') or '03:00')[:5]
+    schedule_cron = (body.get('schedule_cron') or '').strip()[:120]
+    try:
+        schedule_day = max(1, min(31, int(body.get('schedule_day') or 1)))
+    except (TypeError, ValueError):
+        schedule_day = 1
+    run_once_at = (body.get('run_once_at') or '').strip()[:32]
+    prune_only = bool(body.get('prune_only'))
     retention_count = max(0, int(body.get('retention_count') or 7))
     retention_days = max(0, int(body.get('retention_days') or 0))
     include_ram = bool(body.get('include_ram'))
@@ -415,8 +569,15 @@ def create_policy(cluster_id):
         return jsonify({'error': 'name and target_value required'}), 400
     if target_type not in ('vm', 'tag'):
         return jsonify({'error': 'target_type must be vm or tag'}), 400
-    if schedule not in ('hourly', 'daily', 'weekly'):
-        return jsonify({'error': 'schedule must be hourly / daily / weekly'}), 400
+    if schedule not in ('hourly', 'daily', 'weekly', 'monthly', 'once', 'cron'):
+        return jsonify({'error': 'invalid schedule'}), 400
+    if schedule == 'cron' and not _valid_cron(schedule_cron):
+        return jsonify({'error': 'cron schedule needs a valid 5-field expression in schedule_cron'}), 400
+    if schedule == 'once':
+        try:
+            datetime.fromisoformat(run_once_at)
+        except Exception:
+            return jsonify({'error': 'once schedule needs run_once_at as an ISO datetime'}), 400
 
     # MK: a creator can only point a policy at VMs they could snapshot by hand
     mgr = cluster_managers.get(cluster_id)
@@ -438,10 +599,12 @@ def create_policy(cluster_id):
         c = get_db().conn.cursor()
         c.execute('''INSERT INTO snapshot_policies
             (id, cluster_id, name, target_type, target_value, schedule, schedule_at,
+             schedule_cron, schedule_day, run_once_at, prune_only,
              retention_count, retention_days, include_ram, enabled, notes,
              created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (pid, cluster_id, name, target_type, target_value, schedule, schedule_at,
+             schedule_cron, schedule_day, run_once_at, 1 if prune_only else 0,
              retention_count, retention_days, 1 if include_ram else 0, 1 if enabled else 0,
              notes, _current_user(), datetime.now().isoformat()))
         get_db().conn.commit()
@@ -483,12 +646,31 @@ def update_policy(cluster_id, pid):
             return jsonify({'error': 'Permission denied: you lack vm.snapshot on some target VMs',
                             'unauthorized_vms': denied[:10]}), 403
 
+    # #586 — validate the new schedule fields when present
+    if body.get('schedule') and body['schedule'] not in ('hourly', 'daily', 'weekly', 'monthly', 'once', 'cron'):
+        return jsonify({'error': 'invalid schedule'}), 400
+    if body.get('schedule_cron') and not _valid_cron(body['schedule_cron']):
+        return jsonify({'error': 'invalid cron expression'}), 400
+    if body.get('run_once_at'):
+        try:
+            datetime.fromisoformat(body['run_once_at'])
+        except Exception:
+            return jsonify({'error': 'run_once_at must be an ISO datetime'}), 400
+
     fields = []; params = []
     for k, t in (('name', str), ('target_type', str), ('target_value', str),
-                 ('schedule', str), ('schedule_at', str), ('notes', str)):
+                 ('schedule', str), ('schedule_at', str), ('schedule_cron', str),
+                 ('run_once_at', str), ('notes', str)):
         if k in body:
             fields.append(f'{k}=?')
             params.append(str(body[k])[:300])
+    if 'schedule_day' in body:
+        try:
+            fields.append('schedule_day=?'); params.append(max(1, min(31, int(body['schedule_day']))))
+        except (TypeError, ValueError):
+            pass
+    if 'prune_only' in body:
+        fields.append('prune_only=?'); params.append(1 if body['prune_only'] else 0)
     if 'retention_count' in body:
         fields.append('retention_count=?'); params.append(int(body['retention_count']))
     if 'retention_days' in body:
@@ -540,8 +722,9 @@ def run_policy_now(cluster_id, pid):
     c.execute('SELECT id FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
     if not c.fetchone():
         return jsonify({'error': 'not found'}), 404
-    # fire in a thread so the request returns fast
-    t = threading.Thread(target=_execute_policy, args=(pid,), daemon=True,
+    # fire in a thread so the request returns fast. force=True so 'run now' works
+    # even on a disabled policy (#586 — run without having to enable the schedule).
+    t = threading.Thread(target=_execute_policy, args=(pid, True), daemon=True,
                          name=f'snap-run-{pid}')
     t.start()
     return jsonify({'ok': True, 'message': 'policy run started'})
