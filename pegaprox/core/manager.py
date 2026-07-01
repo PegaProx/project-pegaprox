@@ -475,6 +475,16 @@ class PegaProxManager:
             except Exception: pass
 
         session = requests.Session()
+        # NS Jul 2026 — never route cluster API calls through an ambient proxy.
+        # requests defaults trust_env=True, which reads HTTP(S)_PROXY / NO_PROXY
+        # from the environment (and ~/.netrc) per request. On an air-gapped /
+        # offline jumphost a corporate proxy is almost always still set in the
+        # env — so every direct-to-PVE call got routed at the dead proxy and
+        # burned its full connect timeout. That's what made Settings and VM
+        # Config (each ~20 LAN calls) crawl. We talk to PVE directly over the
+        # LAN, so opt out of env proxy/.netrc entirely. (verify= is set
+        # explicitly below, so this doesn't touch CA behaviour.)
+        session.trust_env = False
         # Keep-alive pool. pool_block=False => an excess concurrent request opens
         # a throwaway connection instead of blocking on the pool lock (the old
         # deadlock path). The hot broadcast path hits one host per cluster, so a
