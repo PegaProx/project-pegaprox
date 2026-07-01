@@ -1381,6 +1381,7 @@ def create_storage(cluster_id):
             'cifs': ['server', 'share'],
             'lvm': ['vgname'],
             'lvmthin': ['vgname', 'thinpool'],
+            'starlvm': ['vgname'],  # StarWind x Proxmox SAN plugin — thin snaps on a shared VG (needs the plugin installed on the node)
             'iscsi': ['portal', 'target'],
             'iscsidirect': ['portal', 'target'],
             'rbd': ['pool', 'monhost'],
@@ -1758,7 +1759,7 @@ def rescan_storage(cluster_id, storage_id):
                                 ssh.connect(**connect_kwargs)
                                 
                                 # 1. SCSI bus rescan (detects new LUNs AND size changes)
-                                if storage_type in ['iscsi', 'iscsidirect', 'lvm', 'lvmthin']:
+                                if storage_type in ['iscsi', 'iscsidirect', 'lvm', 'lvmthin', 'starlvm']:
                                     stdin, stdout, stderr = ssh.exec_command(
                                         'for host in /sys/class/scsi_host/host*; do echo "- - -" > "$host/scan" 2>/dev/null; done && '
                                         'for device in /sys/class/scsi_device/*/device/rescan; do echo 1 > "$device" 2>/dev/null; done',
@@ -1810,7 +1811,7 @@ def rescan_storage(cluster_id, storage_id):
                                         })
                                 
                                 # 2. LVM pvresize (auto-resize PVs to use new LUN size)
-                                if storage_type in ['lvm', 'lvmthin'] and auto_pvresize and vgname:
+                                if storage_type in ['lvm', 'lvmthin', 'starlvm'] and auto_pvresize and vgname:
                                     # NS 2026-05-06: vgname kommt aus storage.cfg (admin-managed),
                                     # aber shlex.quote() schadet hier nicht und beruhigt semgrep.
                                     # falls jemand mal nen vgname mit ; oder backticks reindreht
@@ -1878,7 +1879,7 @@ def rescan_storage(cluster_id, storage_id):
                         node_result['actions'].append({'action': 'scsi_rescan_api', 'status': 'failed', 'error': scsi_resp.text[:100]})
                 
                 # 2. For LVM/shared LVM: trigger LVM rescan via API
-                if storage_type in ['lvm', 'lvmthin']:
+                if storage_type in ['lvm', 'lvmthin', 'starlvm']:
                     lvm_url = f"https://{host}:{port}/api2/json/nodes/{node}/disks/lvm"
                     lvm_resp = session.get(lvm_url, timeout=30)
                     if lvm_resp.status_code == 200:
@@ -1928,7 +1929,7 @@ def rescan_storage(cluster_id, storage_id):
             'success': success_count > 0,
             'storage': storage_id,
             'type': storage_type,
-            'vgname': vgname if storage_type in ['lvm', 'lvmthin'] else None,
+            'vgname': vgname if storage_type in ['lvm', 'lvmthin', 'starlvm'] else None,
             'deep_scan': deep_scan,
             'nodes_scanned': len(results),
             'nodes_successful': success_count,

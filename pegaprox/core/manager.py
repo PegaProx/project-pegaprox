@@ -4013,7 +4013,8 @@ class PegaProxManager:
                 for s in storage_response.json().get('data', []):
                     storage_configs[s['storage']] = s
             
-            shared_types = ['nfs', 'cifs', 'glusterfs', 'cephfs', 'rbd', 'iscsi', 'iscsidirect', 'drbd', 'pbs']
+            shared_types = ['nfs', 'cifs', 'glusterfs', 'cephfs', 'rbd', 'iscsi', 'iscsidirect', 'drbd', 'pbs', 'starlvm']
+            # MK: starlvm = StarWind shared thin-LVM (snapshots on a shared SAN LUN), always added with -shared 1
             local_types = ['dir', 'lvmthin']
             # NS: LVM/ZFS treated as local unless proxmox 'shared' flag is set
             # Claude helped optimize this logic - NS feb 2026
@@ -5609,8 +5610,9 @@ echo "AGENT_UNINSTALLED"
                     # Proxmox Backup Server - not a filesystem, skip
                     continue
                     
-                elif storage_type in ['rbd', 'iscsi', 'zfspool', 'lvm', 'lvmthin']:
+                elif storage_type in ['rbd', 'iscsi', 'zfspool', 'lvm', 'lvmthin', 'starlvm']:
                     # Block-based storage - track for warning but can't use for heartbeats
+                    # (starlvm gives VMs snapshots + live-migration, but heartbeat FILES still need a fs)
                     block_storages.append({
                         'name': storage_name,
                         'type': storage_type,
