@@ -286,6 +286,7 @@
                 { id: 'dir', label: 'Directory', icon: '📁' },
                 { id: 'lvm', label: 'LVM', icon: '💾' },
                 { id: 'lvmthin', label: 'LVM-Thin', icon: '💾' },
+                { id: 'starlvm', label: 'StarWind LVM', icon: '🛰️' },
                 { id: 'btrfs', label: 'BTRFS', icon: '🌲' },
                 { id: 'nfs', label: 'NFS', icon: '🌐' },
                 { id: 'cifs', label: 'SMB/CIFS', icon: '🖥' },
@@ -1033,6 +1034,7 @@
                     cifs: ['server', 'share'],
                     lvm: ['vgname'],
                     lvmthin: ['vgname', 'thinpool'],
+                    starlvm: ['vgname'],
                     iscsi: ['portal', 'target'],
                     rbd: ['pool', 'monhost'],
                     cephfs: ['monhost'],
@@ -2598,7 +2600,10 @@
                                                 <div className="grid grid-cols-5 gap-2">
                                                     {storageTypes.map(st => (
                                                         <button key={st.id} onClick={() => {
-                                                            setNewStorage({type: st.id, storage: '', content: 'images,rootdir', enabled: true});
+                                                            const base = {type: st.id, storage: '', content: 'images,rootdir', enabled: true};
+                                                            // LW: starlvm only makes sense as shared block storage — default shared on
+                                                            if (st.id === 'starlvm') base.shared = true;
+                                                            setNewStorage(base);
                                                             setScanResults([]); // Clear scan results when type changes
                                                         }}
                                                             className={`p-2 rounded-lg border text-xs flex flex-col items-center gap-1 ${newStorage.type === st.id ? 'border-proxmox-orange bg-proxmox-orange/20' : 'border-proxmox-border hover:bg-proxmox-dark'}`}>
@@ -2828,6 +2833,27 @@
                                                                 Uses separate volumes for snapshot data instead of internal LVM snapshots. 
                                                                 This provides better performance and compatibility.
                                                             </p>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* StarWind LVM (starlvm) — LW: shared thin-LVM via the StarWind x Proxmox SAN plugin */}
+                                                {newStorage.type === 'starlvm' && (
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <div className="col-span-2 p-3 bg-teal-900/30 border border-teal-500/50 rounded text-sm text-teal-200">
+                                                            <strong>StarWind shared LVM:</strong> the volume group must already exist on the shared SAN LUN, and the <code>starwind-proxmox-plugin</code> must be installed on every node. Gives thin snapshots + live migration on shared block storage.
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-sm text-gray-400 mb-1">Volume group name *</label>
+                                                            <input type="text" value={newStorage.vgname || ''} onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} placeholder="e.g. swvg" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        </div>
+                                                        <div className="flex items-center gap-4">
+                                                            <label className="flex items-center gap-2 text-sm">
+                                                                <input type="checkbox" checked={newStorage.shared !== false} onChange={e => setNewStorage({...newStorage, shared: e.target.checked})} className="rounded" /> Shared
+                                                            </label>
+                                                            <label className="flex items-center gap-2 text-sm">
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                            </label>
                                                         </div>
                                                     </div>
                                                 )}

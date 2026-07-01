@@ -926,6 +926,8 @@
                     'zfspool': 'text-blue-400', 'lvmthin': 'text-purple-400', 'lvm': 'text-purple-400',
                     'dir': 'text-green-400', 'nfs': 'text-yellow-400', 'cifs': 'text-yellow-400',
                     'cephfs': 'text-red-400', 'rbd': 'text-red-400',
+                    'iscsi': 'text-purple-400', 'iscsidirect': 'text-purple-400',
+                    'starlvm': 'text-teal-400',  // LW: StarWind shared thin-LVM
                 };
                 return colors[type] || 'text-gray-400';
             };
