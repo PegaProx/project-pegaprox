@@ -3465,6 +3465,89 @@ _vm_screenshot_lock = threading.Lock()
 _VM_SCREENSHOT_TTL = 60.0
 
 
+# NS Jun 2026 — RFB fallback for the console tile. screendump (qm monitor) is the
+# primary grab, but it comes back empty/black for some guests — the big one being
+# Windows on the virtio-gpu / QXL driver, where the HMP dump just doesn't render.
+# In that case pull ONE frame straight off the vncproxy (RFB), which works no matter
+# the guest GPU because it's QEMU's own VNC server. shared=1 so we don't kick an open
+# console. Costs a single "console opened" line in the PVE log, hence fallback-only.
+def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
+    import urllib.request, urllib.parse, json as _json, ssl as _ssl
+    import websocket as ws_client
+    from pegaprox.utils import vnc_grab
+    host, port = mgr.host, mgr.api_port
+
+    ssl_ctx = _ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = _ssl.CERT_NONE
+
+    # login → vncproxy ticket/port (same flow as vnc_poll)
+    login_data = urllib.parse.urlencode({'username': mgr.config.user, 'password': mgr.config.pass_}).encode('utf-8')
+    login_req = urllib.request.Request(f"https://{host}:{port}/api2/json/access/ticket", data=login_data, method='POST')
+    with urllib.request.urlopen(login_req, context=ssl_ctx, timeout=10) as r:
+        login_result = _json.loads(r.read().decode('utf-8'))
+    pve_ticket = login_result['data']['ticket']
+    csrf_token = login_result['data']['CSRFPreventionToken']
+
+    vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/vncproxy"
+    vnc_req = urllib.request.Request(vnc_url, data=urllib.parse.urlencode({'websocket': '1'}).encode('utf-8'), method='POST')
+    vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
+    vnc_req.add_header('CSRFPreventionToken', csrf_token)
+    with urllib.request.urlopen(vnc_req, context=ssl_ctx, timeout=10) as r:
+        vnc_result = _json.loads(r.read().decode('utf-8'))
+    vnc_ticket = vnc_result['data']['ticket']
+    vnc_port = vnc_result['data']['port']
+
+    # optional SSH tunnel for clusters where 8006 isn't directly reachable from us
+    tunnel_endpoint = None
+    target_host, target_port = host, 8006
+    try:
+        if bool(getattr(mgr.config, 'vnc_tunnel', False)):
+            from pegaprox.utils import vnc_tunnel as _vt
+            _ssh_user = getattr(mgr.config, 'ssh_user', None) or (mgr.config.user or 'root').split('@')[0]
+            _ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
+            tunnel_endpoint = _vt.acquire(
+                cluster_id=getattr(mgr, 'id', ''), pve_host=host,
+                ssh_user=_ssh_user, ssh_port=_ssh_port,
+                ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
+                ssh_password=getattr(mgr.config, 'pass_', '') or '',
+                target_host='127.0.0.1', target_port=8006,
+            )
+            target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
+    except Exception as te:
+        logging.warning(f"[Screenshot] RFB tunnel setup failed ({te}) — direct")
+        tunnel_endpoint = None
+        target_host, target_port = host, 8006
+
+    encoded_ticket = url_quote(vnc_ticket, safe='')
+    pve_ws_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid}/vncwebsocket?port={vnc_port}&vncticket={encoded_ticket}"
+    pve_ws_url = f"wss://{target_host}:{target_port}{pve_ws_path}"
+    pve_ws = None
+    try:
+        pve_ws = ws_client.create_connection(
+            pve_ws_url,
+            sslopt={"cert_reqs": _ssl.CERT_NONE},
+            header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:{port}"},
+            timeout=timeout,
+        )
+        img = vnc_grab.grab_frame(pve_ws, vnc_ticket, timeout=timeout)
+    finally:
+        try:
+            if pve_ws: pve_ws.close()
+        except Exception:
+            pass
+        try:
+            if tunnel_endpoint: tunnel_endpoint.stop()
+        except Exception:
+            pass
+
+    # same blank-guard as screendump — a genuinely-off display shouldn't render a black tile
+    ex = img.getextrema()
+    if max(hi for _lo, hi in ex) <= 10:
+        raise IOError("blank framebuffer (display likely off)")
+    return vnc_grab.to_png_thumbnail(img, max_width=max_width)
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/screenshot', methods=['GET'])
 @require_auth()
 def get_vm_screenshot(cluster_id, node, vm_type, vmid):
@@ -3501,9 +3584,16 @@ def get_vm_screenshot(cluster_id, node, vm_type, vmid):
         from pegaprox.utils import vnc_grab
         png = vnc_grab.screendump_to_png(mgr, node, vmid, max_width=480, timeout=20)
     except Exception as e:
-        # no node exec (API-token-only / no SSH), VM headless, or stopped — fall back to icon
-        logging.info(f"[Screenshot] screendump failed {vm_type}/{vmid}@{node}: {e}")
-        return jsonify({'error': f'screenshot unavailable: {e}'}), 502
+        # screendump came back empty/blank, or can't run (API-token-only / no SSH).
+        # The common one is Windows on virtio-gpu/QXL — qm monitor screendump renders
+        # nothing there, so the tile only ever showed the icon. Fall back to a one-off
+        # RFB frame off the vncproxy (guest-GPU-independent) before giving up.
+        logging.info(f"[Screenshot] screendump failed {vm_type}/{vmid}@{node}: {e} — trying RFB")
+        try:
+            png = _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10)
+        except Exception as e2:
+            logging.info(f"[Screenshot] RFB fallback also failed {vm_type}/{vmid}@{node}: {e2}")
+            return jsonify({'error': f'screenshot unavailable: {e2}'}), 502
 
     with _vm_screenshot_lock:
         _vm_screenshot_cache[cache_key] = (time.monotonic(), png)
