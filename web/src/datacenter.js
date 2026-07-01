@@ -42,6 +42,9 @@
                 setShowMultipathSetup(false);
             }, [clusterId]);
             const [newStorage, setNewStorage] = useState({ type: 'dir', storage: '', path: '', content: 'images,rootdir' });
+            // LW: StarWind SAN plugin (starlvm) one-click install state
+            const [swInstalling, setSwInstalling] = useState(false);
+            const [swInstallResult, setSwInstallResult] = useState(null);  // {installed,total,results,success}
             const [backupJobs, setBackupJobs] = useState([]);
             const [replicationJobs, setReplicationJobs] = useState([]);
             const [snapshotReplJobs, setSnapshotReplJobs] = useState([]);  // snapshot-based repl
@@ -263,6 +266,30 @@
                 } catch (err) {
                     console.error('Auth fetch error:', err);
                     return null;
+                }
+            };
+
+            // LW: one-click install of the StarWind x Proxmox SAN plugin on every node
+            // (backend picks PVE 8 vs 9, signed apt repo, idempotent). Needs node.maintenance.
+            const installStarwindPlugin = async () => {
+                setSwInstalling(true); setSwInstallResult(null);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/storage/starlvm/install`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                    });
+                    const data = res ? await res.json().catch(() => null) : null;
+                    if (res && res.ok && data) {
+                        setSwInstallResult(data);
+                        addToast(`StarWind: ${data.installed}/${data.total} ${t('nodes') || 'nodes'}`, data.success ? 'success' : 'error');
+                    } else {
+                        addToast((data && data.error) || t('starwindInstallFailed') || 'Plugin install failed', 'error');
+                    }
+                } catch (e) {
+                    addToast(t('starwindInstallFailed') || 'Plugin install failed', 'error');
+                } finally {
+                    setSwInstalling(false);
                 }
             };
 
@@ -2843,6 +2870,25 @@
                                                         <div className="col-span-2 p-3 bg-teal-900/30 border border-teal-500/50 rounded text-sm text-teal-200">
                                                             <strong>StarWind shared LVM:</strong> the volume group must already exist on the shared SAN LUN, and the <code>starwind-proxmox-plugin</code> must be installed on every node. Gives thin snapshots + live migration on shared block storage.
                                                         </div>
+                                                        <div className="col-span-2 flex items-center gap-3 flex-wrap">
+                                                            <button type="button" onClick={installStarwindPlugin} disabled={swInstalling}
+                                                                className="px-3 py-1.5 text-sm rounded bg-teal-600 hover:bg-teal-700 disabled:opacity-50 flex items-center gap-2">
+                                                                {swInstalling ? <Icons.RotateCw className="w-4 h-4 animate-spin" /> : <Icons.Download className="w-4 h-4" />}
+                                                                {t('installStarwindPlugin') || 'Install plugin on all nodes'}
+                                                            </button>
+                                                            <span className="text-xs text-gray-400">{t('installStarwindPluginHint') || 'Installs starwind-proxmox-plugin from the signed StarWind apt repo on every node.'}</span>
+                                                        </div>
+                                                        {swInstallResult && (
+                                                            <div className="col-span-2 text-xs space-y-1 max-h-40 overflow-auto">
+                                                                {(swInstallResult.results || []).map(r => (
+                                                                    <div key={r.node} className="flex items-center gap-2">
+                                                                        <span className={r.success ? 'text-green-400' : 'text-red-400'}>{r.success ? '✓' : '✗'}</span>
+                                                                        <span className="font-mono">{r.node}</span>
+                                                                        <span className="text-gray-400">{r.success ? (r.already_installed ? (t('alreadyInstalled') || 'already installed') : (t('installed') || 'installed')) : (r.error || '')}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
                                                         <div>
                                                             <label className="block text-sm text-gray-400 mb-1">Volume group name *</label>
                                                             <input type="text" value={newStorage.vgname || ''} onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} placeholder="e.g. swvg" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />

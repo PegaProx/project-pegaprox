@@ -4,6 +4,11 @@
         // ═══════════════════════════════════════════════
         const translations = {
             de: {
+                // LW: StarWind SAN-Plugin Install (starlvm)
+                installStarwindPlugin: 'Plugin auf allen Nodes installieren',
+                installStarwindPluginHint: 'Installiert starwind-proxmox-plugin aus dem signierten StarWind-apt-Repo auf jedem Node.',
+                starwindInstallFailed: 'Plugin-Installation fehlgeschlagen',
+                alreadyInstalled: 'bereits installiert',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Cluster-Ressourcen-Scheduling (CRS)',
                 crsHaRebalanceOnStart: 'HA-Rebalance beim Knoten-Start',
