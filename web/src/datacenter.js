@@ -2870,6 +2870,10 @@
                                                         <div className="col-span-2 p-3 bg-teal-900/30 border border-teal-500/50 rounded text-sm text-teal-200">
                                                             <strong>StarWind shared LVM:</strong> the volume group must already exist on the shared SAN LUN, and the <code>starwind-proxmox-plugin</code> must be installed on every node. Gives thin snapshots + live migration on shared block storage.
                                                         </div>
+                                                        <div className="col-span-2 p-3 bg-amber-900/30 border border-amber-500/50 rounded text-xs text-amber-200">
+                                                            ⚠️ {t('starwindThirdPartyNote') || 'StarWind LVM is a third-party product by StarWind Software, not part of PegaProx. PegaProx gives no support or warranty for it — for problems, contact StarWind directly:'}{' '}
+                                                            <a href="https://www.starwindsoftware.com/" target="_blank" rel="noopener noreferrer" className="underline text-amber-300 hover:text-amber-100">starwindsoftware.com</a>
+                                                        </div>
                                                         <div className="col-span-2 flex items-center gap-3 flex-wrap">
                                                             <button type="button" onClick={installStarwindPlugin} disabled={swInstalling}
                                                                 className="px-3 py-1.5 text-sm rounded bg-teal-600 hover:bg-teal-700 disabled:opacity-50 flex items-center gap-2">

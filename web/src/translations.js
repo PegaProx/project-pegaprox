@@ -9,6 +9,7 @@
                 installStarwindPluginHint: 'Installiert starwind-proxmox-plugin aus dem signierten StarWind-apt-Repo auf jedem Node.',
                 starwindInstallFailed: 'Plugin-Installation fehlgeschlagen',
                 alreadyInstalled: 'bereits installiert',
+                starwindThirdPartyNote: 'StarWind LVM ist ein Drittanbieter-Produkt von StarWind Software und nicht Teil von PegaProx. PegaProx übernimmt dafür keinen Support und keine Gewähr — bei Problemen wende dich direkt an StarWind:',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Cluster-Ressourcen-Scheduling (CRS)',
                 crsHaRebalanceOnStart: 'HA-Rebalance beim Knoten-Start',
@@ -4085,6 +4086,7 @@
                 installStarwindPluginHint: 'Installs starwind-proxmox-plugin from the signed StarWind apt repo on every node.',
                 starwindInstallFailed: 'Plugin install failed',
                 alreadyInstalled: 'already installed',
+                starwindThirdPartyNote: 'StarWind LVM is a third-party product by StarWind Software, not part of PegaProx. PegaProx gives no support or warranty for it — for problems, contact StarWind directly:',
                 // MK 2026-06-11 — i18n backfill (Nico): keys referenced via t('x')||'fallback'
                 // that were never defined, so t() echoed the raw key. Values = the JSX fallback
                 // text. en map only; other languages fall back here via t() (German = later pass).
@@ -8253,6 +8255,7 @@
                 installStarwindPluginHint: 'Installe starwind-proxmox-plugin depuis le dépôt apt signé de StarWind sur chaque nœud.',
                 starwindInstallFailed: 'Échec de l\'installation du plugin',
                 alreadyInstalled: 'déjà installé',
+                starwindThirdPartyNote: 'StarWind LVM est un produit tiers de StarWind Software, ne faisant pas partie de PegaProx. PegaProx n\'offre aucun support ni garantie — en cas de problème, contactez directement StarWind :',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Planification des ressources du cluster (CRS)',
                 crsHaRebalanceOnStart: 'Rééquilibrage HA au démarrage',
@@ -12007,6 +12010,7 @@
                 installStarwindPluginHint: 'Instala starwind-proxmox-plugin desde el repositorio apt firmado de StarWind en cada nodo.',
                 starwindInstallFailed: 'Error al instalar el plugin',
                 alreadyInstalled: 'ya instalado',
+                starwindThirdPartyNote: 'StarWind LVM es un producto de terceros de StarWind Software, no forma parte de PegaProx. PegaProx no ofrece soporte ni garantía; ante cualquier problema, contacte directamente con StarWind:',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Planificación de recursos del clúster (CRS)',
                 crsHaRebalanceOnStart: 'Reequilibrio HA al iniciar',
@@ -15904,6 +15908,7 @@
                 installStarwindPluginHint: 'Instala starwind-proxmox-plugin do repositório apt assinado da StarWind em cada nó.',
                 starwindInstallFailed: 'Falha ao instalar o plugin',
                 alreadyInstalled: 'já instalado',
+                starwindThirdPartyNote: 'StarWind LVM é um produto de terceiros da StarWind Software e não faz parte do PegaProx. O PegaProx não oferece suporte nem garantia — em caso de problemas, contacte diretamente a StarWind:',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Agendamento de recursos do cluster (CRS)',
                 crsHaRebalanceOnStart: 'Reequilíbrio HA ao iniciar',
@@ -19601,6 +19606,7 @@
                 installStarwindPluginHint: '서명된 StarWind apt 저장소에서 모든 노드에 starwind-proxmox-plugin을 설치합니다.',
                 starwindInstallFailed: '플러그인 설치 실패',
                 alreadyInstalled: '이미 설치됨',
+                starwindThirdPartyNote: 'StarWind LVM은 StarWind Software의 서드파티 제품이며 PegaProx의 일부가 아닙니다. PegaProx는 이에 대한 지원이나 보증을 제공하지 않습니다 — 문제가 있으면 StarWind에 직접 문의하세요:',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Cluster Resource Scheduling (CRS)',
                 crsHaRebalanceOnStart: 'HA Rebalance on Start',
@@ -23380,6 +23386,7 @@
                 installStarwindPluginHint: 'Installa starwind-proxmox-plugin dal repository apt firmato di StarWind su ogni nodo.',
                 starwindInstallFailed: 'Installazione del plugin non riuscita',
                 alreadyInstalled: 'già installato',
+                starwindThirdPartyNote: 'StarWind LVM è un prodotto di terze parti di StarWind Software e non fa parte di PegaProx. PegaProx non fornisce supporto né garanzia — per problemi, contatta direttamente StarWind:',
                 crsHeader: 'Pianificazione delle risorse del cluster (CRS)',
                 crsHaRebalanceOnStart: 'Riequilibrio HA all\'avvio',
                 crsHaRebalanceOnStartHint: 'Riequilibrare automaticamente le risorse HA quando un nodo entra online',
@@ -26981,6 +26988,7 @@
                 installStarwindPluginHint: 'Installa starwind-proxmox-plugin dal repository apt firmato di StarWind su ogni nodo.',
                 starwindInstallFailed: 'Installazione del plugin non riuscita',
                 alreadyInstalled: 'già installato',
+                starwindThirdPartyNote: 'StarWind LVM è un prodotto di terze parti di StarWind Software e non fa parte di PegaProx. PegaProx non fornisce supporto né garanzia — per problemi, contatta direttamente StarWind:',
                 crsHeader: 'Pianificazione delle risorse del cluster (CRS)',
                 crsHaRebalanceOnStart: 'Riequilibrio HA all\'avvio',
                 crsHaRebalanceOnStartHint: 'Riequilibrare automaticamente le risorse HA quando un nodo entra online',
