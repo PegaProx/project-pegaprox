@@ -1457,6 +1457,254 @@ def deploy_smbios_autoconfig_all(cluster_id):
 
 
 # =============================================================================
+# StarWind "starlvm" SAN plugin install
+# MK: one-click install of the StarWind x Proxmox SAN Integration plugin (the
+# custom `starlvm` storage type — thin snapshots on a shared SAN LUN) across the
+# cluster. We deliberately do NOT run StarWind's own installer script: it falls
+# back to an UNSIGNED (trusted=yes) apt repo if its signed-repo test hiccups. We
+# build a SIGNED deb822 source ourselves (key over HTTPS, Signed-By) so apt
+# enforces the signature on install — no unsigned fallback. Repo/key are
+# admin-overridable for air-gapped mirrors. Per-node, idempotent, bounded-parallel.
+# =============================================================================
+
+STARWIND_REPO_DEFAULT = 'http://repo.starwind.com/proxmox/'
+STARWIND_KEY_DEFAULT = 'https://repo.starwind.com/keys/repo_public.key'
+
+# these strings land inside a root-run bash script, so keep the charset tight
+def _safe_repo_url(u, default):
+    u = (u or '').strip() or default
+    if len(u) > 300 or not re.match(r'^https?://[A-Za-z0-9._~:/\-]+$', u):
+        raise ValueError(f'unsafe repo/key url: {u[:60]}')
+    return u
+
+STARLVM_INSTALL_SCRIPT = """#!/usr/bin/env bash
+# PegaProx — install the StarWind x Proxmox SAN plugin (starlvm) on this node.
+set -uo pipefail
+REPO_URL='__REPO_URL__'
+KEY_URL='__KEY_URL__'
+FORCE='__FORCE__'
+KEYRING='/usr/share/keyrings/starwind-proxmox.gpg'
+SRC='/etc/apt/sources.list.d/starwind-proxmox.sources'
+
+pv="$(pveversion 2>/dev/null | grep -oE 'pve-manager/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+if [ -z "${pv:-}" ]; then echo 'PP_ERR not-a-proxmox-node'; exit 3; fi
+if [ "$pv" -ge 9 ]; then PKG='starwind-proxmox-plugin-pve9'; SUITE='trixie'; else PKG='starwind-proxmox-plugin'; SUITE='master'; fi
+
+# idempotent: skip if already there (unless forced)
+if [ "$FORCE" != '1' ] && dpkg-query -W -f='${Status}' "$PKG" 2>/dev/null | grep -q 'install ok installed'; then
+    ver="$(dpkg-query -W -f='${Version}' "$PKG" 2>/dev/null || echo '?')"
+    echo "PP_OK already_installed $PKG $ver pve$pv"; exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || { echo 'PP_ERR curl-missing'; exit 3; }
+command -v gpg  >/dev/null 2>&1 || { echo 'PP_ERR gpg-missing'; exit 3; }
+
+# key over HTTPS, dearmored into its own keyring
+if ! curl -fsSL "$KEY_URL" | gpg --dearmor --yes --output "$KEYRING" 2>/dev/null; then
+    echo 'PP_ERR key-fetch-failed'; exit 4
+fi
+chmod 0644 "$KEYRING"
+
+# SIGNED deb822 source — we never write trusted=yes
+cat > "$SRC" <<EOF
+Types: deb
+URIs: ${REPO_URL}
+Suites: ${SUITE}
+Components: main
+Signed-By: ${KEYRING}
+EOF
+
+# scrub any legacy unsigned config a previous StarWind install may have left
+rm -f /etc/apt/sources.list.d/starwind-proxmox.list /etc/apt/trusted.gpg.d/starwind-proxmox.gpg 2>/dev/null || true
+
+apt-get update -o Acquire::Retries=2 >/tmp/pp_starlvm_apt.log 2>&1 || true
+# on PVE9 drop the old bookworm package (StarWind's documented 8->9 upgrade step)
+if [ "$pv" -ge 9 ]; then DEBIAN_FRONTEND=noninteractive apt-get remove -y starwind-proxmox-plugin >/dev/null 2>&1 || true; fi
+
+# apt refuses an unverifiable Signed-By source, so this is the real security gate
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$PKG" >>/tmp/pp_starlvm_apt.log 2>&1; then
+    echo 'PP_ERR apt-install-failed'; exit 5
+fi
+
+# register the custom storage plugin with PVE
+systemctl restart pvedaemon pveproxy >/dev/null 2>&1 || true
+
+dpkg-query -W -f='${Status}' "$PKG" 2>/dev/null | grep -q 'install ok installed' || { echo 'PP_ERR not-installed-after-apt'; exit 6; }
+[ -f /usr/share/perl5/PVE/Storage/Custom/StarLvmPlugin.pm ] || { echo 'PP_ERR plugin-pm-missing'; exit 6; }
+ver="$(dpkg-query -W -f='${Version}' "$PKG" 2>/dev/null || echo '?')"
+echo "PP_OK installed $PKG $ver pve$pv"
+"""
+
+STARLVM_STATUS_SCRIPT = """set -uo pipefail
+pv="$(pveversion 2>/dev/null | grep -oE 'pve-manager/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+pm='no'; [ -f /usr/share/perl5/PVE/Storage/Custom/StarLvmPlugin.pm ] && pm='yes'
+inst='no'; pkg='none'; ver='none'
+for p in starwind-proxmox-plugin-pve9 starwind-proxmox-plugin; do
+    if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+        inst='yes'; pkg="$p"; ver="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"; break
+    fi
+done
+echo "PP_STATUS installed=$inst pkg=$pkg ver=$ver pm=$pm pve=${pv:-?}"
+"""
+
+
+def _cluster_node_names(mgr):
+    """Node short-names from cluster/status; falls back to the config host for single-node."""
+    try:
+        r = mgr._create_session().get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/status", timeout=10)
+        if r.status_code == 200:
+            names = [it.get('name') for it in r.json().get('data', []) if it.get('type') == 'node']
+            if names:
+                return names
+    except Exception as e:
+        logging.warning(f"[starlvm] node enumerate failed: {e}")
+    return [mgr.config.host.split('.')[0]]
+
+
+@bp.route('/api/clusters/<cluster_id>/storage/starlvm/install', methods=['POST'])
+@require_auth(perms=['admin.settings'])  # MK: root apt-install on every node + caller-overridable repo/key → admin-only (not node.maintenance, which tenant_operator holds)
+def install_starlvm_plugin(cluster_id):
+    """Install the StarWind SAN plugin (starlvm storage type) on cluster nodes over SSH.
+
+    Body (all optional): {repo_url, key_url, force: bool, nodes: [names]}.
+    Signed deb822 source only — no unsigned fallback. Idempotent per node."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'StarWind plugin install is Proxmox-only'}), 400
+
+    body = request.get_json(silent=True) or {}
+    try:
+        repo_url = _safe_repo_url(body.get('repo_url'), STARWIND_REPO_DEFAULT)
+        key_url = _safe_repo_url(body.get('key_url'), STARWIND_KEY_DEFAULT)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    force = '1' if body.get('force') else '0'
+    only = set(body.get('nodes') or [])
+
+    script = (STARLVM_INSTALL_SCRIPT
+              .replace('__REPO_URL__', repo_url)
+              .replace('__KEY_URL__', key_url)
+              .replace('__FORCE__', force))
+
+    nodes = _cluster_node_names(mgr)
+    if only:
+        nodes = [n for n in nodes if n in only]
+    if not nodes:
+        return jsonify({'error': 'No nodes found in cluster'}), 404
+
+    def _install_one(node):
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return {'node': node, 'success': False, 'error': 'no SSH-reachable IP'}
+        ssh = None
+        try:
+            for attempt in range(3):
+                ssh = mgr._ssh_connect(node_ip)
+                if ssh:
+                    break
+                if attempt < 2:
+                    time.sleep(1.5)
+            if not ssh:
+                return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
+            _ssh_write_file(ssh, '/tmp/pegaprox-starlvm-install.sh', script, 0o755)
+            out, _e = _ssh_run_checked(ssh, 'bash /tmp/pegaprox-starlvm-install.sh', timeout=200)
+            try:
+                ssh.exec_command('rm -f /tmp/pegaprox-starlvm-install.sh')
+            except Exception:
+                pass
+            last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
+            if 'PP_OK already_installed' in out:
+                return {'node': node, 'success': True, 'already_installed': True, 'detail': last}
+            if 'PP_OK installed' in out:
+                return {'node': node, 'success': True, 'already_installed': False, 'detail': last}
+            return {'node': node, 'success': False, 'error': last or 'unexpected installer output'}
+        except Exception as e:
+            return {'node': node, 'success': False, 'error': safe_error(e, 'install failed')}
+        finally:
+            if ssh:
+                try: ssh.close()
+                except Exception: pass
+
+    from pegaprox.utils.concurrent import run_per_node
+    res_map = run_per_node({n: _install_one for n in nodes}, max_concurrent=8, timeout=240)
+    results = [res_map.get(n) or {'node': n, 'success': False, 'error': 'timed out'} for n in nodes]
+    installed = sum(1 for r in results if r.get('success'))
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'storage.starlvm_install',
+              f"StarWind SAN plugin install: {installed}/{len(nodes)} nodes (repo={repo_url})",
+              cluster=mgr.config.name)
+    return jsonify({
+        'success': installed == len(nodes),
+        'installed': installed,
+        'total': len(nodes),
+        'results': results,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/storage/starlvm/status', methods=['GET'])
+@require_auth(perms=['storage.view'])
+def starlvm_plugin_status(cluster_id):
+    """Per-node install state of the StarWind starlvm plugin (read-only probe)."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Proxmox-only'}), 400
+
+    import base64 as _b64
+    enc = _b64.b64encode(STARLVM_STATUS_SCRIPT.encode('utf-8')).decode('ascii')
+
+    def _probe(node):
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return {'node': node, 'reachable': False}
+        ssh = None
+        try:
+            ssh = mgr._ssh_connect(node_ip)
+            if not ssh:
+                return {'node': node, 'reachable': False}
+            # read-only, no sudo needed (dpkg-query / file test are world-readable)
+            _in, _out, _err = ssh.exec_command(f"echo {enc} | base64 -d | bash", timeout=20)
+            out = _out.read().decode('utf-8', errors='replace')
+            _out.channel.recv_exit_status()
+            d = {}
+            for tok in out.split():
+                if '=' in tok:
+                    k, v = tok.split('=', 1)
+                    d[k] = v
+            return {
+                'node': node,
+                'reachable': True,
+                'installed': d.get('installed') == 'yes',
+                'package': None if d.get('pkg', 'none') == 'none' else d.get('pkg'),
+                'version': None if d.get('ver', 'none') == 'none' else d.get('ver'),
+                'plugin_file': d.get('pm') == 'yes',
+                'pve_major': d.get('pve'),
+            }
+        except Exception as e:
+            return {'node': node, 'reachable': False, 'error': safe_error(e, 'probe failed')}
+        finally:
+            if ssh:
+                try: ssh.close()
+                except Exception: pass
+
+    nodes = _cluster_node_names(mgr)
+    from pegaprox.utils.concurrent import run_per_node
+    res_map = run_per_node({n: _probe for n in nodes}, max_concurrent=8, timeout=60)
+    results = [res_map.get(n) or {'node': n, 'reachable': False} for n in nodes]
+    return jsonify({
+        'nodes': results,
+        'installed_all': bool(results) and all(r.get('installed') for r in results),
+    })
+
+
+# =============================================================================
 # Custom Scripts Feature
 # MK: Run custom .sh/.py scripts on cluster nodes with permission control
 # =============================================================================
