@@ -4080,6 +4080,11 @@
                 clusterHealthSshMissing: 'Cluster Health benötigt SSH-Zugriff von PegaProx auf den Node (corosync-cfgtool, pvecm, systemctl). Bitte die Node-Shell-SSH-Credentials des Clusters konfigurieren und neu laden.',
             },
             en: {
+                // LW: StarWind SAN plugin install (starlvm)
+                installStarwindPlugin: 'Install plugin on all nodes',
+                installStarwindPluginHint: 'Installs starwind-proxmox-plugin from the signed StarWind apt repo on every node.',
+                starwindInstallFailed: 'Plugin install failed',
+                alreadyInstalled: 'already installed',
                 // MK 2026-06-11 — i18n backfill (Nico): keys referenced via t('x')||'fallback'
                 // that were never defined, so t() echoed the raw key. Values = the JSX fallback
                 // text. en map only; other languages fall back here via t() (German = later pass).
@@ -8243,6 +8248,11 @@
             // French translations by @IMNotMax (PR #186)
             // Falls back to EN for missing keys
             fr: {
+                // LW: StarWind SAN plugin install (starlvm)
+                installStarwindPlugin: 'Installer le plugin sur tous les nœuds',
+                installStarwindPluginHint: 'Installe starwind-proxmox-plugin depuis le dépôt apt signé de StarWind sur chaque nœud.',
+                starwindInstallFailed: 'Échec de l\'installation du plugin',
+                alreadyInstalled: 'déjà installé',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Planification des ressources du cluster (CRS)',
                 crsHaRebalanceOnStart: 'Rééquilibrage HA au démarrage',
@@ -11992,6 +12002,11 @@
                 clusterHealthSshMissing: 'Cluster Health a besoin d\'un accès SSH au nœud depuis PegaProx (corosync-cfgtool, pvecm, systemctl). Configurez les identifiants SSH Node-Shell du cluster et actualisez.',
             },
             es: {
+                // LW: StarWind SAN plugin install (starlvm)
+                installStarwindPlugin: 'Instalar plugin en todos los nodos',
+                installStarwindPluginHint: 'Instala starwind-proxmox-plugin desde el repositorio apt firmado de StarWind en cada nodo.',
+                starwindInstallFailed: 'Error al instalar el plugin',
+                alreadyInstalled: 'ya instalado',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Planificación de recursos del clúster (CRS)',
                 crsHaRebalanceOnStart: 'Reequilibrio HA al iniciar',
@@ -15884,6 +15899,11 @@
                 clusterHealthSshMissing: 'Cluster Health requiere acceso SSH al nodo desde PegaProx (corosync-cfgtool, pvecm, systemctl). Configure las credenciales SSH de Node-Shell del clúster y actualice.',
             },
             pt: {
+                // LW: StarWind SAN plugin install (starlvm)
+                installStarwindPlugin: 'Instalar plugin em todos os nós',
+                installStarwindPluginHint: 'Instala starwind-proxmox-plugin do repositório apt assinado da StarWind em cada nó.',
+                starwindInstallFailed: 'Falha ao instalar o plugin',
+                alreadyInstalled: 'já instalado',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Agendamento de recursos do cluster (CRS)',
                 crsHaRebalanceOnStart: 'Reequilíbrio HA ao iniciar',
@@ -19576,6 +19596,11 @@
                 clusterHealthSshMissing: 'Cluster Health requer acesso SSH ao nó a partir do PegaProx (corosync-cfgtool, pvecm, systemctl). Configure as credenciais SSH de Node-Shell do cluster e atualize.',
             },
             ko: {
+                // LW: StarWind SAN plugin install (starlvm)
+                installStarwindPlugin: '모든 노드에 플러그인 설치',
+                installStarwindPluginHint: '서명된 StarWind apt 저장소에서 모든 노드에 starwind-proxmox-plugin을 설치합니다.',
+                starwindInstallFailed: '플러그인 설치 실패',
+                alreadyInstalled: '이미 설치됨',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Cluster Resource Scheduling (CRS)',
                 crsHaRebalanceOnStart: 'HA Rebalance on Start',
@@ -23351,6 +23376,10 @@
             },
             it: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
+                installStarwindPlugin: 'Installa plugin su tutti i nodi',
+                installStarwindPluginHint: 'Installa starwind-proxmox-plugin dal repository apt firmato di StarWind su ogni nodo.',
+                starwindInstallFailed: 'Installazione del plugin non riuscita',
+                alreadyInstalled: 'già installato',
                 crsHeader: 'Pianificazione delle risorse del cluster (CRS)',
                 crsHaRebalanceOnStart: 'Riequilibrio HA all\'avvio',
                 crsHaRebalanceOnStartHint: 'Riequilibrare automaticamente le risorse HA quando un nodo entra online',
@@ -26948,6 +26977,10 @@
             },
             it: {
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
+                installStarwindPlugin: 'Installa plugin su tutti i nodi',
+                installStarwindPluginHint: 'Installa starwind-proxmox-plugin dal repository apt firmato di StarWind su ogni nodo.',
+                starwindInstallFailed: 'Installazione del plugin non riuscita',
+                alreadyInstalled: 'già installato',
                 crsHeader: 'Pianificazione delle risorse del cluster (CRS)',
                 crsHaRebalanceOnStart: 'Riequilibrio HA all\'avvio',
                 crsHaRebalanceOnStartHint: 'Riequilibrare automaticamente le risorse HA quando un nodo entra online',
