@@ -3429,6 +3429,12 @@ def get_console_ticket(cluster_id, node, vm_type, vmid):
         usr = request.session.get('user', 'unknown')
         log_audit(usr, 'vm.console', f'VNC console opened: {vm_type}/{vmid} on {node}', cluster=mgr.config.name)
 
+        # NS Jul 2026 — tag the vncproxy task with the PegaProx user who opened it,
+        # so the taskbar shows YOUR user (not the shared PVE credential). Every other
+        # task-creating action registers; the console path was the one that never did.
+        if result.get('upid'):
+            register_task_user(result['upid'], usr, cluster_id)
+
         # MK Apr 2026 — Stable VNC Mode (D). Frontend opt-in via ?stable=1.
         # Returns an additional AES-256-GCM session key + handle the WS handler
         # picks up on connect. Inner-encryption layer survives TLS-inspection

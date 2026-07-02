@@ -10586,6 +10586,10 @@ echo "AGENT_INSTALLED_OK"
                     'node': node,
                     'vmid': vmid,
                     'vm_type': vm_type,
+                    # NS Jul 2026 — PVE returns the vncproxy task upid; carry it so the
+                    # console-open route can register_task_user() and the taskbar shows
+                    # WHO opened the console (it never did before).
+                    'upid': data.get('upid'),
                 }
             else:
                 error_msg = response.text
