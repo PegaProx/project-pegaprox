@@ -268,6 +268,24 @@ for variation in babel_transform_variations:
         print("  Disabled Babel.transformScriptTags()")
         break
 
+# NS Jul 2026 (perf): production JSX is pre-compiled, so @babel/standalone (~3MB /
+# ~665KB gz) is downloaded + parsed for nothing AND blocks the 5 libs after it in
+# the serial loader chain. Strip the babel loadScriptWithFallback() step from the
+# PRODUCTION output only — the --restore dev path keeps it (index.html.original is
+# untouched) because it transpiles <script type=text/babel> in the browser.
+babel_load_step = '''        }).then(function() {
+            return loadScriptWithFallback(
+                'https://cdn.jsdelivr.net/npm/@babel/standalone@7.29.2/babel.min.js',
+                '/static/js/babel.min.js',
+                'babel@7.29.2'
+            );
+'''
+if babel_load_step in new_html:
+    new_html = new_html.replace(babel_load_step, '')
+    print('  Stripped @babel/standalone loader (prod, pre-compiled JSX)')
+else:
+    print('  [warn] babel loader step not found to strip (loader chain changed?)')
+
 # Update the loading comment
 old_comment = "// Load in sequence - using jsdelivr instead of unpkg (faster + better caching)"
 new_comment = "// Load in sequence - JSX pre-compiled, Babel loads but skips\n        // Edit web/src/*.js, then run web/Dev/build.sh"
