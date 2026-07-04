@@ -7883,6 +7883,28 @@
             );
         }
 
+        // NS Jul 2026 (render-perf): cheap material-equality for the VM/CT resource
+        // list. The SSE loop now sends a frame on any bucketed change OR every 10th
+        // loop as a keepalive (broadcast.py), and cpu/mem still jitter within a bucket
+        // — so many received frames carry no visible change. Comparing the rendered
+        // fields (status/node/name/ip/tags + 5%cpu/2%mem buckets, same granularity as
+        // the server dedup) lets us keep the SAME array reference on a no-op frame, so
+        // ResourceTable's filter/sort useMemos + the whole grid stay idle instead of
+        // re-rendering every second.
+        function _resSig(r) {
+            return r.vmid + '|' + (r.status || '') + '|' + (r.node || '') + '|' + (r.name || '') +
+                   '|' + Math.floor((r.cpu_percent || 0) / 5) + '|' + Math.floor((r.mem_percent || 0) / 2) +
+                   '|' + (r.ip || '') + '|' + (r.tags || '');
+        }
+        function areResourcesEqual(a, b) {
+            if (a === b) return true;
+            if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+            for (let i = 0; i < a.length; i++) {
+                if (_resSig(a[i]) !== _resSig(b[i])) return false;
+            }
+            return true;
+        }
+
         function PegaProxDashboard() {
             const { t } = useTranslation();
             const { user, sessionId, logout, getAuthHeaders, isAdmin, passwordExpiry, updatePreferences } = useAuth();
@@ -10621,14 +10643,20 @@
                                 }
                             } else if (data.type === 'resources') {
                                 if (currentCluster && data.cluster_id === currentCluster.id) {
-                                    setClusterResources(data.data);
-                                    window.pegaproxVmList = data.data;
-                                    setLastUpdate(new Date());
+                                    // NS Jul 2026 (render-perf): skip the array swap on a no-op/
+                                    // keepalive frame so the VM grid doesn't re-filter/re-render
+                                    // every second (window.pegaproxVmList is the last-applied list)
+                                    if (!areResourcesEqual(window.pegaproxVmList, data.data)) {
+                                        setClusterResources(data.data);
+                                        window.pegaproxVmList = data.data;
+                                        setLastUpdate(new Date());
+                                    }
                                 }
                                 // LW: also update sidebar tree for non-selected clusters
                                 if (data.cluster_id && (!currentCluster || data.cluster_id !== currentCluster.id)) {
                                     setSidebarClusterData(prev => {
                                         if (!prev[data.cluster_id]) return prev;
+                                        if (areResourcesEqual(prev[data.cluster_id].resources, data.data)) return prev;
                                         return { ...prev, [data.cluster_id]: { ...prev[data.cluster_id], resources: data.data } };
                                     });
                                 }
@@ -12278,12 +12306,19 @@
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/resources`, { timeout: POLL_TIMEOUT_MS });
                     if (response && response.ok) {
                         const data = await response.json();
-                        setSidebarClusterData(prev => ({ ...prev, [clusterId]: { ...(prev[clusterId] || {}), resources: data } }));
+                        setSidebarClusterData(prev => {
+                            const cur = prev[clusterId] || {};
+                            if (areResourcesEqual(cur.resources, data)) return prev;
+                            return { ...prev, [clusterId]: { ...cur, resources: data } };
+                        });
                         if (selectedClusterRef.current?.id !== clusterId) return;
-                        setClusterResources(data);
-                        // MK: Store in window for access from ConfigModal reassign feature
-                        window.pegaproxVmList = data;
-                        setLastUpdate(new Date());
+                        // NS Jul 2026 (render-perf): only swap + re-render on a real change
+                        if (!areResourcesEqual(window.pegaproxVmList, data)) {
+                            setClusterResources(data);
+                            // MK: Store in window for access from ConfigModal reassign feature
+                            window.pegaproxVmList = data;
+                            setLastUpdate(new Date());
+                        }
                         
                         // NS: Also track nodes from resources - this includes offline nodes!
                         const nodeResources = (data || []).filter(r => r.type === 'node');
