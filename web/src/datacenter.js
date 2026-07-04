@@ -2075,7 +2075,7 @@
                                         {(!storage || storage.length === 0) ? (
                                             <div className="p-4 text-center text-[12px]" style={{color: 'var(--corp-text-muted)'}}>No storage configured</div>
                                         ) : storage.map((s, idx) => {
-                                            const isShared = s.shared || ['nfs', 'cifs', 'rbd', 'cephfs', 'iscsi', 'pbs'].includes(s.type);
+                                            const isShared = s.shared || ['nfs', 'cifs', 'rbd', 'cephfs', 'iscsi', 'pbs', 'starlvm'].includes(s.type);
                                             const typeColor = isShared ? {bg: 'rgba(73,175,217,0.12)', color: '#49afd9'} : s.type === 'lvm' || s.type === 'lvmthin' || s.type === 'zfspool' ? {bg: 'rgba(155,89,182,0.12)', color: '#9b59b6'} : {bg: 'rgba(114,139,154,0.12)', color: '#728b9a'};
                                             return (
                                                 <div key={idx} className="corp-storage-card">
@@ -2896,6 +2896,14 @@
                                                         <div>
                                                             <label className="block text-sm text-gray-400 mb-1">Volume group name *</label>
                                                             <input type="text" value={newStorage.vgname || ''} onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} placeholder="e.g. swvg" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <select value={newStorage.content || 'images,rootdir'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                                <option value="images,rootdir">Disk image, Container</option>
+                                                                <option value="images">Disk image</option>
+                                                                <option value="rootdir">Container</option>
+                                                            </select>
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">

@@ -1578,7 +1578,7 @@
                                                     {(() => {
                                                         const storage = datastores.shared.find(s => s.storage === selectedStorage.name) || 
                                                                        datastores.local[selectedStorage.node]?.find(s => s.storage === selectedStorage.name);
-                                                        return ['iscsi', 'iscsidirect', 'lvm', 'lvmthin', 'zfspool', 'zfs'].includes(storage?.type);
+                                                        return ['iscsi', 'iscsidirect', 'lvm', 'lvmthin', 'zfspool', 'zfs', 'starlvm'].includes(storage?.type);
                                                     })() && (
                                                         <button
                                                             onClick={() => setShowRescanModal(true)}
