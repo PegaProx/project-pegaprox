@@ -148,6 +148,12 @@
         // air-gap flag isn't set. The flag is persisted to localStorage by
         // the auth-check handler in contexts.js.
         var _isAirGapped = function() {
+            // NS Jul 2026 (offline): also honour a SESSION-only auto-latch set when
+            // the browser turns out to have no internet (navigator.onLine lies on
+            // isolated LANs). The backend still injects the persisted flag when
+            // air_gap_mode is enabled; this window flag catches "no internet but
+            // air-gap not enabled" so lazy modal loaders skip dead CDN fallbacks.
+            try { if (window.__pegaproxAirGap === true) return true; } catch (_) {}
             try { return localStorage.getItem('pegaprox-air-gap') === '1'; }
             catch (_) { return false; }
         };
@@ -298,8 +304,17 @@
             l.rel = 'stylesheet';
             l.href = fontHref;
             l.media = 'print';
+            // NS Jul 2026 (offline): Google Fonts is the one external-only asset (no
+            // bundled woff2). If it fails or hasn't loaded within 3s, assume there's
+            // no internet and latch a SESSION-only air-gap flag so every later lazy
+            // modal loader (xterm/noVNC/html2canvas) skips its CDN fallback and uses
+            // the bundled local asset instead of hanging ~30s on a dead connect. Not
+            // persisted → a reload with internet back re-evaluates. Harmless if wrong:
+            // the CDN branch is only a fallback, locals are always present.
+            var _latchOffline = function() { try { window.__pegaproxAirGap = true; } catch (_) {} };
             l.onload = function() { this.media = 'all'; };
-            l.onerror = function() { this.remove(); };
+            l.onerror = function() { this.remove(); _latchOffline(); };
+            setTimeout(function() { if (l.media !== 'all') _latchOffline(); }, 3000);
             document.head.appendChild(l);
         })();
     </script>

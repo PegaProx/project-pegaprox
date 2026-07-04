@@ -2223,6 +2223,12 @@
                         credentials: 'include',
                         headers: {...getAuthHeaders(), 'Content-Type': 'application/json'},
                         body: JSON.stringify({ force: !!force }),
+                        // NS Jul 2026 (offline): cap the soft-spin. This is same-origin
+                        // but the backend SSHes each node to run apt-update, which can
+                        // hang on an offline node/repo; without a client timeout the
+                        // "Checking..." spinner never resolves. 45s tolerates a legit
+                        // multi-node check but eventually gives up.
+                        signal: AbortSignal.timeout(45000),
                     });
                     
                     const json = await res.json();
