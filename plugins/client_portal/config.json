@@ -10,5 +10,16 @@
     "theme_color": "#e57000",
     "allow_iso_mount": false,
     "iso_storage": "",
-    "allowed_isos": []
+    "allowed_isos": [],
+    "allow_ct_create": false,
+    "ct_create": {
+        "cluster_id": "",
+        "node": "",
+        "storage": "local-lvm",
+        "bridge": "vmbr0",
+        "templates": [],
+        "max_cores": 2,
+        "max_memory_mb": 2048,
+        "max_disk_gb": 16
+    }
 }

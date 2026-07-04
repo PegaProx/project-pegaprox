@@ -322,7 +322,7 @@ async function checkSess(){
 }
 
 // DATA
-async function loadCfg(){try{const r=await api(`${P}/config`);if(r&&r.ok)S.cfg=await r.json();}catch(e){}}
+async function loadCfg(){try{const r=await api(`${P}/config`);if(r&&r.ok)S.cfg=await r.json();}catch(e){} try{const ro=await api(`${P}/ct/create-options`);if(ro&&ro.ok)S.ctOpts=await ro.json();}catch(e){}}
 async function loadVMs(){
     S.loading=true;render();
     try{const r=await api(`${P}/my-vms`);if(r&&r.ok){const d=await r.json();if(d.redirect){window.location.href=d.redirect;return;}S.vms=d.vms||[];}}catch(e){}
@@ -563,6 +563,7 @@ function renderDash(){
             <span class="text-sm" style="color:var(--muted)">${esc(S.user?.display_name||S.user?.username||'')}</span>
             ${!S.user?.totp_enabled?`<button id="b2fa" class="btn btn-ghost text-xs py-1" title="Setup 2FA" style="font-size:13px">&#x1f512; 2FA</button>`:`<span class="text-xs" style="color:#3fb950" title="2FA enabled">&#x2713; 2FA</span>`}
             ${c.allow_password_change?`<button id="bpw" class="btn btn-ghost text-xs py-1" title="Change Password" style="font-size:14px">&#x1f511;</button>`:''}
+            ${S.ctOpts&&S.ctOpts.enabled?`<button class="btn btn-accent text-xs py-1" title="Create Container" onclick="pCreateCt()">&#x2795; Container</button>`:''}
             <button id="btheme" class="theme-toggle" title="Toggle theme">${themeIcon}</button>
             <button id="br" class="btn btn-ghost text-xs py-1">&#8635;</button>
             <button id="bo" class="btn btn-ghost text-xs py-1">Logout</button>
@@ -640,7 +641,55 @@ function renderModal(){
     if(S.modal.type==='password')return renderPasswordModal();
     if(S.modal.type==='2fa-setup')return render2FAModal();
     if(S.modal.type==='isos')return renderIsoModal();
+    if(S.modal.type==='createct')return renderCreateCtModal();
     return'';
+}
+
+// #556 — self-service container creation (only when the hoster enabled it)
+function pCreateCt(){S.modal={type:'createct'};render();}
+function renderCreateCtModal(){
+    const o=S.ctOpts||{}, tmpls=o.templates||[], q=o.quota||{}, u=o.usage||{};
+    const qv=q.max_vms||q.vms, qc=q.max_cores||q.cores, qm=q.max_memory_gb||q.memory_gb;
+    const uv=u.vms||u.used_vms||0, uc=u.cores||u.used_cores||0, um=Math.round(u.memory_gb||u.used_memory_gb||0);
+    const quotaLine=(qv||qc||qm)?`<div class="text-xs mt-1" style="color:var(--muted)">Quota — VMs ${uv}/${qv||'∞'} · Cores ${uc}/${qc||'∞'} · Mem ${um}/${qm||'∞'} GB</div>`:'';
+    const inp='padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px';
+    return`<div class="modal-backdrop" onclick="S.modal=null;render()">
+    <div class="card modal-card" onclick="event.stopPropagation()" style="max-width:460px;width:100%">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold">&#x2795; New Container</h2>
+            <button class="btn btn-ghost text-xs" onclick="S.modal=null;render()">&times;</button>
+        </div>
+        ${tmpls.length===0?`<div style="text-align:center;padding:20px;color:var(--muted)"><p>No templates available</p><p class="text-xs mt-2">Ask your administrator to allow container templates.</p></div>`:`
+        <div class="space-y-3">
+            <div><label class="text-xs" style="color:var(--muted)">Template</label>
+                <select id="ctT" class="w-full" style="${inp}">${tmpls.map(t=>`<option value="${esc(t)}">${esc((''+t).split('/').pop()||t)}</option>`).join('')}</select></div>
+            <div><label class="text-xs" style="color:var(--muted)">Hostname</label>
+                <input id="ctH" class="w-full" placeholder="my-container" style="${inp}"></div>
+            <div style="display:flex;gap:8px">
+                <div style="flex:1"><label class="text-xs" style="color:var(--muted)">Cores (1-${o.max_cores||2})</label>
+                    <input id="ctC" type="number" min="1" max="${o.max_cores||2}" value="1" class="w-full" style="${inp}"></div>
+                <div style="flex:1"><label class="text-xs" style="color:var(--muted)">RAM MB (128-${o.max_memory_mb||2048})</label>
+                    <input id="ctM" type="number" min="128" max="${o.max_memory_mb||2048}" value="512" class="w-full" style="${inp}"></div>
+                <div style="flex:1"><label class="text-xs" style="color:var(--muted)">Disk GB (1-${o.max_disk_gb||16})</label>
+                    <input id="ctD" type="number" min="1" max="${o.max_disk_gb||16}" value="8" class="w-full" style="${inp}"></div>
+            </div>
+            <div><label class="text-xs" style="color:var(--muted)">Root password (min 8 chars)</label>
+                <input id="ctP" type="password" class="w-full" style="${inp}"></div>
+            ${quotaLine}
+            <button class="btn btn-accent w-full" style="justify-content:center" onclick="submitCreateCt()">Create Container</button>
+        </div>`}
+    </div></div>`;
+}
+async function submitCreateCt(){
+    const g=id=>document.getElementById(id);
+    const body={template:g('ctT').value,hostname:(g('ctH').value||'').trim(),
+        cores:parseInt(g('ctC').value||'1'),memory:parseInt(g('ctM').value||'512'),
+        disk_gb:parseInt(g('ctD').value||'8'),password:g('ctP').value||''};
+    const r=await api(`${P}/ct/create`,{method:'POST',body});
+    if(r){const d=await r.json().catch(()=>({}));
+        if(r.ok&&d.success){toast(`Container "${d.hostname}" created (CT ${d.vmid})`,'success');S.modal=null;setTimeout(loadVMs,2500);}
+        else toast(d.error||'Create failed','error');}
+    else toast('Create failed','error');
 }
 
 function renderIsoModal(){

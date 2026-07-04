@@ -668,10 +668,129 @@ def _portal_snapshot_policies():
     return {'policies': policies_out}
 
 
+def _ct_create_options():
+    """#556 — expose what a portal user is allowed to create (templates + limits) and
+    their current tenant-quota usage, so the create form can render + pre-validate."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated'}, 401
+    users = load_users(); user = users.get(username, {}); user['username'] = username
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('role') == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+    cfg = _load_config(); cc = cfg.get('ct_create') or {}
+    enabled = bool(cfg.get('allow_ct_create')) and bool(cc.get('cluster_id')) and bool(cc.get('node'))
+    out = {
+        'enabled': enabled,
+        'templates': cc.get('templates') or [],          # admin whitelist of ostemplate volids
+        'max_cores': int(cc.get('max_cores', 2) or 2),
+        'max_memory_mb': int(cc.get('max_memory_mb', 2048) or 2048),
+        'max_disk_gb': int(cc.get('max_disk_gb', 16) or 16),
+        'target_cluster': cc.get('cluster_id', '') if enabled else '',
+    }
+    # tenant quota usage (best-effort; only if the user is in a tenant)
+    tenant_id = user.get('tenant_id')
+    if tenant_id:
+        try:
+            from pegaprox.utils.rbac import check_tenant_quota
+            q = check_tenant_quota(tenant_id, add_vms=0, force=True)
+            out['quota'] = q.get('quota', {}); out['usage'] = q.get('usage', {})
+            out['quota_enforce'] = q.get('enforce', 'block')
+        except Exception:
+            pass
+    return out
+
+
+def _create_ct():
+    """#556 — portal self-service: create an LXC within the tenant quota + the hoster's
+    guardrails. Non-admin portal users only. The target cluster/node/storage/bridge are
+    ADMIN-configured (never user-supplied); the user only picks a whitelisted template +
+    capped cores/memory/disk + a hostname/password. The new CT is ACL-granted to the
+    creator so it shows up in their portal."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated'}, 401
+    users = load_users(); user = users.get(username, {}); user['username'] = username
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('role') == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+
+    cfg = _load_config(); cc = cfg.get('ct_create') or {}
+    if not cfg.get('allow_ct_create') or not cc.get('cluster_id') or not cc.get('node'):
+        return {'error': 'Container creation is not enabled'}, 403
+
+    data = request.get_json(silent=True) or {}
+    # --- validate strictly against the hoster's guardrails ---
+    template = data.get('template', '')
+    if template not in (cc.get('templates') or []):
+        return {'error': 'Selected template is not allowed'}, 400
+    try:
+        cores = int(data.get('cores', 1)); memory = int(data.get('memory', 512)); disk = int(data.get('disk_gb', 8))
+    except (ValueError, TypeError):
+        return {'error': 'Cores / memory / disk must be numbers'}, 400
+    max_cores = int(cc.get('max_cores', 2) or 2)
+    max_mem = int(cc.get('max_memory_mb', 2048) or 2048)
+    max_disk = int(cc.get('max_disk_gb', 16) or 16)
+    if not (1 <= cores <= max_cores):   return {'error': f'Cores must be between 1 and {max_cores}'}, 400
+    if not (128 <= memory <= max_mem):  return {'error': f'Memory must be between 128 and {max_mem} MB'}, 400
+    if not (1 <= disk <= max_disk):     return {'error': f'Disk must be between 1 and {max_disk} GB'}, 400
+    hostname = (data.get('hostname') or '').strip()
+    import re
+    if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$', hostname):
+        return {'error': 'Invalid hostname — letters/digits/hyphens only, must start and end alphanumeric'}, 400
+    password = data.get('password') or ''
+    if len(password) < 8:
+        return {'error': 'Password must be at least 8 characters'}, 400
+
+    # --- tenant quota (block if enforced) ---
+    tenant_id = user.get('tenant_id')
+    if tenant_id:
+        try:
+            from pegaprox.utils.rbac import check_tenant_quota
+            q = check_tenant_quota(tenant_id, add_cores=cores, add_mem_gb=memory / 1024.0, add_vms=1)
+            if q.get('violations') and q.get('enforce') == 'block':
+                return {'error': 'Quota exceeded (' + ', '.join(q['violations']) + ')',
+                        'quota': q.get('quota'), 'usage': q.get('usage')}, 403
+        except Exception:
+            logging.exception('[client_portal] quota check failed')
+
+    cluster_id = cc['cluster_id']; node = cc['node']
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not mgr.is_connected:
+        return {'error': 'Target cluster is currently unavailable'}, 503
+
+    ct_config = {
+        'template': template, 'hostname': hostname, 'name': hostname,
+        'memory': memory, 'cores': cores, 'password': password,
+        'storage': cc.get('storage', 'local-lvm'), 'disk_size': str(disk),
+        'net_bridge': cc.get('bridge', 'vmbr0'),
+    }
+    res = mgr.create_container(node, ct_config)
+    if not res.get('success'):
+        return {'error': res.get('error', 'Container creation failed')}, 500
+    new_vmid = res.get('vmid') or ct_config.get('vmid')
+
+    # grant the creator access to their new CT (portal scopes on VM-ACL / pool)
+    try:
+        from pegaprox.utils.rbac import save_vm_acls
+        acls = load_vm_acls()
+        acls.setdefault(cluster_id, {})[str(new_vmid)] = {'users': [username]}
+        save_vm_acls(acls)
+    except Exception as e:
+        logging.warning(f'[client_portal] CT {new_vmid} created but ACL grant failed: {e}')
+
+    from pegaprox.utils.audit import log_audit
+    log_audit(username, 'portal.ct_created',
+              f'Client portal: created container "{hostname}" (CT {new_vmid}) on {cluster_id}/{node}')
+    return {'success': True, 'vmid': new_vmid, 'cluster_id': cluster_id, 'hostname': hostname}
+
+
 def register(app):
     """Register plugin routes"""
     register_plugin_route('client_portal', 'config', _get_portal_config)
     register_plugin_route('client_portal', 'my-vms', _get_my_vms)
+    register_plugin_route('client_portal', 'ct/create-options', _ct_create_options)
+    register_plugin_route('client_portal', 'ct/create', _create_ct)
     register_plugin_route('client_portal', 'vm/power', _vm_power)
     register_plugin_route('client_portal', 'vm/console', _vm_console)
     register_plugin_route('client_portal', 'vm/snapshots', _vm_snapshots)
