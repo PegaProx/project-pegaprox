@@ -2402,6 +2402,15 @@ def get_vms_backup_status(cluster_id):
     """Per-VM backup health: last backup age, encryption flag, count over last 30d.
     Used by the VM list to render a status pill column.
     """
+    # SECURITY (MK Jul 2026): this route was gated only by cluster.view (held by every
+    # non-admin role) and never scoped to the caller — a scoped tenant could read
+    # ANOTHER cluster's backup posture, and see backup pills for VMs they can't access.
+    # Add the cluster gate + per-VM ACL scoping (mirrors get_cluster_resources,
+    # clusters.py:1010-1044). The ACL filter runs AFTER the cache read so the cached
+    # list stays cluster-global + reusable across users. Pre-existing gap, hardened here.
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     cm = cluster_managers[cluster_id]
@@ -2409,9 +2418,33 @@ def get_vms_backup_status(cluster_id):
         return jsonify({'error': 'cluster offline'}), 503
     import time as _t
     now = _t.time()
+
+    def _scope_backup_out(rows):
+        # per-VM ACL scoping for non-admins; admins see all
+        from pegaprox.utils.auth import load_users
+        from pegaprox.utils.rbac import get_vm_acls, has_permission
+        u = load_users().get(request.session['user'], {})
+        u['username'] = request.session['user']
+        if u.get('role') == ROLE_ADMIN:
+            return rows
+        cluster_acls = get_vm_acls().get(cluster_id, {})
+        has_general = has_permission(u, 'vm.view')
+        if not cluster_acls:
+            return rows if has_general else []
+        scoped = []
+        for row in rows:
+            acl = cluster_acls.get(str(row.get('vmid', '')), {})
+            if acl:
+                allowed = acl.get('users', [])
+                if u['username'] in allowed or '*' in allowed:
+                    scoped.append(row)
+            elif has_general:
+                scoped.append(row)
+        return scoped
+
     _bc = _backup_status_cache.get(cluster_id)
     if _bc and (now - _bc[0]) < _bc[2]:
-        return jsonify(_bc[1])
+        return jsonify(_scope_backup_out(_bc[1]))
     cutoff_30d = now - (30 * 86400)
 
     # Aggregate snapshots across all PBS servers linked to this cluster + the
@@ -2595,9 +2628,10 @@ def get_vms_backup_status(cluster_id):
             'status': status,
         })
     out.sort(key=lambda r: r['vmid'])
+    # cache the UNFILTERED cluster-global list; scope per-request at return time
     _backup_status_cache[cluster_id] = (
         now, out, _BACKUP_STATUS_TTL if _scan_complete else _BACKUP_STATUS_TTL_PARTIAL)
-    return jsonify(out)
+    return jsonify(_scope_backup_out(out))
 
 
 @bp.route('/api/clusters/<cluster_id>/datacenter/backup/<job_id>/run', methods=['POST'])
