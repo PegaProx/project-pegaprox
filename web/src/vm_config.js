@@ -253,6 +253,12 @@
 
             const isQemu = vm.type === 'qemu';
 
+            // NS Jul 2026 (modal-perf): fire the ~14 open-time fetches ONLY when the
+            // target VM/cluster changes. This effect previously ALSO depended on
+            // hasChanges + saving, so every keystroke (hasChanges false->true) and every
+            // save re-ran the WHOLE fetch storm — including the slow PCI/USB passthrough
+            // node-scan and the backup-catalog fetch — which is exactly what made the
+            // config modal lag while editing. The SSE listener is split out below.
             useEffect(() => {
                 fetchConfig();
                 fetchHardwareOptions();
@@ -260,7 +266,6 @@
                 fetchBridgeList();
                 if (isQemu) {
                     fetchISOList();
-                    fetchPassthrough();
                 }
                 fetchSnapshots();
                 fetchEfficientSnapshots();
@@ -284,8 +289,12 @@
                         setClusterTags(Array.from(tagSet).sort().map(name => ({ name })));
                     })
                     .catch(() => {});
+            }, [vm, clusterId]);
 
-                // NS: Listen for SSE vm_config events for live updates
+            // NS: SSE vm_config live-update listener — split from the fetch effect so
+            // re-subscribing when the user's edit state changes never re-fires the
+            // fetches above (add/removeEventListener is cheap, no network).
+            useEffect(() => {
                 const handleVmConfigUpdate = (event) => {
                     const { vmid: eventVmid, vm_type, config: newConfig } = event.detail;
                     // Only update if this is our VM and user has no pending changes
@@ -308,7 +317,7 @@
                         }));
                     }
                 };
-                
+
                 window.addEventListener('pegaprox-vm-config', handleVmConfigUpdate);
                 return () => window.removeEventListener('pegaprox-vm-config', handleVmConfigUpdate);
             }, [vm, clusterId, hasChanges, saving]);
@@ -328,6 +337,16 @@
                     fetchBackups();
                 }
             }, [activeTab]);
+
+            // NS Jul 2026 (modal-perf): the PCI/USB passthrough scan enumerates node
+            // hardware (~900ms of lspci/lsusb on the node) and is only shown on the
+            // Hardware/Resources tab — fetch it on tab entry instead of on every modal
+            // open (default tab is 'general'). Mirrors the history/firewall gating above.
+            useEffect(() => {
+                if (isQemu && (activeTab === 'hardware' || activeTab === 'resources')) {
+                    fetchPassthrough();
+                }
+            }, [activeTab, vm, clusterId]);
 
             const fetchPassthrough = async () => {
                 if (vm.type !== 'qemu') return;
