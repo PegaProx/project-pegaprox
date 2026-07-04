@@ -233,6 +233,13 @@ def prometheus_metrics():
     emit('# TYPE pegaprox_guest_network_transmit_bytes_total counter')
     emit('# HELP pegaprox_guest_uptime_seconds Uptime in seconds for a VM or LXC container')
     emit('# TYPE pegaprox_guest_uptime_seconds gauge')
+    # Ceph (#540) — only emitted for clusters that actually run Ceph
+    emit('# HELP pegaprox_ceph_health_status Ceph cluster health (0=OK, 1=WARN, 2=ERR, 3=unknown)')
+    emit('# TYPE pegaprox_ceph_health_status gauge')
+    emit('# HELP pegaprox_ceph_osd_up Number of Ceph OSDs currently up')
+    emit('# TYPE pegaprox_ceph_osd_up gauge')
+    emit('# HELP pegaprox_ceph_osd_in Number of Ceph OSDs currently in')
+    emit('# TYPE pegaprox_ceph_osd_in gauge')
 
     for cid, mgr in cluster_managers.items():
         cname = getattr(getattr(mgr, 'config', None), 'name', cid) or cid
@@ -270,6 +277,19 @@ def prometheus_metrics():
             out.extend(_sample('pegaprox_cluster_quorum_held', quorum, base))
         except Exception as e:
             logging.debug(f"[metrics] {cid} node stats failed: {e}")
+
+        # Ceph health (#540) — best-effort; get_ceph_health_summary returns None when
+        # the cluster has no Ceph, so no ceph_* series are emitted for those clusters.
+        # One SSH probe per cluster per scrape, consistent with the apt-updates metric.
+        try:
+            ceph = mgr.get_ceph_health_summary() if hasattr(mgr, 'get_ceph_health_summary') else None
+            if ceph:
+                _cmap = {'HEALTH_OK': 0, 'HEALTH_WARN': 1, 'HEALTH_ERR': 2}
+                out.extend(_sample('pegaprox_ceph_health_status', _cmap.get(ceph.get('status'), 3), base))
+                out.extend(_sample('pegaprox_ceph_osd_up', _num(ceph.get('osd_up', 0)), base))
+                out.extend(_sample('pegaprox_ceph_osd_in', _num(ceph.get('osd_in', 0)), base))
+        except Exception as e:
+            logging.debug(f"[metrics] {cid} ceph health failed: {e}")
 
         # VM counts
         try:
