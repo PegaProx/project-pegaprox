@@ -729,6 +729,104 @@ def get_datastores(cluster_id):
         return jsonify({'error': safe_error(e, 'Failed to get storage list')}), 500
 
 
+def _fmt_size_human(size):
+    size = size or 0
+    if size >= 1024**4:
+        return f"{size / 1024**4:.2f} TB"
+    if size >= 1024**3:
+        return f"{size / 1024**3:.2f} GB"
+    if size >= 1024**2:
+        return f"{size / 1024**2:.2f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.2f} KB"
+    return f"{int(size)} B"
+
+
+def _pve_size_to_bytes(s):
+    # '32G' / '500M' / '1.5T' -> bytes; a bare number is already bytes
+    if not s:
+        return 0
+    s = str(s).strip().upper()
+    mult = {'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4, 'P': 1024**5}
+    if s and s[-1] in mult:
+        try:
+            return int(float(s[:-1]) * mult[s[-1]])
+        except ValueError:
+            return 0
+    try:
+        return int(float(s))
+    except ValueError:
+        return 0
+
+
+# NS Jul 2026 — shared SAN/LVM (and the StarWind starlvm plugin) only report a
+# volume's real size on the node whose host currently has the LV active. Browse
+# the datastore "from" any other node and the disk shows up but reads 0 bytes
+# (Nico hit this on a multi-node shared LVM). The true size still lives
+# cluster-wide in the owning guest's config as size=NNG, so backfill the zeros
+# from there. No-op on file/thick-LVM storages that already hand us a size.
+def _backfill_zero_datastore_sizes(manager, host, port, content):
+    zero = [it for it in content if not (it.get('size') or 0) and it.get('vmid')]
+    if not zero:
+        return
+    rr = manager._create_session().get(
+        f"https://{host}:{port}/api2/json/cluster/resources?type=vm", timeout=8)
+    if rr.status_code != 200:
+        return
+    vm_loc = {}
+    for r in rr.json().get('data', []):
+        vm_loc[r.get('vmid')] = (r.get('node'), 'lxc' if r.get('type') == 'lxc' else 'qemu')
+
+    # distinct guests we still need a config from — capped so a 10k-VM estate
+    # can't turn one datastore click into thousands of config calls
+    want, seen = [], set()
+    for it in zero:
+        vid = it.get('vmid')
+        if vid in vm_loc and vid not in seen:
+            seen.add(vid)
+            want.append(vid)
+    CAP = 250
+    if len(want) > CAP:
+        logging.info(f"[datastore] size-backfill capped at {CAP}/{len(want)} guests — "
+                     f"some remote disks will still read 0")
+        want = want[:CAP]
+
+    def _fetch(vid):
+        node, vtype = vm_loc[vid]
+        try:
+            cr = manager._create_session().get(
+                f"https://{host}:{port}/api2/json/nodes/{node}/{vtype}/{vid}/config", timeout=6)
+            if cr.status_code == 200:
+                return vid, cr.json().get('data', {})
+        except Exception:
+            pass
+        return vid, None
+
+    from pegaprox.utils.concurrent import run_concurrent
+    got = run_concurrent([lambda v=v: _fetch(v) for v in want], timeout=25)
+
+    # volume-basename -> bytes, harvested from every disk line across those configs
+    size_by_vol = {}
+    for pair in got:
+        if not pair or not pair[1]:
+            continue
+        for key, val in pair[1].items():
+            if not isinstance(val, str) or ':' not in val or 'size=' not in val:
+                continue
+            base = val.split(',', 1)[0].split(':', 1)[1].split('/')[-1]  # vm-100-disk-0
+            m = re.search(r'size=([0-9.]+[KMGTP]?)', val)
+            if m and base:
+                size_by_vol[base] = _pve_size_to_bytes(m.group(1))
+
+    for it in zero:
+        volid = it.get('volid') or ''
+        base = (volid.split(':', 1)[1] if ':' in volid else volid).split('/')[-1]
+        b = size_by_vol.get(base)
+        if b:
+            it['size'] = b
+            it['size_from_config'] = True  # LW: UI could badge this later if we want
+
+
 @bp.route('/api/clusters/<cluster_id>/datastores/<storage_name>/content', methods=['GET'])
 @require_auth(perms=['storage.view'])
 def get_datastore_content(cluster_id, storage_name):
@@ -761,24 +859,21 @@ def get_datastore_content(cluster_id, storage_name):
         
         if response.status_code == 200:
             content = response.json().get('data', [])
-            # Enhance with additional info
             for item in content:
                 item['storage'] = storage_name
                 item['node'] = node
-                # Calculate size in human readable format
-                size = item.get('size') or 0
-                if size > 1024**3:
-                    item['size_human'] = f"{size / 1024**3:.2f} GB"
-                elif size > 1024**2:
-                    item['size_human'] = f"{size / 1024**2:.2f} MB"
-                else:
-                    item['size_human'] = f"{size / 1024:.2f} KB"
-                
-                # check item is in use by a VM
-                item['in_use'] = False
-                if item.get('vmid'):
-                    item['in_use'] = True
-                    
+                item['in_use'] = bool(item.get('vmid'))
+
+            # backfill sizes PVE reported as 0 for disks whose LV is active on
+            # another node (shared SAN/LVM, starlvm) — see helper above
+            try:
+                _backfill_zero_datastore_sizes(manager, host, port, content)
+            except Exception as e:
+                logging.debug(f"[datastore] size backfill skipped: {e}")
+
+            for item in content:
+                item['size_human'] = _fmt_size_human(item.get('size') or 0)
+
             return jsonify(content)
         return jsonify([])
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
