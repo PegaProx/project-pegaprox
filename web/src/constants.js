@@ -16,20 +16,40 @@
         const DEBUG = false; // set true for verbose logging
 
         // NS: global time formatting — reads user pref from localStorage
+        // NS Jul 2026 (perf): fmtDate/fmtTime are called thousands of times per render
+        // (every task/log/VM/taskbar timestamp). Each call used dt.toLocaleString(...)
+        // which internally CONSTRUCTS a fresh Intl.DateTimeFormat every time — one of
+        // the slowest common JS ops. A live Chrome trace (config-modal typing) showed
+        // fmtDate alone eating ~1.5s of a few seconds. Cache the formatter per
+        // (kind, 12h, options) key and reuse it via .format() — ~100x cheaper, same
+        // output. h12 is still read per call so a 12h/24h toggle takes effect at once.
+        const _dtfCache = {};
+        function _dtf(kind, h12, opts) {
+            const key = kind + (h12 ? '1' : '0') + '|' + JSON.stringify(opts || {});
+            let f = _dtfCache[key];
+            if (!f) {
+                const base = kind === 'T'
+                    ? { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: h12 }
+                    : { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: h12 };
+                try { f = new Intl.DateTimeFormat(undefined, { ...base, ...(opts || {}) }); }
+                catch (_) { f = new Intl.DateTimeFormat(); }
+                _dtfCache[key] = f;
+            }
+            return f;
+        }
         function fmtDate(d, opts = {}) {
             if (!d) return '';
             const dt = d instanceof Date ? d : new Date(typeof d === 'number' && d < 1e12 ? d * 1000 : d);
             if (isNaN(dt)) return '';
             const h12 = localStorage.getItem('pegaprox-time-format') === '12h';
-            const defaults = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: h12 };
-            return dt.toLocaleString(undefined, {...defaults, ...opts});
+            return _dtf('D', h12, opts).format(dt);
         }
         function fmtTime(d) {
             if (!d) return '';
             const dt = d instanceof Date ? d : new Date(typeof d === 'number' && d < 1e12 ? d * 1000 : d);
             if (isNaN(dt)) return '';
             const h12 = localStorage.getItem('pegaprox-time-format') === '12h';
-            return dt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: h12 });
+            return _dtf('T', h12, null).format(dt);
         }
 
         // NS: timezone list for node time config (matches backend get_timezones)
