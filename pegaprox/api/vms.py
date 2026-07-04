@@ -140,22 +140,28 @@ def get_datacenter_status(cluster_id):
         # connect_to_proxmox skip-cache.
         status_url = f"https://{host}:{port}/api2/json/cluster/status"
         resources_url = f"https://{host}:{port}/api2/json/cluster/resources"
-        try:
-            status_resp = manager._create_session().get(status_url, timeout=15)
-            resources_resp = manager._create_session().get(resources_url, timeout=15)
-        except requests.exceptions.Timeout:
-            # Mark host cold AND force an immediate reconnect so manager.host
-            # pivots to a warm fallback for the next request. Without the
-            # reconnect, _mark_host_failure only affects later
-            # connect_to_proxmox() calls — but the current manager.host
-            # pointer still points at the dead primary.
+        # NS Jul 2026 (SSE-perf): these two full node-walks were issued SERIALLY, so
+        # the route's wall-time was the SUM of two heavy aggregations. Fire them
+        # concurrently (shared pooled session) → wall-time is the MAX. run_concurrent
+        # swallows per-task exceptions into None, so we detect a failed walk and keep
+        # the original cold-host + reconnect failover.
+        from pegaprox.utils.concurrent import run_concurrent
+        sess = manager._create_session()
+        status_resp, resources_resp = run_concurrent([
+            lambda: sess.get(status_url, timeout=15),
+            lambda: sess.get(resources_url, timeout=15),
+        ], timeout=20)
+        if status_resp is None or resources_resp is None:
+            # a walk timed out / errored — mark the primary cold AND force an
+            # immediate reconnect so manager.host pivots to a warm fallback for the
+            # next request (otherwise the host pointer still points at the dead one).
             manager._mark_host_failure(host)
             try:
                 manager.is_connected = False
                 manager.connect_to_proxmox()
             except Exception:
-                pass  # best-effort; user will see the timeout this round
-            raise
+                pass  # best-effort; user sees the offline state this round
+            return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
 
         status_data = status_resp.json().get('data', []) if status_resp.status_code == 200 else []
         resources_data = resources_resp.json().get('data', []) if resources_resp.status_code == 200 else []
@@ -555,6 +561,18 @@ def get_storage_list(cluster_id):
         return jsonify([])
 
 
+# NS Jul 2026 (SSE-perf): short per-cluster cache for the datastores aggregate.
+# get_datastores fans out /nodes/<node>/storage per ONLINE node (O(nodes), 8-wide,
+# ~13 serial waves at 100 nodes) with no cache, and since 0548dc3/32486a6 it rides
+# BOTH the 15s selected-cluster poll AND a 30s per-expanded-sidebar-cluster loop —
+# so the heavy fan-out fired several times a minute per cluster. Storage totals move
+# on grow/add, not per-15s, so a small snapshot collapses the overlapping pollers
+# (and multiple browser tabs) onto one fan-out per window. Keyed per cluster; the
+# payload is cluster-global + already storage.view-gated by the caller above.
+_datastores_cache = {}
+_DATASTORES_TTL = 12.0
+
+
 @bp.route('/api/clusters/<cluster_id>/datastores', methods=['GET'])
 @require_auth(perms=['storage.view'])
 def get_datastores(cluster_id):
@@ -570,6 +588,10 @@ def get_datastores(cluster_id):
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
         storages = manager.get_storages()
         return jsonify({'shared': storages, 'local': {}})
+
+    _dc = _datastores_cache.get(cluster_id)
+    if _dc and (time.time() - _dc[0]) < _DATASTORES_TTL:
+        return jsonify(_dc[1])
 
     try:
         host, port = manager.host, manager.api_port
@@ -716,12 +738,14 @@ def get_datastores(cluster_id):
                     'active_on': [], 'inactive_on': list(all_node_names),
                 }
 
-        return jsonify({
+        payload = {
             'shared': list(shared_storages.values()),
             'local': local_storages,
             'nodes': all_node_names,
             'offline_nodes': offline_nodes,
-        })
+        }
+        _datastores_cache[cluster_id] = (time.time(), payload)
+        return jsonify(payload)
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         logging.warning(f"[API] Cluster {cluster_id} unreachable for datastores: {e}")
         return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503

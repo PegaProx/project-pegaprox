@@ -996,9 +996,12 @@ def get_cluster_resources(cluster_id):
     if not mgr.is_connected:
         return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
     
-    # get all resources
-    all_resources = mgr.get_vm_resources()
-    
+    # get all resources — NS Jul 2026 (SSE-perf): reuse the 1s broadcast loop's
+    # fresh snapshot (max_age) instead of firing another /cluster/resources walk;
+    # this endpoint is polled 15s (selected) + 30s (overview) + per expanded sidebar
+    # cluster, so the same heavy walk was happening 2-3x per window per cluster.
+    all_resources = mgr.get_vm_resources(max_age=6)
+
     # check if user is admin - admin sees everything
     users = load_users()
     user = users.get(request.session['user'], {})

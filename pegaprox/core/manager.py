@@ -1618,10 +1618,21 @@ class PegaProxManager:
             self.logger.error(f"Error getting node status: {e}")
             return {}
     
-    def get_vm_resources(self) -> list:
+    def get_vm_resources(self, max_age: float = 0.0) -> list:
         # NS: fetches VMs + CTs, adds computed mem/cpu percentages
+        # NS Jul 2026 (SSE-perf): optional short read-cache. /cluster/resources is
+        # the "walks every node" call and at 10k VMs is the heaviest PVE query; the
+        # 1s broadcast loop already fetches it every second for every watched
+        # cluster. Callers that pass max_age>0 (the 15s/30s poll endpoints) reuse
+        # that fresh snapshot instead of firing their own redundant walk (the same
+        # cluster was hit 2-3x per poll window). The loop + after-action push keep
+        # max_age=0 → always fresh, so SSE responsiveness is untouched.
+        if max_age > 0:
+            cached = getattr(self, '_vm_resources_cache', None)
+            if cached and (time.time() - cached[0]) < max_age:
+                return cached[1]
         if not self.is_connected or not self.session: return []
-        
+
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/cluster/resources"
             resp = self._create_session().get(url, params={'type': 'vm'}, timeout=10)
@@ -1664,6 +1675,8 @@ class PegaProxManager:
                             r['maxdisk'] = disk_info['total']
                             r['disk_percent'] = round((disk_info['used'] / disk_info['total']) * 100, 1) if disk_info['total'] > 0 else 0
 
+            # refill the short read-cache for max_age>0 pollers (see method head)
+            self._vm_resources_cache = (time.time(), resources)
             return resources
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             # LW: don't immediately mark disconnected, use failure counter

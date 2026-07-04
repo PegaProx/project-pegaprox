@@ -2385,6 +2385,17 @@ def storage_preflight(cluster_id):
     return jsonify({'ok': not issues, 'issues': issues, 'info': info})
 
 
+# NS Jul 2026 (SSE-perf): the per-VM backup pill rode fetchClusterResources at 15s,
+# re-scanning the FULL PBS snapshot catalog (O(PBS×datastores×snapshots)) + every
+# online node's backup storages each time — backup age changes hourly, not per-15s.
+# Cache the derived per-VM list per cluster. Only cache a COMPLETE scan for the full
+# window; a partial scan (the 8s fan-out cap tripped → incomplete data) gets a short
+# TTL so a transient PBS slowdown can't pin wrong 'stale/none' pills for 90s.
+_backup_status_cache = {}
+_BACKUP_STATUS_TTL = 90.0
+_BACKUP_STATUS_TTL_PARTIAL = 15.0
+
+
 @bp.route('/api/clusters/<cluster_id>/vms-backup-status', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_vms_backup_status(cluster_id):
@@ -2398,6 +2409,9 @@ def get_vms_backup_status(cluster_id):
         return jsonify({'error': 'cluster offline'}), 503
     import time as _t
     now = _t.time()
+    _bc = _backup_status_cache.get(cluster_id)
+    if _bc and (now - _bc[0]) < _bc[2]:
+        return jsonify(_bc[1])
     cutoff_30d = now - (30 * 86400)
 
     # Aggregate snapshots across all PBS servers linked to this cluster + the
@@ -2543,10 +2557,14 @@ def get_vms_backup_status(cluster_id):
     except Exception as e:
         logging.debug(f'[vms-backup-status] node enum failed: {e}')
 
+    _scan_complete = True
     if tasks:
         # Tight timeout: most PBS + healthy-node calls return in <2s. Anything
         # stuck longer contributes None and we move on with partial data.
         results = run_concurrent_dict(tasks, timeout=8)
+        # a None result = a fan-out task that timed out → the aggregate is partial;
+        # don't pin it for the full TTL (see cache note at the top of this route)
+        _scan_complete = all(v is not None for v in results.values())
         for bumps in results.values():
             for (vmid, ts, enc, verified_ts) in (bumps or []):
                 try:
@@ -2577,6 +2595,8 @@ def get_vms_backup_status(cluster_id):
             'status': status,
         })
     out.sort(key=lambda r: r['vmid'])
+    _backup_status_cache[cluster_id] = (
+        now, out, _BACKUP_STATUS_TTL if _scan_complete else _BACKUP_STATUS_TTL_PARTIAL)
     return jsonify(out)
 
 
