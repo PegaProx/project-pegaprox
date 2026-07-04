@@ -22,6 +22,7 @@ class MaintenanceTask:
         self.error = None
         self.acknowledged = False
         self.native_ha = False  # NS feb 2026 - tracks if Proxmox native HA maintenance was used
+        self.note = None  # NS jul 2026 - informational note (e.g. single-node: no evacuation target)
 
     def to_dict(self):
         return {
@@ -36,7 +37,8 @@ class MaintenanceTask:
             'progress_percent': round((self.migrated_vms / self.total_vms * 100) if self.total_vms > 0 else 0, 1),
             'error': self.error,
             'acknowledged': self.acknowledged,
-            'native_ha': self.native_ha
+            'native_ha': self.native_ha,
+            'note': self.note
         }
 
 

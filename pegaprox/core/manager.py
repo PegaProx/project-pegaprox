@@ -3184,6 +3184,26 @@ class PegaProxManager:
 
             self.logger.info(f"[PKG] Found {task.total_vms} VMs to evacuate from {node_name}")
 
+            # BUG (single-node maintenance stuck): on a standalone / single-node cluster
+            # — or when every peer is offline — there is NOWHERE to migrate to. The old
+            # path tried each VM (all failed 'no target node'), then STILL entered the
+            # 5-minute post-evacuation wait loop below, so the node sat "stuck" in
+            # maintenance for ~5 min before finishing with errors. Detect the no-target
+            # case up front and skip evacuation: a single node can't live-migrate its
+            # guests, so maintenance just flags the node (guests stay running; the admin
+            # owns any reboot downtime).
+            if self.get_best_target_node(exclude_nodes=[node_name]) is None:
+                self.logger.warning(
+                    f"[MAINT] No other online node to evacuate {task.total_vms} guest(s) from "
+                    f"{node_name} (single-node cluster or all peers offline) — skipping "
+                    f"evacuation; guests stay running.")
+                task.migrated_vms = 0
+                task.pending_vms = []
+                task.note = (f"Single node: {task.total_vms} guest(s) not evacuated — no other "
+                             f"node to migrate to. They stay running (a reboot will take them down).")
+                task.status = 'completed'
+                return
+
             # Sort VMs by memory (smallest first for faster evacuation)
             node_vms.sort(key=lambda x: x.get('mem', 0))
 
