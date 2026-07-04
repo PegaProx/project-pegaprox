@@ -246,7 +246,21 @@ def broadcast_resources_loop():
                         metrics = mgr.get_node_status()
                         if metrics:
                             metrics_ok = True
-                            broadcast_sse('metrics', metrics, cid)
+                            # NS Jul 2026 — dedup like tasks (SSE-perf): node cpu/mem
+                            # jitter every fetch, so bucket coarsely (status / 5% cpu /
+                            # 2% mem) and only push when a node's bucketed state moved,
+                            # or every 10th loop as a keepalive (slow fields + new clients).
+                            try:
+                                m_hash = hash(tuple(
+                                    (name, (d or {}).get('status', ''),
+                                     int((d or {}).get('cpu_percent') or 0) // 5,
+                                     int((d or {}).get('mem_percent') or 0) // 2)
+                                    for name, d in sorted(metrics.items())))
+                            except Exception:
+                                m_hash = None
+                            if m_hash is None or m_hash != getattr(mgr, '_last_metrics_hash', None) or loop_count % 10 == 0:
+                                mgr._last_metrics_hash = m_hash
+                                broadcast_sse('metrics', metrics, cid)
                     except Exception as e:
                         # NS May 2026 — surface this in debug; cooldown if frequent
                         logging.debug(f"[SSE] {cid} get_node_status failed: {e}")
@@ -258,7 +272,26 @@ def broadcast_resources_loop():
                     try:
                         resources = mgr.get_vm_resources()
                         if resources:
-                            broadcast_sse('resources', resources, cid)
+                            # NS Jul 2026 — dedup like tasks (SSE-perf). At 10k VMs the
+                            # full list is a ~3MB json.dumps every second; bucket the noisy
+                            # cpu/mem and only broadcast when a guest's status/node/name or
+                            # bucketed load changed, or every 10th loop (keepalive for
+                            # ip/tags + newly-connected clients). Cuts steady-state hub
+                            # serialize + SSE bandwidth ~90% on a quiet estate. The
+                            # after-action push_immediate_update() bypasses this gate
+                            # (calls broadcast_sse directly) so action feedback stays instant.
+                            try:
+                                r_hash = hash(tuple(
+                                    (r.get('vmid'), r.get('status', ''), r.get('node', ''),
+                                     r.get('name', ''),
+                                     int(r.get('cpu_percent') or 0) // 5,
+                                     int(r.get('mem_percent') or 0) // 2)
+                                    for r in resources))
+                            except Exception:
+                                r_hash = None
+                            if r_hash is None or r_hash != getattr(mgr, '_last_resource_hash', None) or loop_count % 10 == 0:
+                                mgr._last_resource_hash = r_hash
+                                broadcast_sse('resources', resources, cid)
                             # NS: Feb 2026 - Reset stale counter on success
                             mgr._consecutive_empty_responses = 0
                         elif metrics_ok:
