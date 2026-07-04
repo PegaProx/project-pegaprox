@@ -70,6 +70,15 @@ class V2PMigrationTask:
         self.net_driver = self.config.get('net_driver', '')
         self.disk_bus = self.config.get('disk_bus', '')
         self.transfer_mode = self.config.get('transfer_mode', 'auto')
+        # #598 — optional VLAN tag on the target NIC. It gets appended into the net
+        # config that creates the VM, so validate STRICTLY (command-injection surface,
+        # cf. #489): must be an int 1-4094, anything else is ignored (unset) so an empty
+        # value appends nothing and behaviour is byte-identical to before.
+        try:
+            _tag = int(str(self.config.get('net_vlan_tag', '')).strip())
+            self.net_vlan_tag = _tag if 1 <= _tag <= 4094 else None
+        except (ValueError, TypeError):
+            self.net_vlan_tag = None
         self.bios_override = self.config.get('bios', 'auto')
         self.selected_nics = self.config.get('selected_nics', None)
         self.preserve_mac = self.config.get('preserve_mac', False)
@@ -605,9 +614,14 @@ def _run_v2p_migration(task):
                 nic_str = f'{model},bridge={task.network_bridge}'
                 if preserve_mac and isinstance(nic, dict) and nic.get('mac_address'):
                     nic_str += f',macaddr={nic["mac_address"]}'
+                if task.net_vlan_tag:  # #598 — validated int 1-4094
+                    nic_str += f',tag={task.net_vlan_tag}'
                 pve_config[f'net{idx}'] = nic_str
         else:
-            pve_config['net0'] = f'{net_driver},bridge={task.network_bridge}'
+            net0 = f'{net_driver},bridge={task.network_bridge}'
+            if task.net_vlan_tag:  # #598
+                net0 += f',tag={task.net_vlan_tag}'
+            pve_config['net0'] = net0
         if bios == 'ovmf':
             # NS Apr 2026 (offline-transfer bug): DON'T allocate efidisk0 here.
             # On file-based storage (NFS/dir), `efidisk0: storage:1` allocates vm-XXX-disk-0.qcow2.

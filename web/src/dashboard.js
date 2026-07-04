@@ -8087,7 +8087,7 @@
             const [vmwareMigrationPlan, setVmwareMigrationPlan] = useState(null);
             const [vmwareMigrations, setVmwareMigrations] = useState([]);
             const [vmwareMigrateForm, setVmwareMigrateForm] = useState({
-                target_cluster:'',target_node:'',target_storage:'',esxi_user:'root',esxi_password:'',network_bridge:'vmbr0',
+                target_cluster:'',target_node:'',target_storage:'',esxi_user:'root',esxi_password:'',network_bridge:'vmbr0',net_vlan_tag:'',
                 start_after:true,remove_source:false,transfer_mode:'vmkfstools_clone',bios:'auto',preserve_mac:true,
                 // hardware overrides (#222)
                 ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'vmware',net_driver:'auto',
@@ -20592,6 +20592,12 @@
                                                                 <div>
                                                                     <label className="text-xs text-gray-500 mb-1 block">Network Bridge</label>
                                                                     <input value={vmwareMigrateForm.network_bridge} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, network_bridge: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+
+                                                                {/* VLAN Tag (#598) — optional, for VLAN-aware bridges */}
+                                                                <div>
+                                                                    <label className="text-xs text-gray-500 mb-1 block">VLAN Tag <span className="text-gray-600">(optional, 1-4094)</span></label>
+                                                                    <input type="number" min="1" max="4094" value={vmwareMigrateForm.net_vlan_tag} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, net_vlan_tag: e.target.value})} placeholder="none" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                                 </div>
                                                                 
                                                                 {/* Firmware / BIOS */}
