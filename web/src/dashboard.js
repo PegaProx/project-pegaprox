@@ -8087,7 +8087,7 @@
             const [vmwareMigrationPlan, setVmwareMigrationPlan] = useState(null);
             const [vmwareMigrations, setVmwareMigrations] = useState([]);
             const [vmwareMigrateForm, setVmwareMigrateForm] = useState({
-                target_cluster:'',target_node:'',target_storage:'',esxi_password:'',network_bridge:'vmbr0',
+                target_cluster:'',target_node:'',target_storage:'',esxi_user:'root',esxi_password:'',network_bridge:'vmbr0',
                 start_after:true,remove_source:false,transfer_mode:'vmkfstools_clone',bios:'auto',preserve_mac:true,
                 // hardware overrides (#222)
                 ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'vmware',net_driver:'auto',
@@ -20575,10 +20575,17 @@
                                                                     </div>
                                                                 )}
                                                                 
+                                                                {/* ESXi SSH User (#602: hosters like LiquidWeb don't hand out root — the
+                                                                    backend already honours esxi_user, this just exposes it in the wizard) */}
+                                                                <div>
+                                                                    <label className="text-xs text-gray-500 mb-1 block">ESXi SSH User</label>
+                                                                    <input value={vmwareMigrateForm.esxi_user} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, esxi_user: e.target.value})} placeholder="root" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+
                                                                 {/* ESXi Password */}
                                                                 <div>
-                                                                    <label className="text-xs text-gray-500 mb-1 block">ESXi Root Password (for SSH access)</label>
-                                                                    <input type="password" value={vmwareMigrateForm.esxi_password} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, esxi_password: e.target.value})} placeholder="ESXi root password" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                    <label className="text-xs text-gray-500 mb-1 block">ESXi Password (for SSH access)</label>
+                                                                    <input type="password" value={vmwareMigrateForm.esxi_password} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, esxi_password: e.target.value})} placeholder="ESXi password" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                                 </div>
                                                                 
                                                                 {/* Network Bridge */}
