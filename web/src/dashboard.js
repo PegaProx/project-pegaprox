@@ -6260,6 +6260,9 @@
                 // pass, never a NIS2 assessment. informational => no downloadable "assessment" PDF.
                 { id: 'nis2', name: 'NIS2 / KRITIS', region: 'EU', controls: ['ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','file_perms','login_banners','file_integrity','process_acct','audit_boot','audit_rules','aide_audit_protect','audit_immutable','session_limit','inactive_accounts','mem_protection','apparmor','sysctl_hardening','auditd_service','journald','mount_options'], informational: true, note: 'Indicator only — NIS2/KRITIS is an organizational & legal obligation, not a hardening checklist. Hardening-control coverage shown, not a NIS2 assessment.' },
                 { id: 'vsnfd', name: 'VS-NfD (BSI)', region: 'EU', controls: ['vsnfd_disk_encryption','vsnfd_audit_retention','vsnfd_journald_size','vsnfd_secure_boot','vsnfd_kernel_lockdown','vsnfd_password_min_12'] },
+                // FR side — Diffusion Restreinte (II 901) + RGS both map to ANSSI-BP-028 v2.0 (verified R-refs in compliance_mapping.py). ssh_* deferred by BP-028 to a separate ANSSI note, so not scored here.
+                { id: 'dr', name: 'Diffusion Restreinte (ANSSI II 901)', region: 'EU', controls: ['fs_modules','core_dumps','mount_options','journald','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','file_integrity','inactive_accounts','default_umask','audit_boot','audit_rules','aide_audit_protect','audit_immutable','mem_protection','apparmor','sysctl_hardening','auditd_service','pkg_cleanup','vsnfd_secure_boot','vsnfd_journald_size','vsnfd_password_min_12'] },
+                { id: 'rgs', name: 'RGS (ANSSI-BP-028)', region: 'EU', controls: ['fs_modules','core_dumps','mount_options','journald','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','file_integrity','inactive_accounts','default_umask','audit_boot','audit_rules','aide_audit_protect','audit_immutable','mem_protection','apparmor','sysctl_hardening','auditd_service','pkg_cleanup','vsnfd_secure_boot','vsnfd_journald_size','vsnfd_password_min_12'] },
                 { id: 'cmmc1', name: 'CMMC L1 (FAR 52.204-21)', region: 'US', controls: ['ssh_perms','pam_faillock','pw_history','pw_quality','pw_aging','file_perms','login_banners','debsums','file_integrity','audit_boot','audit_rules','sysctl_hardening','auditd_service','mem_protection','apparmor'] },
                 { id: 'cmmc2', name: 'CMMC L2 / NIST 800-171', region: 'US', controls: ['fs_modules','core_dumps','mount_options','journald','ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','session_limit','inactive_accounts','shell_timeout','file_integrity','process_acct','audit_boot','audit_rules','aide_audit_protect','sysctl_hardening','mem_protection','apparmor','auditd_service','debsums','pkg_cleanup'] },
                 { id: 'nist53', name: 'NIST 800-53 (Mod)', region: 'US', controls: ['ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','session_limit','inactive_accounts','file_integrity','process_acct','audit_boot','audit_rules','aide_audit_protect','sysctl_hardening','mem_protection','apparmor','auditd_service','debsums','journald','pkg_cleanup','login_banners','default_umask'] },
@@ -6825,7 +6828,7 @@
                     });
                 });
                 // also add framework-specific term
-                const fwTerm = ({cmmc1: 'CMMC', cmmc2: 'NIST 800-171', nist53: 'NIST 800-53', stig: 'STIG', iso: 'ISO 27001', bsi: 'BSI', vsnfd: 'VS-NfD', 'vs-nfd': 'VS-NfD'})[fw.id];
+                const fwTerm = ({cmmc1: 'CMMC', cmmc2: 'NIST 800-171', nist53: 'NIST 800-53', stig: 'STIG', iso: 'ISO 27001', bsi: 'BSI', vsnfd: 'VS-NfD', 'vs-nfd': 'VS-NfD', dr: 'Diffusion Restreinte', rgs: 'RGS'})[fw.id];
                 if (fwTerm && glossary[fwTerm]) usedSlugs.add(fwTerm);
                 Array.from(usedSlugs).sort().forEach(term => {
                     if (glossary[term]) glossaryRows.push([term, glossary[term]]);
@@ -6882,6 +6885,8 @@
                                 <option value="cis-l1">CIS Level 1 (default)</option>
                                 <option value="cis-l2">CIS Level 2</option>
                                 <option value="vs-nfd">VS-NfD (BSI Grundschutz)</option>
+                                <option value="dr">Diffusion Restreinte (ANSSI II 901)</option>
+                                <option value="rgs">RGS (ANSSI-BP-028)</option>
                             </select>
                             <button
                                 onClick={() => setRefreshTick(t => t + 1)}
@@ -16301,6 +16306,10 @@
                                                                     <option value="iso">ISO 27001 (Annex A)</option>
                                                                     <option value="nis2">NIS2 / KRITIS</option>
                                                                     <option value="vs-nfd">VS-NfD (BSI)</option>
+                                                                </optgroup>
+                                                                <optgroup label={t('regionFR') || 'EU / France'}>
+                                                                    <option value="dr">Diffusion Restreinte (ANSSI II 901)</option>
+                                                                    <option value="rgs">RGS (ANSSI-BP-028)</option>
                                                                 </optgroup>
                                                                 <optgroup label={t('regionUS') || 'US Defense / Federal'}>
                                                                     <option value="cmmc1">CMMC L1 (FAR 52.204-21)</option>

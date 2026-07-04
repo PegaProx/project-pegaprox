@@ -56,6 +56,17 @@ FAMILY_LABELS = {
     'NET': 'Netze und Kommunikation',
     'DER': 'Detektion und Reaktion',
     'CON': 'Konzeption und Vorgehensweise',
+    # ANSSI-BP-028 section codes (French) — used by Diffusion Restreinte + RGS
+    'materiel': 'Configuration matérielle',
+    'noyau': 'Configuration du noyau Linux',
+    'partitionnement': 'Partitionnement système',
+    'comptes': "Comptes d'accès",
+    'controle_acces': "Contrôle d'accès",
+    'fichiers': 'Fichiers et répertoires',
+    'paquets': 'Gestion des paquets',
+    'services': 'Configuration des services',
+    'journalisation': 'Journalisation',
+    'surveillance': 'Surveillance du système de fichiers',
     'APP': 'Anwendungen',
     # Catch-all
     'OTHER': 'Other / Cross-cutting',
@@ -773,6 +784,129 @@ BSI_GRUNDSCHUTZ = {
 }
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# ANSSI-BP-028 v2.0 (2022-10-03) — "Recommandations de configuration d'un
+# système GNU/Linux". The recognised French national Linux-hardening baseline.
+# Both Diffusion Restreinte (protection regime under Instruction interministérielle
+# n° 901 / II 901) and the RGS reference ANSSI-BP-028 as the concrete technical
+# hardening measure set, so 'dr' + 'rgs' both inherit this mapping — same as
+# 'vs-nfd' inherits BSI Grundschutz.
+# NS Jul 2026 — R-numbers + French titles verified against the official ANSSI PDF
+# (v2.0, "Liste des recommandations" p.71-73). Checks with NO defensible BP-028
+# recommendation are INTENTIONALLY UNMAPPED (no fabrication, per the BSI rebuild note):
+#   ssh_crypto / ssh_perms  -> BP-028 defers OpenSSH to a separate ANSSI note (NT-SSH)
+#   vsnfd_kernel_lockdown   -> only Annexe A (non-numbered), not a recommendation
+#   vsnfd_disk_encryption   -> no LUKS/FDE recommendation in v2.0
+#   pve_fail2ban            -> host lockout is R67 (pam_faillock); no fail2ban item
+#   restrict_compilers / debsums / process_acct / vsnfd_audit_retention -> no matching R-number
+# ──────────────────────────────────────────────────────────────────────────
+ANSSI_BP028 = {
+    'pam_faillock': [
+        {'ref': 'R67', 'family': 'services', 'title': 'Sécuriser les authentifications distante par PAM'},
+    ],
+    'pw_quality': [
+        {'ref': 'R67', 'family': 'services', 'title': 'Sécuriser les authentifications distante par PAM'},
+        {'ref': 'R31', 'family': 'comptes', 'title': 'Utiliser des mots de passe robustes'},
+    ],
+    'pw_aging': [
+        {'ref': 'R31', 'family': 'comptes', 'title': 'Utiliser des mots de passe robustes'},
+    ],
+    'pw_history': [
+        {'ref': 'R31', 'family': 'comptes', 'title': 'Utiliser des mots de passe robustes'},
+    ],
+    'pw_hash_rounds': [
+        {'ref': 'R68', 'family': 'services', 'title': 'Protéger les mots de passe stockés'},
+        {'ref': 'R31', 'family': 'comptes', 'title': 'Utiliser des mots de passe robustes'},
+    ],
+    'file_perms': [
+        {'ref': 'R50', 'family': 'fichiers', 'title': "Restreindre les droits d'accès aux fichiers et aux répertoires sensibles"},
+        {'ref': 'R51', 'family': 'fichiers', 'title': "Changer les secrets et droits d'accès dès l'installation"},
+    ],
+    'default_umask': [
+        {'ref': 'R36', 'family': 'controle_acces', 'title': 'Modifier la valeur par défaut de UMASK'},
+    ],
+    'apparmor': [
+        {'ref': 'R45', 'family': 'controle_acces', 'title': 'Activer les profils de sécurité AppArmor'},
+        {'ref': 'R37', 'family': 'controle_acces', 'title': "Utiliser des fonctionnalités de contrôle d'accès obligatoire MAC"},
+    ],
+    'inactive_accounts': [
+        {'ref': 'R30', 'family': 'comptes', 'title': 'Désactiver les comptes utilisateur inutilisés'},
+    ],
+    'vsnfd_password_min_12': [
+        {'ref': 'R67', 'family': 'services', 'title': 'Sécuriser les authentifications distante par PAM'},
+    ],
+    'fs_modules': [
+        {'ref': 'R10', 'family': 'noyau', 'title': 'Désactiver le chargement des modules noyau'},
+    ],
+    'usb_storage': [
+        {'ref': 'R10', 'family': 'noyau', 'title': 'Désactiver le chargement des modules noyau'},
+    ],
+    'mount_options': [
+        {'ref': 'R28', 'family': 'partitionnement', 'title': 'Partitionnement type'},
+    ],
+    'core_dumps': [
+        {'ref': 'R14', 'family': 'noyau', 'title': 'Paramétrer les options de configuration des systèmes de fichiers'},
+        {'ref': 'R8', 'family': 'noyau', 'title': 'Paramétrer les options de configuration de la mémoire'},
+    ],
+    'audit_rules': [
+        {'ref': 'R73', 'family': 'journalisation', 'title': "Journaliser l'activité système avec auditd"},
+    ],
+    'audit_boot': [
+        {'ref': 'R73', 'family': 'journalisation', 'title': "Journaliser l'activité système avec auditd"},
+    ],
+    'auditd_service': [
+        {'ref': 'R73', 'family': 'journalisation', 'title': "Journaliser l'activité système avec auditd"},
+    ],
+    'audit_immutable': [
+        {'ref': 'R73', 'family': 'journalisation', 'title': "Journaliser l'activité système avec auditd"},
+    ],
+    'aide_audit_protect': [
+        {'ref': 'R77', 'family': 'surveillance', 'title': 'Protéger la base de données des scellés'},
+    ],
+    'journald': [
+        {'ref': 'R71', 'family': 'journalisation', 'title': 'Mettre en place un système de journalisation'},
+        {'ref': 'R72', 'family': 'journalisation', 'title': "Mettre en place des journaux d'activité de service dédiés"},
+    ],
+    'file_integrity': [
+        {'ref': 'R76', 'family': 'surveillance', 'title': "Sceller et vérifier l'intégrité des fichiers"},
+        {'ref': 'R77', 'family': 'surveillance', 'title': 'Protéger la base de données des scellés'},
+    ],
+    'mem_protection': [
+        {'ref': 'R9', 'family': 'noyau', 'title': 'Paramétrer les options de configuration du noyau'},
+        {'ref': 'R8', 'family': 'noyau', 'title': 'Paramétrer les options de configuration de la mémoire'},
+        {'ref': 'R11', 'family': 'noyau', 'title': 'Activer et configurer le LSM Yama'},
+    ],
+    'sysctl_hardening': [
+        {'ref': 'R9', 'family': 'noyau', 'title': 'Paramétrer les options de configuration du noyau'},
+        {'ref': 'R8', 'family': 'noyau', 'title': 'Paramétrer les options de configuration de la mémoire'},
+        {'ref': 'R12', 'family': 'noyau', 'title': 'Paramétrer les options de configuration du réseau IPv4'},
+        {'ref': 'R14', 'family': 'noyau', 'title': 'Paramétrer les options de configuration des systèmes de fichiers'},
+    ],
+    'net_protocols': [
+        {'ref': 'R10', 'family': 'noyau', 'title': 'Désactiver le chargement des modules noyau'},
+        {'ref': 'R13', 'family': 'noyau', 'title': 'Désactiver le plan IPv6'},
+    ],
+    'pkg_cleanup': [
+        {'ref': 'R58', 'family': 'paquets', 'title': "N'installer que les paquets strictement nécessaires"},
+    ],
+    'remove_legacy_svcs': [
+        {'ref': 'R62', 'family': 'services', 'title': 'Désactiver les services non nécessaires'},
+        {'ref': 'R58', 'family': 'paquets', 'title': "N'installer que les paquets strictement nécessaires"},
+    ],
+    'disable_services': [
+        {'ref': 'R62', 'family': 'services', 'title': 'Désactiver les services non nécessaires'},
+        {'ref': 'R63', 'family': 'services', 'title': 'Désactiver les fonctionnalités des services non essentielles'},
+    ],
+    'vsnfd_journald_size': [
+        {'ref': 'R28', 'family': 'partitionnement', 'title': 'Partitionnement type'},
+    ],
+    'vsnfd_secure_boot': [
+        {'ref': 'R3', 'family': 'materiel', 'title': 'Activer le démarrage sécurisé UEFI'},
+        {'ref': 'R4', 'family': 'materiel', 'title': 'Remplacer les clés préchargées'},
+    ],
+}
+
+
 # Master lookup
 FRAMEWORK_MAPPING = {
     'cmmc1':  CMMC_L1,
@@ -782,6 +916,8 @@ FRAMEWORK_MAPPING = {
     'iso':    ISO_27001,
     'bsi':    BSI_GRUNDSCHUTZ,
     'vs-nfd': BSI_GRUNDSCHUTZ,  # VS-NfD inherits BSI Grundschutz refs
+    'dr':     ANSSI_BP028,      # Diffusion Restreinte (II 901) — French Linux baseline = ANSSI-BP-028
+    'rgs':    ANSSI_BP028,      # RGS references ANSSI-BP-028 for Linux system hardening
 }
 
 
@@ -1127,6 +1263,20 @@ FRAMEWORK_META = {
         'control_count': None,
         'note':         'German national restricted-use classification. PegaProx provides a Proxmox-safe BSI Grundschutz subset + 6 VS-NfD-specific informational checks.',
     },
+    'dr': {
+        'full_name':    'Diffusion Restreinte (II 901)',
+        'revision':     'Instruction interministérielle n° 901; technical Linux baseline = ANSSI-BP-028 v2.0 (2022-10-03)',
+        'source_url':   'https://cyber.gouv.fr/publications/recommandations-de-securite-relatives-un-systeme-gnulinux',
+        'control_count': None,
+        'note':         'French national restricted classification. II 901 sets the protection regime for DR-level information systems; PegaProx maps the technical Linux-hardening measures to ANSSI-BP-028 (the recognised French baseline). Audit-prep evidence — not a homologation.',
+    },
+    'rgs': {
+        'full_name':    'RGS (Référentiel Général de Sécurité)',
+        'revision':     'RGS v2.0; Linux-hardening implementation reference = ANSSI-BP-028 v2.0 (2022-10-03)',
+        'source_url':   'https://cyber.gouv.fr/le-referentiel-general-de-securite-rgs-version-20',
+        'control_count': None,
+        'note':         'French general security framework for administrations. RGS points to ANSSI technical guides for implementation; PegaProx maps the Linux node-hardening subset to ANSSI-BP-028. Technical-config evidence only.',
+    },
 }
 
 
@@ -1191,6 +1341,11 @@ GLOSSARY = {
     'BSI':         'Bundesamt für Sicherheit in der Informationstechnik — the German Federal Office for Information Security.',
     'IT-Grundschutz': 'BSI methodology and control catalogue for information security in German government / industry.',
     'VS-NfD':      'Verschlusssache - Nur für den Dienstgebrauch — German national classification level "For Official Use Only".',
+    'ANSSI':       'Agence nationale de la sécurité des systèmes d\'information — the French national cybersecurity authority (the French counterpart to the German BSI).',
+    'ANSSI-BP-028': 'ANSSI\'s "Recommandations de configuration d\'un système GNU/Linux" (v2.0, 2022) — the recognised French Linux system-hardening baseline (numbered recommendations R1–R80).',
+    'Diffusion Restreinte': 'French national "Restricted" protection level for sensitive information; the information-system protection regime is set by Instruction interministérielle n° 901 (II 901). Rough analogue of German VS-NfD.',
+    'II 901':      'Instruction interministérielle n° 901 — French regulation defining the protection of information systems handling Diffusion Restreinte information.',
+    'RGS':         'Référentiel Général de Sécurité — the French general security framework mandatory for administrations\' information systems (crypto, authentication, audit, timestamping).',
     'FIPS 140-3':  'Federal Information Processing Standard for cryptographic modules. Validates the implementation of the crypto library itself, not the system hardening.',
     'OVMF':        'Open Virtual Machine Firmware — the UEFI implementation used in QEMU / KVM virtual machines.',
     'Secure Boot': 'UEFI feature that allows only firmware-signed boot loaders to run, preventing certain rootkit/bootkit attacks.',

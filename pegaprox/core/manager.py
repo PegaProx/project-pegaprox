@@ -15366,6 +15366,26 @@ echo DONE""",
             'session_limit', 'inactive_accounts', 'mem_protection', 'apparmor',
             'sysctl_hardening', 'auditd_service', 'journald', 'mount_options',
         },
+        # NS Jul 2026 — French frameworks. Diffusion Restreinte (II 901) + RGS both
+        # reference ANSSI-BP-028 v2.0 as the Linux-hardening baseline; scope = the
+        # real checks BP-028 covers. BP-028 defers OpenSSH to a separate ANSSI note,
+        # so ssh_perms/ssh_crypto are intentionally NOT in this run-scope.
+        'dr': {
+            'fs_modules', 'core_dumps', 'mount_options', 'journald', 'pam_faillock',
+            'pw_history', 'pw_quality', 'pw_aging', 'pw_hash_rounds', 'file_perms',
+            'file_integrity', 'inactive_accounts', 'default_umask', 'audit_boot',
+            'audit_rules', 'aide_audit_protect', 'audit_immutable', 'mem_protection',
+            'apparmor', 'sysctl_hardening', 'auditd_service', 'pkg_cleanup',
+            'vsnfd_secure_boot', 'vsnfd_journald_size', 'vsnfd_password_min_12',
+        },
+        'rgs': {
+            'fs_modules', 'core_dumps', 'mount_options', 'journald', 'pam_faillock',
+            'pw_history', 'pw_quality', 'pw_aging', 'pw_hash_rounds', 'file_perms',
+            'file_integrity', 'inactive_accounts', 'default_umask', 'audit_boot',
+            'audit_rules', 'aide_audit_protect', 'audit_immutable', 'mem_protection',
+            'apparmor', 'sysctl_hardening', 'auditd_service', 'pkg_cleanup',
+            'vsnfd_secure_boot', 'vsnfd_journald_size', 'vsnfd_password_min_12',
+        },
         'cmmc1': {
             # CMMC Level 1 (FAR 52.204-21) — 17 basic safeguarding controls, software-side
             'ssh_perms', 'pam_faillock', 'pw_history', 'pw_quality', 'pw_aging',

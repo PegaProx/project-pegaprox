@@ -684,7 +684,7 @@ def check_hardening(cluster_id, node):
     # NS Apr 2026 — profile filter; Harden PVE Node UI + Compliance Dashboard share these.
     profile = (request.args.get('profile', '') or '').strip().lower() or None
     if profile and profile not in {'cis-l1', 'cis-l2', 'vs-nfd', 'bsi', 'iso', 'nis2',
-                                     'cmmc1', 'cmmc2', 'nist53', 'stig'}:
+                                     'cmmc1', 'cmmc2', 'nist53', 'stig', 'dr', 'rgs'}:
         return jsonify({'error': f'unknown profile: {profile}'}), 400
     result = mgr.check_node_hardening(node, verbose=verbose, profile=profile)
     if result is None:
