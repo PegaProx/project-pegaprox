@@ -881,11 +881,13 @@
             // NS: Issue #50 - Fetch guest agent info
             useEffect(() => {
                 const gkey = `${clusterId}:${vm.vmid}`;
-                if (!isQemu || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
+                // #560 — also fetch for LXC (backend returns os/ip via config+pct, no agent)
+                if (!(isQemu || vm.type === 'lxc') || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
                     .then(r => r && r.ok ? r.json() : null)
                     .then(data => {
-                        if (data && data.agent_running) { _guestInfoCache[gkey] = data; setGuestInfo(data); }
+                        // LXC has no guest agent → accept on is_lxc, not just agent_running
+                        if (data && (data.agent_running || data.is_lxc)) { _guestInfoCache[gkey] = data; setGuestInfo(data); }
                         else setGuestInfo(_guestInfoCache[gkey] || null);  // keep last-known on transient miss, don't flip
                     })
                     .catch(() => setGuestInfo(_guestInfoCache[gkey] || null));
@@ -1175,8 +1177,10 @@
                         </div>
                     )}
 
-                    {/* NS: Issue #50 - Guest Agent Info */}
-                    {isQemu && vm.status === 'running' && guestInfo && (
+                    {/* NS: Issue #50 - Guest Agent Info. #560 — also render for LXC:
+                        the backend guest-info route now returns os_pretty_name/kernel/ip
+                        for containers (read via config + pct), so surface OS + IP here too. */}
+                    {(isQemu || vm.type === 'lxc') && vm.status === 'running' && guestInfo && (
                         <div className="px-6 pb-2">
                             <div className="bg-proxmox-dark rounded-lg p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
                                 {guestInfo.hostname && (
@@ -1212,9 +1216,21 @@
                                         </div>
                                     </div>
                                 )}
+                                {/* #560 — IP address (QEMU guest-agent or LXC config/pct) */}
+                                {guestInfo.ip_addresses && guestInfo.ip_addresses.length > 0 && (
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-lg bg-blue-500/10">
+                                            <Icons.Globe className="w-4 h-4 text-blue-400" />
+                                        </div>
+                                        <div className="min-w-0">
+                                            <div className="text-xs text-gray-500">{t('ipAddress') || 'IP Address'}</div>
+                                            <div className="text-sm font-semibold text-white font-mono truncate" title={guestInfo.ip_addresses.join(', ')}>{guestInfo.ip_addresses.join(', ')}</div>
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="flex items-center gap-1.5 md:col-span-3 pt-2 border-t border-gray-700/30">
                                     <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                                    <span className="text-xs text-cyan-400/70">QEMU Guest Agent</span>
+                                    <span className="text-xs text-cyan-400/70">{isQemu ? 'QEMU Guest Agent' : 'LXC Container'}</span>
                                 </div>
                             </div>
                         </div>
@@ -1683,11 +1699,13 @@
             // Fetch guest agent info
             useEffect(() => {
                 const gkey = `${clusterId}:${vm.vmid}`;
-                if (!isQemu || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
+                // #560 — also fetch for LXC (backend returns os/ip via config+pct, no agent)
+                if (!(isQemu || vm.type === 'lxc') || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
                     .then(r => r && r.ok ? r.json() : null)
                     .then(data => {
-                        if (data && data.agent_running) { _guestInfoCache[gkey] = data; setGuestInfo(data); }
+                        // LXC has no guest agent → accept on is_lxc, not just agent_running
+                        if (data && (data.agent_running || data.is_lxc)) { _guestInfoCache[gkey] = data; setGuestInfo(data); }
                         else setGuestInfo(_guestInfoCache[gkey] || null);  // keep last-known on transient miss, don't flip
                     })
                     .catch(() => setGuestInfo(_guestInfoCache[gkey] || null));
