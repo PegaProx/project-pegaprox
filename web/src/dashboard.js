@@ -7163,7 +7163,7 @@
             // init settings form
             useEffect(() => {
                 if (planDetail && srSubTab === 'settings') {
-                    setSettingsForm({ name: planDetail.name, auto_failover: !!planDetail.auto_failover, failover_timeout: planDetail.failover_timeout || 120, pre_failover_webhook: planDetail.pre_failover_webhook || '', post_failover_webhook: planDetail.post_failover_webhook || '' });
+                    setSettingsForm({ name: planDetail.name, auto_failover: !!planDetail.auto_failover, failover_timeout: planDetail.failover_timeout || 120, pre_failover_webhook: planDetail.pre_failover_webhook || '', post_failover_webhook: planDetail.post_failover_webhook || '', test_disconnect_nics: !!planDetail.test_disconnect_nics });
                     setSettingsDirty(false);
                 }
             }, [planDetail?.id, srSubTab]);
@@ -7549,6 +7549,10 @@
                                     {settingsForm.auto_failover && <div><label className="text-xs text-gray-500 block mb-1">{t('failoverTimeout')} ({settingsForm.failover_timeout}s)</label><input type="range" min="30" max="600" step="10" value={settingsForm.failover_timeout || 120} onChange={e => { setSettingsForm(f => ({...f, failover_timeout: parseInt(e.target.value)})); setSettingsDirty(true); }} className="w-full" /></div>}
                                     <div><label className="text-xs text-gray-500 block mb-1">{t('preWebhook')}</label><input value={settingsForm.pre_failover_webhook || ''} onChange={e => { setSettingsForm(f => ({...f, pre_failover_webhook: e.target.value})); setSettingsDirty(true); }} placeholder="https://..." className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" /></div>
                                     <div><label className="text-xs text-gray-500 block mb-1">{t('postWebhook')}</label><input value={settingsForm.post_failover_webhook || ''} onChange={e => { setSettingsForm(f => ({...f, post_failover_webhook: e.target.value})); setSettingsDirty(true); }} placeholder="https://..." className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" /></div>
+                                    {/* MK Jul 2026 (#413) — Test-Failover NIC isolation */}
+                                    <div className="flex items-center justify-between pt-2 border-t border-proxmox-border/50"><div><label className="text-sm font-medium">{t('testDisconnectNics') || 'Disconnect NICs on Test Failover'}</label><p className="text-xs text-gray-500">{t('testDisconnectNicsDesc') || 'Bring test-failover clones up with network cables unplugged (link down) so a DR test cannot collide with production IPs.'}</p></div>
+                                        <div className={`toggle-switch ${settingsForm.test_disconnect_nics ? 'active' : ''}`} onClick={() => { setSettingsForm(f => ({...f, test_disconnect_nics: !f.test_disconnect_nics})); setSettingsDirty(true); }} />
+                                    </div>
                                     <div className="flex justify-end"><button onClick={saveSettings} disabled={!settingsDirty} className="px-4 py-1.5 text-sm rounded-lg bg-proxmox-orange text-white hover:bg-proxmox-orange/80 disabled:opacity-40">{t('saveSettings') || 'Save'}</button></div>
                                 </div>
                                 {canManage && <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-4">
@@ -17962,6 +17966,26 @@
                                                                         onChange={v => updateConfig('predictive_threshold', v)}
                                                                         min={50} max={95}
                                                                     />
+                                                                </div>
+                                                            )}
+                                                        </div>
+
+                                                        {/* MK Jul 2026 (#426) — drive placement from ProxLB VM tags */}
+                                                        <div className="pt-3 border-t border-gray-700/50">
+                                                            <Toggle
+                                                                checked={selectedCluster.proxlb_tags_enabled || false}
+                                                                onChange={v => updateConfig('proxlb_tags_enabled', v)}
+                                                                label={t('proxlbTags') || 'ProxLB VM Tags'}
+                                                            />
+                                                            <div className="text-xs text-gray-500 pl-12 mt-1">
+                                                                {t('proxlbTagsDesc') || 'Derive affinity, anti-affinity, ignore and pin rules from ProxLB-style VM tags. Off = no effect.'}
+                                                            </div>
+                                                            {selectedCluster.proxlb_tags_enabled && (
+                                                                <div className="mt-2 ml-12 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-xs text-blue-200 space-y-1">
+                                                                    <div><code className="font-mono">plb_affinity_&lt;group&gt;</code> — {t('proxlbTagAffinity') || 'keep tagged guests together'}</div>
+                                                                    <div><code className="font-mono">plb_anti_affinity_&lt;group&gt;</code> — {t('proxlbTagAnti') || 'keep tagged guests apart'}</div>
+                                                                    <div><code className="font-mono">plb_ignore</code> — {t('proxlbTagIgnore') || 'never auto-migrate this guest'}</div>
+                                                                    <div><code className="font-mono">plb_pin_&lt;node&gt;</code> — {t('proxlbTagPin') || 'restrict this guest to the named node'}</div>
                                                                 </div>
                                                             )}
                                                         </div>

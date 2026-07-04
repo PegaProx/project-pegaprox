@@ -1899,6 +1899,92 @@ class PegaProxManager:
             self.logger.info(f"[OK] Cluster balanced. Score diff {score_diff:.2f} <= {effective_threshold}")
             return False, None, None
     
+    def _derive_proxlb_tag_rules(self, vms=None):
+        """MK Jul 2026 (#426) — translate ProxLB-convention VM tags into the
+        placement rules the balancer already understands. Opt-in per cluster via
+        config.proxlb_tags_enabled; a full no-op when the toggle is off or no
+        guest carries plb_ tags, so it never changes behaviour by surprise.
+
+        Recognised tags (PVE stores the `tags` field semicolon-separated; we also
+        tolerate commas / whitespace):
+          plb_affinity_<group>       -> keep tagged guests together  (type 'together')
+          plb_anti_affinity_<group>  -> keep tagged guests apart     (type 'separate')
+          plb_ignore[_<suffix>]      -> never migrate this guest (balancing exclusion)
+          plb_pin_<node>             -> restrict this guest to the named node(s)
+
+        Returns {'rules': [<affinity-rule dicts, same shape as get_affinity_rules()>],
+                 'ignored': set(int vmid), 'pins': {int vmid: set(node names)}}.
+        Short-TTL cached because _check_affinity_violation calls us per candidate.
+        """
+        if not getattr(self.config, 'proxlb_tags_enabled', False):
+            return {'rules': [], 'ignored': set(), 'pins': {}}
+
+        now = time.time()
+        cached = getattr(self, '_proxlb_derived_cache', None)
+        if cached and (now - cached[0]) < 20:
+            return cached[1]
+
+        if vms is None:
+            try:
+                vms = self.get_vm_resources()
+            except Exception:
+                vms = []
+
+        valid_nodes = set()
+        try:
+            valid_nodes = set((self.get_node_status() or {}).keys())
+        except Exception:
+            pass
+
+        affinity_groups, anti_groups = {}, {}
+        ignored, pins = set(), {}
+
+        for res in (vms or []):
+            if res.get('type') not in ('qemu', 'lxc'):
+                continue
+            raw = res.get('tags')
+            if not raw:
+                continue
+            try:
+                vmid = int(res.get('vmid'))
+            except (TypeError, ValueError):
+                continue
+            tags = [t.strip().lower() for t in re.split(r'[;,\s]+', str(raw)) if t.strip()]
+            for tag in tags:
+                if tag.startswith('plb_affinity_'):
+                    g = tag[len('plb_affinity_'):]
+                    if g:
+                        affinity_groups.setdefault(g, []).append(str(vmid))
+                elif tag.startswith('plb_anti_affinity_'):
+                    g = tag[len('plb_anti_affinity_'):]
+                    if g:
+                        anti_groups.setdefault(g, []).append(str(vmid))
+                elif tag == 'plb_ignore' or tag.startswith('plb_ignore_'):
+                    ignored.add(vmid)
+                elif tag.startswith('plb_pin_'):
+                    node = tag[len('plb_pin_'):]
+                    # ProxLB validates the node against cluster membership; so do we,
+                    # matching case-insensitively (PVE lower-cases tag text).
+                    match = next((n for n in valid_nodes if n.lower() == node), None)
+                    if match:
+                        pins.setdefault(vmid, set()).add(match)
+                    else:
+                        self.logger.debug(f"[PROXLB] plb_pin_{node} on VM {vmid}: no such node — pin ignored")
+
+        rules = []
+        for g, members in affinity_groups.items():
+            if len(members) >= 2:
+                rules.append({'name': f'ProxLB affinity: {g}', 'type': 'together',
+                              'vms': members, 'enabled': True, 'enforce': True, '_source': 'proxlb'})
+        for g, members in anti_groups.items():
+            if len(members) >= 2:
+                rules.append({'name': f'ProxLB anti-affinity: {g}', 'type': 'separate',
+                              'vms': members, 'enabled': True, 'enforce': True, '_source': 'proxlb'})
+
+        result = {'rules': rules, 'ignored': ignored, 'pins': pins}
+        self._proxlb_derived_cache = (now, result)
+        return result
+
     def _check_affinity_violation(self, vmid, target_node, vm_nodes=None):
         """Check if moving a VM/CT would violate affinity rules
 
@@ -1910,7 +1996,24 @@ class PegaProxManager:
             rules = get_db().get_affinity_rules(self.id).get(self.id, [])
         except Exception as e:
             self.logger.error(f"Failed to load affinity rules: {e}")
-            return {'violation': False}
+            rules = []
+
+        # MK Jul 2026 (#426) — fold in ProxLB tag-derived rules + honour pins.
+        # A pin is a hard constraint checked even when there are no DB rules.
+        try:
+            _derived = self._derive_proxlb_tag_rules()
+            if _derived['rules']:
+                rules = list(rules) + _derived['rules']
+            try:
+                _vid_int = int(vmid)
+            except (TypeError, ValueError):
+                _vid_int = None
+            _pin = _derived['pins'].get(_vid_int) if _vid_int is not None else None
+            if _pin and target_node not in _pin:
+                return {'violation': True, 'enforce': True, 'rule': 'ProxLB pin',
+                        'message': f"VM/CT {vmid} is pinned to node(s) {', '.join(sorted(_pin))}"}
+        except Exception as e:
+            self.logger.debug(f"[PROXLB] tag-rule derivation failed in affinity check: {e}")
 
         if not rules:
             return {'violation': False}
@@ -2134,7 +2237,16 @@ class PegaProxManager:
         try:
             rules = get_db().get_affinity_rules(self.id).get(self.id, [])
         except Exception:
-            return 0
+            rules = []
+
+        # MK Jul 2026 (#426) — include ProxLB tag-derived anti-affinity rules (opt-in)
+        _derived = {'rules': [], 'ignored': set(), 'pins': {}}
+        try:
+            _derived = self._derive_proxlb_tag_rules()
+            if _derived['rules']:
+                rules = list(rules) + _derived['rules']
+        except Exception:
+            pass
 
         if not rules:
             return 0
@@ -2202,6 +2314,14 @@ class PegaProxManager:
                     occupied = set(node_groups.keys())
                     free_nodes = [n for n in available_nodes if n not in occupied and n != nd]
 
+                    # #426 — a ProxLB-pinned guest may only move within its pin set
+                    try:
+                        _vpin = _derived['pins'].get(int(vid))
+                    except (TypeError, ValueError):
+                        _vpin = None
+                    if _vpin:
+                        free_nodes = [n for n in free_nodes if n in _vpin]
+
                     if not free_nodes:
                         # fallback: pick least-loaded node that isn't this one
                         # even if it has another rule member (soft best-effort)
@@ -2262,6 +2382,13 @@ class PegaProxManager:
         excluded_pools = self.get_balancing_excluded_pools()
         if excluded_pools:
             self.logger.info(f"Pools excluded from balancing: {excluded_pools}")
+
+        # MK Jul 2026 (#426) — ProxLB tag-derived ignore/pin sets (opt-in; empty when off)
+        _proxlb = self._derive_proxlb_tag_rules(vms=vms)
+        proxlb_ignored = _proxlb['ignored']
+        proxlb_pins = _proxlb['pins']
+        if proxlb_ignored:
+            self.logger.info(f"[PROXLB] guests ignored via plb_ignore tag: {sorted(proxlb_ignored)}")
 
         # Filter VMs on source node that are running
         # NS: VM cooldown — skip VMs migrated in last 15 min to prevent ping-pong
@@ -2340,7 +2467,9 @@ class PegaProxManager:
             vm.get('vmid') not in exclude_vmids and  # LW: Skip already-migrated VMs this cycle
             vm.get('pool', '') not in excluded_pools and  # NS: Skip VMs in excluded pools
             vm.get('vmid') not in cooled_vmids and  # NS: Skip recently migrated VMs
-            vm.get('vmid') not in pve_crs_managed_vmids  # MK: PVE CRS owns these (9.2+)
+            vm.get('vmid') not in pve_crs_managed_vmids and  # MK: PVE CRS owns these (9.2+)
+            vm.get('vmid') not in proxlb_ignored and  # #426: ProxLB plb_ignore tag
+            (vm.get('vmid') not in proxlb_pins or target_node in proxlb_pins.get(vm.get('vmid'), set()))  # #426: plb_pin — only if target is a pinned node
         ]
 
         # Log if any VMs were excluded
@@ -2488,10 +2617,12 @@ class PegaProxManager:
             self.logger.info(f"Selected for migration: {selected.get('name', 'unnamed')} ({vm_type} {selected.get('vmid')})")
         return selected
     
-    def get_best_target_node(self, exclude_nodes: List[str] = None) -> Optional[str]:
+    def get_best_target_node(self, exclude_nodes: List[str] = None, vmid: int = None) -> Optional[str]:
         """Find the best target node for migration
-        
+
         LW: Now also excludes nodes configured in excluded_nodes (like ProxLB)
+        MK Jul 2026 (#426): pass vmid to honour a ProxLB plb_pin_<node> tag when
+        picking an evacuation/migration target for that specific guest.
         """
         if exclude_nodes is None:
             exclude_nodes = []
@@ -2527,10 +2658,23 @@ class PegaProxManager:
         if not available_nodes:
             self.logger.debug(f"Insufficent target nodes for migration (all excluded or in maintenace)")
             return None
-        
+
+        # MK Jul 2026 (#426) — if this guest carries a ProxLB plb_pin_<node> tag,
+        # restrict the target set to the pinned node(s).
+        if vmid is not None:
+            try:
+                _pin = self._derive_proxlb_tag_rules()['pins'].get(int(vmid))
+            except Exception:
+                _pin = None
+            if _pin:
+                available_nodes = [(n, d) for (n, d) in available_nodes if n in _pin]
+                if not available_nodes:
+                    self.logger.warning(f"[PROXLB] VM {vmid} pinned to {sorted(_pin)} but none are available targets")
+                    return None
+
         # Sort by score (lowest first)
         available_nodes.sort(key=lambda x: x[1]['score'])
-        
+
         return available_nodes[0][0]
     
     def _get_vm_storage(self, node, vmid, vm_type):
@@ -3229,8 +3373,8 @@ class PegaProxManager:
                 except:
                     pass  # if check fails, try migrating anyway
 
-                # Find best target node
-                target_node = self.get_best_target_node(exclude_nodes=[node_name])
+                # Find best target node (#426: honour a plb_pin tag for this guest)
+                target_node = self.get_best_target_node(exclude_nodes=[node_name], vmid=vmid)
 
                 if not target_node:
                     self.logger.error(f"[ERROR] No available target node for {vm_name}")

@@ -220,6 +220,7 @@ class PegaProxDB:
                 auto_migrate INTEGER DEFAULT 0,
                 balance_containers INTEGER DEFAULT 0,
                 balance_local_disks INTEGER DEFAULT 0,
+                proxlb_tags_enabled INTEGER DEFAULT 0,
                 dry_run INTEGER DEFAULT 1,
                 enabled INTEGER DEFAULT 1,
                 ha_enabled INTEGER DEFAULT 0,
@@ -990,6 +991,17 @@ class PegaProxDB:
                 except Exception as e:
                     logging.error(f"Failed to add excluded_nodes column: {e}")
 
+            # MK Jul 2026 (#426) — opt-in gate for driving placement/affinity from
+            # ProxLB-convention VM tags (plb_affinity_*, plb_anti_affinity_*,
+            # plb_ignore_*, plb_pin_*). Off by default = zero behaviour change.
+            if 'proxlb_tags_enabled' not in cluster_columns:
+                logging.info("Adding proxlb_tags_enabled column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN proxlb_tags_enabled INTEGER DEFAULT 0")
+                    logging.info("Added proxlb_tags_enabled column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add proxlb_tags_enabled column: {e}")
+
             # MK Feb 2026: Add smbios_autoconfig for per-cluster SMBIOS settings
             if 'smbios_autoconfig' not in cluster_columns:
                 logging.info("Adding smbios_autoconfig column to clusters table...")
@@ -1321,6 +1333,7 @@ class PegaProxDB:
                     failover_timeout INTEGER DEFAULT 120,
                     pre_failover_webhook TEXT DEFAULT '',
                     post_failover_webhook TEXT DEFAULT '',
+                    test_disconnect_nics INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'ready',
                     last_test TEXT,
                     last_failover TEXT,
@@ -1360,6 +1373,16 @@ class PegaProxDB:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_plan ON site_recovery_vms(plan_id, vmid)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_events_plan ON site_recovery_events(plan_id, started_at)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_plans_status ON site_recovery_plans(status)')
+            # MK Jul 2026 (#413) — per-plan option: bring Test-Failover clones up with
+            # NICs disconnected (link_down) so a DR test can't collide with production
+            # IPs on the network. Migrate existing DBs that predate the column.
+            try:
+                sr_cols = [row[1] for row in cursor.execute("PRAGMA table_info(site_recovery_plans)").fetchall()]
+                if 'test_disconnect_nics' not in sr_cols:
+                    cursor.execute("ALTER TABLE site_recovery_plans ADD COLUMN test_disconnect_nics INTEGER DEFAULT 0")
+                    logging.info("Added test_disconnect_nics column to site_recovery_plans")
+            except Exception as e:
+                logging.error(f"Failed to add test_disconnect_nics column: {e}")
             logging.info("Ensured site_recovery tables exist")
         except Exception as e:
             logging.error(f"Error creating site_recovery tables: {e}")
@@ -2689,6 +2712,7 @@ class PegaProxDB:
                 'auto_migrate': bool(row['auto_migrate']),
                 'balance_containers': bool(row['balance_containers']),
                 'balance_local_disks': bool(row['balance_local_disks']),
+                'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
                 'dry_run': bool(row['dry_run']),
                 'enabled': bool(row['enabled']),
                 'ha_enabled': bool(row['ha_enabled']),
@@ -2774,6 +2798,7 @@ class PegaProxDB:
             'auto_migrate': bool(row['auto_migrate']),
             'balance_containers': bool(row['balance_containers']),
             'balance_local_disks': bool(row['balance_local_disks']),
+            'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
             'dry_run': bool(row['dry_run']),
             'enabled': bool(row['enabled']),
             'ha_enabled': bool(row['ha_enabled']),
@@ -2844,9 +2869,10 @@ class PegaProxDB:
              backup_sla_max_age_hours,
              api_port,
              latitude, longitude, location_label,
+             proxlb_tags_enabled,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -2888,6 +2914,7 @@ class PegaProxDB:
             data.get('latitude', existing_lat),
             data.get('longitude', existing_lon),
             data.get('location_label', existing_loc_label) or '',
+            1 if data.get('proxlb_tags_enabled', False) else 0,
             existing['created_at'] if existing else now,
             now
         ))

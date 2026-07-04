@@ -1980,6 +1980,54 @@
                                                             needsRestart={true}
                                                         />
                                                     </div>
+                                                    {/* MK Jul 2026 — Extra CPU Flags (#410). Tri-state per flag:
+                                                        off (absent) / +flag (enabled) / -flag (disabled). Spliced
+                                                        in/out of the composite cpu= string as one semicolon-joined
+                                                        flags= segment, preserving type/reported-model/level. Backend
+                                                        passes cpu= through untouched, so this rides the delta-save. */}
+                                                    <div className="mt-1">
+                                                        <label className="block text-sm text-gray-400 mb-2">{t('extraCpuFlags') || 'Extra CPU Flags'}</label>
+                                                        <div className="grid grid-cols-3 gap-2">
+                                                            {['pcid', 'spec-ctrl', 'ssbd', 'ibpb', 'virt-ssbd', 'amd-ssbd', 'amd-no-ssb', 'pdpe1gb', 'hv-tlbflush', 'hv-evmcs', 'aes', 'md-clear'].map(flag => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                let state = 0; // 0 = default, 1 = +, -1 = -
+                                                                for (const part of cur.split(',').slice(1)) {
+                                                                    if (part.startsWith('flags=')) {
+                                                                        for (const tk of part.slice(6).split(';').filter(Boolean)) {
+                                                                            if (tk === '+' + flag) state = 1;
+                                                                            else if (tk === '-' + flag) state = -1;
+                                                                        }
+                                                                    }
+                                                                }
+                                                                const cycle = () => {
+                                                                    const cur2 = getValue('hardware', 'cpu') || '';
+                                                                    const [base, ...rest] = cur2.split(',');
+                                                                    let toks = [];
+                                                                    const kept = rest.filter(p => {
+                                                                        if (p.startsWith('flags=')) { toks = p.slice(6).split(';').filter(Boolean); return false; }
+                                                                        return true;
+                                                                    });
+                                                                    toks = toks.filter(tk => tk !== '+' + flag && tk !== '-' + flag);
+                                                                    const next = state === 0 ? 1 : (state === 1 ? -1 : 0);
+                                                                    if (next === 1) toks.push('+' + flag);
+                                                                    else if (next === -1) toks.push('-' + flag);
+                                                                    if (toks.length) kept.push('flags=' + toks.join(';'));
+                                                                    handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
+                                                                };
+                                                                const cls = state === 1 ? 'bg-green-500/20 border-green-500/50 text-green-300'
+                                                                    : state === -1 ? 'bg-red-500/20 border-red-500/50 text-red-300'
+                                                                        : 'bg-proxmox-dark border-proxmox-border text-gray-400';
+                                                                return (
+                                                                    <button key={flag} type="button" onClick={cycle}
+                                                                        title={state === 1 ? `+${flag} (enabled)` : state === -1 ? `-${flag} (disabled)` : `${flag} (default)`}
+                                                                        className={`px-2 py-1.5 text-xs rounded-lg border font-mono ${cls} hover:opacity-80 transition-opacity`}>
+                                                                        {state === 1 ? '+' : state === -1 ? '−' : ''}{flag}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                        <p className="text-xs text-gray-500 mt-1.5">{t('extraCpuFlagsHint') || 'Click to cycle each flag: default → enabled (+) → disabled (−). Requires a VM restart.'}</p>
+                                                    </div>
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <ConfigInputField
                                                             label="BIOS"

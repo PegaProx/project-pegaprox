@@ -95,6 +95,9 @@ class PegaProxConfig:
         self.auto_migrate = cluster_data.get('auto_migrate', False)
         self.balance_containers = cluster_data.get('balance_containers', False)
         self.balance_local_disks = cluster_data.get('balance_local_disks', False)
+        # MK Jul 2026 (#426) — opt-in: derive affinity/anti-affinity/ignore/pin
+        # placement rules from ProxLB-convention VM tags. Off = zero change.
+        self.proxlb_tags_enabled = cluster_data.get('proxlb_tags_enabled', False)
         self.dry_run = cluster_data.get('dry_run', False)
         self.enabled = cluster_data.get('enabled', True)
         self.ha_enabled = cluster_data.get('ha_enabled', False)

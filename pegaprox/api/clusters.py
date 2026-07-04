@@ -1055,6 +1055,7 @@ ALLOWED_CONFIG_FIELDS = {
     'balance_cpu_weight', 'balance_mem_weight', 'balance_io_weight',
     'cpu_baseline',
     'vnc_tunnel',  # MK Apr 2026 — SSH-tunnel-mode for VNC console
+    'proxlb_tags_enabled',  # MK Jul 2026 (#426) — derive placement from ProxLB VM tags
 }
 
 @bp.route('/api/clusters/<cluster_id>', methods=['PUT'])

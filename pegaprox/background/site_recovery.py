@@ -185,7 +185,13 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         fallback_reason = None
         if storage_map:
             try:
-                config = src_mgr.get_vm_config(vm_node, vmid, vm_type)
+                # MK Jul 2026 (#413) — get_vm_config returns {'success','config'};
+                # the flat scsiN/virtioN/rootfs keys live in config['raw']. The old
+                # code iterated the wrapper dict, so this remap NEVER matched and every
+                # cross-cluster failover silently fell back to the default storage.
+                _cfg_res = src_mgr.get_vm_config(vm_node, vmid, vm_type)
+                config = ((_cfg_res.get('config') or {}).get('raw') or {}) \
+                    if isinstance(_cfg_res, dict) and _cfg_res.get('success') else {}
                 if not config:
                     fallback_reason = 'source config empty (API call returned no data)'
                 else:
@@ -339,6 +345,63 @@ def _start_replicated_vm(tgt_mgr, vmid, vm_type='qemu'):
         return False, str(e)
 
 
+def _target_vmid_exists(tgt_mgr, vmid):
+    """MK Jul 2026 (#413) — is this VMID already present on the target cluster?
+    Used to fast-detect a replication-pre-seeded target before launching a qmigrate
+    that can only abort (PVE can't reconcile an existing target VMID)."""
+    try:
+        res = tgt_mgr._api_get(
+            f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/cluster/resources",
+            params={'type': 'vm'}
+        )
+        if res.status_code != 200:
+            return False
+        for r in res.json().get('data', []):
+            if int(r.get('vmid', 0)) == int(vmid):
+                return True
+    except Exception as e:
+        logger.debug(f"[SR] target-VMID existence probe failed: {e}")
+    return False
+
+
+def _disconnect_test_nics(tgt_mgr, node, vmid, vm_type='qemu'):
+    """MK Jul 2026 (#413) — bring a Test-Failover clone up with every NIC
+    'unplugged' (link_down=1) so the isolated test can't collide with production
+    IPs on the live network. QEMU-only (link_down is a KVM NIC property); a no-op
+    for LXC. Runs while the clone is still stopped, so it boots disconnected.
+    Returns the number of NICs disconnected."""
+    if vm_type != 'qemu':
+        return 0
+    try:
+        res = tgt_mgr.get_vm_config(node, int(vmid), vm_type)
+    except Exception as e:
+        logger.warning(f"[SR] link-down: cannot read config for test VM {vmid}: {e}")
+        return 0
+    # get_vm_config returns {'success': True, 'config': parsed}; the flat netN
+    # keys live in config['raw'] (parsed itself only has grouped sections).
+    if not isinstance(res, dict) or not res.get('success'):
+        logger.warning(f"[SR] link-down: get_vm_config failed for test VM {vmid}: "
+                       f"{res.get('error') if isinstance(res, dict) else res}")
+        return 0
+    cfg = res.get('config') or {}
+    raw = cfg.get('raw', cfg)
+    n = 0
+    for key in list(raw.keys()):
+        # netN entries are the VM's virtual NICs (net0, net1, ...)
+        if key.startswith('net') and key[3:].isdigit():
+            try:
+                res = tgt_mgr.toggle_network_link(node, int(vmid), key, True)
+                if not isinstance(res, dict) or res.get('success', True) is not False:
+                    n += 1
+                else:
+                    logger.warning(f"[SR] link-down: {key} on test VM {vmid} failed: {res.get('error')}")
+            except Exception as e:
+                logger.warning(f"[SR] link-down: {key} on test VM {vmid} raised: {e}")
+    if n:
+        logger.info(f"[SR] Test VM {vmid}: started with {n} NIC(s) disconnected (link_down)")
+    return n
+
+
 def execute_failover(plan_id, failover_type='planned'):
     """Main failover orchestrator. Runs in greenlet.
 
@@ -413,9 +476,22 @@ def execute_failover(plan_id, failover_type='planned'):
                 if not src_mgr or not src_mgr.is_connected:
                     ok, err = False, "Source cluster not connected"
                 else:
-                    logger.info(f"[SR] Migrating {vm_name} ({vmid}): {src_id} → {tgt_id}")
-                    _broadcast_progress(plan_id, f"Migrating {vm_name}...", int(completed / total_vms * 100))
-                    ok, err = _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, stor_map, net_map)
+                    # MK Jul 2026 (#413) — fast pre-flight: a target VMID already
+                    # present (pre-seeded by replication) can't be reconciled by
+                    # qmigrate, which would only abort after a long transfer. Detect
+                    # it up front and point the operator at Emergency Failover, which
+                    # starts the already-replicated target, instead of churning.
+                    _tgt_vmid = vm.get('target_vmid') or vmid
+                    if tgt_mgr and _target_vmid_exists(tgt_mgr, _tgt_vmid):
+                        ok, err = False, (f"Target VMID {_tgt_vmid} already exists on '{tgt_id}' "
+                                          f"(likely pre-seeded by replication). Live/planned migration "
+                                          f"cannot reconcile an existing VMID — use Emergency Failover "
+                                          f"to start the replicated target instead.")
+                        logger.warning(f"[SR] {vm_name} ({vmid}): {err}")
+                    else:
+                        logger.info(f"[SR] Migrating {vm_name} ({vmid}): {src_id} → {tgt_id}")
+                        _broadcast_progress(plan_id, f"Migrating {vm_name}...", int(completed / total_vms * 100))
+                        ok, err = _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, stor_map, net_map)
 
             results[str(vmid)] = {'success': ok, 'error': err, 'vm_name': vm_name}
             if not ok:
@@ -514,6 +590,10 @@ def execute_test_failover(plan_id):
                             clone_ok = clone_result.get('success') if isinstance(clone_result, dict) else bool(clone_result)
                             if clone_ok:
                                 test_vmids.append({'vmid': test_vmid, 'vm_type': vtype})
+                                # MK Jul 2026 (#413) — optionally disconnect every NIC
+                                # BEFORE start so the test clone can't grab a live IP.
+                                if plan.get('test_disconnect_nics'):
+                                    _disconnect_test_nics(tgt_mgr, node_name, test_vmid, vtype)
                                 # NS Apr 2026: was start_vm() which doesn't exist — use vm_action
                                 start_res = tgt_mgr.vm_action(node_name, test_vmid, vtype, 'start')
                                 if start_res.get('success'):

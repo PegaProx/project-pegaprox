@@ -139,6 +139,7 @@ def save_config():
                     'auto_migrate': getattr(manager.config, 'auto_migrate', False),
                     'balance_containers': getattr(manager.config, 'balance_containers', False),
                     'balance_local_disks': getattr(manager.config, 'balance_local_disks', False),
+                    'proxlb_tags_enabled': bool(getattr(manager.config, 'proxlb_tags_enabled', False)),
                     'dry_run': getattr(manager.config, 'dry_run', False),
                     'enabled': getattr(manager.config, 'enabled', True),
                     'ha_enabled': getattr(manager.config, 'ha_enabled', False),

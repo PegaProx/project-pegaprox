@@ -121,8 +121,9 @@ def create_plan():
     db.execute('''INSERT INTO site_recovery_plans
         (id, group_id, name, source_cluster, target_cluster, network_mappings, storage_mappings,
          auto_failover, failover_timeout, pre_failover_webhook, post_failover_webhook,
+         test_disconnect_nics,
          created_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (plan_id, data.get('group_id', ''), data['name'],
          data['source_cluster'], data['target_cluster'],
          json.dumps(data.get('network_mappings', {})),
@@ -131,6 +132,7 @@ def create_plan():
          data.get('failover_timeout', 120),
          data.get('pre_failover_webhook', ''),
          data.get('post_failover_webhook', ''),
+         1 if data.get('test_disconnect_nics') else 0,
          getattr(request, 'session', {}).get('user', 'system'),
          now, now))
 
@@ -175,7 +177,8 @@ def update_plan(plan_id):
 
     data = request.json or {}
     allowed = {'name', 'network_mappings', 'storage_mappings', 'auto_failover',
-               'failover_timeout', 'pre_failover_webhook', 'post_failover_webhook', 'group_id'}
+               'failover_timeout', 'pre_failover_webhook', 'post_failover_webhook', 'group_id',
+               'test_disconnect_nics'}  # MK Jul 2026 (#413)
     updates = []
     params = []
     for key in allowed:
@@ -183,7 +186,7 @@ def update_plan(plan_id):
             val = data[key]
             if key in ('network_mappings', 'storage_mappings'):
                 val = json.dumps(val) if isinstance(val, dict) else val
-            elif key == 'auto_failover':
+            elif key in ('auto_failover', 'test_disconnect_nics'):
                 val = 1 if val else 0
             updates.append(f"{key} = ?")
             params.append(val)
