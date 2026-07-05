@@ -487,9 +487,9 @@ def execute_failover(plan_id, failover_type='planned'):
                                           f"(likely pre-seeded by replication). Live/planned migration "
                                           f"cannot reconcile an existing VMID — use Emergency Failover "
                                           f"to start the replicated target instead.")
-                        logger.warning(f"[SR] {vm_name} ({vmid}): {err}")
+                        logger.warning(f"[SR] {_sl(vm_name)} ({vmid}): {err}")
                     else:
-                        logger.info(f"[SR] Migrating {vm_name} ({vmid}): {src_id} → {tgt_id}")
+                        logger.info(f"[SR] Migrating {_sl(vm_name)} ({vmid}): {src_id} → {tgt_id}")
                         _broadcast_progress(plan_id, f"Migrating {vm_name}...", int(completed / total_vms * 100))
                         ok, err = _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, stor_map, net_map)
 
