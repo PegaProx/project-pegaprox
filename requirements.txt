@@ -35,12 +35,15 @@ dnspython>=2.7.0
 # === Encryption & Security ===
 # NS May 2026 — cryptography 46.0.6/.0.7 patches CVE-2026-34073 + -39892,
 # pyopenssl 26.x patches CVE-2026-27448 + -27459. argon2-cffi unchanged.
-# MK Jun 2026 — held below 49 on purpose: fido2 (WebAuthn/hardware-key 2FA) caps
-# cryptography <49 in every published release, so bumping to 49 (Aikido autofix PR
-# #550 / AIKIDO-2026-94131, raw-ChaCha20 counter overflow) would force-drop fido2.
-# We use zero raw ChaCha20 (AES-GCM + Fernet only) → not exposed; risk-accepted.
-# Revisit 49 once a fido2 release lifts the <49 cap.
-cryptography>=48.0.1,<49
+# MK Jul 2026 — bumped to 49: fido2 2.2.1 (2026-06-29) lifted its cryptography
+# ceiling from <49 to <52, so we can finally close AIKIDO-2026-94131 (raw-ChaCha20
+# counter overflow — the CVE the Aikido autofix PRs #550/#603 kept re-raising)
+# PROPERLY, without force-dropping fido2 (WebAuthn/hardware-key 2FA). Verified: no
+# removed-alias usage (PUBLIC_KEY_TYPES etc.), our crypto surface (Fernet/AESGCM/
+# TripleDES-decrepit/rsa/ec/serialization) + create_app import clean on 49; PegaProx
+# is Linux-only so the dropped macOS/32-bit-Windows wheels don't apply. <52 matches
+# fido2's ceiling. (The CVE was never reachable here anyway — zero raw ChaCha20.)
+cryptography>=49.0.0,<52
 pyopenssl>=26.0.0
 argon2-cffi>=23.0.0
 # pyasn1 0.6.3 fixes the recursion + resource-allocation vulns; transitive
@@ -79,7 +82,9 @@ qrcode[pil]>=7.4.0
 pillow>=12.2.0
 # WebAuthn / FIDO2 hardware tokens (YubiKey, Nitrokey, Touch ID, Windows Hello).
 # Optional at runtime — feature is auto-disabled if import fails.
-fido2>=1.1.0
+# MK Jul 2026 — floor at 2.2.1: that's the first release whose cryptography cap is
+# <52 (older fido2 caps <49 and would conflict with cryptography>=49 above).
+fido2>=2.2.1
 
 # === LDAP Auth ===
 ldap3>=2.9.0
