@@ -79,7 +79,11 @@ gevent-websocket>=0.10.0
 pyotp>=2.9.0
 # qrcode[pil] pulls Pillow; bump floor so CVE-2026-40192 is dodged.
 qrcode[pil]>=7.4.0
-pillow>=12.2.0
+# NS Jul 2026 — floor 12.3.0 clears AIKIDO-2026-457677 (PCF-font-loader DoS,
+# Aikido autofix PR #606). Floor, not the bot's ==12.3.0 hard-pin, so future
+# patch bumps aren't blocked. Not reachable here anyway (we only use PIL.Image,
+# no PCF/untrusted font loading) — verified Image PNG roundtrip + vnc_grab on 12.3.
+pillow>=12.3.0
 # WebAuthn / FIDO2 hardware tokens (YubiKey, Nitrokey, Touch ID, Windows Hello).
 # Optional at runtime — feature is auto-disabled if import fails.
 # MK Jul 2026 — floor at 2.2.1: that's the first release whose cryptography cap is
