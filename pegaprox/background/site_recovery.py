@@ -468,8 +468,8 @@ def execute_failover(plan_id, failover_type='planned'):
 
             if failover_type == 'emergency':
                 # source is down - start replicated VM on target
-                logger.info(f"[SR] Emergency: starting {vm_name} ({vmid}) on target")
-                _broadcast_progress(plan_id, f"Starting {vm_name} on target...", int(completed / total_vms * 100))
+                logger.info(f"[SR] Emergency: starting {_sl(vm_name)} ({vmid}) on target")
+                _broadcast_progress(plan_id, f"Starting {_sl(vm_name)} on target...", int(completed / total_vms * 100))
                 ok, err = _start_replicated_vm(tgt_mgr, vmid, vm_type)
             else:
                 # planned or failback - live migrate
@@ -490,15 +490,15 @@ def execute_failover(plan_id, failover_type='planned'):
                         logger.warning(f"[SR] {_sl(vm_name)} ({vmid}): {err}")
                     else:
                         logger.info(f"[SR] Migrating {_sl(vm_name)} ({vmid}): {src_id} → {tgt_id}")
-                        _broadcast_progress(plan_id, f"Migrating {vm_name}...", int(completed / total_vms * 100))
+                        _broadcast_progress(plan_id, f"Migrating {_sl(vm_name)}...", int(completed / total_vms * 100))
                         ok, err = _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, stor_map, net_map)
 
             results[str(vmid)] = {'success': ok, 'error': err, 'vm_name': vm_name}
             if not ok:
-                logger.error(f"[SR] Failed for {vm_name}: {err}")
+                logger.error(f"[SR] Failed for {_sl(vm_name)}: {err}")
                 failed = True
             else:
-                logger.info(f"[SR] {vm_name} OK")
+                logger.info(f"[SR] {_sl(vm_name)} OK")
 
             completed += 1
 
@@ -564,7 +564,7 @@ def execute_test_failover(plan_id):
         # ID). Either way, log which one we're looking for so the next debug
         # bundle tells us exactly why a detection failed.
         target_vmid = vm.get('target_vmid') or vmid
-        _broadcast_progress(plan_id, f"Cloning {vm_name}...", int(i / len(vms) * 100))
+        _broadcast_progress(plan_id, f"Cloning {_sl(vm_name)}...", int(i / len(vms) * 100))
 
         try:
             # find the replicated VM on target and clone it
