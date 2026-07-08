@@ -9415,7 +9415,12 @@ echo "AGENT_INSTALLED_OK"
             
             # EFI disk for UEFI
             if vm_config.get('bios') == 'ovmf':
-                efi_storage = vm_config.get('efi_storage', storage)
+                # MK Jul 2026 (#607) — an empty efi_storage (e.g. a quick template
+                # that sets bios=ovmf but leaves the EFI-storage field untouched)
+                # must fall back to the VM's main storage. `.get(k, default)` keeps
+                # an empty string, which produced `efidisk0=:1` → PVE "unable to
+                # parse volume ID ':1'". `or storage` handles both missing + empty.
+                efi_storage = vm_config.get('efi_storage') or storage
                 efi_type = "4m"
                 if vm_config.get('efi_pre_enroll'):
                     data['efidisk0'] = f"{efi_storage}:1,efitype={efi_type},pre-enrolled-keys=1"
