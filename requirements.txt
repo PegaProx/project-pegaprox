@@ -23,7 +23,7 @@ werkzeug>=3.1.6
 # cookie-redirect-leak floor. Each bump motivated by Aikido / Snyk findings.
 # (PR #404 Snyk auto-fix used exact `==2.7.0`; broadened back to `>=` so future
 # patches roll in cleanly.)
-requests>=2.33.0
+requests==2.34.0
 # MK 2026-06-04 (#525 ccesario): MultipartEncoder for streaming large
 # (>2 GB) ISO uploads. Plain `requests` files= path runs fp.read() and
 # buffers the whole file in memory before encoding the multipart body,
@@ -113,6 +113,6 @@ defusedxml>=0.7.1
 # MK May 2026 — these aren't direct deps but old transitive resolutions get
 # flagged by pip-audit / Snyk. Listing them here forces a fresh venv to a
 # floor that doesn't carry known CVEs. Newer versions are pulled automatically.
-setuptools>=78.1.1  # CVE-2024-6345 RCE in package_index, CVE-2025-47273 ReDoS
+setuptools==83.0.0
 zipp>=3.19.1        # CVE-2024-5569 infinite loop in Path._next
 idna>=3.15          # CVE-2024-3651 ReDoS/DoS in idna<3.7 (transitive via requests; Snyk PR #530)
