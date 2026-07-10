@@ -2295,6 +2295,26 @@ def get_usb_mappings(cluster_id):
 
 
 # Maintenance Mode API Routes
+@bp.route('/api/clusters/<cluster_id>/nodes/<node_name>/maintenance-preview', methods=['GET'])
+@require_auth(perms=['node.maintenance'])
+def maintenance_capacity_preview_api(cluster_id, node_name):
+    # #611 — read-only pre-flight: does evacuating this node overcommit the
+    # remaining nodes' RAM past `threshold`? Non-blocking hint for the UI.
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    try:
+        threshold = float(request.args.get('threshold', 90))
+    except (TypeError, ValueError):
+        threshold = 90.0
+    threshold = max(1.0, min(100.0, threshold))
+    try:
+        return jsonify(mgr.maintenance_capacity_preview(node_name, threshold=threshold))
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Failed to compute maintenance preview')}), 500
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node_name>/maintenance', methods=['PUT'])
 @require_auth(perms=['node.maintenance'])
 def set_maintenance_mode(cluster_id, node_name):

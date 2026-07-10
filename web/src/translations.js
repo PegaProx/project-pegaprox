@@ -4,6 +4,11 @@
         // ═══════════════════════════════════════════════
         const translations = {
             de: {
+                // #611 — Maintenance-Kapazitäts-Vorwarnung
+                maintPreviewProceed: 'Du kannst trotzdem fortfahren — das ist nur eine Kapazitätsprüfung, keine harte Sperre.',
+                maintPreviewNoTargets: 'Warnung: Kein anderer Online-Knoten, um die Gäste dieses Knotens zu evakuieren — sie laufen weiter (ein Reboot nimmt sie herunter).',
+                maintPreviewNoHeadroom: 'Warnung: Die verbleibenden Online-Knoten haben womöglich nicht genug freien RAM für alle Gäste dieses Knotens. Einige Migrationen könnten fehlschlagen.',
+                maintPreviewOverThreshold: 'Warnung: Das Evakuieren dieses Knotens würde diese(n) Knoten über die RAM-Schwelle drücken: ',
                 // LW: StarWind SAN-Plugin Install (starlvm)
                 installStarwindPlugin: 'Plugin auf allen Nodes installieren',
                 installStarwindPluginHint: 'Installiert starwind-proxmox-plugin aus dem signierten StarWind-apt-Repo auf jedem Node.',
@@ -4091,6 +4096,11 @@
                 clusterHealthSshMissing: 'Cluster Health benötigt SSH-Zugriff von PegaProx auf den Node (corosync-cfgtool, pvecm, systemctl). Bitte die Node-Shell-SSH-Credentials des Clusters konfigurieren und neu laden.',
             },
             en: {
+                // #611 — maintenance capacity pre-warning
+                maintPreviewProceed: 'You can still proceed — this is only a capacity pre-check, not a hard block.',
+                maintPreviewNoTargets: 'Warning: no other online node to evacuate this node\'s guests to — they will keep running (a reboot takes them down).',
+                maintPreviewNoHeadroom: 'Warning: the remaining online nodes may not have enough free RAM to hold all guests from this node. Some migrations could fail.',
+                maintPreviewOverThreshold: 'Warning: evacuating this node would push these node(s) over the RAM threshold: ',
                 // LW: StarWind SAN plugin install (starlvm)
                 installStarwindPlugin: 'Install plugin on all nodes',
                 installStarwindPluginHint: 'Installs starwind-proxmox-plugin from the signed StarWind apt repo on every node.',
@@ -8270,6 +8280,11 @@
             // French translations by @IMNotMax (PR #186)
             // Falls back to EN for missing keys
             fr: {
+                // #611 — pré-avertissement de capacité maintenance
+                maintPreviewProceed: 'Vous pouvez tout de même continuer — ce n\'est qu\'une pré-vérification de capacité, pas un blocage.',
+                maintPreviewNoTargets: 'Avertissement : aucun autre nœud en ligne pour évacuer les invités de ce nœud — ils continueront de tourner (un redémarrage les arrêtera).',
+                maintPreviewNoHeadroom: 'Avertissement : les nœuds en ligne restants pourraient ne pas avoir assez de RAM libre pour héberger tous les invités de ce nœud. Certaines migrations pourraient échouer.',
+                maintPreviewOverThreshold: 'Avertissement : évacuer ce nœud pousserait ce(s) nœud(s) au-delà du seuil de RAM : ',
                 // LW: StarWind SAN plugin install (starlvm)
                 installStarwindPlugin: 'Installer le plugin sur tous les nœuds',
                 installStarwindPluginHint: 'Installe starwind-proxmox-plugin depuis le dépôt apt signé de StarWind sur chaque nœud.',
@@ -12035,6 +12050,11 @@
                 clusterHealthSshMissing: 'Cluster Health a besoin d\'un accès SSH au nœud depuis PegaProx (corosync-cfgtool, pvecm, systemctl). Configurez les identifiants SSH Node-Shell du cluster et actualisez.',
             },
             es: {
+                // #611 — pre-aviso de capacidad de mantenimiento
+                maintPreviewProceed: 'Aún puedes continuar — esto es solo una comprobación previa de capacidad, no un bloqueo.',
+                maintPreviewNoTargets: 'Advertencia: no hay otro nodo en línea para evacuar los invitados de este nodo — seguirán ejecutándose (un reinicio los apagará).',
+                maintPreviewNoHeadroom: 'Advertencia: los nodos en línea restantes podrían no tener suficiente RAM libre para todos los invitados de este nodo. Algunas migraciones podrían fallar.',
+                maintPreviewOverThreshold: 'Advertencia: evacuar este nodo empujaría estos nodos por encima del umbral de RAM: ',
                 // LW: StarWind SAN plugin install (starlvm)
                 installStarwindPlugin: 'Instalar plugin en todos los nodos',
                 installStarwindPluginHint: 'Instala starwind-proxmox-plugin desde el repositorio apt firmado de StarWind en cada nodo.',
@@ -15943,6 +15963,11 @@
                 clusterHealthSshMissing: 'Cluster Health requiere acceso SSH al nodo desde PegaProx (corosync-cfgtool, pvecm, systemctl). Configure las credenciales SSH de Node-Shell del clúster y actualice.',
             },
             pt: {
+                // #611 — pré-aviso de capacidade de manutenção
+                maintPreviewProceed: 'Você ainda pode continuar — isto é apenas uma verificação prévia de capacidade, não um bloqueio.',
+                maintPreviewNoTargets: 'Aviso: nenhum outro nó online para evacuar os convidados deste nó — eles continuarão em execução (uma reinicialização irá desligá-los).',
+                maintPreviewNoHeadroom: 'Aviso: os nós online restantes podem não ter RAM livre suficiente para todos os convidados deste nó. Algumas migrações podem falhar.',
+                maintPreviewOverThreshold: 'Aviso: evacuar este nó empurraria estes nós acima do limite de RAM: ',
                 // LW: StarWind SAN plugin install (starlvm)
                 installStarwindPlugin: 'Instalar plugin em todos os nós',
                 installStarwindPluginHint: 'Instala starwind-proxmox-plugin do repositório apt assinado da StarWind em cada nó.',
@@ -19651,6 +19676,11 @@
                 clusterHealthSshMissing: 'Cluster Health requer acesso SSH ao nó a partir do PegaProx (corosync-cfgtool, pvecm, systemctl). Configure as credenciais SSH de Node-Shell do cluster e atualize.',
             },
             ko: {
+                // #611 — 유지보수 용량 사전 경고
+                maintPreviewProceed: '그래도 계속 진행할 수 있습니다 — 이것은 용량 사전 점검일 뿐이며 강제 차단이 아닙니다.',
+                maintPreviewNoTargets: '경고: 이 노드의 게스트를 옮길 다른 온라인 노드가 없습니다 — 게스트는 계속 실행됩니다(재부팅 시 종료됨).',
+                maintPreviewNoHeadroom: '경고: 남은 온라인 노드에 이 노드의 모든 게스트를 수용할 여유 RAM이 부족할 수 있습니다. 일부 마이그레이션이 실패할 수 있습니다.',
+                maintPreviewOverThreshold: '경고: 이 노드를 비우면 다음 노드가 RAM 임계값을 초과합니다: ',
                 // LW: StarWind SAN plugin install (starlvm)
                 installStarwindPlugin: '모든 노드에 플러그인 설치',
                 installStarwindPluginHint: '서명된 StarWind apt 저장소에서 모든 노드에 starwind-proxmox-plugin을 설치합니다.',
@@ -27053,6 +27083,11 @@
                 datastoreFound: 'Datastore trovato',
             },
             it: {
+                // #611 — pre-avviso capacità manutenzione
+                maintPreviewProceed: 'Puoi comunque procedere — questo è solo un controllo preventivo della capacità, non un blocco.',
+                maintPreviewNoTargets: 'Avviso: nessun altro nodo online su cui evacuare gli ospiti di questo nodo — continueranno a funzionare (un riavvio li spegnerà).',
+                maintPreviewNoHeadroom: 'Avviso: i nodi online rimanenti potrebbero non avere RAM libera sufficiente per tutti gli ospiti di questo nodo. Alcune migrazioni potrebbero fallire.',
+                maintPreviewOverThreshold: 'Avviso: evacuare questo nodo spingerebbe questi nodi oltre la soglia di RAM: ',
                 // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 installStarwindPlugin: 'Installa plugin su tutti i nodi',
                 installStarwindPluginHint: 'Installa starwind-proxmox-plugin dal repository apt firmato di StarWind su ogni nodo.',

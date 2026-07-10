@@ -12702,13 +12702,33 @@
                 }
             };
 
+            // #611 — non-blocking pre-flight RAM capacity check before entering
+            // maintenance. Any failure returns '' so the confirm proceeds unchanged.
+            const buildMaintPreviewWarning = async (clusterId, nodeName) => {
+                try {
+                    const pv = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${nodeName}/maintenance-preview?threshold=90`);
+                    if (!pv || !pv.ok) return '';
+                    const p = await pv.json();
+                    if (!p) return '';
+                    const proceed = '\n' + (t('maintPreviewProceed') || 'You can still proceed — this is only a capacity pre-check, not a hard block.');
+                    if (p.reason === 'no_target_nodes' && p.guest_count > 0)
+                        return '\n\n' + (t('maintPreviewNoTargets') || "Warning: no other online node to evacuate this node's guests to — they will keep running (a reboot takes them down).");
+                    if (!p.headroom_sufficient)
+                        return '\n\n' + (t('maintPreviewNoHeadroom') || 'Warning: the remaining online nodes may not have enough free RAM to hold all guests from this node. Some migrations could fail.') + proceed;
+                    if (p.over_threshold && p.over_threshold.length)
+                        return '\n\n' + (t('maintPreviewOverThreshold') || 'Warning: evacuating this node would push these node(s) over the RAM threshold: ') + p.over_threshold.join(', ') + proceed;
+                    return '';
+                } catch (_) { return ''; }
+            };
+
             const handleMaintenanceToggle = async (nodeName, enable) => {
                 if (!selectedCluster) return;
                 // #147
                 const msg = enable
                     ? `${t('startingMaintenanceMode') || 'Enable maintenance mode'}: "${nodeName}"? VMs will be evacuated.`
                     : `${t('disableMaintenance') || 'Disable maintenance'}: "${nodeName}"?`;
-                if (!confirm(msg)) return;
+                const warn = enable ? await buildMaintPreviewWarning(selectedCluster.id, nodeName) : '';
+                if (!confirm(msg + warn)) return;
 
                 try {
                     if (enable) {
@@ -13260,7 +13280,8 @@
                         { label: maintenance ? (t('exitMaintenance') || 'Exit Maintenance') : (t('enterMaintenance') || 'Enter Maintenance'), icon: <Icons.Wrench className="w-3.5 h-3.5" />, onClick: async () => {
                             // NS: Mar 2026 - inline API call with known clusterId to avoid stale closure on selectedCluster
                             const mMsg = maintenance ? `${t('disableMaintenance') || 'Disable maintenance'}: "${nodeName}"?` : `${t('startingMaintenanceMode') || 'Enable maintenance mode'}: "${nodeName}"? VMs will be evacuated.`;
-                            if (!confirm(mMsg)) return;
+                            const mWarn = maintenance ? '' : await buildMaintPreviewWarning(clusterId, nodeName);
+                            if (!confirm(mMsg + mWarn)) return;
                             selectCluster();
                             try {
                                 if (!maintenance) {

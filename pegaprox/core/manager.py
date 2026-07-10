@@ -2676,7 +2676,107 @@ class PegaProxManager:
         available_nodes.sort(key=lambda x: x[1]['score'])
 
         return available_nodes[0][0]
-    
+
+    def maintenance_capacity_preview(self, node_name, threshold=90.0):
+        """#611 — read-only pre-flight: would evacuating node_name push any
+        remaining node past `threshold`% RAM?
+
+        Simulates the SAME placement the evacuator performs (running qemu/lxc
+        guests, smallest-mem-first, onto the least-loaded remaining online /
+        non-maintenance / non-excluded node), using already-cached
+        get_node_status() + get_vm_resources() so it adds no PVE load at scale.
+        Never migrates or mutates anything — it is a non-blocking hint.
+
+        Returns {ok, threshold, guest_count, total_guest_mem,
+                 nodes:[{node,current_pct,projected_pct,mem_total}],
+                 over_threshold:[node...], headroom_sufficient, reason?}.
+        """
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = 90.0
+        threshold = max(1.0, min(100.0, threshold))
+
+        node_status = self.get_node_status()
+        source = node_status.get(node_name)
+        if not source or source.get('status') != 'online':
+            return {'ok': True, 'reason': 'node_not_online', 'threshold': threshold,
+                    'guest_count': 0, 'total_guest_mem': 0, 'nodes': [],
+                    'over_threshold': [], 'headroom_sufficient': True}
+
+        # Target pool — mirror get_best_target_node's filters (rolling-update
+        # exclusions + config excluded_nodes + online + not-in-maintenance) and
+        # drop the source node itself.
+        exclude = []
+        if hasattr(self, '_rolling_update') and self._rolling_update:
+            rebooting = self._rolling_update.get('rebooting_nodes', [])
+            current = self._rolling_update.get('current_node', '')
+            exclude = [n for n in rebooting + [current] if n]
+        config_excluded = getattr(self.config, 'excluded_nodes', []) or []
+        all_excluded = set(exclude) | set(config_excluded) | {node_name}
+        targets = {
+            n: {'mem_used': d.get('mem_used', 0), 'mem_total': d.get('mem_total', 0),
+                'mem_percent': d.get('mem_percent', 0)}
+            for n, d in node_status.items()
+            if d.get('status') == 'online'
+            and not d.get('maintenance_mode', False)
+            and n not in all_excluded
+        }
+
+        # Guests to evacuate — mirror _evacuate_node (running qemu/lxc on node).
+        vms = self.get_vm_resources() or []
+        node_vms = [
+            vm for vm in vms
+            if vm.get('node') == node_name
+            and vm.get('status') == 'running'
+            and vm.get('type') in ('qemu', 'lxc')
+        ]
+        total_guest_mem = sum(int(vm.get('mem', 0) or 0) for vm in node_vms)
+
+        if not targets:
+            # single-node cluster / all peers offline: the evacuator SKIPS
+            # evacuation (guests stay running), so this is not a capacity
+            # overflow — flag it distinctly rather than as "over threshold".
+            return {'ok': len(node_vms) == 0, 'reason': 'no_target_nodes',
+                    'threshold': threshold, 'guest_count': len(node_vms),
+                    'total_guest_mem': total_guest_mem, 'nodes': [],
+                    'over_threshold': [], 'headroom_sufficient': len(node_vms) == 0}
+
+        # Simulate: smallest-mem-first, each guest onto the target with the
+        # lowest projected mem% (mem-dominant proxy for the evacuator's score).
+        sim = {n: {'used': float(d['mem_used']), 'total': float(d['mem_total'])}
+               for n, d in targets.items()}
+        for vm in sorted(node_vms, key=lambda x: int(x.get('mem', 0) or 0)):
+            gmem = float(int(vm.get('mem', 0) or 0))
+            best = min(sim.keys(),
+                       key=lambda n: ((sim[n]['used'] + gmem) / sim[n]['total'] * 100.0)
+                                     if sim[n]['total'] > 0 else float('inf'))
+            sim[best]['used'] += gmem
+
+        nodes_out, over_threshold = [], []
+        for n in sorted(sim.keys()):
+            total = sim[n]['total']
+            proj = round(sim[n]['used'] / total * 100.0, 1) if total > 0 else 0.0
+            nodes_out.append({'node': n, 'current_pct': round(targets[n]['mem_percent'], 1),
+                              'projected_pct': proj, 'mem_total': int(total)})
+            if proj > threshold:
+                over_threshold.append(n)
+
+        # Aggregate headroom: does the whole cluster even have room under the cap?
+        agg_free = sum(max(0.0, sim[n]['total'] * threshold / 100.0 - float(targets[n]['mem_used']))
+                       for n in sim)
+        headroom_sufficient = total_guest_mem <= agg_free
+
+        return {
+            'ok': (not over_threshold) and headroom_sufficient,
+            'threshold': threshold,
+            'guest_count': len(node_vms),
+            'total_guest_mem': total_guest_mem,
+            'nodes': nodes_out,
+            'over_threshold': over_threshold,
+            'headroom_sufficient': headroom_sufficient,
+        }
+
     def _get_vm_storage(self, node, vmid, vm_type):
         """Get the primary storage name of a VM/CT (e.g. 'local-lvm')."""
         try:
