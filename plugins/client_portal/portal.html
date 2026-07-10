@@ -322,7 +322,7 @@ async function checkSess(){
 }
 
 // DATA
-async function loadCfg(){try{const r=await api(`${P}/config`);if(r&&r.ok)S.cfg=await r.json();}catch(e){} try{const ro=await api(`${P}/ct/create-options`);if(ro&&ro.ok)S.ctOpts=await ro.json();}catch(e){}}
+async function loadCfg(){try{const r=await api(`${P}/config`);if(r&&r.ok)S.cfg=await r.json();}catch(e){} try{const ro=await api(`${P}/ct/create-options`);if(ro&&ro.ok)S.ctOpts=await ro.json();}catch(e){} try{const rd=await api(`${P}/vm/destroy-options`);if(rd&&rd.ok)S.destroyOpts=await rd.json();}catch(e){}}
 async function loadVMs(){
     S.loading=true;render();
     try{const r=await api(`${P}/my-vms`);if(r&&r.ok){const d=await r.json();if(d.redirect){window.location.href=d.redirect;return;}S.vms=d.vms||[];}}catch(e){}
@@ -598,6 +598,7 @@ function renderDash(){
         }
         if(c.allow_snapshots)acts+=`<button class="btn btn-ghost text-xs" onclick="pSnaps('${escCid}',${v.vmid})">&#x1f4f8; Snapshots</button>`;
         if(c.allow_iso_mount&&v.type==='qemu')acts+=`<button class="btn btn-ghost text-xs" onclick="pIso('${escCid}',${v.vmid})">&#x1f4bf; ISO</button>`;
+        if(S.destroyOpts&&S.destroyOpts.enabled)acts+=`<button class="btn btn-danger text-xs" style="opacity:0.85" onclick="pDestroy('${escCid}',${v.vmid})">&#x1f5d1; Destroy</button>`;
 
         return`<div class="card ${on?'card-running':''}" style="padding:16px">
             <div class="vm-header">
@@ -642,6 +643,7 @@ function renderModal(){
     if(S.modal.type==='2fa-setup')return render2FAModal();
     if(S.modal.type==='isos')return renderIsoModal();
     if(S.modal.type==='createct')return renderCreateCtModal();
+    if(S.modal.type==='destroy')return renderDestroyModal();
     return'';
 }
 
@@ -690,6 +692,42 @@ async function submitCreateCt(){
         if(r.ok&&d.success){toast(`Container "${d.hostname}" created (CT ${d.vmid})`,'success');S.modal=null;setTimeout(loadVMs,2500);}
         else toast(d.error||'Create failed','error');}
     else toast('Create failed','error');
+}
+
+function pDestroy(cid,vmid){
+    const vm=(S.vms||[]).find(v=>String(v.vmid)===String(vmid)&&v.cluster_id===cid);
+    if(!vm){toast('VM not found','error');return;}
+    S.modal={type:'destroy',cluster_id:cid,vmid:vmid,name:vm.name||('VM '+vmid),vtype:vm.type||'qemu'};render();
+}
+function renderDestroyModal(){
+    const m=S.modal;
+    const inp='padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px';
+    return`<div class="modal-backdrop" onclick="S.modal=null;render()">
+    <div class="card modal-card" onclick="event.stopPropagation()" style="max-width:440px;width:100%">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold" style="color:var(--danger,#e5484d)">&#x1f5d1; Destroy ${esc(m.vtype)} — ${esc(m.name)}</h2>
+            <button class="btn btn-ghost text-xs" onclick="S.modal=null;render()">&times;</button>
+        </div>
+        <div class="space-y-3">
+            <div class="text-xs p-3 rounded-lg" style="background:var(--surface);color:var(--muted)">
+                This permanently deletes the ${esc(m.vtype)} <strong>${esc(m.name)}</strong> (ID ${esc(''+m.vmid)}) and purges its disks and backups. <strong>This cannot be undone.</strong>
+            </div>
+            <div><label class="text-xs" style="color:var(--muted)">Type the exact name <strong>${esc(m.name)}</strong> to confirm</label>
+                <input id="dcn" class="w-full" autocomplete="off" data-name="${esc(m.name)}" placeholder="${esc(m.name)}" style="${inp}" oninput="document.getElementById('dbtn').disabled=(this.value.trim()!==this.dataset.name)"></div>
+            <button id="dbtn" class="btn btn-danger w-full" style="justify-content:center" disabled onclick="submitDestroy()">Destroy permanently</button>
+        </div>
+    </div></div>`;
+}
+async function submitDestroy(){
+    const m=S.modal; if(!m)return;
+    const el=document.getElementById('dcn');
+    const val=((el&&el.value)||'').trim();
+    if(val!==m.name){toast('Name does not match','error');return;}
+    const r=await api(`${P}/vm/destroy`,{method:'POST',body:{cluster_id:m.cluster_id,vmid:m.vmid,confirm_name:val}});
+    if(r){const d=await r.json().catch(()=>({}));
+        if(r.ok&&d.success){toast('Guest destroyed','success');S.modal=null;setTimeout(loadVMs,2500);}
+        else toast(d.error||'Teardown failed','error');}
+    else toast('Teardown failed','error');
 }
 
 function renderIsoModal(){

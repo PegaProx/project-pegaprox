@@ -785,12 +785,111 @@ def _create_ct():
     return {'success': True, 'vmid': new_vmid, 'cluster_id': cluster_id, 'hostname': hostname}
 
 
+def _destroy_options():
+    """#556 — portal probe: is self-service teardown enabled by the hoster?
+    The frontend uses this (not the public /config blob) to decide whether to
+    render the Destroy button."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated'}, 401
+    users = load_users(); user = users.get(username, {}); user['username'] = username
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('role') == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+    cfg = _load_config()
+    return {'enabled': bool(cfg.get('allow_destroy'))}
+
+
+def _destroy_guest():
+    """#556 (down half) — self-service teardown of one of the caller's OWN guests.
+
+    Fail-secure authorization — ALL of the following must pass or we deny:
+      (a) hoster opt-in flag allow_destroy (default off),
+      (b) the target is in the caller's own _get_my_vms() set — the single
+          trusted ACL/pool ownership computation the whole portal uses
+          (closes IDOR/BOLA against another tenant's guest),
+      (c) user_can_access_vm(..., 'vm.stop') — a portal-manageable guest.
+          vm.delete is intentionally NOT in the inherit_role whitelist
+          (rbac.py), so we authorize via vm.stop and NEVER add vm.delete to a
+          role — that would grant delete to every ACL'd user product-wide,
+      (d) a type-the-name confirm matching the LIVE guest name.
+    Then purge-delete, drop the stale VM-ACL row (so a recycled VMID can't
+    inherit this grant), and audit."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated'}, 401
+    users = load_users(); user = users.get(username, {}); user['username'] = username
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('role') == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+
+    cfg = _load_config()
+    if not cfg.get('allow_destroy'):
+        return {'error': 'Teardown is not enabled'}, 403
+
+    data = request.get_json(silent=True) or {}
+    cluster_id = data.get('cluster_id')
+    vmid = data.get('vmid')
+    confirm_name = (data.get('confirm_name') or '').strip()
+    if not cluster_id or vmid is None:
+        return {'error': 'Missing cluster_id or vmid'}, 400
+
+    # (b) OWNERSHIP — reuse _get_my_vms (VM-ACL users + resource-pool grants).
+    my = _get_my_vms()
+    if isinstance(my, tuple):
+        my = my[0]
+    if not isinstance(my, dict) or 'vms' not in my:
+        return {'error': 'Not permitted'}, 403
+    target = next((v for v in (my.get('vms') or [])
+                   if str(v.get('vmid')) == str(vmid) and v.get('cluster_id') == cluster_id), None)
+    if not target:
+        return {'error': 'Not found or not permitted'}, 404
+
+    # (c) second, independent authz — vm.stop IS in the inherit_role whitelist.
+    try:
+        vmid_int = int(vmid)
+    except (ValueError, TypeError):
+        return {'error': 'Invalid vmid'}, 400
+    if not user_can_access_vm(user, cluster_id, vmid_int, 'vm.stop'):
+        return {'error': 'Permission denied'}, 403
+
+    # (d) type-the-name confirm — compared to the LIVE name from _get_my_vms,
+    # server-side (the disabled button is only UX; a crafted POST can't skip it).
+    live_name = target.get('name') or ''
+    if not confirm_name or confirm_name != live_name:
+        return {'error': 'Type the exact guest name to confirm'}, 400
+
+    node = target.get('node')
+    vm_type = target.get('type', 'qemu')
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not mgr.is_connected:
+        return {'error': 'Cluster is currently unavailable'}, 503
+
+    res = mgr.delete_vm(node, vmid_int, vm_type, purge=True, destroy_unreferenced=True)
+    if not res.get('success'):
+        return {'error': res.get('error', 'Teardown failed')}, 500
+
+    # drop the stale VM-ACL row so a recycled VMID doesn't inherit this grant.
+    try:
+        from pegaprox.core.db import get_db
+        get_db().delete_vm_acl(cluster_id, vmid_int)
+    except Exception as e:
+        logging.warning(f'[client_portal] destroyed {vmid_int} but ACL cleanup failed: {e}')
+
+    from pegaprox.utils.audit import log_audit
+    log_audit(username, 'portal.guest_destroyed',
+              f'Client portal: destroyed {vm_type} {vmid_int} ("{live_name}") on {cluster_id}/{node}')
+    return {'success': True, 'vmid': vmid_int}
+
+
 def register(app):
     """Register plugin routes"""
     register_plugin_route('client_portal', 'config', _get_portal_config)
     register_plugin_route('client_portal', 'my-vms', _get_my_vms)
     register_plugin_route('client_portal', 'ct/create-options', _ct_create_options)
     register_plugin_route('client_portal', 'ct/create', _create_ct)
+    register_plugin_route('client_portal', 'vm/destroy-options', _destroy_options)
+    register_plugin_route('client_portal', 'vm/destroy', _destroy_guest)
     register_plugin_route('client_portal', 'vm/power', _vm_power)
     register_plugin_route('client_portal', 'vm/console', _vm_console)
     register_plugin_route('client_portal', 'vm/snapshots', _vm_snapshots)

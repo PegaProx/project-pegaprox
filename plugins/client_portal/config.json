@@ -12,6 +12,7 @@
     "iso_storage": "",
     "allowed_isos": [],
     "allow_ct_create": false,
+    "allow_destroy": false,
     "ct_create": {
         "cluster_id": "",
         "node": "",
