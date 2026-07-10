@@ -58,15 +58,17 @@ EXPOSE 5000 5001 5002
 # to ~4.5 minutes total before the container gets marked unhealthy. After the
 # initial migration, all subsequent boots short-circuit (state == 'encrypted')
 # so the long start_period only costs operators on the upgrade boot.
-# MK 2026-06-01 (#516 prueckls): try HTTPS first, fall back to HTTP. When the
-# operator flips "Behind Reverse Proxy" on, app.py:927 disables the built-in
-# SSL (nginx/haproxy handles it upstream) and gevent only serves plain HTTP.
-# The old healthcheck was HTTPS-only → SSL handshake against the HTTP socket
-# died with WRONG_VERSION_NUMBER, container went unhealthy. Either protocol
-# answering /api/health counts as healthy now.
+# MK 2026-06-01 (#516 prueckls): probe /api/health; either protocol counts.
+# MK 2026-07-10 (#614 wwwlde): pick the scheme from PEGAPROX_BEHIND_PROXY and
+# always dial 127.0.0.1 — NEVER the hostname 'localhost'. In behind-proxy mode
+# the built-in SSL is off (gevent serves plain HTTP), so the old HTTPS-first
+# probe fired a TLS ClientHello (SNI=localhost) against the HTTP socket every
+# interval — harmless to health (we fell back to HTTP) but it spammed
+# "Invalid HTTP method '\x16\x03\x01...'" into the logs. Now the FIRST attempt
+# matches the served protocol; the opposite scheme is only a misconfig fallback.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 \
-    CMD python3 -c "import urllib.request, ssl; urllib.request.urlopen('https://localhost:5000/api/health', context=ssl._create_unverified_context(), timeout=4)" 2>/dev/null \
-        || python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health', timeout=4)" \
+    CMD python3 -c "import os,urllib.request,ssl; s=('http' if os.environ.get('PEGAPROX_BEHIND_PROXY','').lower() in ('1','true','yes') else 'https'); urllib.request.urlopen(s+'://127.0.0.1:5000/api/health', context=(ssl._create_unverified_context() if s=='https' else None), timeout=4)" 2>/dev/null \
+        || python3 -c "import os,urllib.request,ssl; s=('https' if os.environ.get('PEGAPROX_BEHIND_PROXY','').lower() in ('1','true','yes') else 'http'); urllib.request.urlopen(s+'://127.0.0.1:5000/api/health', context=(ssl._create_unverified_context() if s=='https' else None), timeout=4)" \
         || exit 1
 
 ENTRYPOINT ["python3", "pegaprox_multi_cluster.py"]

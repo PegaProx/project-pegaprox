@@ -34,7 +34,7 @@ from pegaprox.utils.oidc import (
     oidc_get_user_groups, oidc_map_groups_to_role, oidc_provision_user,
 )
 from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID
-from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error
+from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error, effective_reverse_proxy
 from pegaprox.utils.sanitization import sanitize_identifier, sanitize_username
 from pegaprox.utils.ssh import check_auth_action_rate_limit
 from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
@@ -855,7 +855,7 @@ def auth_login():
         'session_id': session_id,
         'portal_only': user.get('portal_only', False),
         'default_theme': default_theme,  # NS: Include for frontend fallback
-        'reverse_proxy_enabled': settings.get('reverse_proxy_enabled', False),
+        'reverse_proxy_enabled': effective_reverse_proxy(settings),
         'air_gap_mode': settings.get('air_gap_mode', False),
         'requires_2fa_setup': requires_2fa_setup,  # NS: Feb 2026 - Force 2FA
         # NS: Security warning if using default password
@@ -1113,7 +1113,7 @@ def auth_check():
         },
         'password_expiry': password_expiry,
         'requires_2fa_setup': requires_2fa_setup,
-        'reverse_proxy_enabled': settings.get('reverse_proxy_enabled', False),
+        'reverse_proxy_enabled': effective_reverse_proxy(settings),
         'air_gap_mode': settings.get('air_gap_mode', False),
         'default_theme': default_theme
     })

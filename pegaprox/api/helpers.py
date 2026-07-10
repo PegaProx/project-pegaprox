@@ -18,6 +18,18 @@ from pegaprox.globals import (
 )
 from pegaprox.core.db import get_db
 
+def effective_reverse_proxy(settings=None):
+    """#614 — the frontend builds console (VNC/SSH) WebSocket URLs from
+    reverse_proxy_enabled. PEGAPROX_BEHIND_PROXY forces behind-proxy mode at boot
+    (app.py) but is never persisted, so report the OR of the persisted setting and
+    the env override — otherwise `PEGAPROX_BEHIND_PROXY=true` alone leaves consoles
+    dialing port+1/+2, which the reverse proxy can't route."""
+    if settings is None:
+        settings = load_server_settings()
+    return bool(settings.get('reverse_proxy_enabled', False)) or \
+        os.environ.get('PEGAPROX_BEHIND_PROXY', '').lower() in ('1', 'true', 'yes')
+
+
 def load_server_settings():
     """Load server settings from SQLite database
     
