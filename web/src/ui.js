@@ -788,8 +788,8 @@
                 2: 'https://www.netwolk.ch',
                 3: 'https://expertize.nl/',  // Banner Oranje - Platinum
                 4: 'https://netzware.at/',  // Netzware - Platinum
+                5: 'https://www.occentus.net/',  // Occentus Network - Platinum
 
-                5: null,
                 6: null,
                 7: null,
                 8: null
