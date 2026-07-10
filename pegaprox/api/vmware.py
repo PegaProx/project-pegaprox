@@ -991,6 +991,14 @@ def start_vmware_migration(vmware_id, vm_id):
         if _v and not validate_esxi_path_component(_v):
             return jsonify({'error': f'Invalid {_f}: only letters, digits, space and ._()+- are allowed (single name, no path).'}), 400
 
+    # #598 — aio_mode is interpolated into the root `qm set` / conf line that
+    # attaches the migrated disk. V2PMigrationTask.__init__ already whitelists it,
+    # but reject a bad value at the door too (matches the boundary-validation
+    # style above); empty = unset = PVE default.
+    _aio = (data.get('aio_mode') or '').strip().lower()
+    if _aio and _aio not in ('threads', 'native', 'io_uring'):
+        return jsonify({'error': 'Invalid aio_mode: must be threads, native or io_uring.'}), 400
+
     if not data.get('esxi_password'):
         return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
     if data['target_cluster'] not in cluster_managers:

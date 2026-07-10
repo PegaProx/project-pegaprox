@@ -8097,7 +8097,7 @@
                 ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'vmware',net_driver:'auto',
                 sockets:0,cores_per_socket:0,memory:0,cpu_type:'host',
                 // advanced
-                disk_format:'raw',disk_cache:'none',disk_iothread:true,disk_discard:'on',disk_ssd:false,
+                disk_format:'raw',disk_cache:'none',disk_iothread:true,disk_discard:'on',disk_ssd:false,aio_mode:'',
                 secure_boot:null,tpm_enabled:null,tpm_version:'v2.0',numa:false,
                 hotplug:'disk,network',agent:true,balloon:0,onboot:false,protection:false,tags:'',description:'',
                 // NS Apr 2026 — OC awareness gate. Kein Hard-Sell, aber pflicht-Acknowledge, damit
@@ -20825,6 +20825,16 @@
                                                                                 <option value="writeback">writeback</option>
                                                                                 <option value="directsync">directsync</option>
                                                                             </select>
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-xs text-gray-500 mb-1 block">AIO Mode</label>
+                                                                            <select value={vmwareMigrateForm.aio_mode} onChange={e => setVmwareMigrateForm(f => ({...f, aio_mode: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white">
+                                                                                <option value="">default (io_uring)</option>
+                                                                                <option value="io_uring">io_uring</option>
+                                                                                <option value="native">native</option>
+                                                                                <option value="threads">threads</option>
+                                                                            </select>
+                                                                            <p className="text-[10px] text-gray-600 mt-1">native needs cache=none/directsync; io_uring needs a modern kernel. Leave default unless you know you need it.</p>
                                                                         </div>
                                                                         <label className="flex items-center gap-2 text-xs text-gray-400">
                                                                             <input type="checkbox" checked={vmwareMigrateForm.disk_iothread} onChange={e => setVmwareMigrateForm(f => ({...f, disk_iothread: e.target.checked}))} className="rounded" />
