@@ -65,7 +65,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
   </a>
   &nbsp;&nbsp;&nbsp;
   <a href="https://www.occentus.net/">
-    <img src="images/sponsors/occentus.png" alt="Occentus Network" width="200"/>
+    <img src="images/sponsors/occentus.png" alt="Occentus Network" width="500"/>
   </a>
 </p>
 
