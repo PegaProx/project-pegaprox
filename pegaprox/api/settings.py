@@ -869,6 +869,14 @@ def rollback_pegaprox_update():
         
         # Restore specific backup
         backup_path = os.path.join(backup_dir, backup_name)
+        # MK Jul 2026 (CodeAnt CWE-22): sanitize_identifier strips '/' but keeps '.',
+        # so a name of exactly '..'/'.' survives and resolves outside/at the backups
+        # dir (one level up to CONFIG_DIR). Require the resolved path to sit STRICTLY
+        # inside backup_dir before we os.listdir() + copy2() files out of it.
+        _real_root = os.path.realpath(backup_dir)
+        _real_backup = os.path.realpath(backup_path)
+        if _real_backup == _real_root or os.path.commonpath([_real_backup, _real_root]) != _real_root:
+            return jsonify({'error': 'Invalid backup name'}), 400
         if not os.path.exists(backup_path):
             return jsonify({'error': 'Backup not found'}), 404
         
