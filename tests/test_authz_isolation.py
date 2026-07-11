@@ -80,20 +80,13 @@ def test_vm_acl_wildcard_grants_tenant_members(seed):
     assert user_can_access_vm(bob, 'cluster_1', 100, 'vm.view') is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="LIVE BUG (broken access control, CWE-863): the vm_acls table has no "
-           "'inherit_role' column (db.py:343-350), so save_vm_acl (db.py:3596) and "
-           "the bulk path (db.py:2251) silently DROP inherit_role. get_all_vm_acls "
-           "(db.py:3579) can't restore it, so user_can_access_vm (rbac.py:774) reads "
-           "vm_acl.get('inherit_role', True) → always True → a UI-configured "
-           "'custom permissions' (inherit_role=False) ACL grants FULL VM access "
-           "instead of the restricted set. Fix = add the column + migration + "
-           "read/write it; then drop this xfail.",
-)
 def test_vm_acl_inherit_role_false_restricts_to_listed_perms(seed):
     """inherit_role=False → only the ACL's explicit permissions apply, even if
-    the user's role would otherwise allow more. (Currently xfails: see reason.)"""
+    the user's role would otherwise allow more.
+
+    Regression guard for the CWE-863 fix (Jul 2026): the vm_acls table now carries
+    an inherit_role column (added + migrated in db.py), so a 'custom permissions'
+    ACL actually restricts instead of silently granting full VM access."""
     seed.tenant('tenant_a', clusters=['cluster_1'])
     alice = seed.user('alice', role='user', tenant_id='tenant_a')
     seed.vm_acl('cluster_1', 100, users=['alice'], inherit_role=False,

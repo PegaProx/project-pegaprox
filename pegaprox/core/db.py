@@ -346,10 +346,24 @@ class PegaProxDB:
                 vmid TEXT NOT NULL,
                 users TEXT DEFAULT '[]',
                 permissions TEXT DEFAULT '[]',
+                inherit_role INTEGER DEFAULT 1,
                 UNIQUE(cluster_id, vmid)
             )
         ''')
-        
+        # MK Jul 2026 — inherit_role was never persisted before (no column), so an
+        # ACL saved with inherit_role=False (UI "custom permissions" mode) silently
+        # became full access in user_can_access_vm. Add the column for existing DBs;
+        # default 1 (True) preserves the historical effective behaviour for rows that
+        # predate the fix — they always acted as inherit_role=True anyway.
+        try:
+            cursor.execute("PRAGMA table_info(vm_acls)")
+            _acl_cols = [c[1] for c in cursor.fetchall()]
+            if 'inherit_role' not in _acl_cols:
+                cursor.execute("ALTER TABLE vm_acls ADD COLUMN inherit_role INTEGER DEFAULT 1")
+                logging.info("Added inherit_role column to vm_acls table")
+        except Exception as _ae:
+            logging.error(f"vm_acls inherit_role column migration failed: {_ae}")
+
         # Affinity rules table
         # MK: added enforce column Feb 2026 - was losing this value on every restart lol
         cursor.execute('''
@@ -2248,13 +2262,14 @@ class PegaProxDB:
             for vmid, acl in vms.items():
                 try:
                     cursor.execute('''
-                        INSERT OR REPLACE INTO vm_acls (cluster_id, vmid, users, permissions)
-                        VALUES (?, ?, ?, ?)
+                        INSERT OR REPLACE INTO vm_acls (cluster_id, vmid, users, permissions, inherit_role)
+                        VALUES (?, ?, ?, ?, ?)
                     ''', (
                         cluster_id,
                         vmid,
                         json.dumps(acl.get('users', [])),
-                        json.dumps(acl.get('permissions', []))
+                        json.dumps(acl.get('permissions', [])),
+                        1 if acl.get('inherit_role', True) else 0
                     ))
                 except:
                     pass
@@ -3589,6 +3604,8 @@ class PegaProxDB:
             acls[cluster_id][row['vmid']] = {
                 'users': json.loads(row['users'] or '[]'),
                 'permissions': json.loads(row['permissions'] or '[]'),
+                # default True for legacy rows (pre-column) to preserve behaviour
+                'inherit_role': bool(row['inherit_role']) if 'inherit_role' in row.keys() else True,
             }
         
         return acls
@@ -3597,13 +3614,14 @@ class PegaProxDB:
         """Save VM ACL"""
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT OR REPLACE INTO vm_acls (cluster_id, vmid, users, permissions)
-            VALUES (?, ?, ?, ?)
+            INSERT OR REPLACE INTO vm_acls (cluster_id, vmid, users, permissions, inherit_role)
+            VALUES (?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             vmid,
             json.dumps(data.get('users', [])),
-            json.dumps(data.get('permissions', []))
+            json.dumps(data.get('permissions', [])),
+            1 if data.get('inherit_role', True) else 0
         ))
         self.conn.commit()
     
