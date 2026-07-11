@@ -874,7 +874,20 @@ def _destroy_guest():
         from pegaprox.core.db import get_db
         get_db().delete_vm_acl(cluster_id, vmid_int)
     except Exception as e:
-        logging.warning(f'[client_portal] destroyed {vmid_int} but ACL cleanup failed: {e}')
+        # ACL cleanup failed AFTER the guest was already purged (irreversible). A
+        # lingering vm_acls row would grant the old owner access if PVE recycles this
+        # VMID for a different guest (BOLA-adjacent) — so log LOUD (error) + audit it
+        # so ops can remove the stale row manually. (CodeAnt review 2026-07-11.)
+        logging.error(f'[client_portal] destroyed {vm_type} {vmid_int} on {cluster_id} but '
+                      f'VM-ACL cleanup FAILED: {e} — remove the stale vm_acls row manually '
+                      f'to avoid a recycled-VMID access grant')
+        try:
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'portal.acl_cleanup_failed',
+                      f'ORPHANED VM-ACL after teardown of {vm_type} {vmid_int} on '
+                      f'{cluster_id}/{node} — manual cleanup required ({e})')
+        except Exception:
+            pass
 
     from pegaprox.utils.audit import log_audit
     log_audit(username, 'portal.guest_destroyed',
