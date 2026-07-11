@@ -6775,8 +6775,18 @@
             const isEfficient = mode === 'efficient';
             const canEfficient = efficientInfo?.eligible;
 
+            const nameValidationError = !snapname ? '' : (
+                !/^[a-zA-Z]/.test(snapname)
+                    ? (t('snapshotNameLetterWarning') || 'Snapshot name must start with a letter.')
+                    : (!/^[a-zA-Z0-9_-]+$/.test(snapname)
+                        ? (t('snapshotNameCharsWarning') || 'Snapshot name can only contain alphanumeric characters, underscores, and hyphens (no spaces or special characters).')
+                        : (snapname.length > 80
+                            ? (t('snapshotNameLengthWarning') || 'Snapshot name cannot exceed 80 characters.')
+                            : ''))
+            );
+
             const handleSubmit = () => {
-                if (!snapname.trim()) return;
+                if (!snapname.trim() || nameValidationError) return;
                 onSubmit(snapname.trim(), description, vmstate, isEfficient ? { mode: 'efficient', snap_size_gb: snapSizeGb } : { mode: 'standard' });
             };
 
@@ -6891,6 +6901,12 @@
                                             onChange={(e) => setSnapname(e.target.value)}
                                             placeholder="snapshot-name"
                                         />
+                                        {nameValidationError && (
+                                            <div className="text-[11px] mt-1 flex items-center gap-1" style={{color: '#efc006'}}>
+                                                <Icons.AlertTriangle className="w-3 h-3" />
+                                                <span>{nameValidationError}</span>
+                                            </div>
+                                        )}
                                     </div>
                                     <div>
                                         <div className="corp-vm-section-title">{t('description')} <span style={{color:'var(--corp-text-muted)', fontWeight:400}}>({t('optional')})</span></div>
@@ -6917,7 +6933,7 @@
                                 <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost">{t('cancel')}</button>
                                 <button
                                     onClick={handleSubmit}
-                                    disabled={loading || !snapname.trim()}
+                                    disabled={loading || !snapname.trim() || !!nameValidationError}
                                     className="corp-vm-btn corp-vm-btn-create flex items-center gap-2"
                                 >
                                     {loading && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
@@ -7030,6 +7046,12 @@
                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                     placeholder="snapshot-name"
                                 />
+                                {nameValidationError && (
+                                    <div className="text-xs mt-1 flex items-center gap-1 text-yellow-400">
+                                        <Icons.AlertTriangle className="w-3.5 h-3.5" />
+                                        <span>{nameValidationError}</span>
+                                    </div>
+                                )}
                             </div>
                             <div>
                                 <label className="block text-sm text-gray-400 mb-1">{t('description')} ({t('optional')})</label>
@@ -7059,7 +7081,7 @@
                             </button>
                             <button
                                 onClick={handleSubmit}
-                                disabled={loading || !snapname.trim()}
+                                disabled={loading || !snapname.trim() || !!nameValidationError}
                                 className="flex items-center gap-2 px-4 py-2 rounded-lg text-white disabled:opacity-50 bg-green-600 hover:bg-green-700"
                             >
                                 {loading && <Icons.RotateCw />}
