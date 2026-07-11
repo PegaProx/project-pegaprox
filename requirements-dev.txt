@@ -1,0 +1,4 @@
+# Dev / test-only dependencies (NOT needed at runtime — do not ship in the appliance).
+# Install:  pip install -r requirements-dev.txt
+# Run:      python -m pytest
+pytest>=8.0
