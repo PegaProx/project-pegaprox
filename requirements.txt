@@ -46,9 +46,10 @@ dnspython>=2.7.0
 cryptography>=49.0.0,<52
 pyopenssl>=26.0.0
 argon2-cffi>=23.0.0
-# pyasn1 0.6.3 fixes the recursion + resource-allocation vulns; transitive
-# via pyopenssl. Explicit pin so scanners stop seeing the old 0.5.x floor.
-pyasn1>=0.6.3
+# pyasn1 transitive via pyopenssl. Explicit pin so scanners stop seeing the old
+# 0.5.x floor. MK 2026-07-11 — bumped 0.6.3 -> 0.6.4: clears 3 new Aikido findings
+# AIKIDO-2026-746993 (HIGH), -911927 + -27979 (both MEDIUM).
+pyasn1>=0.6.4
 
 # MK May 2026 — SQLCipher full-DB encryption (AES-256-CBC + HMAC-SHA512).
 # Currently only ships pre-built wheels for Linux x86_64; ARM / macOS /
