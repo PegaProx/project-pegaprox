@@ -1160,6 +1160,21 @@
             font-variant-numeric: tabular-nums;
         }
 
+        /* NS Jul 2026 (scale) — native windowing for the sidebar tree. content-visibility:auto
+           lets the browser skip layout + paint for rows scrolled out of the sidebar's
+           scrollport, so a 100-node / 1000+-VM tree stays smooth while scrolling. Unlike JS
+           windowing the rows STAY in the DOM, so keyboard nav (querySelectorAll+focus),
+           tooltips, selection and the #vmid ::after all keep working unchanged — a
+           content-visibility:auto row is still focusable and in the a11y tree, and renders
+           the moment it's focused or scrolled near. contain-intrinsic-size keeps the
+           scrollbar honest before a row first paints (`auto` remembers the real height after
+           first render; ~20px is only the initial estimate). Degrades gracefully: browsers
+           without content-visibility just render every row normally. */
+        .corp-tree-child {
+            content-visibility: auto;
+            contain-intrinsic-size: auto 24px;  /* real row height: leading-5 (20px) + py-0.5 (4px); `auto` self-corrects per row (network rows are ~20px) */
+        }
+
         /* LW: Mar 2026 — corporate light mode tokens. NS 2026-05-10 retuned:
            bumped text contrast (was #555/#888 → too washed), darker accent for
            AA on white, slightly cooler surface base, sharper border on the
@@ -2970,7 +2985,14 @@
 
         /* sidebar tree expand animation */
         @keyframes corp-tree-expand { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-        body[data-layout="corporate"] .corp-tree-child { animation: corp-tree-expand 0.12s ease-out; }
+        /* NS Jul 2026 (scale) — animate the tree CONTAINER once on expand, not each
+           .corp-tree-child row. The per-row entry animation collided with the new
+           content-visibility:auto (a row re-ran its fade every time it scrolled back into
+           view = jank on exactly the big trees this targets) and meant ~1000 simultaneous
+           animations on expand. One container fade is smoother and far cheaper. Both view
+           roots (network + datastore reuse .corp-inline-tree; pools use .corp-pool-tree). */
+        body[data-layout="corporate"] .corp-inline-tree,
+        body[data-layout="corporate"] .corp-pool-tree { animation: corp-tree-expand 0.12s ease-out; }
 
         /* empty state placeholder */
         .corp-empty-state { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 20px; text-align: center; }

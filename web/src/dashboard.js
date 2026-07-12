@@ -8250,6 +8250,17 @@
             // NS: Mar 2026 - pool/folder view for corporate sidebar
             const [sidebarViewMode, setSidebarViewMode] = useState(() => localStorage.getItem('pegaprox-sidebar-view') || 'tree');
             const [sidebarSearch, setSidebarSearch] = useState('');
+            // NS Jul 2026 (scale) — debounce the value used for FILTERING + the match
+            // counter so typing in a 100-node / 1000+-VM sidebar doesn't re-filter and
+            // re-count across every cluster on each keystroke. The <input> stays bound to
+            // sidebarSearch for instant echo; the heavy work reads this debounced mirror.
+            // Empty clears instantly (no lag when wiping the box).
+            const [sidebarSearchDebounced, setSidebarSearchDebounced] = useState('');
+            useEffect(() => {
+                if (!sidebarSearch) { setSidebarSearchDebounced(''); return; }
+                const _sd = setTimeout(() => setSidebarSearchDebounced(sidebarSearch), 250);
+                return () => clearTimeout(_sd);
+            }, [sidebarSearch]);
             const [sidebarTypeFilter, setSidebarTypeFilter] = useState('all');
             const [expandedSidebarPools, setExpandedSidebarPools] = useState({});
             const [clusterPools, setClusterPools] = useState([]);
@@ -8637,7 +8648,7 @@
                     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
                 // LW: Mar 2026 - sidebar quick-filter + NS: type filter
-                const searchLower = sidebarSearch.toLowerCase();
+                const searchLower = sidebarSearchDebounced.toLowerCase();
                 const showNodes = sidebarTypeFilter === 'all' || sidebarTypeFilter === 'nodes';
                 const showVms = sidebarTypeFilter === 'all' || sidebarTypeFilter === 'vms';
                 const showCts = sidebarTypeFilter === 'all' || sidebarTypeFilter === 'cts';
@@ -8713,7 +8724,7 @@
                                     ) : (
                                         <Icons.Server className="w-4 h-4 flex-shrink-0" style={{color: 'var(--corp-accent)'}} />
                                     )}
-                                    <span className="truncate flex-1" style={{opacity: nodeOnline ? 1 : 0.5}}>{highlightMatch(nodeName, sidebarSearch)}{statusSuffix}</span>
+                                    <span className="truncate flex-1" style={{opacity: nodeOnline ? 1 : 0.5}}>{highlightMatch(nodeName, sidebarSearchDebounced)}{statusSuffix}</span>
                                 </div>
                             );
                         })}
@@ -8758,7 +8769,7 @@
                                             <Icons.Template className="w-3.5 h-3.5" />
                                         </span>
                                     )}
-                                    <span className="truncate flex-1">{highlightMatch(vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`, sidebarSearch)}</span>
+                                    <span className="truncate flex-1">{highlightMatch(vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`, sidebarSearchDebounced)}</span>
                                 </div>
                             );
                         })}
@@ -9162,7 +9173,7 @@
                     const isExpanded = expandedSidebarNets[`${clusterId}:${net.name}`];
                     const isSdn = sdnNets.includes(net);
                     // filter search
-                    const search = sidebarSearch.toLowerCase();
+                    const search = sidebarSearchDebounced.toLowerCase();
                     if (search) {
                         const nameMatch = net.name?.toLowerCase().includes(search);
                         const vmMatch = net.vms?.some(v => v.name?.toLowerCase().includes(search) || String(v.vmid).includes(search));
@@ -14135,8 +14146,8 @@
                                                         {f === 'all' ? (t('all') || 'All') : f === 'vms' ? 'VMs' : f === 'cts' ? 'CTs' : (t('nodes') || 'Nodes')}
                                                     </button>
                                                 ))}
-                                                {sidebarSearch && (() => {
-                                                    const sl = sidebarSearch.toLowerCase();
+                                                {sidebarSearchDebounced && (() => {
+                                                    const sl = sidebarSearchDebounced.toLowerCase();
                                                     let count = 0;
                                                     Object.entries(expandedSidebarClusters).forEach(([cid, exp]) => {
                                                         if (!exp) return;
