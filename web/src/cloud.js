@@ -1534,14 +1534,52 @@
         }
 
         // ── SDN ────────────────────────────────────────────────────
+        // simple centered modal used by the cloud-native CRUD views
+        function CloudModal({ title, onClose, onSubmit, submitLabel, children, t }) {
+            return (
+                <div className="cloud-modal-overlay" style={{ position: 'fixed', inset: 0, zIndex: 70, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
+                    <div className="cloud-card" style={{ width: 'min(460px,92vw)', padding: 0 }} onClick={e => e.stopPropagation()}>
+                        {cloudHead({ icon: <Icons.Plus />, title, right: <CloudIconBtn icon="X" title={t('close') || 'Close'} onClick={onClose} /> })}
+                        <form onSubmit={(e) => { e.preventDefault(); onSubmit(); }}>
+                            <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>{children}</div>
+                            <div className="cloud-modal-footer" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '12px 16px', borderTop: '1px solid var(--cloud-divider)' }}>
+                                <button type="button" className="cloud-link-btn" onClick={onClose}>{t('cancel') || 'Cancel'}</button>
+                                <button type="submit" className="cloud-btn-primary">{submitLabel || (t('create') || 'Create')}</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+        function CloudField({ label, children }) {
+            return <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: '.8rem', color: 'var(--cloud-text-secondary)' }}>{label}{children}</label>;
+        }
+
         function CloudSDN({ clusterId, t }) {
             const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/datacenter/sdn` : null);
+            const mut = useCloudMutate(reload);
             const s = data || {};
-            const notAvail = !s.available;
+            const base = `/api/clusters/${clusterId}/datacenter/sdn`;
             const zones = Array.isArray(s.zones) ? s.zones : [];
             const vnets = Array.isArray(s.vnets) ? s.vnets : [];
             const subnets = Array.isArray(s.subnets) ? s.subnets : [];
             const controllers = Array.isArray(s.controllers) ? s.controllers : [];
+            const notAvail = !s.available && !zones.length && !vnets.length;
+            const [modal, setModal] = React.useState(null); // 'zone' | 'vnet'
+            const [zForm, setZForm] = React.useState({ zone: '', type: 'vlan', bridge: '', peers: '', controller: '' });
+            const [vForm, setVForm] = React.useState({ vnet: '', zone: '' });
+            const submitZone = () => {
+                const body = { zone: zForm.zone.trim(), type: zForm.type };
+                if (zForm.type === 'vlan' || zForm.type === 'qinq') body.bridge = zForm.bridge.trim();
+                if (zForm.type === 'vxlan') body.peers = zForm.peers.trim();
+                if (zForm.type === 'evpn') body.controller = zForm.controller.trim();
+                if (!body.zone) return;
+                mut.run('addzone', 'POST', `${base}/zones`, body); setModal(null); setZForm({ zone: '', type: 'vlan', bridge: '', peers: '', controller: '' });
+            };
+            const submitVnet = () => {
+                if (!vForm.vnet.trim() || !vForm.zone) return;
+                mut.run('addvnet', 'POST', `${base}/vnets`, { vnet: vForm.vnet.trim(), zone: vForm.zone }); setModal(null); setVForm({ vnet: '', zone: '' });
+            };
             const kpis = [
                 { icon: 'Globe', value: zones.length, label: t('cloud.sdnZones') || 'Zones', accent: '#6366f1' },
                 { icon: 'Network', value: vnets.length, label: t('cloud.sdnVnets') || 'VNets', accent: '#14b8a6' },
@@ -1553,22 +1591,70 @@
                     <CloudPageHeader title={t('cloud.sdn') || 'SDN'} sub={t('cloud.sdnSub') || 'Software-defined networking'}>
                         <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={notAvail && !zones.length && !vnets.length} emptyIcon="Network" emptyTitle={t('cloud.sdnNA') || 'SDN is not configured on this cluster'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={notAvail} emptyIcon="Network" emptyTitle={t('cloud.sdnNA') || 'SDN is not configured on this cluster'} t={t}>
+                        {s.pending ? (
+                            <div className="cloud-card" style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderLeft: '3px solid #eab308' }}>
+                                <Icons.AlertTriangle />
+                                <span style={{ flex: 1 }}>{t('cloud.sdnPending') || 'You have unapplied SDN changes.'}</span>
+                                <button type="button" className="cloud-btn-primary" onClick={() => mut.run('apply', 'POST', `${base}/apply`)}>{t('cloud.applySDN') || 'Apply'}</button>
+                            </div>
+                        ) : null}
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
-                        {zones.length ? (
+
+                        <div className="cloud-card cloud-table-card">
+                            {cloudHead({ icon: <Icons.Globe />, title: t('cloud.sdnZones') || 'Zones', count: zones.length, right: <button type="button" className="cloud-link-btn" onClick={() => setModal('zone')}><Icons.Plus /> {t('cloud.addZone') || 'Add zone'}</button> })}
+                            {zones.length ? <div className="cloud-table-scroll"><table className="cloud-table">
+                                <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colType') || 'Type'}</th><th>MTU</th><th>{t('cloud.colNodes') || 'Nodes'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <tbody>{zones.map((z, i) => (<tr className="cloud-table-row cloud-table-row-static" key={z.zone || i}>
+                                    <td>{z.zone || z.name || '—'}</td><td className="cloud-table-mono">{z.type || '—'}</td><td className="cloud-cell-muted">{z.mtu || '—'}</td><td className="cloud-cell-muted">{z.nodes || '—'}</td>
+                                    <td><span className="cloud-chip cloud-chip-soft">{z.state || z.status || 'ok'}</span></td>
+                                    <CloudRowActions><CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('dz' + (z.zone), 'DELETE', `${base}/zones/${z.zone}`, undefined, (t('cloud.confirmDelZone') || 'Delete this zone?'))} /></CloudRowActions>
+                                </tr>))}</tbody>
+                            </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.noZones') || 'No zones.'}</div>}
+                        </div>
+
+                        <div className="cloud-card cloud-table-card">
+                            {cloudHead({ icon: <Icons.Network />, title: t('cloud.sdnVnets') || 'VNets', count: vnets.length, right: <button type="button" className="cloud-link-btn" onClick={() => setModal('vnet')}><Icons.Plus /> {t('cloud.addVnet') || 'Add VNet'}</button> })}
+                            {vnets.length ? <div className="cloud-table-scroll"><table className="cloud-table">
+                                <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.sdnZone') || 'Zone'}</th><th>{t('cloud.colTag') || 'Tag'}</th><th>{t('cloud.colAlias') || 'Alias'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <tbody>{vnets.map((v, i) => (<tr className="cloud-table-row cloud-table-row-static" key={v.vnet || i}>
+                                    <td>{v.vnet || '—'}</td><td className="cloud-cell-muted">{v.zone || '—'}</td><td className="cloud-table-mono">{v.tag || '—'}</td><td className="cloud-cell-muted">{v.alias || '—'}</td>
+                                    <CloudRowActions><CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('dv' + v.vnet, 'DELETE', `${base}/vnets/${v.vnet}`, undefined, (t('cloud.confirmDelVnet') || 'Delete this VNet?'))} /></CloudRowActions>
+                                </tr>))}</tbody>
+                            </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.noVnets') || 'No VNets.'}</div>}
+                        </div>
+
+                        {subnets.length ? (
                             <div className="cloud-card cloud-table-card">
-                                {cloudHead({ icon: <Icons.Globe />, title: t('cloud.sdnZones') || 'Zones', count: zones.length })}
+                                {cloudHead({ icon: <Icons.Layers />, title: t('cloud.sdnSubnets') || 'Subnets', count: subnets.length })}
                                 <div className="cloud-table-scroll"><table className="cloud-table">
-                                    <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colState') || 'State'}</th></tr></thead>
-                                    <tbody>{zones.map((z, i) => (<tr className="cloud-table-row cloud-table-row-static" key={z.zone || z.name || i}>
-                                        <td>{z.zone || z.name || '—'}</td>
-                                        <td className="cloud-table-mono">{z.type || '—'}</td>
-                                        <td><span className="cloud-chip cloud-chip-soft">{z.state || z.status || 'ok'}</span></td>
+                                    <thead><tr><th>CIDR</th><th>{t('cloud.colGateway') || 'Gateway'}</th><th>DHCP</th><th>SNAT</th><th>{t('cloud.sdnVnet') || 'VNet'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                    <tbody>{subnets.map((sn, i) => (<tr className="cloud-table-row cloud-table-row-static" key={(sn.subnet || i)}>
+                                        <td className="cloud-table-mono">{sn.subnet || sn.cidr || '—'}</td><td className="cloud-cell-muted">{sn.gateway || '—'}</td><td className="cloud-cell-muted">{sn.dhcp || 'none'}</td>
+                                        <td>{(Number(sn.snat) === 1 || sn.snat === true) ? <span className="cloud-chip cloud-chip-ok">on</span> : <span className="cloud-cell-muted">off</span>}</td>
+                                        <td className="cloud-cell-muted">{sn.vnet || '—'}</td>
+                                        <CloudRowActions>{sn.vnet ? <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('ds' + (sn.subnet), 'DELETE', `${base}/vnets/${sn.vnet}/subnets/${encodeURIComponent(sn.subnet)}`, undefined, (t('cloud.confirmDelSubnet') || 'Delete this subnet?'))} /> : null}</CloudRowActions>
                                     </tr>))}</tbody>
                                 </table></div>
                             </div>
                         ) : null}
                     </CloudSectionState>
+
+                    {modal === 'zone' && (
+                        <CloudModal title={t('cloud.addZone') || 'Add zone'} onClose={() => setModal(null)} onSubmit={submitZone} submitLabel={t('create') || 'Create'} t={t}>
+                            <CloudField label={t('cloud.zoneName') || 'Zone ID'}><input className="cloud-input" value={zForm.zone} onChange={e => setZForm({ ...zForm, zone: e.target.value })} placeholder="zone1" maxLength={8} /></CloudField>
+                            <CloudField label={t('cloud.colType') || 'Type'}><select className="cloud-input" value={zForm.type} onChange={e => setZForm({ ...zForm, type: e.target.value })}>{['simple', 'vlan', 'qinq', 'vxlan', 'evpn'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
+                            {(zForm.type === 'vlan' || zForm.type === 'qinq') && <CloudField label={t('cloud.zoneBridge') || 'Bridge'}><input className="cloud-input" value={zForm.bridge} onChange={e => setZForm({ ...zForm, bridge: e.target.value })} placeholder="vmbr0" /></CloudField>}
+                            {zForm.type === 'vxlan' && <CloudField label={t('cloud.zonePeers') || 'Peers (comma-sep IPs)'}><input className="cloud-input" value={zForm.peers} onChange={e => setZForm({ ...zForm, peers: e.target.value })} placeholder="10.0.0.1,10.0.0.2" /></CloudField>}
+                            {zForm.type === 'evpn' && <CloudField label={t('cloud.zoneController') || 'Controller'}><input className="cloud-input" value={zForm.controller} onChange={e => setZForm({ ...zForm, controller: e.target.value })} /></CloudField>}
+                        </CloudModal>
+                    )}
+                    {modal === 'vnet' && (
+                        <CloudModal title={t('cloud.addVnet') || 'Add VNet'} onClose={() => setModal(null)} onSubmit={submitVnet} submitLabel={t('create') || 'Create'} t={t}>
+                            <CloudField label={t('cloud.vnetName') || 'VNet ID'}><input className="cloud-input" value={vForm.vnet} onChange={e => setVForm({ ...vForm, vnet: e.target.value })} placeholder="vnet1" maxLength={8} /></CloudField>
+                            <CloudField label={t('cloud.sdnZone') || 'Zone'}><select className="cloud-input" value={vForm.zone} onChange={e => setVForm({ ...vForm, zone: e.target.value })}><option value="">—</option>{zones.map(z => <option key={z.zone} value={z.zone}>{z.zone}</option>)}</select></CloudField>
+                        </CloudModal>
+                    )}
                 </div>
             );
         }

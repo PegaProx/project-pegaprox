@@ -3198,8 +3198,11 @@
         .cloud-btn-danger { color:#f4868a; border-color:rgba(248,113,113,0.4); background:transparent; }
         .cloud-btn-danger:hover { background:rgba(248,113,113,0.12); color:#fca5a5; }
         .cloud-btn-sm { padding:5px 10px; font-size:0.8rem; }
-        .cloud-link-btn { background:none; border:none; color:var(--cloud-accent); cursor:pointer; font-size:0.82rem; padding:0; }
+        .cloud-link-btn { background:none; border:none; color:var(--cloud-accent); cursor:pointer; font-size:0.82rem; padding:0; display:inline-flex; align-items:center; gap:4px; }
         .cloud-link-btn:hover { color:var(--cloud-accent-hover); text-decoration:underline; }
+        .cloud-link-btn svg { width:14px; height:14px; }
+        .cloud-input { width:100%; background:var(--cloud-surface-2); border:1px solid var(--cloud-border-medium, var(--cloud-divider)); border-radius:6px; color:var(--color-text); padding:8px 10px; font-size:0.85rem; }
+        .cloud-input:focus { outline:none; border-color:var(--cloud-accent); }
 
         /* icon button */
         .cloud-icon-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:var(--radius-md); background:transparent; border:1px solid transparent; color:var(--cloud-text-secondary); cursor:pointer; flex:0 0 auto; transition:background .12s, color .12s; }
