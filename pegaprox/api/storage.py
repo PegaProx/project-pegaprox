@@ -2517,9 +2517,16 @@ def iso_sync_trigger(cluster_id):
     # MK May 2026 (#481 port) — storage name is concatenated into a `pvesm` shell
     # command downstream. Block anything outside [A-Za-z0-9._-] before the shell
     # ever sees it.
-    from pegaprox.utils.sanitization import validate_storage_name
+    from pegaprox.utils.sanitization import validate_storage_name, validate_content_filename
     if not validate_storage_name(storage):
         return jsonify({'error': 'Invalid storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+
+    # NS Jul 2026 (pentest CRIT) — `filename` is interpolated UNESCAPED into SSH
+    # shell commands in sync_content_to_nodes (only single-quoted → a quote breaks
+    # out = root RCE on every node for a low-priv storage.upload holder). Reject
+    # anything that isn't a plain ISO/template filename before it reaches the shell.
+    if not validate_content_filename(filename):
+        return jsonify({'error': 'Invalid filename. Must be a plain ISO/template filename (letters, digits, . _ + -), no path or shell characters.'}), 400
 
     if hasattr(mgr, '_get_syncable_storage'):
         _, storage_err = mgr._get_syncable_storage(source, storage, content_type)

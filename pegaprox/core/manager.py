@@ -12094,6 +12094,12 @@ echo "AGENT_INSTALLED_OK"
         MK: tries node-to-node scp (with sshpass) first, falls back to sftp relay
         """
         results = []
+        # NS Jul 2026 (pentest CRIT, defense-in-depth) — filename is interpolated into
+        # SSH shell commands below; the API route already validates it, but fail closed
+        # here too in case another caller ever reaches this sink unvalidated.
+        from pegaprox.utils.sanitization import validate_content_filename
+        if not validate_content_filename(filename):
+            return [{'error': 'Invalid filename (rejected by content-sync guard)'}]
         if not self.is_connected:
             return [{'error': 'Not connected'}]
 
