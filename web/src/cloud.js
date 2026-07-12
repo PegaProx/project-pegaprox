@@ -386,6 +386,7 @@
                     { id: 'networks', label: 'Networks', icon: 'Network' },
                     { id: 'sdn', label: 'SDN', icon: 'Globe' },
                     { id: 'firewall', label: 'Firewall', icon: 'Lock' },
+                    { id: 'topology', label: 'Topology', icon: 'Share2' },
                 ] },
                 { label: 'DATA PROTECTION', items: [
                     { id: 'backups', label: 'Backups', icon: 'Archive' },
@@ -402,6 +403,9 @@
                 { label: 'ACTIVITY', items: [{ id: 'tasks', label: 'Tasks', icon: 'ClipboardList' }] },
             ];
             if (isAdmin) {
+                groups.push({ label: 'GOVERNANCE', items: [
+                    { id: 'compliance', label: 'Compliance', icon: 'Shield' },
+                ] });
                 groups.push({ label: 'SYSTEM', items: [
                     { id: 'users', label: 'Users', icon: 'Users' },
                     { id: 'settings', label: 'Settings', icon: 'Settings' },
@@ -1760,7 +1764,7 @@
             );
         }
 
-        function CloudShell({ clusters, selectedCluster, setSelectedCluster, clusterResources, clusterMetrics, allClusterMetrics, clusterDatastores, clusterNetworks, clusterPools, tasks, knownNodes, actions, isAdmin, currentUser, t, onExitCloud, onOpenSettings, onOpenProfile, onLogout }) {
+        function CloudShell({ clusters, selectedCluster, setSelectedCluster, clusterResources, clusterMetrics, allClusterMetrics, clusterDatastores, clusterNetworks, clusterPools, tasks, knownNodes, actions, isAdmin, currentUser, t, authFetch, addToast, onExitCloud, onOpenSettings, onOpenProfile, onLogout }) {
             const [section, setSection] = React.useState('overview');
             const [detailRes, setDetailRes] = React.useState(null);
             const [collapsed, setCollapsed] = React.useState(false);
@@ -1857,6 +1861,8 @@
                 pbs: T('cloud.pbs') || 'Backup Servers',
                 siterecovery: T('cloud.siteRecovery') || 'Site Recovery',
                 monitoring: T('cloud.monitoring') || 'Monitoring',
+                topology: T('topology') || 'Topology',
+                compliance: T('compliance') || 'Compliance',
                 tasks: T('cloud.tasks') || 'Tasks',
                 users: T('cloud.users') || 'Users',
                 settings: T('cloud.settings') || 'Settings',
@@ -1933,6 +1939,23 @@
                         break;
                     case 'monitoring':
                         body = <CloudMonitoring clusterId={cid} t={T} />;
+                        break;
+                    // NS 2026-07: parity with Corporate — mount the SAME real components
+                    // (defined in dashboard.js, hoisted into the shared script scope) inside
+                    // a cloud content frame so the functionality is identical, not a re-impl.
+                    case 'topology':
+                        body = (
+                            <div className="cloud-mounted">
+                                <TopologyTab clusterId={cid} authFetch={authFetch} addToast={addToast} t={T} />
+                            </div>
+                        );
+                        break;
+                    case 'compliance':
+                        body = (
+                            <div className="cloud-mounted">
+                                <ComplianceDashboardTab clusters={safeClusters} selectedCluster={selectedCluster} authFetch={authFetch} addToast={addToast} t={T} isCorporate={false} user={currentUser} />
+                            </div>
+                        );
                         break;
                     case 'tasks':
                         body = <CloudTasks tasks={tasks} t={T} />;

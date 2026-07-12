@@ -13532,6 +13532,8 @@
                             isAdmin={isAdmin}
                             currentUser={user}
                             t={t}
+                            authFetch={authFetch}
+                            addToast={addToast}
                             onExitCloud={() => updatePreferences({ ui_layout: 'modern', theme: 'proxmoxDark' })}
                             onOpenSettings={() => setShowSettings(true)}
                             onOpenProfile={() => setShowProfile(true)}
