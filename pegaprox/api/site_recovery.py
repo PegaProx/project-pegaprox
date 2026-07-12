@@ -84,10 +84,20 @@ def _plan_with_vms(plan):
 @require_auth(perms=['site_recovery.view'])
 def list_plans():
     db = get_db()
+    # NS Jul 2026 (pentest MEDIUM) — a site_recovery.view holder must not enumerate
+    # EVERY tenant's DR plans (names, source/target clusters, network/storage mappings,
+    # webhooks). Filter to clusters the caller can reach; admins / untenanted users get
+    # allowed=None = all, unchanged (same pattern as the replication-jobs fix).
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    _user = build_authz_user(request.session.get('user', ''), request.session)
+    _allowed = get_user_clusters(_user)
     rows = db.query('SELECT * FROM site_recovery_plans ORDER BY created_at DESC')
     plans = []
     for row in (rows or []):
         p = dict(row)
+        if _allowed is not None and p.get('source_cluster') not in _allowed and p.get('target_cluster') not in _allowed:
+            continue
         for k in ('network_mappings', 'storage_mappings'):
             try:
                 p[k] = json.loads(p[k] or '{}')

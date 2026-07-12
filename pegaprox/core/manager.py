@@ -9069,7 +9069,10 @@ echo "AGENT_INSTALLED_OK"
                 data['bwlimit'] = bwlimit
             
             self.logger.info(f"Remote migrating {vm_type}/{vmid} from {node} to target cluster (target vmid: {actual_target_vmid})")
-            self.logger.debug(f"Migration data: {data}")
+            # NS Jul 2026 (pentest HIGH) — data['target-endpoint'] carries a cleartext,
+            # full-rights, non-expiring PVEAPIToken secret; never write it to the log.
+            _safe_data = {k: ('***REDACTED***' if k == 'target-endpoint' else v) for k, v in data.items()}
+            self.logger.debug(f"Migration data: {_safe_data}")
             response = self._api_post(url, data=data)
             
             if response.status_code == 200:

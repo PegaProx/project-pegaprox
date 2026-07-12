@@ -2286,7 +2286,17 @@ def download_from_url(cluster_id, node, storage):
             return jsonify({'error': 'URL is required'}), 400
         if not filename:
             return jsonify({'error': 'Filename is required'}), 400
-        
+
+        # NS Jul 2026 (pentest HIGH) — the URL is handed to the Proxmox node, which
+        # fetches it FROM the PVE management network (SSRF: internal services, cloud
+        # metadata 169.254.169.254, etc.). Validate before delegating. http+https only
+        # (ISO mirrors use both); require_resolution fails CLOSED on unresolvable hosts.
+        from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+        try:
+            url = sanitize_outbound_url(url, allowed_schemes=('https', 'http'))
+        except SsrfError as _ssrf:
+            return jsonify({'error': f'URL rejected by SSRF guard: {_ssrf}'}), 400
+
         # Use Proxmox download-url API
         download_url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/download-url"
         download_data = {

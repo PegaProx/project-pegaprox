@@ -71,6 +71,15 @@ def topology(cluster_id):
         return jsonify({'error': 'cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
 
+    # NS Jul 2026 (pentest DoS) — building the topology fires one PVE /config roundtrip
+    # per guest (O(N) at 1000+ VMs) and is reachable by any cluster.view holder. The
+    # diagram changes slowly, so serve a 30s per-cluster TTL cache to bound how often
+    # a low-priv caller can drive that N+1 (full coverage kept; only frequency bounded).
+    import time as _t
+    _tc = getattr(mgr, '_topology_cache', None)
+    if _tc is not None and (_t.monotonic() - getattr(mgr, '_topology_cache_time', 0.0)) < 30.0:
+        return jsonify(_tc)
+
     nodes_out = []
     links_out = []
 
@@ -147,7 +156,9 @@ def topology(cluster_id):
 
     # ── VMs / CTs grouped under their bridge
     try:
-        resources = mgr.get_vm_resources() or []
+        # NS Jul 2026 (pentest DoS) — reuse the broadcast loop's cached snapshot
+        # (max_age) instead of a fresh cluster walk on every topology request.
+        resources = mgr.get_vm_resources(max_age=6) or []
     except Exception:
         resources = []
     for r in resources:
@@ -186,7 +197,7 @@ def topology(cluster_id):
                     continue
             links_out.append({'source': vm_id, 'target': br_target, 'kind': 'attached'})
 
-    return jsonify({
+    payload = {
         'cluster': {'id': cluster_id, 'name': cluster_label},
         'nodes': nodes_out,
         'links': links_out,
@@ -196,4 +207,10 @@ def topology(cluster_id):
             'vms': len([r for r in resources if r.get('type') == 'qemu']),
             'cts': len([r for r in resources if r.get('type') == 'lxc']),
         },
-    })
+    }
+    # NS Jul 2026 (pentest DoS) — cache the built payload per cluster (see TTL note
+    # at the top of the handler). Full coverage kept; only the frequency is bounded.
+    import time as _t
+    mgr._topology_cache = payload
+    mgr._topology_cache_time = _t.monotonic()
+    return jsonify(payload)
