@@ -397,11 +397,13 @@
                 { label: 'AUTOMATION', items: [
                     { id: 'snapshotpolicies', label: 'Snapshot Policies', icon: 'Camera' },
                     { id: 'templates', label: 'Templates', icon: 'Copy' },
+                    { id: 'alerts', label: 'Alert Channels', icon: 'Bell' },
                 ] },
                 { label: 'INFRASTRUCTURE', items: [
                     { id: 'clusters', label: 'Clusters', icon: 'Cloud' },
                     { id: 'nodes', label: 'Hosts', icon: 'Cpu' },
                     { id: 'ha', label: 'High Availability', icon: 'Shield' },
+                    { id: 'updates', label: 'Update Manager', icon: 'Download' },
                 ] },
                 { label: 'MONITORING', items: [{ id: 'monitoring', label: 'Monitoring', icon: 'Activity' }] },
                 { label: 'REPORTS', items: [
@@ -415,6 +417,8 @@
             if (isAdmin) {
                 groups.push({ label: 'GOVERNANCE', items: [
                     { id: 'compliance', label: 'Compliance', icon: 'Shield' },
+                    { id: 'drift', label: 'Config Drift', icon: 'Activity' },
+                    { id: 'siem', label: 'SIEM', icon: 'AlertTriangle' },
                 ] });
                 groups.push({ label: 'SYSTEM', items: [
                     { id: 'users', label: 'Users', icon: 'Users' },
@@ -1879,6 +1883,10 @@
                 costs: T('costDashboard') || 'Costs',
                 power: T('powerTitle') || 'Power & Carbon',
                 apihealth: T('apiHealth') || 'API Health',
+                drift: T('configDrift') || 'Config Drift',
+                siem: T('siem') || 'SIEM',
+                alerts: T('alertChannels') || 'Alert Channels',
+                updates: T('updateManager') || 'Update Manager',
                 tasks: T('cloud.tasks') || 'Tasks',
                 users: T('cloud.users') || 'Users',
                 settings: T('cloud.settings') || 'Settings',
@@ -2002,6 +2010,18 @@
                         break;
                     case 'apihealth':
                         body = <div className="cloud-mounted"><ApiLatencyDashboard clusterId={cid} authFetch={authFetch} apiUrl={API_URL} t={T} /></div>;
+                        break;
+                    case 'drift':
+                        body = <div className="cloud-mounted"><DriftTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} /></div>;
+                        break;
+                    case 'siem':
+                        body = <div className="cloud-mounted"><SIEMTab addToast={addToast} t={T} getAuthHeaders={() => ({})} /></div>;
+                        break;
+                    case 'alerts':
+                        body = <div className="cloud-mounted"><AlertChannelsPanel t={T} addToast={addToast} getAuthHeaders={() => ({})} /></div>;
+                        break;
+                    case 'updates':
+                        body = <div className="cloud-mounted"><UpdateManagerSection clusterId={cid} addToast={addToast} /></div>;
                         break;
                     case 'tasks':
                         body = <CloudTasks tasks={tasks} t={T} />;
