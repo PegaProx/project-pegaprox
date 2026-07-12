@@ -1396,12 +1396,14 @@ def get_download_status(cluster_id, storage_name, task_id):
 @require_auth(perms=['backup.view'])
 def get_vm_backups(cluster_id, node, vm_type, vmid):
     """Get all backups for a specific VM
-    
+
     LW: Scans all backup-capable storages for vzdump files matching the vmid
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -2261,6 +2263,8 @@ def get_vm_firewall_refs(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2278,6 +2282,8 @@ def get_vm_firewall_log(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -4129,7 +4135,9 @@ def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
     """Get lock status of a VM/CT"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -4375,6 +4383,8 @@ def get_vm_guest_fsinfo_api(cluster_id, node, vm_type, vmid):
     """Proxy for qemu-agent get-fsinfo — list mounted filesystems with used/total bytes."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -4662,6 +4672,8 @@ def get_node_usb_devices(cluster_id, node):
 def fix_vm_qemu_args(cluster_id, node, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu')
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -4883,10 +4895,12 @@ def add_serial_port(cluster_id, node, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu')
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+
     data = request.json or {}
     serial_type = data.get('type', 'socket')  # socket, pty, or /dev/xxx
     
@@ -5087,9 +5101,11 @@ def add_disk_api(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
     disk_config = request.json or {}
     
@@ -5124,10 +5140,12 @@ def remove_disk_api(cluster_id, node, vm_type, vmid, disk_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
-    
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
     delete_data = request.args.get('delete_data', 'false').lower() == 'true'
     
@@ -5200,9 +5218,11 @@ def set_cdrom_api(cluster_id, node, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu')
+    if denied: return denied
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
     data = request.json or {}
     iso_path = data.get('iso')  # None to eject
@@ -5236,12 +5256,14 @@ def add_network_api(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
     net_config = request.json or {}
-    
+
     result = manager.add_network(node, vmid, vm_type, net_config)
     
     if result['success']:
@@ -5259,13 +5281,15 @@ def update_network_api(cluster_id, node, vm_type, vmid, net_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
-    
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
     net_config = request.json or {}
-    
+
     result = manager.update_network(node, vmid, vm_type, net_id, net_config)
     
     if result['success']:
@@ -5283,12 +5307,14 @@ def remove_network_api(cluster_id, node, vm_type, vmid, net_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
-    
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
-    
+
     result = manager.remove_network(node, vmid, vm_type, net_id)
     
     if result['success']:
@@ -5311,9 +5337,11 @@ def toggle_network_link_api(cluster_id, node, vm_type, vmid, net_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     # Only QEMU supports link_down toggle
     if vm_type != 'qemu':
         return jsonify({'error': 'Network disconnect only supported for QEMU VMs'}), 400
@@ -5342,9 +5370,11 @@ def check_snapshot_capability_api(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
     result = manager.check_snapshot_capability(node, vmid, vm_type)
     return jsonify(result)
