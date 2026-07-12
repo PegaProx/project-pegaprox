@@ -1102,6 +1102,16 @@ def upload_to_datastore(cluster_id, storage_name):
         # don't include user extension in temp filename
         fd, tmp_path = tempfile.mkstemp(dir=upload_tmp_dir)
         try:
+            # NS Jul 2026 (pentest DoS) — the /upload route permits a very large body
+            # (100 GB cap); refuse up front if the appliance temp dir can't hold it
+            # (disk-exhaustion DoS) instead of filling the disk mid-write. 256 MB reserve.
+            import shutil as _shutil
+            _clen = request.content_length or 0
+            if _clen and (_clen + 256 * 1024 * 1024) > _shutil.disk_usage(upload_tmp_dir).free:
+                os.close(fd)
+                try: os.unlink(tmp_path)
+                except Exception: pass
+                return jsonify({'error': 'Insufficient free space on the appliance to buffer this upload'}), 507
             file.save(tmp_path)
         except Exception as e:
             os.close(fd)
@@ -1202,25 +1212,17 @@ def download_iso_from_url(cluster_id, storage_name):
         if not url:
             return jsonify({'error': 'URL is required'}), 400
         
-        # Validate URL
-        if not url.startswith('http://') and not url.startswith('https://'):
-            return jsonify({'error': 'URL must start with http:// or https://'}), 400
-
-        # NS: Mar 2026 - block internal/metadata URLs to prevent SSRF
-        import ipaddress as _ipaddr
-        from urllib.parse import urlparse as _urlparse
+        # NS Jul 2026 (pentest HIGH) — the previous hand-rolled filter FAILED OPEN on an
+        # unresolvable host ("let proxmox handle it") and missed multicast / CGNAT /
+        # metadata-by-hostname. Delegate to the central guard, which fails CLOSED
+        # (require_resolution) and blocks private/loopback/link-local/metadata. The URL is
+        # fetched by the Proxmox node, so this SSRF would fire from the PVE management LAN.
+        from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
         try:
-            _parsed_host = _urlparse(url).hostname or ''
-            # resolve hostname to check if it points to internal IP
-            import socket as _sock
-            _resolved = _sock.getaddrinfo(_parsed_host, None, 0, _sock.SOCK_STREAM)
-            for _fam, _type, _proto, _canon, _addr in _resolved:
-                _ip = _ipaddr.ip_address(_addr[0])
-                if _ip.is_private or _ip.is_loopback or _ip.is_link_local or _ip.is_reserved:
-                    return jsonify({'error': 'Download from internal/private networks is not allowed'}), 400
-        except (ValueError, _sock.gaierror):
-            pass  # can't resolve = let proxmox handle it
-        
+            url = sanitize_outbound_url(url, allowed_schemes=('https', 'http'))
+        except SsrfError as _ssrf:
+            return jsonify({'error': f'URL rejected by SSRF guard: {_ssrf}'}), 400
+
         # Extract filename from URL if not provided
         if not filename:
             from urllib.parse import urlparse, unquote
@@ -1932,6 +1934,8 @@ def get_vm_firewall_options(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -1949,6 +1953,8 @@ def set_vm_firewall_options(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -1969,6 +1975,8 @@ def get_vm_firewall_rules(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -1989,6 +1997,8 @@ def create_vm_firewall_rule(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2016,6 +2026,8 @@ def update_vm_firewall_rule(cluster_id, node, vmtype, vmid, pos):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2034,6 +2046,8 @@ def delete_vm_firewall_rule(cluster_id, node, vmtype, vmid, pos):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2053,6 +2067,8 @@ def get_vm_firewall_aliases(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2070,6 +2086,8 @@ def create_vm_firewall_alias(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2088,6 +2106,8 @@ def update_vm_firewall_alias(cluster_id, node, vmtype, vmid, name):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2106,6 +2126,8 @@ def delete_vm_firewall_alias(cluster_id, node, vmtype, vmid, name):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2123,6 +2145,8 @@ def get_vm_firewall_ipsets(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2140,6 +2164,8 @@ def create_vm_firewall_ipset(cluster_id, node, vmtype, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2158,6 +2184,8 @@ def get_vm_firewall_ipset_content(cluster_id, node, vmtype, vmid, name):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2175,6 +2203,8 @@ def add_vm_firewall_ipset_entry(cluster_id, node, vmtype, vmid, name):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2193,6 +2223,8 @@ def delete_vm_firewall_ipset_entry(cluster_id, node, vmtype, vmid, name, cidr):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -2210,6 +2242,8 @@ def delete_vm_firewall_ipset(cluster_id, node, vmtype, vmid, name):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vmtype)
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -5454,6 +5488,8 @@ def diff_snapshots_api(cluster_id, node, vm_type, vmid):
     """Compare two snapshot configs. Query: ?a=<snapA>&b=<snapB>"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     a = (request.args.get('a') or '').strip()
@@ -9596,6 +9632,11 @@ def bulk_migrate_api(cluster_id):
     mgr = cluster_managers[cluster_id]
     data = request.json or {}
     vms = data.get('vms', [])  # List of {node, vmid, type}
+    # NS Jul 2026 (pentest DoS) — cap the batch so one request can't fan out unbounded
+    # per-VM cluster-walk + SQLCipher work (a 10 MB body could carry tens of thousands
+    # of entries). 1000 is far above any realistic bulk migrate; split larger jobs.
+    if isinstance(vms, list) and len(vms) > 1000:
+        return jsonify({'error': 'Too many VMs in one request (max 1000). Split into smaller batches.'}), 400
     target_node = data.get('target')
     online = data.get('online', True)
     
