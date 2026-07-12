@@ -2276,7 +2276,7 @@ class PegaProxDB:
                         vmid,
                         json.dumps(acl.get('users', [])),
                         json.dumps(acl.get('permissions', [])),
-                        1 if acl.get('inherit_role', True) else 0
+                        (0 if str(acl.get('inherit_role', True)).strip().lower() in ('false', '0', 'no', 'off', 'none', '') else 1)
                     ))
                 except:
                     pass
@@ -3495,35 +3495,57 @@ class PegaProxDB:
         
         return entries
     
-    def verify_audit_log_integrity(self) -> dict:
-        """Verify integrity of entire audit log - returns statistics"""
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM audit_log ORDER BY timestamp DESC')
-        
-        total = 0
-        verified = 0
-        unsigned = 0
-        tampered = 0
-        
-        for row in cursor.fetchall():
-            entry = dict(row)
-            total += 1
-            
-            if not entry.get('hmac_signature'):
-                unsigned += 1  # Old entry without signature
-            elif self._verify_audit_hmac(entry):
-                verified += 1
-            else:
-                tampered += 1
-                logging.warning(f"AUDIT LOG INTEGRITY VIOLATION: Entry ID {entry.get('id')} may have been tampered!")
-        
-        return {
-            'total_entries': total,
-            'verified': verified,
-            'unsigned': unsigned,
-            'potentially_tampered': tampered,
-            'integrity_percentage': round((verified / total * 100) if total > 0 else 100, 2)
-        }
+    def verify_audit_log_integrity(self, limit: int = None) -> dict:
+        """Verify integrity of the audit log — returns statistics.
+
+        NS Jul 2026 (scale): runs FULLY off the gevent hub via run_heavy_read — the
+        SELECT *and* the per-row SQLCipher decrypt + HMAC verify happen in a worker
+        thread on a fresh connection, so the UI never freezes even when the audit_log
+        holds hundreds of thousands of rows (100 nodes / 1000+ VMs). Coverage is NOT
+        reduced — the full log is verified by default (the HMAC verify is pure CPU,
+        no DB access, so it is safe in the worker). Pass limit=N for a bounded
+        spot-check; omit for the complete off-hub scan.
+        """
+        def _verify_rows(rows):
+            total = 0
+            verified = 0
+            unsigned = 0
+            tampered = 0
+            for row in rows:
+                entry = dict(row)
+                total += 1
+                if not entry.get('hmac_signature'):
+                    unsigned += 1  # Old entry without signature
+                elif self._verify_audit_hmac(entry):
+                    verified += 1
+                else:
+                    tampered += 1
+                    logging.warning(f"AUDIT LOG INTEGRITY VIOLATION: Entry ID {entry.get('id')} may have been tampered!")
+            return {
+                'total_entries': total,
+                'verified': verified,
+                'unsigned': unsigned,
+                'potentially_tampered': tampered,
+                'integrity_percentage': round((verified / total * 100) if total > 0 else 100, 2),
+                'scanned_limit': (limit if limit and limit > 0 else None)  # None = full scan
+            }
+
+        if limit and limit > 0:
+            sql = 'SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?'
+            params = (limit,)
+        else:
+            sql = 'SELECT * FROM audit_log ORDER BY timestamp DESC'
+            params = ()
+
+        try:
+            from pegaprox.core.dbcrypto import run_heavy_read
+            # transform runs INSIDE the worker thread → verify stays off the hub too.
+            return run_heavy_read(sql, params, transform=_verify_rows)
+        except Exception:
+            # Fallback: gevent/off-hub path unavailable (CLI/test) — run in-thread.
+            cursor = self.conn.cursor()
+            cursor.execute(sql, params)
+            return _verify_rows(cursor.fetchall())
     
     def cleanup_audit_log(self, days: int = 90):
         """Remove audit entries older than specified days"""
@@ -3631,7 +3653,7 @@ class PegaProxDB:
             vmid,
             json.dumps(data.get('users', [])),
             json.dumps(data.get('permissions', [])),
-            1 if data.get('inherit_role', True) else 0
+            (0 if str(data.get('inherit_role', True)).strip().lower() in ('false', '0', 'no', 'off', 'none', '') else 1)
         ))
         self.conn.commit()
     

@@ -225,9 +225,10 @@ def update_user_preferences():
     if 'taskbar_auto_expand' in data:
         user['taskbar_auto_expand'] = bool(data['taskbar_auto_expand'])
 
-    # NS Jul 2026 — opt-in VMIDs in the corporate sidebar tree
+    # NS Jul 2026 — opt-in VMIDs in the corporate sidebar tree.
+    # Strict coercion so a stringy "false"/"0" doesn't flip the pref on (bool("false") is True).
     if 'sidebar_show_vmid' in data:
-        user['sidebar_show_vmid'] = bool(data['sidebar_show_vmid'])
+        user['sidebar_show_vmid'] = str(data['sidebar_show_vmid']).strip().lower() in ('true', '1', 'yes', 'on')
 
     # LW: Mar 2026 - track if user has explicitly chosen a layout
     if 'layout_chosen' in data:
