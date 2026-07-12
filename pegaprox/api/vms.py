@@ -21,9 +21,22 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
-from pegaprox.utils.auth import require_auth, load_users, validate_session
+from pegaprox.utils.auth import require_auth, load_users, validate_session, build_authz_user
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm, get_user_permissions
+
+
+def _require_vm_access(cluster_id, vmid, perm, vm_type=None):
+    """Per-VM BOLA/IDOR guard. NS Jul 2026 (pentest): several VM-scoped detail and
+    action routes only did check_cluster_access + a role permission and never honoured
+    per-VM ACLs (the /resources LIST did) — a confused deputy that let a low-priv or
+    tenant user read/act on a restricted VM. Returns None when the acting (token-scoped)
+    user may access this VM for `perm`, else a jsonify(403) tuple the caller must return.
+    build_authz_user applies effective_role so an admin-owned scoped token can't bypass."""
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vm(user, cluster_id, vmid, perm, vm_type):
+        return jsonify({'error': f'Access denied to this VM ({perm})'}), 403
+    return None
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error
@@ -3972,10 +3985,13 @@ def get_node_shell_ticket(cluster_id, node):
 def _get_vm_config_response(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
+
     mgr = cluster_managers[cluster_id]
     try:
         result = mgr.get_vm_config(node, vmid, vm_type)
@@ -4122,7 +4138,9 @@ def unlock_vm_api(cluster_id, node, vm_type, vmid):
     """Unlock a VM/CT - use with caution!"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -4151,6 +4169,8 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
     """Get QEMU Guest Agent info (hostname, OS, kernel, NICs, filesystems, users, clock)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -4384,6 +4404,8 @@ def get_vm_guest_file_read_api(cluster_id, node, vm_type, vmid):
     if not ok: return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
     if vm_type != 'qemu':
         return jsonify({'error': 'Guest-agent file-read is QEMU-only'}), 400
 
@@ -4429,6 +4451,8 @@ def get_vm_rrd_api(cluster_id, node, vm_type, vmid, timeframe):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -4630,7 +4654,9 @@ def get_vm_passthrough_devices(cluster_id, node, vmid):
     """Get current passthrough devices configured for a VM"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', 'qemu')
+    if denied: return denied
+
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -4693,7 +4719,9 @@ def add_pci_passthrough(cluster_id, node, vmid):
     """Add a PCI device passthrough to a VM"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu')
+    if denied: return denied
+
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -4754,6 +4782,8 @@ def add_usb_passthrough(cluster_id, node, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu')
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -4867,6 +4897,8 @@ def remove_passthrough_device(cluster_id, node, vmid, device_type, key):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu')
+    if denied: return denied
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -4942,10 +4974,13 @@ def resize_vm_disk_api(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
     manager = cluster_managers[cluster_id]
     data = request.json or {}
     disk = data.get('disk')
@@ -5092,10 +5127,13 @@ def move_disk_api(cluster_id, node, vm_type, vmid, disk_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
     manager = cluster_managers[cluster_id]
     data = request.json or {}
     target_storage = data.get('storage')
@@ -5287,6 +5325,8 @@ def get_snapshots_api(cluster_id, node, vm_type, vmid):
         return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
     
     manager = cluster_managers[cluster_id]
     snapshots = manager.get_snapshots(node, vmid, vm_type)
@@ -5391,6 +5431,8 @@ def get_snapshot_config_api(cluster_id, node, vm_type, vmid, snapname):
     if not ok: return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied: return denied
     mgr = cluster_managers[cluster_id]
     if not mgr.is_connected:
         return jsonify({'error': 'Cluster offline'}), 503
