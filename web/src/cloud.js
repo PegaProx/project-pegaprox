@@ -395,6 +395,8 @@
                     { id: 'siterecovery', label: 'Site Recovery', icon: 'LifeBuoy' },
                 ] },
                 { label: 'AUTOMATION', items: [
+                    { id: 'schedules', label: 'Schedules', icon: 'Clock' },
+                    { id: 'scripts', label: 'Scripts', icon: 'Terminal' },
                     { id: 'snapshotpolicies', label: 'Snapshot Policies', icon: 'Camera' },
                     { id: 'templates', label: 'Templates', icon: 'Copy' },
                     { id: 'alerts', label: 'Alert Channels', icon: 'Bell' },
@@ -421,6 +423,7 @@
                     { id: 'siem', label: 'SIEM', icon: 'AlertTriangle' },
                 ] });
                 groups.push({ label: 'SYSTEM', items: [
+                    { id: 'plugins', label: 'Plugins', icon: 'Box' },
                     { id: 'users', label: 'Users', icon: 'Users' },
                     { id: 'settings', label: 'Settings', icon: 'Settings' },
                 ] });
@@ -1778,6 +1781,138 @@
             );
         }
 
+        // ═══ NS 2026-07 — cloud-native parity views (features that are inline in
+        //     dashboard.js with no mountable component). Same useCloudData/useCloudMutate
+        //     pattern as CloudBackups; list + core actions (create/edit → follow-up). ═══
+        function CloudPlugins({ clusterId, t }) {
+            const { data, loading, err, reload } = useCloudData('/api/plugins');
+            const mut = useCloudMutate(reload);
+            const list = (Array.isArray(data) ? data : []).filter(p => p && p.enabled);
+            const [sel, setSel] = React.useState(null);
+            const cur = list.find(p => p.id === sel) || null;
+            return (
+                <div className="cloud-body">
+                    <CloudPageHeader title={t('plugins') || 'Plugins'} sub={list.length + ' ' + (t('plugins') || 'plugins')}>
+                        <button type="button" className="cloud-link-btn" onClick={() => mut.run('rescan', 'POST', '/api/plugins/rescan')}><Icons.Search /> {t('rescan') || 'Rescan'}</button>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    </CloudPageHeader>
+                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="Box" emptyTitle={t('noPlugins') || 'No plugins enabled'} emptyText={t('cloud.pluginsHint') || 'Enable plugins in Settings → Plugins.'} t={t}>
+                        <div className="cloud-kpi-grid">
+                            {list.map(p => (
+                                <CloudKpiCard key={p.id} icon="Box" value={p.name || p.id}
+                                    label={'v' + (p.version || '?') + (p.author ? ' · ' + p.author : '')}
+                                    sub={p.loaded ? (t('loaded') || 'Loaded') : (p.error ? (t('error') || 'Error') : (t('unloaded') || 'Unloaded'))}
+                                    accent={(cur && cur.id === p.id) ? 'var(--cloud-accent)' : (p.loaded ? '#22c55e' : '#ef4444')}
+                                    onClick={() => setSel(p.id)} />
+                            ))}
+                        </div>
+                        {cur && (
+                            <div className="cloud-card cloud-table-card" style={{ padding: 0, overflow: 'hidden' }}>
+                                {cloudHead({ icon: <Icons.Box />, title: cur.name || cur.id, count: (cur.routes && cur.routes.length) || null, right: (
+                                    <div style={{ display: 'flex', gap: 4 }}>
+                                        <CloudIconBtn icon="RotateCw" title={t('reload') || 'Reload'} onClick={() => mut.run('rl' + cur.id, 'POST', `/api/plugins/${cur.id}/reload`)} />
+                                        <CloudIconBtn icon="Power" danger title={t('disable') || 'Disable'} onClick={() => mut.run('ds' + cur.id, 'POST', `/api/plugins/${cur.id}/disable`)} />
+                                    </div>
+                                ) })}
+                                {cur.has_frontend && cur.frontend_route
+                                    ? <iframe title={cur.name || cur.id} src={cur.frontend_route + (cur.frontend_route.indexOf('?') >= 0 ? '&' : '?') + 'cluster=' + encodeURIComponent(clusterId || '')} style={{ width: '100%', height: '70vh', border: 'none', background: '#fff', display: 'block' }} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" referrerPolicy="same-origin" />
+                                    : <div style={{ padding: 16 }}>
+                                        {cur.description && <p className="cloud-cell-muted" style={{ marginBottom: 8 }}>{cur.description}</p>}
+                                        {cur.error && <div className="cloud-chip cloud-chip-err" style={{ marginBottom: 8 }}>{cur.error}</div>}
+                                        <div className="cloud-cell-muted" style={{ fontSize: '.8rem' }}>{(cur.routes || []).length ? 'Routes: ' + cur.routes.join(', ') : (t('cloud.pluginNoUi') || 'This plugin has no frontend UI.')}</div>
+                                    </div>}
+                            </div>
+                        )}
+                    </CloudSectionState>
+                </div>
+            );
+        }
+
+        function CloudScripts({ clusterId, t }) {
+            const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/scripts` : null);
+            const mut = useCloudMutate(reload);
+            const rows = Array.isArray(data) ? data : (data && Array.isArray(data.scripts) ? data.scripts : []);
+            const [out, setOut] = React.useState(null);
+            const viewOutput = (s) => {
+                fetch(`/api/clusters/${clusterId}/scripts/${s.id}/output`).then(r => r.ok ? r.json() : null)
+                    .then(d => setOut({ name: s.name, text: (d && (d.output || d.stdout || d.result)) || '(no output)' }))
+                    .catch(() => setOut({ name: s.name, text: 'Failed to load output.' }));
+            };
+            return (
+                <div className="cloud-body">
+                    <CloudPageHeader title={t('customScripts') || 'Scripts'} sub={t('cloud.scriptsSub') || 'Custom cluster scripts'}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    </CloudPageHeader>
+                    <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Terminal" emptyTitle={t('cloud.noScripts') || 'No scripts'} t={t}>
+                        <div className="cloud-card cloud-table-card">
+                            {cloudHead({ icon: <Icons.Terminal />, title: t('customScripts') || 'Scripts', count: rows.length })}
+                            <div className="cloud-table-scroll"><table className="cloud-table">
+                                <thead><tr><th>{t('name') || 'Name'}</th><th>{t('type') || 'Type'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colLastRun') || 'Last run'}</th><th>{t('cloud.colStatus') || 'Status'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <tbody>{rows.map((s, i) => {
+                                    const st = String(s.last_status || '').toLowerCase();
+                                    const ok = st.indexOf('ok') >= 0 || st.indexOf('success') >= 0;
+                                    return (<tr className="cloud-table-row cloud-table-row-static" key={s.id || i}>
+                                        <td>{s.name}{s.description ? <div className="cloud-cell-muted" style={{ fontSize: '.75rem' }}>{s.description}</div> : null}</td>
+                                        <td><span className="cloud-chip cloud-chip-soft">{s.type || 'bash'}</span></td>
+                                        <td className="cloud-cell-muted">{s.target_nodes || 'all'}</td>
+                                        <td className="cloud-cell-muted">{s.last_run || '—'}</td>
+                                        <td>{s.last_status ? (ok ? <span className="cloud-chip cloud-chip-ok">{s.last_status}</span> : <span className="cloud-chip cloud-chip-err">{s.last_status}</span>) : <span className="cloud-cell-muted">—</span>}</td>
+                                        <CloudRowActions>
+                                            <CloudIconBtn icon="FileText" title={t('cloud.viewOutput') || 'Output'} onClick={() => viewOutput(s)} />
+                                            <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/clusters/${clusterId}/scripts/${s.id}`, undefined, (t('cloud.confirmDelScript') || 'Delete this script?'))} />
+                                        </CloudRowActions>
+                                    </tr>);
+                                })}</tbody>
+                            </table></div>
+                        </div>
+                        {out && (
+                            <div className="cloud-card" style={{ padding: 12 }}>
+                                <CloudSectionTitle right={<CloudIconBtn icon="X" title="Close" onClick={() => setOut(null)} />}>{out.name} — {t('cloud.output') || 'Output'}</CloudSectionTitle>
+                                <pre style={{ whiteSpace: 'pre-wrap', fontSize: '.8rem', maxHeight: '40vh', overflow: 'auto', background: 'var(--cloud-surface-2)', padding: 10, borderRadius: 6, marginTop: 8 }}>{out.text}</pre>
+                            </div>
+                        )}
+                    </CloudSectionState>
+                </div>
+            );
+        }
+
+        function CloudSchedules({ clusterId, t }) {
+            const { data, loading, err, reload } = useCloudData('/api/schedules');
+            const mut = useCloudMutate(reload);
+            const all = Array.isArray(data) ? data : (data && Array.isArray(data.schedules) ? data.schedules : []);
+            const rows = clusterId ? all.filter(s => !s.cluster_id || String(s.cluster_id) === String(clusterId)) : all;
+            const isOn = (s) => Number(s.enabled) === 1 || s.enabled === true;
+            return (
+                <div className="cloud-body">
+                    <CloudPageHeader title={t('scheduledActions') || 'Schedules'} sub={t('cloud.schedulesSub') || 'Time-based VM actions'}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    </CloudPageHeader>
+                    <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Clock" emptyTitle={t('cloud.noSchedules') || 'No schedules'} t={t}>
+                        <div className="cloud-card cloud-table-card">
+                            {cloudHead({ icon: <Icons.Clock />, title: t('scheduledActions') || 'Schedules', count: rows.length })}
+                            <div className="cloud-table-scroll"><table className="cloud-table">
+                                <thead><tr><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colAction') || 'Action'}</th><th>{t('cloud.colWhen') || 'When'}</th><th>{t('cloud.colLastRun') || 'Last run'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <tbody>{rows.map((s, i) => (
+                                    <tr className="cloud-table-row cloud-table-row-static" key={s.id || i}>
+                                        <td className="cloud-table-mono">{s.vmid ? '#' + s.vmid : (s.target || '—')}{s.vm_type ? ' · ' + s.vm_type : ''}</td>
+                                        <td><span className="cloud-chip cloud-chip-soft">{s.action || '—'}</span></td>
+                                        <td className="cloud-cell-muted">{[s.schedule_type, s.time, s.date, s.cron].filter(Boolean).join(' ') || '—'}</td>
+                                        <td className="cloud-cell-muted">{s.last_run || s.last_run_at || '—'}</td>
+                                        <td><CloudConnChip connected={isOn(s)} t={t} /></td>
+                                        <CloudRowActions>
+                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + s.id, 'POST', `/api/schedules/${s.id}/run`)} />
+                                            <CloudIconBtn icon="Power" title={isOn(s) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + s.id, 'PUT', `/api/schedules/${s.id}`, { enabled: isOn(s) ? 0 : 1 })} />
+                                            <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/schedules/${s.id}`, undefined, (t('cloud.confirmDelSchedule') || 'Delete this schedule?'))} />
+                                        </CloudRowActions>
+                                    </tr>
+                                ))}</tbody>
+                            </table></div>
+                        </div>
+                    </CloudSectionState>
+                </div>
+            );
+        }
+
         function CloudShell({ clusters, selectedCluster, setSelectedCluster, clusterResources, clusterMetrics, allClusterMetrics, clusterDatastores, clusterNetworks, clusterPools, tasks, knownNodes, actions, isAdmin, currentUser, t, authFetch, addToast, onExitCloud, onOpenSettings, onOpenProfile, onLogout }) {
             const [section, setSection] = React.useState('overview');
             const [detailRes, setDetailRes] = React.useState(null);
@@ -1887,6 +2022,9 @@
                 siem: T('siem') || 'SIEM',
                 alerts: T('alertChannels') || 'Alert Channels',
                 updates: T('updateManager') || 'Update Manager',
+                plugins: T('plugins') || 'Plugins',
+                scripts: T('customScripts') || 'Scripts',
+                schedules: T('scheduledActions') || 'Schedules',
                 tasks: T('cloud.tasks') || 'Tasks',
                 users: T('cloud.users') || 'Users',
                 settings: T('cloud.settings') || 'Settings',
@@ -2022,6 +2160,15 @@
                         break;
                     case 'updates':
                         body = <div className="cloud-mounted"><UpdateManagerSection clusterId={cid} addToast={addToast} /></div>;
+                        break;
+                    case 'plugins':
+                        body = <CloudPlugins clusterId={cid} t={T} />;
+                        break;
+                    case 'scripts':
+                        body = <CloudScripts clusterId={cid} t={T} />;
+                        break;
+                    case 'schedules':
+                        body = <CloudSchedules clusterId={cid} t={T} />;
                         break;
                     case 'tasks':
                         body = <CloudTasks tasks={tasks} t={T} />;
