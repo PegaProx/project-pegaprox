@@ -413,6 +413,7 @@
                     { id: 'costs', label: 'Costs', icon: 'DollarSign' },
                     { id: 'power', label: 'Power & Carbon', icon: 'Zap' },
                     { id: 'apihealth', label: 'API Health', icon: 'Activity' },
+                    { id: 'cve', label: 'CVE Scanner', icon: 'Shield' },
                 ] },
                 { label: 'ACTIVITY', items: [{ id: 'tasks', label: 'Tasks', icon: 'ClipboardList' }] },
             ];
@@ -1350,9 +1351,18 @@
                 { icon: 'Globe', value: out, label: t('cloud.fwOut') || 'Outbound', accent: '#a855f7' },
             ];
             const actChip = a => { const u = (a || '').toUpperCase(); const cls = u === 'ACCEPT' ? 'cloud-chip-ok' : (u === 'DROP' || u === 'REJECT') ? 'cloud-chip-err' : 'cloud-chip-soft'; return <span className={'cloud-chip ' + cls}>{u || '—'}</span>; };
+            const [showNew, setShowNew] = React.useState(false);
+            const [form, setForm] = React.useState({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
+            const submitNew = () => {
+                const body = { type: form.type, action: form.action, enable: 1 };
+                ['proto', 'dport', 'source', 'dest', 'comment'].forEach(k => { if (String(form[k]).trim()) body[k] = String(form[k]).trim(); });
+                mut.run('newrule', 'POST', `/api/clusters/${clusterId}/datacenter/firewall/rules`, body);
+                setShowNew(false); setForm({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
+            };
             return (
                 <div className="cloud-body">
                     <CloudPageHeader title={t('cloud.firewall') || 'Firewall'} sub={t('cloud.firewallSub') || 'Datacenter firewall rules'}>
+                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newRule') || 'New rule'}</button>
                         <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
                     </CloudPageHeader>
                     <CloudSectionState loading={loading} err={err} empty={!rules.length} emptyIcon="Shield" emptyTitle={t('cloud.noFwRules') || 'No datacenter firewall rules'} t={t}>
@@ -1379,6 +1389,23 @@
                             </table></div>
                         </div>
                     </CloudSectionState>
+                    {showNew && (
+                        <CloudModal title={t('cloud.newRule') || 'New firewall rule'} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create') || 'Create'} t={t}>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <CloudField label={t('cloud.colDir') || 'Direction'}><select className="cloud-input" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="in">in</option><option value="out">out</option></select></CloudField>
+                                <CloudField label={t('cloud.colAction') || 'Action'}><select className="cloud-input" value={form.action} onChange={e => setForm({ ...form, action: e.target.value })}>{['ACCEPT', 'DROP', 'REJECT'].map(a => <option key={a} value={a}>{a}</option>)}</select></CloudField>
+                            </div>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <CloudField label={t('cloud.colProto') || 'Protocol'}><input className="cloud-input" value={form.proto} onChange={e => setForm({ ...form, proto: e.target.value })} placeholder="tcp" /></CloudField>
+                                <CloudField label={t('cloud.colPort') || 'Dest port'}><input className="cloud-input" value={form.dport} onChange={e => setForm({ ...form, dport: e.target.value })} placeholder="22" /></CloudField>
+                            </div>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <CloudField label={t('cloud.colSource') || 'Source'}><input className="cloud-input" value={form.source} onChange={e => setForm({ ...form, source: e.target.value })} placeholder="0.0.0.0/0" /></CloudField>
+                                <CloudField label={t('cloud.colDest') || 'Dest'}><input className="cloud-input" value={form.dest} onChange={e => setForm({ ...form, dest: e.target.value })} /></CloudField>
+                            </div>
+                            <CloudField label={t('cloud.colComment') || 'Comment'}><input className="cloud-input" value={form.comment} onChange={e => setForm({ ...form, comment: e.target.value })} /></CloudField>
+                        </CloudModal>
+                    )}
                 </div>
             );
         }
@@ -1580,6 +1607,14 @@
                 if (!vForm.vnet.trim() || !vForm.zone) return;
                 mut.run('addvnet', 'POST', `${base}/vnets`, { vnet: vForm.vnet.trim(), zone: vForm.zone }); setModal(null); setVForm({ vnet: '', zone: '' });
             };
+            const [sForm, setSForm] = React.useState({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
+            const submitSubnet = () => {
+                if (!sForm.vnet || !sForm.subnet.trim()) return;
+                const body = { subnet: sForm.subnet.trim(), snat: sForm.snat ? 1 : 0 };
+                if (sForm.gateway.trim()) body.gateway = sForm.gateway.trim();
+                if (sForm.dhcp && sForm.dhcp !== 'none') body.dhcp = sForm.dhcp;
+                mut.run('addsubnet', 'POST', `${base}/vnets/${sForm.vnet}/subnets`, body); setModal(null); setSForm({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
+            };
             const kpis = [
                 { icon: 'Globe', value: zones.length, label: t('cloud.sdnZones') || 'Zones', accent: '#6366f1' },
                 { icon: 'Network', value: vnets.length, label: t('cloud.sdnVnets') || 'VNets', accent: '#14b8a6' },
@@ -1624,10 +1659,9 @@
                             </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.noVnets') || 'No VNets.'}</div>}
                         </div>
 
-                        {subnets.length ? (
-                            <div className="cloud-card cloud-table-card">
-                                {cloudHead({ icon: <Icons.Layers />, title: t('cloud.sdnSubnets') || 'Subnets', count: subnets.length })}
-                                <div className="cloud-table-scroll"><table className="cloud-table">
+                        <div className="cloud-card cloud-table-card">
+                            {cloudHead({ icon: <Icons.Layers />, title: t('cloud.sdnSubnets') || 'Subnets', count: subnets.length, right: vnets.length ? <button type="button" className="cloud-link-btn" onClick={() => setModal('subnet')}><Icons.Plus /> {t('cloud.addSubnet') || 'Add subnet'}</button> : null })}
+                            {subnets.length ? <div className="cloud-table-scroll"><table className="cloud-table">
                                     <thead><tr><th>CIDR</th><th>{t('cloud.colGateway') || 'Gateway'}</th><th>DHCP</th><th>SNAT</th><th>{t('cloud.sdnVnet') || 'VNet'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                     <tbody>{subnets.map((sn, i) => (<tr className="cloud-table-row cloud-table-row-static" key={(sn.subnet || i)}>
                                         <td className="cloud-table-mono">{sn.subnet || sn.cidr || '—'}</td><td className="cloud-cell-muted">{sn.gateway || '—'}</td><td className="cloud-cell-muted">{sn.dhcp || 'none'}</td>
@@ -1635,9 +1669,8 @@
                                         <td className="cloud-cell-muted">{sn.vnet || '—'}</td>
                                         <CloudRowActions>{sn.vnet ? <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('ds' + (sn.subnet), 'DELETE', `${base}/vnets/${sn.vnet}/subnets/${encodeURIComponent(sn.subnet)}`, undefined, (t('cloud.confirmDelSubnet') || 'Delete this subnet?'))} /> : null}</CloudRowActions>
                                     </tr>))}</tbody>
-                                </table></div>
-                            </div>
-                        ) : null}
+                                </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{vnets.length ? (t('cloud.noSubnets') || 'No subnets.') : (t('cloud.subnetsNeedVnet') || 'Create a VNet first.')}</div>}
+                        </div>
                     </CloudSectionState>
 
                     {modal === 'zone' && (
@@ -1653,6 +1686,17 @@
                         <CloudModal title={t('cloud.addVnet') || 'Add VNet'} onClose={() => setModal(null)} onSubmit={submitVnet} submitLabel={t('create') || 'Create'} t={t}>
                             <CloudField label={t('cloud.vnetName') || 'VNet ID'}><input className="cloud-input" value={vForm.vnet} onChange={e => setVForm({ ...vForm, vnet: e.target.value })} placeholder="vnet1" maxLength={8} /></CloudField>
                             <CloudField label={t('cloud.sdnZone') || 'Zone'}><select className="cloud-input" value={vForm.zone} onChange={e => setVForm({ ...vForm, zone: e.target.value })}><option value="">—</option>{zones.map(z => <option key={z.zone} value={z.zone}>{z.zone}</option>)}</select></CloudField>
+                        </CloudModal>
+                    )}
+                    {modal === 'subnet' && (
+                        <CloudModal title={t('cloud.addSubnet') || 'Add subnet'} onClose={() => setModal(null)} onSubmit={submitSubnet} submitLabel={t('create') || 'Create'} t={t}>
+                            <CloudField label={t('cloud.sdnVnet') || 'VNet'}><select className="cloud-input" value={sForm.vnet} onChange={e => setSForm({ ...sForm, vnet: e.target.value })}><option value="">—</option>{vnets.map(v => <option key={v.vnet} value={v.vnet}>{v.vnet}</option>)}</select></CloudField>
+                            <CloudField label={'CIDR'}><input className="cloud-input" value={sForm.subnet} onChange={e => setSForm({ ...sForm, subnet: e.target.value })} placeholder="10.0.10.0/24" /></CloudField>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <CloudField label={t('cloud.colGateway') || 'Gateway'}><input className="cloud-input" value={sForm.gateway} onChange={e => setSForm({ ...sForm, gateway: e.target.value })} placeholder="10.0.10.1" /></CloudField>
+                                <CloudField label={'DHCP'}><select className="cloud-input" value={sForm.dhcp} onChange={e => setSForm({ ...sForm, dhcp: e.target.value })}>{['none', 'dnsmasq'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
+                            </div>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '.85rem', color: 'var(--cloud-text-secondary)' }}><input type="checkbox" checked={sForm.snat} onChange={e => setSForm({ ...sForm, snat: e.target.checked })} /> SNAT</label>
                         </CloudModal>
                     )}
                 </div>
@@ -2052,6 +2096,62 @@
             );
         }
 
+        function CloudCVE({ clusterId, t }) {
+            const [res, setRes] = React.useState(null);
+            const [busy, setBusy] = React.useState(false);
+            const [err, setErr] = React.useState(null);
+            const scan = () => {
+                setBusy(true); setErr(null);
+                fetch(`/api/clusters/${clusterId}/reports/cve-scan`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: '{}' })
+                    .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+                    .then(d => { setRes(d); setBusy(false); })
+                    .catch(e => { setErr(String(e && e.message || e)); setBusy(false); });
+            };
+            const nodes = React.useMemo(() => {
+                if (!res) return [];
+                if (Array.isArray(res.results)) return res.results;
+                if (Array.isArray(res.nodes)) return res.nodes;
+                if (res.nodes && typeof res.nodes === 'object') return Object.entries(res.nodes).map(([node, v]) => ({ node, ...(v || {}) }));
+                return [];
+            }, [res]);
+            const totalVulns = nodes.reduce((a, n) => a + (((n.packages || n.vulnerabilities || n.cves || []).length) || Number(n.count) || 0), 0);
+            return (
+                <div className="cloud-body">
+                    <CloudPageHeader title={t('cveScanner') || 'CVE Scanner'} sub={t('cloud.cveSub') || 'Package vulnerability scan (debsecan)'}>
+                        <button type="button" className="cloud-btn-primary" onClick={scan} disabled={busy}>{busy ? (t('cloud.scanning') || 'Scanning…') : (t('cloud.runScan') || 'Run scan')}</button>
+                    </CloudPageHeader>
+                    {err && <div className="cloud-card"><CloudEmpty icon="AlertTriangle" title={t('cloud.scanFailed') || 'Scan failed'} text={err} /></div>}
+                    {!res && !busy && !err && <div className="cloud-card"><CloudEmpty icon="Shield" title={t('cloud.cveIdle') || 'No scan yet'} text={t('cloud.cveHint') || 'Run a scan to check node packages for known CVEs (needs debsecan on the nodes).'} /></div>}
+                    {busy && <div className="cloud-card"><div className="cloud-empty">{t('cloud.scanning') || 'Scanning nodes…'}</div></div>}
+                    {res && !busy && (
+                        <React.Fragment>
+                            <div className="cloud-kpi-grid">
+                                <CloudKpiCard icon="Cpu" value={nodes.length} label={t('cloud.colNodes') || 'Nodes'} accent="#6366f1" />
+                                <CloudKpiCard icon={totalVulns ? 'AlertTriangle' : 'Shield'} value={totalVulns} label={t('cloud.cveVulns') || 'Vulnerabilities'} accent={totalVulns ? '#ef4444' : '#22c55e'} />
+                            </div>
+                            {nodes.map((n, i) => {
+                                const pkgs = n.packages || n.vulnerabilities || n.cves || [];
+                                return (
+                                    <div className="cloud-card cloud-table-card" key={n.node || i}>
+                                        {cloudHead({ icon: <Icons.Cpu />, title: n.node || ('node ' + i), count: pkgs.length })}
+                                        {n.error ? <div className="cloud-empty" style={{ padding: 14 }}>{n.error}</div> : (pkgs.length ? <div className="cloud-table-scroll"><table className="cloud-table">
+                                            <thead><tr><th>{t('cloud.colPackage') || 'Package'}</th><th>{t('cloud.colInstalled') || 'Installed'}</th><th>CVE</th><th>{t('cloud.colSeverity') || 'Severity'}</th></tr></thead>
+                                            <tbody>{pkgs.slice(0, 200).map((p, j) => { const sev = String(p.severity || '').toLowerCase(); return (<tr className="cloud-table-row cloud-table-row-static" key={j}>
+                                                <td className="cloud-table-mono">{p.package || p.pkg || p.name || '—'}</td>
+                                                <td className="cloud-cell-muted">{p.installed || p.version || '—'}</td>
+                                                <td className="cloud-table-mono">{p.cve || p.id || '—'}</td>
+                                                <td>{p.severity ? <span className={'cloud-chip ' + (sev.indexOf('high') >= 0 || sev.indexOf('crit') >= 0 ? 'cloud-chip-err' : 'cloud-chip-soft')}>{p.severity}</span> : <span className="cloud-cell-muted">—</span>}</td>
+                                            </tr>); })}</tbody>
+                                        </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.cveClean') || 'No known vulnerabilities.'}</div>)}
+                                    </div>
+                                );
+                            })}
+                        </React.Fragment>
+                    )}
+                </div>
+            );
+        }
+
         function CloudShell({ clusters, selectedCluster, setSelectedCluster, clusterResources, clusterMetrics, allClusterMetrics, clusterDatastores, clusterNetworks, clusterPools, tasks, knownNodes, actions, isAdmin, currentUser, t, authFetch, addToast, onExitCloud, onOpenSettings, onOpenProfile, onLogout }) {
             const [section, setSection] = React.useState('overview');
             const [detailRes, setDetailRes] = React.useState(null);
@@ -2164,6 +2264,7 @@
                 plugins: T('plugins') || 'Plugins',
                 scripts: T('customScripts') || 'Scripts',
                 schedules: T('scheduledActions') || 'Schedules',
+                cve: T('cveScanner') || 'CVE Scanner',
                 tasks: T('cloud.tasks') || 'Tasks',
                 users: T('cloud.users') || 'Users',
                 settings: T('cloud.settings') || 'Settings',
@@ -2308,6 +2409,9 @@
                         break;
                     case 'schedules':
                         body = <CloudSchedules clusterId={cid} t={T} />;
+                        break;
+                    case 'cve':
+                        body = <CloudCVE clusterId={cid} t={T} />;
                         break;
                     case 'tasks':
                         body = <CloudTasks tasks={tasks} t={T} />;
