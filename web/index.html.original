@@ -3203,6 +3203,25 @@
         .cloud-link-btn svg { width:14px; height:14px; }
         .cloud-input { width:100%; background:var(--cloud-surface-2); border:1px solid var(--cloud-border-medium, var(--cloud-divider)); border-radius:6px; color:var(--color-text); padding:8px 10px; font-size:0.85rem; }
         .cloud-input:focus { outline:none; border-color:var(--cloud-accent); }
+        /* NS 2026-07 — harmonize the mounted Corporate/modern components with the cloud
+           theme. They render with the default proxmox-dark palette + proxmox-orange accent;
+           remap their surfaces/borders/accent to cloud tokens, the same trick the corporate
+           layout uses at data-layout=corporate. Scoped to .cloud-mounted so cloud-native
+           views are untouched. */
+        body[data-layout="cloud"] .cloud-mounted { --color-card: var(--cloud-surface-2); --color-border: var(--cloud-border-subtle); --color-bg: var(--cloud-surface-0); --color-secondary: var(--cloud-surface-2); }
+        body[data-layout="cloud"] .cloud-mounted .bg-proxmox-dark { background: var(--cloud-surface-1) !important; }
+        body[data-layout="cloud"] .cloud-mounted .bg-proxmox-darker { background: var(--cloud-surface-0) !important; }
+        body[data-layout="cloud"] .cloud-mounted .bg-proxmox-card { background: var(--cloud-surface-2) !important; }
+        body[data-layout="cloud"] .cloud-mounted .bg-proxmox-secondary { background: var(--cloud-surface-2) !important; }
+        body[data-layout="cloud"] .cloud-mounted .border-proxmox-border { border-color: var(--cloud-border-subtle) !important; }
+        body[data-layout="cloud"] .cloud-mounted .text-proxmox-orange { color: var(--cloud-accent) !important; }
+        body[data-layout="cloud"] .cloud-mounted .bg-proxmox-orange { background: var(--cloud-accent) !important; }
+        body[data-layout="cloud"] .cloud-mounted .border-proxmox-orange { border-color: var(--cloud-accent) !important; }
+        /* recolour the common blue "primary" accents used by the modern components to the cloud accent */
+        body[data-layout="cloud"] .cloud-mounted .bg-blue-600, body[data-layout="cloud"] .cloud-mounted .bg-blue-500 { background: var(--cloud-accent) !important; color: #04121a !important; }
+        body[data-layout="cloud"] .cloud-mounted .text-blue-400, body[data-layout="cloud"] .cloud-mounted .text-blue-500 { color: var(--cloud-accent) !important; }
+        body[data-layout="cloud"] .cloud-mounted .border-blue-500, body[data-layout="cloud"] .cloud-mounted .border-blue-600 { border-color: var(--cloud-accent) !important; }
+        body[data-layout="cloud"] .cloud-mounted .hover\:bg-blue-700:hover { background: var(--cloud-accent-hover) !important; }
 
         /* icon button */
         .cloud-icon-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:var(--radius-md); background:transparent; border:1px solid transparent; color:var(--cloud-text-secondary); cursor:pointer; flex:0 0 auto; transition:background .12s, color .12s; }
