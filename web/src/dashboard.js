@@ -8758,6 +8758,7 @@
                                         </span>
                                     )}
                                     <span className="truncate flex-1">{highlightMatch(vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`, sidebarSearch)}</span>
+                                    {user?.sidebar_show_vmid && vm.name && <span className="flex-shrink-0 text-[11px]" style={{color: 'var(--corp-text-muted)'}}>#{vm.vmid}</span>}
                                 </div>
                             );
                         })}
@@ -8850,6 +8851,7 @@
                                 </span>
                             )}
                             <span className="truncate flex-1">{vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`}</span>
+                            {user?.sidebar_show_vmid && vm.name && <span className="flex-shrink-0 text-[11px]" style={{color: 'var(--corp-text-muted)'}}>#{vm.vmid}</span>}
                         </div>
                     );
                 };
@@ -9263,6 +9265,7 @@
                                                                 </span>
                                                             )}
                                                             <span className="truncate">{vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`}</span>
+                                                            {user?.sidebar_show_vmid && vm.name && <span className="flex-shrink-0 text-[11px]" style={{color: 'var(--corp-text-muted)'}}>#{vm.vmid}</span>}
                                                             <span className="text-[10px] ml-auto flex-shrink-0" style={{color: '#5a7a8a'}}>{vm.iface}</span>
                                                         </div>
                                                     );

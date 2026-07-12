@@ -391,6 +391,7 @@
                                 language: data.language,
                                 ui_layout: data.ui_layout,
                                 taskbar_auto_expand: data.taskbar_auto_expand,
+                                sidebar_show_vmid: data.sidebar_show_vmid,
                                 layout_chosen: data.layout_chosen
                             };
                             // LW: state updated, no log needed

@@ -3023,7 +3023,34 @@
                                             </button>
                                         </div>
                                     </div>
-                                    
+
+                                    {/* NS Jul 2026 — show VMIDs in the corporate sidebar tree */}
+                                    {isCorporate && (
+                                    <div className="pt-4 border-t border-proxmox-border">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-3">
+                                                <div className="p-2 rounded-lg bg-blue-500/10">
+                                                    <Icons.Tag className="w-5 h-5 text-blue-400" />
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-medium text-white">{t('showVmidSidebar') || 'Show VM IDs in sidebar'}</p>
+                                                    <p className="text-xs text-gray-400">{t('showVmidSidebarDesc') || 'Show the VMID next to each guest name in the sidebar tree'}</p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={async () => {
+                                                    const newValue = !(user?.sidebar_show_vmid === true);
+                                                    const result = await updatePreferences({ sidebar_show_vmid: newValue });
+                                                    if (result.success) addToast(newValue ? (t('showVmidSidebarOn') || 'VM IDs shown in sidebar') : (t('showVmidSidebarOff') || 'VM IDs hidden'), 'success');
+                                                }}
+                                                className={`relative w-12 h-6 rounded-full transition-colors ${user?.sidebar_show_vmid === true ? 'bg-proxmox-orange' : 'bg-gray-600'}`}
+                                            >
+                                                <span className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${user?.sidebar_show_vmid === true ? 'left-7' : 'left-1'}`} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    )}
+
                                     {/* NS Jun 2026 — language moved from corporate header into profile prefs */}
                                     {isCorporate && (
                                         <div className="pt-4 border-t border-proxmox-border">

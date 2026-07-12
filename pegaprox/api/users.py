@@ -113,6 +113,7 @@ def get_user_preferences():
         'language': user.get('language', ''),
         'ui_layout': user.get('ui_layout', 'modern'),
         'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Default true for backward compat
+        'sidebar_show_vmid': user.get('sidebar_show_vmid', False),  # NS Jul 2026 — corporate sidebar VMIDs
         'default_theme': default_theme
     })
 
@@ -224,6 +225,10 @@ def update_user_preferences():
     if 'taskbar_auto_expand' in data:
         user['taskbar_auto_expand'] = bool(data['taskbar_auto_expand'])
 
+    # NS Jul 2026 — opt-in VMIDs in the corporate sidebar tree
+    if 'sidebar_show_vmid' in data:
+        user['sidebar_show_vmid'] = bool(data['sidebar_show_vmid'])
+
     # LW: Mar 2026 - track if user has explicitly chosen a layout
     if 'layout_chosen' in data:
         user['layout_chosen'] = bool(data['layout_chosen'])
@@ -244,6 +249,7 @@ def update_user_preferences():
         'language': user.get('language', ''),
         'ui_layout': user.get('ui_layout', 'modern'),
         'taskbar_auto_expand': user.get('taskbar_auto_expand', True),
+        'sidebar_show_vmid': user.get('sidebar_show_vmid', False),
         'layout_chosen': user.get('layout_chosen', False),
         'default_theme': default_theme
     })

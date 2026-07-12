@@ -849,6 +849,7 @@ def auth_login():
             'language': user.get('language', ''),
             'ui_layout': user.get('ui_layout', 'modern'),
             'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Feb 2026
+            'sidebar_show_vmid': user.get('sidebar_show_vmid', False),  # NS Jul 2026 — corporate sidebar VMIDs
             'layout_chosen': user.get('layout_chosen', False),
             'portal_only': user.get('portal_only', False)
         },
@@ -1107,6 +1108,7 @@ def auth_check():
             'language': user.get('language', ''),
             'ui_layout': user.get('ui_layout', 'modern'),
             'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Feb 2026
+            'sidebar_show_vmid': user.get('sidebar_show_vmid', False),  # NS Jul 2026 — corporate sidebar VMIDs
             'totp_enabled': user.get('totp_enabled', False),
             'layout_chosen': user.get('layout_chosen', False),
             'portal_only': user.get('portal_only', False)

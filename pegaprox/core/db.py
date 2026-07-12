@@ -1472,6 +1472,13 @@ class PegaProxDB:
                 cursor.execute("ALTER TABLE users ADD COLUMN portal_only INTEGER DEFAULT 0")
                 logging.info("Added portal_only column to users table")
         except: pass
+        # NS: Jul 2026 - opt-in "show VMIDs in the corporate sidebar" user preference
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(users)").fetchall()]
+            if 'sidebar_show_vmid' not in cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN sidebar_show_vmid INTEGER DEFAULT 0")
+                logging.info("Added sidebar_show_vmid column to users table")
+        except: pass
 
         # MK: Apr 2026 - status page incident tracking + uptime history
         try:
@@ -3064,6 +3071,7 @@ class PegaProxDB:
                 'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
                 'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
                 'portal_only': bool(row_dict.get('portal_only', 0)),
+                'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
                 'user_folder': row_dict.get('user_folder', ''),
             }
 
@@ -3129,6 +3137,7 @@ class PegaProxDB:
             'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
             'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
             'portal_only': bool(row_dict.get('portal_only', 0)),
+            'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
             'user_folder': row_dict.get('user_folder', ''),
         }
 
@@ -3145,13 +3154,13 @@ class PegaProxDB:
             enabled, theme, language, ui_layout, taskbar_auto_expand,
              auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
-             layout_chosen, portal_only, user_folder)
+             layout_chosen, portal_only, sidebar_show_vmid, user_folder)
             VALUES (?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, ?)
+                    ?, ?, ?, ?)
         ''', (
             username,
             data.get('password_salt', ''),
@@ -3185,6 +3194,7 @@ class PegaProxDB:
             data.get('last_oidc_sync', ''),
             1 if data.get('layout_chosen', False) else 0,
             1 if data.get('portal_only', False) else 0,
+            1 if data.get('sidebar_show_vmid', False) else 0,
             data.get('user_folder', ''),
         ))
         self.conn.commit()
