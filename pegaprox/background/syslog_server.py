@@ -334,7 +334,7 @@ def _tcp_listener(host, port):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         srv.bind((host, port))
-        srv.listen(32)
+        srv.listen(256)  # NS Jul 2026: larger accept backlog for reconnect bursts at scale
         _tcp_sock = srv
         logging.info(f"[Syslog] TCP listening on {host}:{port}")
     except OSError as e:
@@ -363,10 +363,32 @@ def _tcp_listener(host, port):
             pass
         finally:
             client_sock.close()
+            _tcp_conns['n'] -= 1
+
+    # NS Jul 2026 (scale/DoS): cap concurrent TCP handler greenlets. Without this
+    # a remote peer could open unbounded connections and spawn one greenlet each,
+    # exhausting the hub. Cooperative-safe counter (gevent has no preemption between
+    # the check and the increment). Env-tunable; excess connections are dropped.
+    _tcp_conns = {'n': 0}
+    try:
+        # Generous default for large estates (100+ nodes, plus per-app forwarders):
+        # 1024 concurrent handlers still bounds the greenlet explosion but never
+        # throttles legitimate senders. Tune up further via the env var if needed.
+        _tcp_max = int(os.environ.get('PEGAPROX_SYSLOG_TCP_MAX', '1024'))
+    except (TypeError, ValueError):
+        _tcp_max = 1024
 
     while not _stop_event.is_set():
         try:
             client, addr = srv.accept()
+            if _tcp_conns['n'] >= _tcp_max:
+                logging.warning(f"[Syslog] TCP connection cap ({_tcp_max}) reached — dropping {addr[0]}")
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                continue
+            _tcp_conns['n'] += 1
             gevent.spawn(handle_client, client, addr)
         except Exception as e:
             if _stop_event.is_set():
