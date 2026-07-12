@@ -1918,7 +1918,7 @@
                         body = <CloudPools pools={clusterPools} t={T} />;
                         break;
                     case 'networks':
-                        body = <CloudNetworks networks={clusterNetworks} t={T} />;
+                        body = <div className="cloud-mounted"><NetworkTab clusterId={cid} addToast={addToast} /></div>;
                         break;
                     case 'clusters':
                         body = <CloudClusters clusters={safeClusters} resources={safeResources} allClusterMetrics={allClusterMetrics} t={T} />;
@@ -1927,15 +1927,19 @@
                         body = <CloudNodes metrics={clusterMetrics} act={act} isAdmin={isAdmin} t={T} />;
                         break;
                     case 'ha':
-                        body = <CloudHA clusterId={cid} t={T} />;
+                        body = <div className="cloud-mounted"><ProxmoxHaSection clusterId={cid} /></div>;
                         break;
                     case 'storage':
-                        body = <CloudStorage clusterId={cid} t={T} />;
+                        body = <div className="cloud-mounted"><DatastoreTab clusterId={cid} addToast={addToast} sharedDatastoreData={clusterDatastores} /></div>;
                         break;
                     case 'ceph':
                         body = <CloudCeph clusterId={cid} t={T} />;
                         break;
                     case 'sdn':
+                        // NOTE: Corporate's SDN CRUD lives inside the monolithic DatacenterTab
+                        // hub (Cluster/Storage/SDN/Backup/…), which would duplicate the flat
+                        // cloud nav + mislabel under "SDN". Keep the scoped cloud view for now;
+                        // a cloud-native scoped SDN CRUD is a follow-up. -- NS
                         body = <CloudSDN clusterId={cid} t={T} />;
                         break;
                     case 'firewall':
@@ -1951,7 +1955,7 @@
                         body = <CloudPBS t={T} />;
                         break;
                     case 'siterecovery':
-                        body = <CloudSiteRecovery t={T} />;
+                        body = <div className="cloud-mounted"><SiteRecoveryTab clusters={safeClusters} selectedCluster={selectedCluster} authFetch={authFetch} addToast={addToast} t={T} isCorporate={false} srProgress={{}} user={currentUser} /></div>;
                         break;
                     case 'monitoring':
                         body = <CloudMonitoring clusterId={cid} t={T} />;
