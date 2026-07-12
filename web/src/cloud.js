@@ -394,6 +394,10 @@
                     { id: 'pbs', label: 'Backup Servers', icon: 'Server' },
                     { id: 'siterecovery', label: 'Site Recovery', icon: 'LifeBuoy' },
                 ] },
+                { label: 'AUTOMATION', items: [
+                    { id: 'snapshotpolicies', label: 'Snapshot Policies', icon: 'Camera' },
+                    { id: 'templates', label: 'Templates', icon: 'Copy' },
+                ] },
                 { label: 'INFRASTRUCTURE', items: [
                     { id: 'clusters', label: 'Clusters', icon: 'Cloud' },
                     { id: 'nodes', label: 'Hosts', icon: 'Cpu' },
@@ -1863,6 +1867,8 @@
                 monitoring: T('cloud.monitoring') || 'Monitoring',
                 topology: T('topology') || 'Topology',
                 compliance: T('compliance') || 'Compliance',
+                snapshotpolicies: T('snapshotPolicies') || 'Snapshot Policies',
+                templates: T('templatesLibrary') || 'Templates',
                 tasks: T('cloud.tasks') || 'Tasks',
                 users: T('cloud.users') || 'Users',
                 settings: T('cloud.settings') || 'Settings',
@@ -1954,6 +1960,20 @@
                         body = (
                             <div className="cloud-mounted">
                                 <ComplianceDashboardTab clusters={safeClusters} selectedCluster={selectedCluster} authFetch={authFetch} addToast={addToast} t={T} isCorporate={false} user={currentUser} />
+                            </div>
+                        );
+                        break;
+                    case 'snapshotpolicies':
+                        body = (
+                            <div className="cloud-mounted">
+                                <SnapshotPoliciesTab clusterId={cid} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} />
+                            </div>
+                        );
+                        break;
+                    case 'templates':
+                        body = (
+                            <div className="cloud-mounted">
+                                <TemplatesLibraryTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} isCorporate={false} />
                             </div>
                         );
                         break;
