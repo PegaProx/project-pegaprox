@@ -2553,6 +2553,11 @@ def restore_config():
                         # Clear existing
                         database.conn.cursor().execute('DELETE FROM vm_acls')
                     database.save_all_vm_acls(data['vm_acls'])
+                    # NS Jul 2026 — this path writes vm_acls directly (bypassing
+                    # rbac.save_vm_acls), so drop the TTL-cached ACLs so the restore
+                    # takes effect immediately for permission checks.
+                    from pegaprox.utils.rbac import invalidate_vm_acls_cache
+                    invalidate_vm_acls_cache()
                 results['restored']['vm_acls'] = len(data['vm_acls'])
             except Exception as e:
                 results['errors'].append(f"VM ACLs: {str(e)}")

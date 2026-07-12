@@ -11793,6 +11793,17 @@ echo "AGENT_INSTALLED_OK"
             if not self.connect_to_proxmox():
                 return {'networks': []}
 
+        # NS Jul 2026 (scale) — the walk below fires one PVE /config roundtrip per
+        # guest to map bridges + disk-storage for the topology view; at 1000+ VMs
+        # that is 1000 roundtrips per call. Network/storage topology changes slowly,
+        # so serve a 30s per-cluster TTL cache to bound how often that N+1 storm runs
+        # (repeat opens / polls of the topology view hit the cache). Errors below are
+        # returned uncached so a transient failure never pins an empty diagram.
+        _now = time.monotonic()
+        _cn = getattr(self, '_cluster_networks_cache', None)
+        if _cn is not None and (_now - getattr(self, '_cluster_networks_cache_time', 0.0)) < 30.0:
+            return _cn
+
         try:
             host = self.host
 
@@ -11957,7 +11968,7 @@ echo "AGENT_INSTALLED_OK"
                         'status': vs['status'], 'type': vs['type'], 'slot': vs['slot'],
                     })
 
-            return {
+            result = {
                 'networks': sorted(network_map.values(), key=lambda n: n['name']),
                 # NS May 2026 — flat list, easier for frontend to index by storage name
                 'storage_assignments': [
@@ -11965,6 +11976,10 @@ echo "AGENT_INSTALLED_OK"
                     for s in sorted(storage_assignments.keys())
                 ],
             }
+            # NS Jul 2026 — cache only the successful result (see TTL note above)
+            self._cluster_networks_cache = result
+            self._cluster_networks_cache_time = _now
+            return result
         except Exception as e:
             logging.error(f"get_cluster_networks failed: {e}")
             return {'networks': [], 'storage_assignments': []}

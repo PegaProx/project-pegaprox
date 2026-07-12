@@ -718,19 +718,35 @@ def get_user_pool_vmids(user: dict, cluster_id: str, permission: str = None) -> 
                 continue
     return out
 
+# NS Jul 2026 (scale) — short TTL for the VM-ACL cache. user_can_access_vm() calls
+# get_vm_acls() once per VM on the console/action/pbs/user-listing paths, so a non-admin
+# op over 1000 VMs did ~1000 full SQLCipher-decrypted reloads of the whole vm_acls table
+# (~1.6ms each ≈ 1.6s of pure waste per request). ACLs are security-critical, so this stays
+# CORRECT via complete write-invalidation — every writer (api/users set+delete, settings
+# import) calls invalidate_vm_acls_cache(). The TTL is only a secondary safety net that
+# bounds any hypothetically-missed invalidation to a few seconds; it is short on purpose.
+_VM_ACLS_TTL = 30.0
+
 def get_vm_acls():
-    """Get VM ACLs - always reload from disk to avoid stale cache issues
-    
-    MK: Changed to always reload since ACLs are critical for security
+    """Get VM ACLs with a short TTL cache (security-critical; writes invalidate).
+
+    MK: was "always reload" for safety. NS Jul 2026: re-enabled the pre-existing
+    _vm_acls_cache behind a 30s TTL now that every write path invalidates it — this
+    kills the per-VM reload storm at 1000+-VM scale without a stale-authz window
+    (a write nulls the cache immediately; the TTL only caps a missed invalidation).
     """
-    global _vm_acls_cache
-    # always reload from disk for security-critical data
+    global _vm_acls_cache, _vm_acls_cache_time
+    now = time.monotonic()
+    if _vm_acls_cache is not None and (now - _vm_acls_cache_time) < _VM_ACLS_TTL:
+        return _vm_acls_cache
     _vm_acls_cache = load_vm_acls()
+    _vm_acls_cache_time = now
     return _vm_acls_cache
 
 def invalidate_vm_acls_cache():
-    global _vm_acls_cache
+    global _vm_acls_cache, _vm_acls_cache_time
     _vm_acls_cache = None
+    _vm_acls_cache_time = 0
 
 def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str = 'vm.view', vm_type: str = None) -> bool:
     """Check if user can access a specific VM
