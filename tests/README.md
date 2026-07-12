@@ -39,13 +39,13 @@ temp dir and asserts an access decision.
 | `test_authz_api_token.py` | API-token privilege floor (`min(token, owner)`), no admin-bypass for an admin-owned viewer token, mint-ceiling |
 | `test_authz_pool.py` | pool.admin vs granular pool perms, pool grant does not leak to non-member VMs or across clusters |
 
-### Known live bug documented by this suite
+### Broken-access-control regression guard
 
-`test_vm_acl_inherit_role_false_restricts_to_listed_perms` is marked
-`xfail(strict=True)`. It documents a **real broken-access-control bug**: the
-`vm_acls` table has no `inherit_role` column, so an ACL saved with
-`inherit_role=False` (the UI's "custom permissions" mode) is silently stored as
-full access — `user_can_access_vm` reads `vm_acl.get('inherit_role', True)`.
-When that bug is fixed (add the column + migration + read/write it), the test
-will XPASS and — because `strict=True` — pytest will fail until the `xfail`
-marker is removed. Do not remove the test; remove the marker with the fix.
+`test_vm_acl_inherit_role_false_restricts_to_listed_perms` guards a
+**broken-access-control bug that has been fixed**: the `vm_acls` table now has
+an `inherit_role` column (added with an idempotent migration), so an ACL saved
+with `inherit_role=False` (the UI's "custom permissions" mode) is honoured and
+`user_can_access_vm` restricts to the listed perms instead of granting full
+access. Coercion is strict on both write paths, so a stringy `"false"` cannot
+re-broaden access. The test now passes as a plain assertion (no `xfail`); keep
+it — it fails if the column, migration, or restrictive read is ever regressed.

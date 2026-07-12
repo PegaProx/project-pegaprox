@@ -4,8 +4,6 @@
 # throwaway DB and asserts an access decision. A failure here means a real
 # BOLA / privilege-escalation regression, not a style nit.
 
-import pytest
-
 from pegaprox.utils.rbac import (
     user_can_access_vm,
     get_user_clusters,

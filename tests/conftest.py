@@ -49,6 +49,12 @@ def db():
         yield database
     finally:
         try:
+            # PegaProxDB keeps its live handle on a threadlocal (self._local.conn);
+            # `_conn` is always None. Close the real connection so the temp DB file
+            # isn't held open when we rmtree it below.
+            _tlconn = getattr(getattr(database, '_local', None), 'conn', None)
+            if _tlconn is not None:
+                _tlconn.close()
             if getattr(database, '_conn', None) is not None:
                 database._conn.close()
         except Exception:
