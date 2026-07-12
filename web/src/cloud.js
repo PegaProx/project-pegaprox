@@ -1919,14 +1919,25 @@
             const mut = useCloudMutate(reload);
             const rows = Array.isArray(data) ? data : (data && Array.isArray(data.scripts) ? data.scripts : []);
             const [out, setOut] = React.useState(null);
+            const [showNew, setShowNew] = React.useState(false);
+            const [form, setForm] = React.useState({ name: '', description: '', type: 'bash', target_nodes: 'all', content: '' });
+            const [runFor, setRunFor] = React.useState(null);
+            const [pw, setPw] = React.useState('');
             const viewOutput = (s) => {
                 fetch(`/api/clusters/${clusterId}/scripts/${s.id}/output`).then(r => r.ok ? r.json() : null)
                     .then(d => setOut({ name: s.name, text: (d && (d.output || d.stdout || d.result)) || '(no output)' }))
                     .catch(() => setOut({ name: s.name, text: 'Failed to load output.' }));
             };
+            const submitNew = () => {
+                if (!form.name.trim() || !form.content.trim()) return;
+                mut.run('newscript', 'POST', `/api/clusters/${clusterId}/scripts`, { name: form.name.trim(), description: form.description.trim(), type: form.type, target_nodes: form.target_nodes.trim() || 'all', content: form.content });
+                setShowNew(false); setForm({ name: '', description: '', type: 'bash', target_nodes: 'all', content: '' });
+            };
+            const submitRun = () => { if (!pw) return; mut.run('run' + runFor.id, 'POST', `/api/clusters/${clusterId}/scripts/${runFor.id}/run`, { password: pw }); setRunFor(null); setPw(''); };
             return (
                 <div className="cloud-body">
                     <CloudPageHeader title={t('customScripts') || 'Scripts'} sub={t('cloud.scriptsSub') || 'Custom cluster scripts'}>
+                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newScript') || 'New script'}</button>
                         <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
                     </CloudPageHeader>
                     <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Terminal" emptyTitle={t('cloud.noScripts') || 'No scripts'} t={t}>
@@ -1944,6 +1955,7 @@
                                         <td className="cloud-cell-muted">{s.last_run || '—'}</td>
                                         <td>{s.last_status ? (ok ? <span className="cloud-chip cloud-chip-ok">{s.last_status}</span> : <span className="cloud-chip cloud-chip-err">{s.last_status}</span>) : <span className="cloud-cell-muted">—</span>}</td>
                                         <CloudRowActions>
+                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run'} onClick={() => setRunFor(s)} />
                                             <CloudIconBtn icon="FileText" title={t('cloud.viewOutput') || 'Output'} onClick={() => viewOutput(s)} />
                                             <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/clusters/${clusterId}/scripts/${s.id}`, undefined, (t('cloud.confirmDelScript') || 'Delete this script?'))} />
                                         </CloudRowActions>
@@ -1958,6 +1970,23 @@
                             </div>
                         )}
                     </CloudSectionState>
+                    {showNew && (
+                        <CloudModal title={t('cloud.newScript') || 'New script'} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create') || 'Create'} t={t}>
+                            <CloudField label={t('name') || 'Name'}><input className="cloud-input" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="cleanup-logs" /></CloudField>
+                            <CloudField label={t('description') || 'Description'}><input className="cloud-input" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></CloudField>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <CloudField label={t('type') || 'Type'}><select className="cloud-input" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="bash">bash</option><option value="python">python</option></select></CloudField>
+                                <CloudField label={t('cloud.colTarget') || 'Target nodes'}><input className="cloud-input" value={form.target_nodes} onChange={e => setForm({ ...form, target_nodes: e.target.value })} placeholder="all" /></CloudField>
+                            </div>
+                            <CloudField label={t('cloud.scriptContent') || 'Script'}><textarea className="cloud-input" style={{ minHeight: 140, fontFamily: 'monospace' }} value={form.content} onChange={e => setForm({ ...form, content: e.target.value })} placeholder={form.type === 'python' ? '#!/usr/bin/env python3' : '#!/bin/bash'} /></CloudField>
+                        </CloudModal>
+                    )}
+                    {runFor && (
+                        <CloudModal title={(t('cloud.runNow') || 'Run') + ' — ' + runFor.name} onClose={() => { setRunFor(null); setPw(''); }} onSubmit={submitRun} submitLabel={t('cloud.runNow') || 'Run'} t={t}>
+                            <div className="cloud-cell-muted" style={{ fontSize: '.8rem' }}>{t('cloud.runScriptHint') || 'Runs on the target nodes over SSH. Confirm with the node root password.'}</div>
+                            <CloudField label={t('password') || 'Node password'}><input className="cloud-input" type="password" value={pw} onChange={e => setPw(e.target.value)} autoFocus /></CloudField>
+                        </CloudModal>
+                    )}
                 </div>
             );
         }
@@ -1968,9 +1997,19 @@
             const all = Array.isArray(data) ? data : (data && Array.isArray(data.schedules) ? data.schedules : []);
             const rows = clusterId ? all.filter(s => !s.cluster_id || String(s.cluster_id) === String(clusterId)) : all;
             const isOn = (s) => Number(s.enabled) === 1 || s.enabled === true;
+            const [showNew, setShowNew] = React.useState(false);
+            const [form, setForm] = React.useState({ vmid: '', vm_type: 'qemu', action: 'start', schedule_type: 'daily', time: '03:00', date: '' });
+            const submitNew = () => {
+                if (!String(form.vmid).trim() || !form.time) return;
+                const body = { cluster_id: clusterId, vmid: Number(form.vmid), vm_type: form.vm_type, action: form.action, schedule_type: form.schedule_type, time: form.time };
+                if (form.schedule_type === 'once' && form.date) body.date = form.date;
+                mut.run('newsched', 'POST', '/api/schedules', body);
+                setShowNew(false); setForm({ vmid: '', vm_type: 'qemu', action: 'start', schedule_type: 'daily', time: '03:00', date: '' });
+            };
             return (
                 <div className="cloud-body">
                     <CloudPageHeader title={t('scheduledActions') || 'Schedules'} sub={t('cloud.schedulesSub') || 'Time-based VM actions'}>
+                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newSchedule') || 'New schedule'}</button>
                         <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
                     </CloudPageHeader>
                     <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Clock" emptyTitle={t('cloud.noSchedules') || 'No schedules'} t={t}>
@@ -1995,6 +2034,20 @@
                             </table></div>
                         </div>
                     </CloudSectionState>
+                    {showNew && (
+                        <CloudModal title={t('cloud.newSchedule') || 'New schedule'} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create') || 'Create'} t={t}>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <CloudField label={'VMID'}><input className="cloud-input" type="number" value={form.vmid} onChange={e => setForm({ ...form, vmid: e.target.value })} placeholder="100" /></CloudField>
+                                <CloudField label={t('type') || 'Type'}><select className="cloud-input" value={form.vm_type} onChange={e => setForm({ ...form, vm_type: e.target.value })}><option value="qemu">qemu</option><option value="lxc">lxc</option></select></CloudField>
+                            </div>
+                            <CloudField label={t('cloud.colAction') || 'Action'}><select className="cloud-input" value={form.action} onChange={e => setForm({ ...form, action: e.target.value })}>{['start', 'stop', 'shutdown', 'reboot', 'snapshot'].map(a => <option key={a} value={a}>{a}</option>)}</select></CloudField>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <CloudField label={t('cloud.colWhen') || 'Schedule'}><select className="cloud-input" value={form.schedule_type} onChange={e => setForm({ ...form, schedule_type: e.target.value })}>{['once', 'daily', 'weekly', 'weekdays', 'weekends'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
+                                <CloudField label={t('cloud.colTime') || 'Time'}><input className="cloud-input" type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} /></CloudField>
+                            </div>
+                            {form.schedule_type === 'once' && <CloudField label={t('cloud.colDate') || 'Date'}><input className="cloud-input" type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></CloudField>}
+                        </CloudModal>
+                    )}
                 </div>
             );
         }
