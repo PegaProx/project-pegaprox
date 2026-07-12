@@ -404,6 +404,12 @@
                     { id: 'ha', label: 'High Availability', icon: 'Shield' },
                 ] },
                 { label: 'MONITORING', items: [{ id: 'monitoring', label: 'Monitoring', icon: 'Activity' }] },
+                { label: 'REPORTS', items: [
+                    { id: 'insights', label: 'Insights', icon: 'Zap' },
+                    { id: 'costs', label: 'Costs', icon: 'DollarSign' },
+                    { id: 'power', label: 'Power & Carbon', icon: 'Zap' },
+                    { id: 'apihealth', label: 'API Health', icon: 'Activity' },
+                ] },
                 { label: 'ACTIVITY', items: [{ id: 'tasks', label: 'Tasks', icon: 'ClipboardList' }] },
             ];
             if (isAdmin) {
@@ -1869,6 +1875,10 @@
                 compliance: T('compliance') || 'Compliance',
                 snapshotpolicies: T('snapshotPolicies') || 'Snapshot Policies',
                 templates: T('templatesLibrary') || 'Templates',
+                insights: T('insights') || 'Insights',
+                costs: T('costDashboard') || 'Costs',
+                power: T('powerTitle') || 'Power & Carbon',
+                apihealth: T('apiHealth') || 'API Health',
                 tasks: T('cloud.tasks') || 'Tasks',
                 users: T('cloud.users') || 'Users',
                 settings: T('cloud.settings') || 'Settings',
@@ -1976,6 +1986,18 @@
                                 <TemplatesLibraryTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} isCorporate={false} />
                             </div>
                         );
+                        break;
+                    case 'insights':
+                        body = <div className="cloud-mounted"><InsightsTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} /></div>;
+                        break;
+                    case 'costs':
+                        body = <div className="cloud-mounted"><CostDashboardTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} /></div>;
+                        break;
+                    case 'power':
+                        body = <div className="cloud-mounted"><PowerCarbonTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} /></div>;
+                        break;
+                    case 'apihealth':
+                        body = <div className="cloud-mounted"><ApiLatencyDashboard clusterId={cid} authFetch={authFetch} apiUrl={API_URL} t={T} /></div>;
                         break;
                     case 'tasks':
                         body = <CloudTasks tasks={tasks} t={T} />;
