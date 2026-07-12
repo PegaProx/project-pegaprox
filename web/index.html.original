@@ -3058,9 +3058,10 @@
         .cloud-body { display:flex; flex-direction:column; gap:var(--space-lg); }
         .cloud-nav { width:220px; flex:0 0 220px; background:var(--cloud-surface-1); border-right:1px solid var(--cloud-border-subtle); padding:var(--space-md) 0; overflow-y:auto; }
         .cloud-nav-brand { display:flex; align-items:center; gap:var(--space-sm); padding:0 var(--space-md) var(--space-md); border-bottom:1px solid var(--cloud-divider); margin-bottom:var(--space-md); }
-        .cloud-nav-brand-mark { color:var(--cloud-accent); display:inline-flex; }
+        .cloud-nav-brand-mark { color:var(--cloud-accent); display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
         .cloud-nav-brand-mark svg { width:20px; height:20px; }
-        .cloud-nav-brand-text { font-weight:600; font-size:0.9rem; color:var(--color-text); }
+        .cloud-nav-brand-mark img { width:30px; height:30px; object-fit:contain; display:block; }
+        .cloud-nav-brand-text { font-weight:700; font-size:0.98rem; letter-spacing:0.01em; color:var(--color-text); }
         .cloud-nav-group { margin-bottom:var(--space-sm); }
         .cloud-nav-group-label { font-size:0.65rem; letter-spacing:0.08em; font-weight:600; color:var(--cloud-text-muted); padding:var(--space-sm) var(--space-md) var(--space-xs); }
         .cloud-nav-item { display:flex; align-items:center; gap:var(--space-sm); width:100%; border:none; background:transparent; color:var(--cloud-text-secondary); padding:var(--space-sm) var(--space-md); font-size:0.85rem; cursor:pointer; border-left:3px solid transparent; text-align:left; transition:background .12s, color .12s; }

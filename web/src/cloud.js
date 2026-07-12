@@ -410,7 +410,19 @@
             return (
                 <nav className={'cloud-nav' + (collapsed ? ' cloud-nav-collapsed' : '')}>
                     <div className="cloud-nav-brand">
-                        <span className="cloud-nav-brand-mark"><Icons.Cloud /></span>
+                        {/* NS 2026-07: real PegaProx pegasus logo (was a generic Cloud icon).
+                            Cloud-theme-aware: white pegasus on the dark shell, dark pegasus on
+                            the light theme. Falls back to the Cloud icon if the asset 404s. */}
+                        <span className="cloud-nav-brand-mark">
+                            <img
+                                src={(typeof document !== 'undefined' && document.body && document.body.dataset.cloudTheme === 'light')
+                                    ? '/images/pegaprox-logo-light.png'
+                                    : '/images/pegaprox-logo-dark.png'}
+                                alt="PegaProx"
+                                onError={(e) => { e.target.style.display = 'none'; const s = e.target.nextSibling; if (s) s.style.display = 'inline-flex'; }}
+                            />
+                            <span className="cloud-nav-brand-fallback" style={{ display: 'none' }}><Icons.Cloud /></span>
+                        </span>
                         {!collapsed && <span className="cloud-nav-brand-text">PegaProx</span>}
                         {!collapsed && <span className="cloud-chip cloud-chip-preview">PREVIEW</span>}
                     </div>
