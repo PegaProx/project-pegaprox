@@ -1143,6 +1143,23 @@
             --corp-thresh-crit: #f54f47;
         }
 
+        /* NS Jul 2026 (scale) — opt-in "show VM IDs" in the corporate sidebar tree.
+           Rendered as a CSS ::after on each guest row (a trailing flex item, so it
+           stays visible even when the name truncates) instead of an extra <span>
+           per VM. Gated on the body flag set from the user pref, so toggling it is
+           free at 1000+ VMs — no per-row React re-render, no added DOM nodes.
+           Only rows WITH a name carry data-vmid (nameless rows already show the id
+           in their fallback label), so there is no duplicate id. */
+        body[data-sidebar-vmid="1"] .corp-tree-child[data-vmid]::after {
+            content: "#" attr(data-vmid);
+            flex-shrink: 0;
+            margin-left: 6px;
+            font-size: 11px;
+            color: var(--corp-text-muted);
+            opacity: 0.85;
+            font-variant-numeric: tabular-nums;
+        }
+
         /* LW: Mar 2026 — corporate light mode tokens. NS 2026-05-10 retuned:
            bumped text contrast (was #555/#888 → too washed), darker accent for
            AA on white, slightly cooler surface base, sharper border on the

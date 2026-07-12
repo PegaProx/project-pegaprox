@@ -489,5 +489,17 @@
                 }
             }, [layout]);
 
+            // NS Jul 2026 (scale) — the corporate sidebar "show VM IDs" pref renders
+            // the #vmid via a CSS ::after on each row (see index.html) instead of an
+            // extra <span> per guest. Gate it with a single body flag so toggling the
+            // pref costs nothing at 1000+ VMs (no per-row React re-render / DOM node).
+            useEffect(() => {
+                if (isCorporate && user?.sidebar_show_vmid) {
+                    document.body.dataset.sidebarVmid = '1';
+                } else {
+                    delete document.body.dataset.sidebarVmid;
+                }
+            }, [isCorporate, user?.sidebar_show_vmid]);
+
             return { layout, isCorporate, isCloud };
         }

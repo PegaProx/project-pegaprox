@@ -1354,8 +1354,14 @@
             const [showNew, setShowNew] = React.useState(false);
             const [form, setForm] = React.useState({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
             const submitNew = () => {
+                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 const body = { type: form.type, action: form.action, enable: 1 };
                 ['proto', 'dport', 'source', 'dest', 'comment'].forEach(k => { if (String(form[k]).trim()) body[k] = String(form[k]).trim(); });
+                // Guard against an unconstrained ACCEPT rule (no proto/port/source/dest = allow-all).
+                const constrained = ['proto', 'dport', 'source', 'dest'].some(k => body[k]);
+                if (form.action === 'ACCEPT' && !constrained) {
+                    if (!window.confirm(t('cloud.fwAllowAllWarn') || 'This ACCEPT rule matches ALL traffic (no protocol, port, source or destination set). Create this allow-all rule anyway?')) return;
+                }
                 mut.run('newrule', 'POST', `/api/clusters/${clusterId}/datacenter/firewall/rules`, body);
                 setShowNew(false); setForm({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
             };
@@ -1596,6 +1602,7 @@
             const [zForm, setZForm] = React.useState({ zone: '', type: 'vlan', bridge: '', peers: '', controller: '' });
             const [vForm, setVForm] = React.useState({ vnet: '', zone: '' });
             const submitZone = () => {
+                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 const body = { zone: zForm.zone.trim(), type: zForm.type };
                 if (zForm.type === 'vlan' || zForm.type === 'qinq') body.bridge = zForm.bridge.trim();
                 if (zForm.type === 'vxlan') body.peers = zForm.peers.trim();
@@ -1604,11 +1611,13 @@
                 mut.run('addzone', 'POST', `${base}/zones`, body); setModal(null); setZForm({ zone: '', type: 'vlan', bridge: '', peers: '', controller: '' });
             };
             const submitVnet = () => {
+                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 if (!vForm.vnet.trim() || !vForm.zone) return;
                 mut.run('addvnet', 'POST', `${base}/vnets`, { vnet: vForm.vnet.trim(), zone: vForm.zone }); setModal(null); setVForm({ vnet: '', zone: '' });
             };
             const [sForm, setSForm] = React.useState({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
             const submitSubnet = () => {
+                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 if (!sForm.vnet || !sForm.subnet.trim()) return;
                 const body = { subnet: sForm.subnet.trim(), snat: sForm.snat ? 1 : 0 };
                 if (sForm.gateway.trim()) body.gateway = sForm.gateway.trim();

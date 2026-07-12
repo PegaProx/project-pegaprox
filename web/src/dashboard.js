@@ -8733,6 +8733,7 @@
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
                                     }}
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
+                                    data-vmid={vm.name ? vm.vmid : undefined}
                                     style={isVmSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
                                     onMouseEnter={(e) => {
                                         if (!isVmSelected) { e.currentTarget.style.background = 'var(--color-hover)'; e.currentTarget.style.color = 'var(--color-text)'; }
@@ -8758,7 +8759,6 @@
                                         </span>
                                     )}
                                     <span className="truncate flex-1">{highlightMatch(vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`, sidebarSearch)}</span>
-                                    {user?.sidebar_show_vmid && vm.name && <span className="flex-shrink-0 text-[11px]" style={{color: 'var(--corp-text-muted)'}}>#{vm.vmid}</span>}
                                 </div>
                             );
                         })}
@@ -8834,6 +8834,7 @@
                                 else if (e.key === 'ArrowUp') treeNavUp(e);
                             }}
                             className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
+                            data-vmid={vm.name ? vm.vmid : undefined}
                             style={isVmSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid #49afd9', color: '#e9ecef'} : {color: '#adbbc4'}}
                             onMouseEnter={(e) => { if (!isVmSelected) { e.currentTarget.style.background = '#29414e'; e.currentTarget.style.color = '#e9ecef'; }}}
                             onMouseLeave={(e) => { if (!isVmSelected) { e.currentTarget.style.background = ''; e.currentTarget.style.color = '#adbbc4'; }}}
@@ -8851,7 +8852,6 @@
                                 </span>
                             )}
                             <span className="truncate flex-1">{vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`}</span>
-                            {user?.sidebar_show_vmid && vm.name && <span className="flex-shrink-0 text-[11px]" style={{color: 'var(--corp-text-muted)'}}>#{vm.vmid}</span>}
                         </div>
                     );
                 };
@@ -9248,6 +9248,7 @@
                                                                 setActiveTab('resources');
                                                             }}
                                                             className={`corp-tree-child flex items-center gap-1.5 pr-2 py-0.5 text-[12px] leading-4 cursor-pointer ${multiNode ? 'pl-3' : 'pl-1'}`}
+                                                            data-vmid={vm.name ? vm.vmid : undefined}
                                                             style={isVmSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
                                                             onMouseEnter={(e) => { if (!isVmSelected) { e.currentTarget.style.background = 'var(--color-hover)'; e.currentTarget.style.color = 'var(--color-text)'; }}}
                                                             onMouseLeave={(e) => { if (!isVmSelected) { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--corp-text-secondary)'; }}}
@@ -9265,7 +9266,6 @@
                                                                 </span>
                                                             )}
                                                             <span className="truncate">{vm.name || `${vm.type === 'lxc' ? 'CT' : 'VM'} ${vm.vmid}`}</span>
-                                                            {user?.sidebar_show_vmid && vm.name && <span className="flex-shrink-0 text-[11px]" style={{color: 'var(--corp-text-muted)'}}>#{vm.vmid}</span>}
                                                             <span className="text-[10px] ml-auto flex-shrink-0" style={{color: '#5a7a8a'}}>{vm.iface}</span>
                                                         </div>
                                                     );
