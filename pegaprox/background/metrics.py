@@ -16,6 +16,38 @@ METRICS_HISTORY_FILE = os.path.join(CONFIG_DIR, 'metrics_history.json')
 
 from pegaprox.globals import cluster_managers
 from pegaprox.core.db import get_db
+from pegaprox.utils.concurrent import run_per_node  # #601: SSH-aware bounded fan-out for per-node temp reads
+
+
+def _node_hottest_temp(mgr, node):
+    """#601 — SSH lm-sensors → hottest temperature reading (°C) for one node, or None.
+
+    Honours a per-node backoff so installs WITHOUT lm-sensors/SSH (or non-PVE hosts)
+    aren't re-probed every 5-min cycle — an error parks the node for ~1h. Nodes that
+    do report temps clear their backoff, so a freshly-installed lm-sensors is picked
+    up on the next successful probe.
+    """
+    import time as _t
+    backoff = getattr(mgr, '_node_temp_probe_backoff', None)
+    if backoff is None:
+        backoff = mgr._node_temp_probe_backoff = {}
+    until = backoff.get(node, 0)
+    if until and _t.time() < until:
+        return None
+    try:
+        res = mgr.get_node_sensors(node)
+    except Exception:
+        res = {'error': 'exception'}
+    if not isinstance(res, dict) or res.get('error'):
+        backoff[node] = _t.time() + 3600  # no sensors/SSH here → don't storm SSH
+        return None
+    temps = [s.get('value') for s in (res.get('sensors') or [])
+             if s.get('kind') == 'temp' and isinstance(s.get('value'), (int, float))]
+    backoff.pop(node, None)  # works here — clear any prior backoff
+    if not temps:
+        return None
+    return round(max(temps), 1)
+
 
 def load_metrics_history():
     """Load historical metrics from SQLite database.
@@ -173,7 +205,51 @@ def collect_metrics_snapshot():
                 cluster_data['totals']['cpu_used'] += node_data.get('cpu', 0) * node_data.get('maxcpu', 0)
                 cluster_data['totals']['mem_total'] += node_data.get('maxmem', 0)
                 cluster_data['totals']['mem_used'] += node_data.get('mem', 0)
-            
+
+            # #601 — per-node hottest temperature (°C) for the history chart + the
+            # temperature alert metric. lm-sensors is SSH-side, so fan out over ALL
+            # online nodes with the SSH-AWARE primitive: run_per_node caps concurrency
+            # at 8/cluster so we never open 30+ simultaneous SSH sessions (which trips
+            # AccountLockFailures on hardened nodes). Real PVE (corosync) clusters are
+            # <=~32 nodes, so 90s comfortably covers a whole cluster each cycle. Runs on
+            # the 5-min collector greenlet, off the broadcast hot-path. Writes both the
+            # snapshot (→ persisted history) and the manager temp-cache (→ read by the
+            # 60s alert loop, which must not SSH).
+            try:
+                online_node_names = list(cluster_data['nodes'].keys())
+                if online_node_names:
+                    node_calls = {name: (lambda nm: _node_hottest_temp(mgr, nm))
+                                  for name in online_node_names}
+                    temp_by_node = run_per_node(node_calls, max_concurrent=8, timeout=90)
+                    now_ts = time.time()
+                    tcache = getattr(mgr, '_node_temp_cache', None)
+                    tlock = getattr(mgr, '_node_temp_lock', None)
+                    got = 0
+                    for nm, temp_c in (temp_by_node or {}).items():
+                        if temp_c is None:
+                            continue
+                        cluster_data['nodes'][nm]['temp'] = temp_c
+                        got += 1
+                        if tcache is not None and tlock is not None:
+                            with tlock:
+                                tcache[nm] = {'temp': temp_c, 'ts': now_ts}
+                    # keep the per-manager caches bounded: drop keys for decommissioned/
+                    # renamed nodes so they don't accrete over the process lifetime.
+                    known = set(mgr.nodes or {})
+                    if known:
+                        if tcache is not None and tlock is not None:
+                            with tlock:
+                                for k in [k for k in tcache if k not in known]:
+                                    tcache.pop(k, None)
+                        bo = getattr(mgr, '_node_temp_probe_backoff', None)
+                        if isinstance(bo, dict):
+                            for k in [k for k in bo if k not in known]:
+                                bo.pop(k, None)
+                    if got:
+                        logging.debug(f"[metrics] {cluster_id}: temp for {got}/{len(online_node_names)} node(s)")
+            except Exception as _te:
+                logging.debug(f"[metrics] {cluster_id}: temp collection skipped: {_te}")
+
             # Count VMs + per-VM samples for right-sizing (MK May 2026)
             cluster_data['vms'] = {}  # vmid -> {cpu_pct, mem_pct, maxmem, maxcpu, status}
             try:

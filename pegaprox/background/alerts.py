@@ -203,6 +203,16 @@ def check_and_send_alerts():
                         total = sum(n.get('disk_total', 0) for n in online)
                         if total > 0:
                             current_value = used / total * 100
+                    elif metric == 'temperature':
+                        # #601 — hottest cached node temperature (°C) across the cluster.
+                        # Populated by the 5-min metrics collector; we never SSH here.
+                        temps = []
+                        for nname in list(getattr(manager, '_node_temp_cache', {}) or {}):
+                            tv = manager.get_cached_node_temp(nname)
+                            if tv is not None:
+                                temps.append(tv)
+                        if temps:
+                            current_value = max(temps)
                     elif metric in ('backup_sla_breached_pct', 'backup_sla_compliance_pct'):
                         # MK May 2026 — Backup SLA-aware alerts. Run the same
                         # eval as the /backup-sla endpoint and feed the % into
@@ -323,6 +333,9 @@ def check_and_send_alerts():
                         rootfs = node_summary.get('rootfs', {}) or {}
                         if rootfs.get('total', 0) > 0:
                             current_value = (rootfs.get('used', 0) / rootfs.get('total', 1)) * 100
+                    elif metric == 'temperature':
+                        # #601 — cached hottest-sensor temp (°C) for this node.
+                        current_value = manager.get_cached_node_temp(target_id)
 
                 elif target_type == 'vm':
                     # MK: was `manager.get_resources()` which doesn't exist; the
@@ -364,8 +377,11 @@ def check_and_send_alerts():
         elif operator == '<=' and current_value <= threshold:
             triggered = True
 
+        # #601 — temperature is an absolute °C reading, every other metric is a %.
+        unit = '°C' if metric == 'temperature' else '%'
+
         if not triggered:
-            _record_eval(alert_id, reason=f'below threshold ({metric}={current_value:.1f}% {operator} {threshold}% → false)',
+            _record_eval(alert_id, reason=f'below threshold ({metric}={current_value:.1f}{unit} {operator} {threshold}{unit} → false)',
                          cluster_id=cluster_id, metric=metric, current_value=round(current_value, 1),
                          threshold=threshold, operator=operator, triggered=False)
 
@@ -377,8 +393,8 @@ def check_and_send_alerts():
 Alert: {alert_name}
 Target: {target_type.capitalize()} - {target_name}
 Metric: {metric.upper()}
-Condition: {metric} {operator} {threshold}%
-Current Value: {current_value:.1f}%
+Condition: {metric} {operator} {threshold}{unit}
+Current Value: {current_value:.1f}{unit}
 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Cluster: {cluster_id}
 
@@ -394,8 +410,8 @@ This is an automated alert from PegaProx.
 <table style="border-collapse: collapse; width: 100%; max-width: 500px;">
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Target</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(target_type).capitalize())} - {_e(str(target_name))}</td></tr>
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Metric</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(metric).upper())}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Condition</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(metric))} {_e(str(operator))} {threshold}%</td></tr>
-<tr style="background-color: #fee2e2;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Current Value</strong></td><td style="padding: 8px; border: 1px solid #ddd;"><strong>{current_value:.1f}%</strong></td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Condition</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(metric))} {_e(str(operator))} {threshold}{unit}</td></tr>
+<tr style="background-color: #fee2e2;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Current Value</strong></td><td style="padding: 8px; border: 1px solid #ddd;"><strong>{current_value:.1f}{unit}</strong></td></tr>
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Time</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
 </table>
 <p style="color: #666; font-size: 12px; margin-top: 20px;">This is an automated alert from PegaProx.</p>
@@ -437,7 +453,13 @@ This is an automated alert from PegaProx.
 
             # NS #501: a rule may pin an explicit severity; otherwise derive it.
             _rule_sev = alert.get('severity')
-            severity = _rule_sev if _rule_sev and _rule_sev != 'auto' else ('critical' if current_value > 90 else 'warning' if current_value > 70 else 'info')
+            if _rule_sev and _rule_sev != 'auto':
+                severity = _rule_sev
+            elif metric == 'temperature':
+                # #601 — absolute °C thresholds for auto-severity (not the %-based ladder)
+                severity = 'critical' if current_value >= 85 else 'warning' if current_value >= 75 else 'info'
+            else:
+                severity = 'critical' if current_value > 90 else 'warning' if current_value > 70 else 'info'
             alert_data = {
                 'alert_name': alert_name,
                 'metric': metric,
@@ -449,7 +471,7 @@ This is an automated alert from PegaProx.
                 'cluster_id': cluster_id,
                 'severity': severity,
                 'timestamp': datetime.now().isoformat(),
-                'message': f"{target_type.capitalize()} {target_name}: {metric} is {current_value:.1f}% (threshold: {operator} {threshold}%)",
+                'message': f"{target_type.capitalize()} {target_name}: {metric} is {current_value:.1f}{unit} (threshold: {operator} {threshold}{unit})",
             }
             if _notification_handlers:
                 for handler in _notification_handlers:

@@ -4089,6 +4089,9 @@
                 sensors: 'Sensoren',
                 sensor: 'Sensor',
                 sensorsHint: 'Hardware-Sensoren via lm-sensors. Zellen in Rot überschreiten den kritischen Schwellwert, Gelb überschreiten Max.',
+                temperatureC: 'Temperatur (°C)',
+                tempHistoryTitle: 'Temperaturverlauf (heißester Sensor)',
+                samples: 'Messwerte',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Aggregate',
                 pools: 'Pools',
@@ -8260,6 +8263,9 @@
                 sensors: 'Sensors',
                 sensor: 'Sensor',
                 sensorsHint: 'Hardware sensors via lm-sensors. Cells in red exceed the critical threshold, yellow exceed max.',
+                temperatureC: 'Temperature (°C)',
+                tempHistoryTitle: 'Temperature over time (hottest sensor)',
+                samples: 'samples',
                 // MK + LW 2026-05-31 — cluster health panel
                 configVersion: 'Config v',
                 corosyncRings: 'Corosync Rings',
@@ -12051,6 +12057,9 @@
                 sensors: 'Capteurs',
                 sensor: 'Capteur',
                 sensorsHint: 'Capteurs matériels via lm-sensors. Les cellules en rouge dépassent le seuil critique, en jaune le maximum.',
+                temperatureC: 'Température (°C)',
+                tempHistoryTitle: 'Température au fil du temps (capteur le plus chaud)',
+                samples: 'échantillons',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Agrégations',
                 pools: 'pools',
@@ -15968,6 +15977,9 @@
                 sensors: 'Sensores',
                 sensor: 'Sensor',
                 sensorsHint: 'Sensores de hardware vía lm-sensors. Las celdas rojas superan el umbral crítico, las amarillas superan el máximo.',
+                temperatureC: 'Temperatura (°C)',
+                tempHistoryTitle: 'Temperatura a lo largo del tiempo (sensor más caliente)',
+                samples: 'muestras',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Agregaciones',
                 pools: 'pools',
@@ -19685,6 +19697,9 @@
                 sensors: 'Sensores',
                 sensor: 'Sensor',
                 sensorsHint: 'Sensores de hardware via lm-sensors. Células vermelhas excedem o limite crítico, amarelas excedem o máximo.',
+                temperatureC: 'Temperatura (°C)',
+                tempHistoryTitle: 'Temperatura ao longo do tempo (sensor mais quente)',
+                samples: 'amostras',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Agregações',
                 pools: 'pools',
@@ -23471,10 +23486,16 @@
                 sensors: '센서',
                 sensor: '센서',
                 sensorsHint: 'lm-sensors를 통한 하드웨어 센서. 빨간색 셀은 임계값 초과, 노란색은 최대값 초과를 의미합니다.',
+                temperatureC: '온도 (°C)',
+                tempHistoryTitle: '시간에 따른 온도 (가장 뜨거운 센서)',
+                samples: '샘플',
                 // MK + LW 2026-05-31 — sensors panel
                 sensors: 'Sensori',
                 sensor: 'Sensore',
                 sensorsHint: 'Sensori hardware via lm-sensors. Le celle rosse superano la soglia critica, le gialle superano il massimo.',
+                temperatureC: 'Temperatura (°C)',
+                tempHistoryTitle: 'Temperatura nel tempo (sensore più caldo)',
+                samples: 'campioni',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: '집계',
                 pools: '풀',

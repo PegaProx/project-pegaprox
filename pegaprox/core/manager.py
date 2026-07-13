@@ -231,6 +231,12 @@ class PegaProxManager:
         self._vm_migration_cooldown = {}  # {vmid: timestamp} — prevent ping-pong
         self._node_metrics_history = {}  # {node_name: [{timestamp, cpu, mem_pct, ...}]} ring buffer for predictive LB
         self._metrics_history_lock = threading.Lock()  # guard concurrent access from API routes
+        # #601 — hottest lm-sensors reading per node (°C), refreshed by the 5-min
+        # metrics collector and READ by the 60s alert loop (which must never SSH
+        # per-tick). _node_temp_probe_backoff skips nodes without lm-sensors/SSH.
+        self._node_temp_cache = {}   # {node_name: {'temp': float_c, 'ts': epoch}}
+        self._node_temp_lock = threading.Lock()
+        self._node_temp_probe_backoff = {}  # {node_name: reprobe_after_epoch}
 
         # maintenance mode
         self.nodes_in_maintenance = {}
@@ -13760,6 +13766,19 @@ echo "AGENT_INSTALLED_OK"
                 }
                 out.append(row)
         return {'sensors': out, 'count': len(out)}
+
+    def get_cached_node_temp(self, node: str, max_age: float = 900):
+        """#601 — last cached hottest-sensor temperature (°C) for a node, or None if
+        missing/stale. Populated by the 5-min metrics collector (see background/
+        metrics.py); read by the alert loop so temperature alerts never SSH per-tick."""
+        import time as _t
+        with self._node_temp_lock:
+            ent = self._node_temp_cache.get(node)
+        if not ent:
+            return None
+        if max_age and (_t.time() - ent.get('ts', 0)) > max_age:
+            return None
+        return ent.get('temp')
 
     def get_node_cluster_health(self, node: str) -> Dict[str, Any]:
         # MK May 2026 — SSH-side cluster health: corosync ring status,

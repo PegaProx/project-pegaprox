@@ -8437,6 +8437,7 @@
             const [pickedChannels, setPickedChannels] = useState(['email']);
             const [activeAlerts, setActiveAlerts] = useState([]);  // NS #501 — firing incidents
             const [escSteps, setEscSteps] = useState([]);  // NS #501 — escalation steps in the create modal
+            const [alertMetricSel, setAlertMetricSel] = useState('cpu');  // #601 — drives the threshold unit (% vs °C)
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
             
@@ -23245,10 +23246,11 @@
                                     <div className="grid grid-cols-3 gap-3">
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('metric') || 'Metric'}</label>
-                                            <select name="metric" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
+                                            <select name="metric" value={alertMetricSel} onChange={e => setAlertMetricSel(e.target.value)} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value="cpu">CPU</option>
                                                 <option value="memory">Memory</option>
                                                 <option value="disk">Disk</option>
+                                                <option value="temperature">{t('temperatureC') || 'Temperature (°C)'}</option>
                                                 <option value="backup_sla_breached_pct">{t('backupSlaBreachedPct') || 'Backup SLA breached %'}</option>
                                                 <option value="backup_sla_compliance_pct">{t('backupSlaCompliancePct') || 'Backup SLA compliance %'}</option>
                                             </select>
@@ -23261,8 +23263,8 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('threshold') || 'Threshold'} %</label>
-                                            <input name="threshold" type="number" min="0" max="100" defaultValue="80" required className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
+                                            <label className="block text-sm text-gray-400 mb-1">{t('threshold') || 'Threshold'} {alertMetricSel === 'temperature' ? '°C' : '%'}</label>
+                                            <input name="threshold" type="number" min="0" max={alertMetricSel === 'temperature' ? 150 : 100} defaultValue="80" required className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
                                         </div>
                                     </div>
                                     <div>

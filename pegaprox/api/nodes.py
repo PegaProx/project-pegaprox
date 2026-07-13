@@ -194,6 +194,35 @@ def get_node_sensors_api(cluster_id, node):
     return jsonify(result)
 
 
+# #601 — per-node hottest-temperature history for the chart-over-time ask. Reads the
+# background collector's persisted 5-min metrics_history snapshots (off-hub, cached);
+# no live SSH here, so it stays cheap even at fleet scale.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/temperature-history', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_temperature_history_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    from pegaprox.background.metrics import load_metrics_history
+    series = []
+    try:
+        hist = load_metrics_history() or {}
+        for snap in (hist.get('snapshots') or []):
+            try:
+                nodes = ((snap.get('clusters') or {}).get(cluster_id) or {}).get('nodes') or {}
+                temp = (nodes.get(node) or {}).get('temp')
+                ts = snap.get('timestamp')
+                if temp is not None and ts:
+                    series.append({'ts': ts, 'temp': temp})
+            except Exception:
+                continue
+    except Exception as e:
+        return jsonify({'error': f'history read failed: {e}'}), 500
+    series.sort(key=lambda x: x['ts'])
+    return jsonify({'series': series, 'unit': '°C', 'count': len(series)})
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])
 @require_auth(perms=['node.network'])
 def update_node_network_api(cluster_id, node, iface):

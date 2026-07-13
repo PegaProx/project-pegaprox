@@ -1121,6 +1121,7 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/temperature-history`,
                         ],
                         disks: [
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/disks`,
@@ -1157,6 +1158,7 @@
                         newData.certificates = results[4] || [];
                         newData.clusterHealth = (results[5] && !results[5].error) ? results[5] : null;
                         newData.sensors = (results[6] && Array.isArray(results[6].sensors)) ? results[6].sensors : null;
+                        newData.tempHistory = (results[7] && Array.isArray(results[7].series)) ? results[7].series : null;  // #601
                     }
                     else if (tab === 'disks') {
                         newData.disks = results[0] || [];
@@ -2332,6 +2334,38 @@
                                                     <div className="px-2 py-2 text-xs text-gray-500 mt-1">
                                                         {t('sensorsHint') || 'Hardware sensors via lm-sensors. Cells in red exceed the critical threshold, yellow exceed max.'}
                                                     </div>
+                                                    {/* #601 — temperature over time (hottest sensor, from the 5-min metrics collector) */}
+                                                    {data.tempHistory && data.tempHistory.length >= 2 && (() => {
+                                                        const vals = data.tempHistory.map(p => p.temp).filter(v => typeof v === 'number');
+                                                        if (vals.length < 2) return null;
+                                                        const w = 480, h = 60, pad = 4;
+                                                        const mx = Math.max(...vals), mn = Math.min(...vals), flat = mx === mn, rng = (mx - mn) || 1;
+                                                        const pts = vals.map((v, i) => {
+                                                            const x = pad + (i / (vals.length - 1)) * (w - 2 * pad);
+                                                            const y = flat ? h / 2 : pad + (1 - (v - mn) / rng) * (h - 2 * pad);
+                                                            return `${x},${y}`;
+                                                        }).join(' ');
+                                                        const cur = vals[vals.length - 1];
+                                                        const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+                                                        const clr = cur >= 85 ? '#f54f47' : cur >= 75 ? '#efc006' : '#60b515';
+                                                        return (
+                                                            <div className="mt-3 pt-3 border-t border-proxmox-border">
+                                                                <div className="flex items-center justify-between mb-1">
+                                                                    <span className="text-xs font-medium text-gray-300">{t('tempHistoryTitle') || 'Temperature over time (hottest sensor)'}</span>
+                                                                    <span className="text-xs text-gray-500">{vals.length} {t('samples') || 'samples'}</span>
+                                                                </div>
+                                                                <svg width="100%" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="block" style={{ height: '60px' }}>
+                                                                    <polyline fill="none" stroke={clr} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={pts} />
+                                                                </svg>
+                                                                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400 mt-1">
+                                                                    <span>{t('current') || 'Current'}: <span className="font-mono" style={{ color: clr }}>{cur.toFixed(1)} °C</span></span>
+                                                                    <span>{t('min') || 'Min'}: <span className="font-mono">{mn.toFixed(1)} °C</span></span>
+                                                                    <span>{t('max') || 'Max'}: <span className="font-mono">{mx.toFixed(1)} °C</span></span>
+                                                                    <span>{t('avg') || 'Avg'}: <span className="font-mono">{avg.toFixed(1)} °C</span></span>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })()}
                                                 </div>
                                             )}
 
