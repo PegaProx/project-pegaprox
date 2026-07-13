@@ -1737,6 +1737,19 @@ def _run_esxi_to_pve(task):
             datastore_name = ds_match.group(1)
             vmdk_rel_path = ds_match.group(2)
 
+            # NS Jul 2026 (CodeAnt RCE) — datastore_name + every path component below flow into
+            # ROOT SSH shell commands on the PVE node (sshfs mount, ls, qemu-img convert). The
+            # sshfs-direct branch single-quotes them naively (line ~1883), so a VMware datastore/
+            # folder/VMDK name containing a single quote (these are attacker/tenant-influenced
+            # ESXi-inventory values) breaks out of the quotes → root RCE on the target node.
+            # Validate every component the same way v2p.py does and fail closed; a legitimate
+            # VMware name is [A-Za-z0-9 ._()+-] with no '/'.
+            from pegaprox.utils.sanitization import validate_esxi_path_component
+            _pcs = [datastore_name] + [c for c in vmdk_rel_path.split('/') if c]
+            if not all(validate_esxi_path_component(c) for c in _pcs):
+                task.set_phase('failed', f'Unsafe ESXi path component in VMDK path: {vmdk!r}')
+                return
+
             # find flat vmdk (actual data file)
             flat_path = vmdk_rel_path
             if flat_path.endswith('.vmdk') and '-flat.vmdk' not in flat_path:
@@ -1880,7 +1893,9 @@ def _run_esxi_to_pve(task):
                 dev_path = p_out.read().decode().strip()
 
                 # convert from SSHFS mount directly to storage volume
-                conv_cmd = f"qemu-img convert -p -f vmdk -O raw '{sshfs_vmdk}' '{dev_path}'"
+                # NS Jul 2026 (CodeAnt RCE) — shlex.quote both paths (defense-in-depth on top of
+                # the component validation above) instead of the naive single-quoting.
+                conv_cmd = f"qemu-img convert -p -f vmdk -O raw {_q_local(sshfs_vmdk)} {_q_local(dev_path)}"
                 task.log(f"  Converting via SSHFS → {vol_id}")
                 _, conv_out, conv_err = ssh_pve.exec_command(conv_cmd, timeout=7200)
                 conv_exit = conv_out.channel.recv_exit_status()
