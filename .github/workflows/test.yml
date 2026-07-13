@@ -25,11 +25,14 @@ jobs:
     runs-on: ubuntu-24.04   # ships Python 3.12, matching the Dockerfile base image
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: Show Python
-        run: python3 --version
       - name: Install dependencies
+        # NS: build in an ISOLATED venv — ubuntu-24.04's system Python carries a
+        # partial `zope` namespace that shadows pip-installed zope.event (a gevent
+        # dep), breaking the app import. A clean venv (no system site-packages) fixes it.
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements.txt -r requirements-dev.txt
+          python3 --version
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
       - name: Run test suite
-        run: python3 -m pytest tests/ -q
+        run: .venv/bin/python -m pytest tests/ -q
