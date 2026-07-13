@@ -1,0 +1,35 @@
+name: Tests
+
+# NS Jul 2026 — run the pytest suite (including the route-authz contract test) on
+# every PR and on pushes to the integration branches. The static reviewers
+# (CodeAnt / Aikido / Qodo) READ the code; this actually EXECUTES the invariants
+# — the layer that caught this project's real authz/behaviour bugs.
+#
+# persist-credentials is left at its default on purpose (Nico: "wir brauchen die
+# Zugangsdaten"); the GITHUB_TOKEN is scoped read-only since this job only reads.
+
+on:
+  pull_request:
+  push:
+    branches: [main, Testing]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04   # ships Python 3.12, matching the Dockerfile base image
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Show Python
+        run: python3 --version
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run test suite
+        run: python3 -m pytest tests/ -q
