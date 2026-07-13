@@ -1,9 +1,9 @@
 {
-  "version": "0.9.14.1",
-  "build": "2026.07.10",
-  "release_date": "2026-07-10",
+  "version": "0.9.15",
+  "build": "2026.07.14",
+  "release_date": "2026-07-14",
   "changelog": [
-    "feat+fix: v0.9.14.1 — Features, fixes, security and a new sponsor since 0.9.14. FEATURES: the ESXi→PVE migration wizard gains a per-disk QEMU aio-mode selector (threads / native / io_uring) for the migrated target disk (#598 ajoergensen). Maintenance Mode now runs a non-blocking pre-flight RAM check and warns you before evacuating a node would push the remaining nodes past ~90% memory (#611 cybrwerk). The Client Portal gains self-service guest teardown — quota-bound portal users can now destroy their own CTs/VMs, not just create them, behind an opt-in hoster flag with a type-the-name confirm and full audit trail (#556). FIXES: the VM-creation wizard's OVMF quick-templates no longer fail with 'efidisk0=:1' when the EFI storage field is left blank (#607 cybrwerk); behind a reverse proxy the container no longer spams TLS-handshake noise into the logs, and PEGAPROX_BEHIND_PROXY now also routes the console WebSockets through the proxy without needing the Settings toggle (#614 wwwlde). SECURITY: dependency floors raised to clear Aikido findings — cryptography 49 + fido2 2.2.1, pillow 12.3, setuptools 83, requests 2.34 (all as >= floors so future patch bumps roll in cleanly); the remaining request-controlled Site-Recovery log lines are sanitised (CWE-117). SPONSORS: welcome Occentus Network (occentus.net) as a Platinum sponsor. 💚"
+    "security+feat: v0.9.15 — a large security-hardening pass, full Cloud-layout feature parity, temperature monitoring, and scale/perf work since 0.9.14.1. SECURITY: a broad authorization + input-validation sweep — per-VM ACL enforcement on VM detail/action/firewall routes, tenant-isolation gates across VMware / PBS / cluster / DR-drill / history / alerts / migration reads (IDOR/BOLA), SSRF guards on OIDC jwks_uri + template image_url + the ACME chain, RCE-hardening of ISO/template and ESXi-VMDK paths before root SSH, CSRF / HTTP-response-splitting / CSP tightening, tainted-log sanitisation (CWE-117) + vnc-ticket redaction, session invalidation on admin password reset, SIEM secret masking, per-cluster TLS ssl_verify gating for VNC/console, rollback path-containment (CWE-22), and dependency CVE bumps (Flask 3.1.3, PyJWT 2.13, pyasn1, pytest 9). Adds an AGPL §7(b) attribution term. CLOUD: the Cloud (Preview) layout reaches full parity with Corporate — complete SDN CRUD, Plugins / Scripts / Schedules, Config Drift / SIEM / Alert Channels / Update Manager, real HA / Networks / Storage / Site-Recovery components, a Reports group (Insights / Costs / Power & Carbon / API Health), Automation (Snapshot Policies / Templates), Topology + Compliance, and the real pegasus logo. FEATURES: per-host temperature monitoring gains history + a temperature alert metric (#601 jostrasser); opt-in 'show VM IDs in the sidebar' via My Profile (all 7 languages). PERF/SCALE: sidebar filter debounce + native windowing for 1000+ VM trees, TTL-cached VM-ACL + topology lookups, capped syslog TCP handlers. QUALITY: a full-stack integration test harness + 166 blueprint tests + security-invariant unit tests + a route-authz contract test, now run on every PR. Includes community PR #617 — snapshot-name validation (thanks @MatrixNeoKozak). SPONSORS: welcome TechniData AG Limited as a Silver sponsor. 💚"
   ],
   "min_python": "3.8",
   "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
@@ -248,6 +248,7 @@
     "web/sw.js"
   ],
   "prev_changelog": [
+    "v0.9.14.1 — per-disk aio-mode selector in the ESXi→PVE wizard (#598), maintenance-mode RAM pre-flight (#611), Client Portal self-service teardown (#556), OVMF quick-template + reverse-proxy fixes (#607/#614), dependency floors + Site-Recovery log sanitisation; welcome Occentus Network (Platinum)",
     "v0.9.13.3 — flexible snapshot schedules (#586) + replication overview tab (#430) + offline-lag/rolling-update fixes + CIS log-bounds hardening",
     "Italian translation — thanks @fabriziosalmi (#332)",
     "PBS Reports tab: executive summary, inventory, gap analysis + PDF/PNG export (#273)",
