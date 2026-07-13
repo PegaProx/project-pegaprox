@@ -903,6 +903,7 @@ def update_user(username):
             return jsonify({'error': 'Invalid tenant_id'}), 400
         user['tenant_id'] = data['tenant_id']
     
+    _password_changed = False
     if 'password' in data and data['password']:
         # NS: Block password change for LDAP/OIDC users
         if user.get('auth_source', 'local') in ('ldap', 'oidc', 'entra'):
@@ -915,9 +916,20 @@ def update_user(username):
         user['password_salt'] = salt
         user['password_hash'] = password_hash
         user['password_changed_at'] = datetime.now().isoformat()  # LW: reset expiry
-    
+        _password_changed = True
+
     save_users(users_db)
-    
+
+    # NS Jul 2026 (CodeAnt session handling) — an admin password reset must invalidate the
+    # target user's live sessions (mirrors admin_change_password); otherwise a stolen/old
+    # session survives the reset. Scoped to the password branch so role/email/tenant edits
+    # don't needlessly log the user out.
+    if _password_changed:
+        from pegaprox.utils.auth import invalidate_all_user_sessions
+        invalidate_all_user_sessions(username)
+        log_audit(request.session['user'], 'user.sessions_invalidated',
+                  f"Invalidated sessions after password change for {username}")
+
     logging.info(f"Admin '{request.session['user']}' updated user '{username}'")
     log_audit(request.session['user'], 'user.updated', f"Updated user: {username}")
     
