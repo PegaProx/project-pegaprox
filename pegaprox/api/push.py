@@ -352,9 +352,28 @@ def _alert_handler(alert_data: dict):
         except Exception:
             users = []
 
+        # NS Jul 2026 (CodeAnt exploitation — cross-tenant alert leak) — a cluster-scoped alert
+        # must only reach subscribers who can actually reach that cluster. The old unconditional
+        # fan-out wrote tenant-B alert content (cluster/node/VM names, live metric %) into EVERY
+        # subscriber's inbox, and _wake_all() pushed it to every browser. Tenant is the isolation
+        # boundary and is always present in the reconstructed user, so cross-tenant is closed;
+        # admins / default-tenant users (get_user_clusters -> None) still receive everything;
+        # cluster-less system alerts (no cid) go to all. Fail CLOSED on a lookup error.
+        from pegaprox.utils.rbac import get_user_clusters
+        from pegaprox.utils.auth import load_users
+        _all_users = load_users()
         for u in users:
+            if cid:
+                try:
+                    udict = dict(_all_users.get(u) or {})
+                    udict['username'] = u
+                    allowed = get_user_clusters(udict)   # None => all clusters (admin/default)
+                except Exception:
+                    allowed = []                          # fail closed — never leak on error
+                if allowed is not None and cid not in allowed:
+                    continue
             _push_to_inbox(u, title, body, sev, url, tag)
-        _wake_all()
+            _wake_user(u)
     except Exception as e:
         logging.debug(f"[push] alert_handler swallowed: {e}")
 

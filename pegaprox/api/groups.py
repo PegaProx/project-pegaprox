@@ -15,7 +15,7 @@ from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.audit import log_audit
 # MK 2026-06-04 (CWE-117): group_id from URL path goes into the logger below.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
-from pegaprox.utils.rbac import DEFAULT_TENANT_ID
+from pegaprox.utils.rbac import DEFAULT_TENANT_ID, get_user_clusters
 from pegaprox.api.helpers import load_server_settings, save_server_settings, check_cluster_access
 
 bp = Blueprint('groups', __name__)
@@ -243,6 +243,15 @@ def rename_cluster(cluster_id):
     usr = getattr(request, 'session', {}).get('user', 'system')
     ip = request.remote_addr
 
+    # NS Jul 2026 (CodeAnt exploitation) — defense-in-depth: same source-cluster ownership gate
+    # as assign_cluster_to_group. Lower impact (display-name only) but the same permissive
+    # check_cluster_access gate, so a VM-ACL-reach actor with admin.groups shouldn't rename a
+    # cluster they don't tenant-own.
+    _owned = get_user_clusters(load_users().get(usr, {}), include_pools=False)
+    if _owned is not None and cluster_id not in _owned:
+        log_audit(usr, 'cluster.rename_denied', f"Access denied to rename cluster {cluster_id} — not tenant-owned", ip_address=ip)
+        return jsonify({'error': 'Access denied - you do not own this cluster'}), 403
+
     cluster = db.query_one('SELECT name, display_name FROM clusters WHERE id = ?', (cluster_id,))
     old_name = cluster['display_name'] or cluster['name'] if cluster else cluster_id
 
@@ -276,7 +285,19 @@ def assign_cluster_to_group(cluster_id):
     users = load_users()
     user = users.get(usr, {})
     ip = request.remote_addr
-    
+
+    # NS Jul 2026 (CodeAnt exploitation — cross-tenant cluster hijack) — check_cluster_access
+    # above passes on mere VM-ACL/pool reach into the SOURCE cluster (#248/#555 fallbacks), so
+    # a non-admin with admin.groups + one additive VM grant on a foreign cluster could move it
+    # into their own group and gain cluster-wide tenant membership over it (get_user_clusters'
+    # unconditional group-reachback). Require real TENANT ownership of the source cluster
+    # (include_pools=False strips the pool/ACL reach) before re-grouping. admin/default-tenant
+    # → get_user_clusters None → skipped. Evaluated pre-write, so an owned cluster still passes.
+    _owned = get_user_clusters(user, include_pools=False)
+    if _owned is not None and cluster_id not in _owned:
+        log_audit(usr, 'cluster.group_assign_denied', f"Access denied to re-group cluster {cluster_id} — not tenant-owned", ip_address=ip)
+        return jsonify({'error': 'Access denied - you do not own this cluster'}), 403
+
     # Verify group exists and user has access to it
     if group_id:
         group = db.query_one('SELECT name, tenant_id FROM cluster_groups WHERE id = ?', (group_id,))

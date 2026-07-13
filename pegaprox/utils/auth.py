@@ -883,9 +883,18 @@ def require_auth(roles: list = None, perms: list = None):
             # SELECT *-ing + decrypting the entire users table on every authed request.
             # get_user() builds the identical dict get_all_users() would for this row.
             try:
-                user = get_db().get_user(session['user']) or {}
+                user = get_db().get_user(session['user'])
             except Exception:
-                user = load_users().get(session['user'], {})
+                user = load_users().get(session['user'])
+            # NS Jul 2026 (CodeAnt exploitation / off-boarding bypass) — FAIL CLOSED when the
+            # acting user's record is gone. The old `get_user() or {}` swallowed a DELETED user
+            # into {}, so `{}.get('enabled', True)` == True passed the disabled-check and
+            # `fresh_role` fell back to the stale session role → a deleted user (or their still
+            # valid pgx_ API token) kept access until the session expired. A missing record now
+            # means "no longer exists" → reject. This covers BOTH session and API-token auth,
+            # since both resolve the acting user here.
+            if user is None:
+                return jsonify({'error': 'Account no longer exists', 'code': 'ACCOUNT_DELETED'}), 401
             # stash for check_cluster_access et al. so cluster-scoped routes don't refetch
             try:
                 from flask import g as _g

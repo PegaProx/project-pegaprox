@@ -964,12 +964,21 @@ def delete_user(username):
     
     # Also remove from memory
     del users_db[username]
-    
-    # Invalidate any sessions for this user
-    to_remove = [sid for sid, s in active_sessions.items() if s['user'] == username]
-    for sid in to_remove:
-        del active_sessions[sid]
-    
+
+    # NS Jul 2026 (CodeAnt exploitation) — the previous inline purge mutated a STALE
+    # `active_sessions` binding: auth.load_sessions() rebinds that module global to a fresh
+    # dict after startup, so this imported name no longer points at the live store and the
+    # loop removed 0 live sessions (validate_session kept accepting the deleted user's
+    # cookie/token until it expired). Use the canonical helper, which locks + mutates the
+    # LIVE store and persists. Also revoke the user's API tokens so a long-lived pgx_ token
+    # can't outlive the account.
+    from pegaprox.utils.auth import invalidate_all_user_sessions
+    invalidate_all_user_sessions(username)
+    try:
+        db.execute('UPDATE api_tokens SET revoked = 1 WHERE username = ?', (username,))
+    except Exception as e:
+        logging.warning(f"Failed to revoke API tokens for deleted user '{_sl(username)}': {e}")
+
     logging.info(f"Admin '{_sl(request.session['user'])}' deleted user '{_sl(username)}'")
     log_audit(request.session['user'], 'user.deleted', f"Deleted user: {username}")
     
