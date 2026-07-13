@@ -18,7 +18,7 @@ from pegaprox.utils.audit import log_audit
 # vmware_id from URL. Sanitise both before logging for consistency.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import user_can_access_vmware_vm
-from pegaprox.api.helpers import check_cluster_access
+from pegaprox.api.helpers import check_cluster_access, check_vmware_access
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server
 from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
 from pegaprox.background.broadcast import broadcast_resources_loop
@@ -254,6 +254,10 @@ def diagnose_vmware_connection(vmware_id):
 @require_auth(perms=['vmware.vm.view'])
 def get_vmware_vms(vmware_id):
     """List all VMs from vCenter/ESXi"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -275,6 +279,10 @@ def get_vmware_vms(vmware_id):
 @require_auth(perms=['vmware.vm.view'])
 def get_vmware_vm_detail(vmware_id, vm_id):
     """Get detailed VM info with guest and performance data"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -330,6 +338,10 @@ def vmware_vm_power(vmware_id, vm_id, action):
 @require_auth(perms=['vmware.vm.snapshot'])
 def get_vmware_snapshots(vmware_id, vm_id):
     """List VM snapshots"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -399,6 +411,10 @@ def delete_vmware_snapshot(vmware_id, vm_id, snapshot_id):
 @require_auth(perms=['vmware.host.view'])
 def get_vmware_hosts(vmware_id):
     """List ESXi hosts"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -422,6 +438,10 @@ def get_vmware_hosts(vmware_id):
 @require_auth(perms=['vmware.datastore.view'])
 def get_vmware_datastores(vmware_id):
     """List VMware datastores"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -443,6 +463,10 @@ def get_vmware_datastores(vmware_id):
 @require_auth(perms=['vmware.datastore.view'])
 def get_vmware_datastore_detail(vmware_id, ds_id):
     """Get detailed datastore info"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -457,6 +481,10 @@ def get_vmware_datastore_detail(vmware_id, ds_id):
 @require_auth(perms=['vmware.network.view'])
 def get_vmware_networks(vmware_id):
     """List VMware networks"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -478,6 +506,10 @@ def get_vmware_networks(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_vcenter_clusters(vmware_id):
     """List vCenter compute clusters with DRS/HA status"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -504,6 +536,10 @@ def get_vmware_vcenter_clusters(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_cluster_detail(vmware_id, cluster_id):
     """Get cluster detail with DRS/HA config"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -518,6 +554,10 @@ def get_vmware_cluster_detail(vmware_id, cluster_id):
 @require_auth(perms=['vmware.cluster.manage'])
 def set_vmware_cluster_drs(vmware_id, cluster_id):
     """Toggle DRS on a cluster"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     data = request.json or {}
@@ -536,6 +576,10 @@ def set_vmware_cluster_drs(vmware_id, cluster_id):
 @require_auth(perms=['vmware.cluster.manage'])
 def set_vmware_cluster_ha(vmware_id, cluster_id):
     """Toggle HA on a cluster"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     data = request.json or {}
@@ -553,6 +597,10 @@ def set_vmware_cluster_ha(vmware_id, cluster_id):
 @require_auth(perms=['vmware.vm.view'])
 def get_vmware_vm_performance(vmware_id, vm_id):
     """Get VM performance metrics"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -567,6 +615,10 @@ def get_vmware_vm_performance(vmware_id, vm_id):
 def watch_vmware_vm(vmware_id, vm_id):
     """register interest in a VM -- SSE will push detail data every 5s.
     Call again to renew the 120s watch window. POST with empty body."""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if not hasattr(broadcast_resources_loop, '_vmw_watched'):
         broadcast_resources_loop._vmw_watched = {}
     broadcast_resources_loop._vmw_watched[(vmware_id, vm_id)] = time.time()
@@ -577,6 +629,10 @@ def watch_vmware_vm(vmware_id, vm_id):
 @require_auth(perms=['vmware.vm.view'])
 def unwatch_vmware_vm(vmware_id, vm_id):
     """Stop watching a VM"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     watched = getattr(broadcast_resources_loop, '_vmw_watched', {})
     watched.pop((vmware_id, vm_id), None)
     return jsonify({'ok': True})
@@ -586,6 +642,10 @@ def unwatch_vmware_vm(vmware_id, vm_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_datacenters(vmware_id):
     """List vCenter datacenters"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -601,6 +661,10 @@ def get_vmware_datacenters(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_summary(vmware_id):
     """Get environment summary (VM counts, host counts, health)"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -614,6 +678,10 @@ def get_vmware_summary(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_health(vmware_id):
     """Get vCenter appliance health"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -627,6 +695,10 @@ def get_vmware_health(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_folders(vmware_id):
     """List folders"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -641,6 +713,10 @@ def get_vmware_folders(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_resource_pools(vmware_id):
     """List resource pools"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -654,6 +730,10 @@ def get_vmware_resource_pools(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_storage_policies(vmware_id):
     """List storage policies"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -667,6 +747,10 @@ def get_vmware_storage_policies(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_content_libraries(vmware_id):
     """List content libraries"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]

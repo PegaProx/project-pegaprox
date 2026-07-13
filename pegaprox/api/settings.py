@@ -4442,6 +4442,10 @@ def start_rolling_update(cluster_id):
 @require_auth(perms=['node.update'])
 def cancel_rolling_update(cluster_id):
     """Cancel a running rolling update"""
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -4468,6 +4472,10 @@ def cancel_rolling_update(cluster_id):
 @bp.route('/api/clusters/<cluster_id>/updates/rolling/resume', methods=['POST'])
 @require_auth(perms=['node.update'])
 def resume_rolling_update(cluster_id):
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     manager = cluster_managers[cluster_id]
@@ -4485,6 +4493,10 @@ def resume_rolling_update(cluster_id):
 @require_auth(perms=['node.update'])
 def clear_rolling_update_status(cluster_id):
     """Clear completed/cancelled rolling update status (dismiss notification)"""
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     

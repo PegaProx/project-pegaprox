@@ -767,6 +767,10 @@ def get_pbs_remotes(pbs_id):
 @require_auth(perms=['pbs.subscription.view'])
 def get_pbs_subscription(pbs_id):
     """Get PBS subscription status"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -913,6 +917,10 @@ def set_pbs_snapshot_protected(pbs_id, store):
 @require_auth(perms=['pbs.traffic.view'])
 def get_pbs_traffic_control(pbs_id):
     """Get traffic control / bandwidth limit configuration"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -925,6 +933,10 @@ def get_pbs_traffic_control(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_syslog(pbs_id):
     """Get PBS server syslog entries"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -939,6 +951,10 @@ def get_pbs_syslog(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_node_rrd(pbs_id):
     """Get PBS node-level RRD performance data"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -953,6 +969,10 @@ def get_pbs_node_rrd(pbs_id):
 @require_auth(perms=['pbs.notifications.view'])
 def get_pbs_notifications(pbs_id):
     """Get PBS notification config (targets + matchers)"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1451,6 +1471,10 @@ def delete_pbs_notification_matcher(pbs_id, name):
 @require_auth(perms=['pbs.traffic.manage'])
 def create_pbs_traffic_control(pbs_id):
     """Create a traffic control rule"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     data = request.json or {}
@@ -1469,6 +1493,10 @@ def create_pbs_traffic_control(pbs_id):
 @require_auth(perms=['pbs.traffic.manage'])
 def update_pbs_traffic_control(pbs_id, name):
     """Update a traffic control rule"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     data = request.json or {}
@@ -1482,6 +1510,10 @@ def update_pbs_traffic_control(pbs_id, name):
 @require_auth(perms=['pbs.traffic.manage'])
 def delete_pbs_traffic_control_rule(pbs_id, name):
     """Delete a traffic control rule"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].delete_traffic_control(name)
@@ -1516,6 +1548,10 @@ def get_pbs_disk_smart(pbs_id, disk):
 @require_auth(perms=['pbs.subscription.set'])
 def set_pbs_subscription(pbs_id):
     """Set subscription key"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     data = request.json or {}
@@ -1536,6 +1572,10 @@ def set_pbs_subscription(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_network(pbs_id):
     """Get PBS server network config"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_network()
@@ -1546,6 +1586,10 @@ def get_pbs_network(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_dns(pbs_id):
     """Get PBS server DNS config"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_dns()
@@ -1556,6 +1600,10 @@ def get_pbs_dns(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_time(pbs_id):
     """Get PBS server time/timezone"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_time()
@@ -2044,6 +2092,10 @@ def get_backup_verification_history(cluster_id):
 @require_auth(perms=['vm.backup'])
 def get_active_verifications(cluster_id):
     """Get all currently running verifications"""
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     from pegaprox.core.backup_verify import get_active_verifications
 
     active = get_active_verifications()
@@ -2111,6 +2163,10 @@ def probe_pbs_fingerprint():
 @require_auth(perms=['pbs.view'])
 def get_pbs_health(pbs_id):
     """0-100 health score for a PBS server. Aggregates multiple datastores."""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -2236,6 +2292,10 @@ def get_pbs_health(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_capacity_forecast(pbs_id):
     """Linear regression on historic free-space (per datastore) → ETA-to-full."""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -2397,6 +2457,10 @@ def storage_preflight(cluster_id):
 
     Body: same shape as /datacenter/storage POST.
     """
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     data = request.json or {}
@@ -2734,6 +2798,10 @@ def run_backup_job_now(cluster_id, job_id):
 
     Note: the job_id matches the UUID in /etc/pve/jobs.cfg (vzdump: <id>).
     """
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     cm = cluster_managers[cluster_id]

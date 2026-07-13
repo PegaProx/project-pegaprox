@@ -36,6 +36,35 @@ def _mk_vmware(vmware_id, linked):
     return m
 
 
+def test_vmware_route_cross_tenant_denied(api, seed):
+    # the vmware.py read routes now enforce check_vmware_access (were role-perm only)
+    ppglobals.vmware_managers.clear()
+    seed.tenant('tenant_a', clusters=['cluster_1'])
+    seed.tenant('tenant_b', clusters=['cluster_2'])
+    alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['vmware.vm.view'])
+    _mk_vmware('vmw_b', ['cluster_2'])   # linked to tenant_b's cluster
+    try:
+        r = api.as_user(alice).get('/api/vmware/vmw_b/vms')
+        assert r.status_code == 403, r.get_data(as_text=True)
+    finally:
+        ppglobals.vmware_managers.clear()
+
+
+def test_tenant_admin_cannot_amplify_via_tenant_perms(api, seed):
+    # the set_user_perms TENANT branch must reject a non-global-admin granting admin role/perms
+    seed.tenant('tenant_a', clusters=['cluster_1'])
+    tadmin = seed.user('tadmin', role='user', tenant_id='tenant_a', permissions=['admin.users'])
+    seed.user('victim', role='user', tenant_id='tenant_a')
+    c = api.as_user(tadmin)
+    # vector 1: role='admin' in own tenant
+    r1 = c.put('/api/users/victim/permissions', json={'tenant_id': 'tenant_a', 'role': 'admin'})
+    assert r1.status_code == 403, r1.get_data(as_text=True)
+    # vector 2: admin.* perms in own tenant
+    r2 = c.put('/api/users/victim/permissions',
+               json={'tenant_id': 'tenant_a', 'extra': ['admin.users', 'admin.settings']})
+    assert r2.status_code == 403, r2.get_data(as_text=True)
+
+
 def test_vmware_vm_cross_tenant_denied(api, seed):
     ppglobals.vmware_managers.clear()
     seed.tenant('tenant_a', clusters=['cluster_1'])

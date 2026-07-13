@@ -466,7 +466,18 @@ def set_user_perms(username):
         role = data.get('role')
         extra = data.get('extra', [])
         denied = data.get('denied', [])
-        
+
+        # NS Jul 2026 (CodeAnt re-scan — tenant->global privilege escalation) — a non-global-admin
+        # delegating tenant admin must NOT grant the global admin role or any admin.* permission:
+        # a tenant_permissions entry resolves to the target's EFFECTIVE GLOBAL perms because
+        # has_permission() runs with no tenant_id (auth.py) and get_user_permissions falls back to
+        # the target's own tenant. (The 'role' field was also previously stored unvalidated.)
+        if request.session.get('role') != ROLE_ADMIN and (
+                (role or '') == ROLE_ADMIN or any(str(p).startswith('admin.') for p in extra)):
+            log_audit(request.session.get('user', ''), 'security.privilege_amplification_denied',
+                      f"Denied tenant-admin granting admin-level role/perms to {username}")
+            return jsonify({'error': 'Access denied: tenant admins cannot grant admin-level role or permissions'}), 403
+
         # validate
         for p in extra + denied:
             if p not in PERMISSIONS:

@@ -303,6 +303,10 @@ def get_cluster_networks_api(cluster_id):
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_node_dns_api(cluster_id, node):
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

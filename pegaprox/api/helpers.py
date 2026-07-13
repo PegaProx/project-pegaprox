@@ -438,6 +438,35 @@ def check_pbs_access(pbs_id):
     return False, (jsonify({'error': 'Access denied to this PBS server'}), 403)
 
 
+def check_vmware_access(vmware_id):
+    """NS Jul 2026 (CodeAnt re-scan IDOR) — tenant gate for a VMware/ESXi server, mirroring
+    check_pbs_access. Most vmware.py routes only had a role perm and never scoped to tenant, so
+    any vmware.* holder could read/act on ANOTHER tenant's ESXi. A server is accessible if the
+    caller is a global admin, the server has no linked_clusters (backward-compat), the caller is
+    all-cluster (get_user_clusters None), or the caller reaches one of the server's linked clusters.
+    Returns (True, None) or (False, error_response)."""
+    from flask import request, jsonify
+    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.globals import vmware_managers
+    from pegaprox.models.permissions import ROLE_ADMIN
+
+    if vmware_id not in vmware_managers:
+        return False, (jsonify({'error': 'VMware server not found'}), 404)
+    user = load_users().get(request.session.get('user', ''), {})
+    if user.get('role') == ROLE_ADMIN:
+        return True, None
+    linked = getattr(vmware_managers[vmware_id], 'linked_clusters', None) or []
+    if not linked:
+        return True, None   # backward-compat: unlinked server is accessible to all
+    uc = get_user_clusters(user)
+    if uc is None:
+        return True, None
+    if any(c in uc for c in linked):
+        return True, None
+    return False, (jsonify({'error': 'Access denied to this VMware server'}), 403)
+
+
 def safe_error(e, default_msg='An internal error occurred'):
     """Return a safe error message for API responses.
     MK Feb 2026 - logs full exception but returns generic message to client.

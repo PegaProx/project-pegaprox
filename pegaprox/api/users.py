@@ -562,6 +562,10 @@ def reset_all_password_expiry():
 @require_auth(perms=['admin.audit'])
 def get_security_audit(cluster_id):
     """Get security audit info for a cluster"""
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     

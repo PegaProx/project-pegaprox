@@ -211,6 +211,10 @@ def add_cluster():
 @require_auth(perms=['cluster.config'])
 def export_cluster_config(cluster_id):
     """Export cluster config WITHOUT secrets — for re-configure pre-fill (#256)"""
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -238,6 +242,10 @@ def export_cluster_config(cluster_id):
 @bp.route('/api/clusters/<cluster_id>/api-token/rotate', methods=['POST'])
 @require_auth(perms=['cluster.config'])
 def rotate_cluster_api_token(cluster_id):
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -309,6 +317,10 @@ def reconfigure_cluster(cluster_id):
     """Re-configure cluster credentials. Requires re-authentication. (#256)
     Keeps same cluster_id so VM ACLs, replication jobs etc. stay intact.
     """
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1062,6 +1074,10 @@ ALLOWED_CONFIG_FIELDS = {
 @require_auth(perms=['cluster.config'])
 def update_cluster_config(cluster_id):
     """Update cluster configuration"""
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1087,6 +1103,10 @@ def update_cluster_config(cluster_id):
 @require_auth(perms=['cluster.config'])
 def update_cluster_config_live(cluster_id):
     """Update cluster configuration without restart"""
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
