@@ -482,6 +482,12 @@ def acknowledge_event(eid):
         ev = c.fetchone()
         if not ev:
             return jsonify({'error': 'not found'}), 404
+        # NS Jul 2026 (CodeAnt IDOR) — tenant gate on the event's cluster before ack/promote
+        # (was ack-ing / rebaselining another tenant's drift events).
+        from pegaprox.api.helpers import check_cluster_access
+        ok, err = check_cluster_access(ev['cluster_id'])
+        if not ok:
+            return err
         c.execute('''UPDATE drift_events SET status='acknowledged',
                      acknowledged_at=?, acknowledged_by=? WHERE id=?''',
                   (datetime.now().isoformat(), user, eid))

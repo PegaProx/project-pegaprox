@@ -512,17 +512,19 @@ def get_schedules():
     users_db = load_users()
     user_data = users_db.get(user, {})
     is_admin = user_data.get('role') == ROLE_ADMIN
-    user_clusters = user_data.get('clusters', [])
-    
-    # Filter actions by accessible clusters
-    if is_admin:
+
+    # NS Jul 2026 (CodeAnt IDOR) — use the real access model. The old filter read the raw
+    # user_data['clusters'] field and FELL OPEN (`if not user_clusters` -> returned every tenant's
+    # schedules) when it was empty. get_user_clusters returns None only for a genuine admin/
+    # default-tenant all-cluster user; otherwise it's the caller's reachable cluster set.
+    from pegaprox.utils.rbac import get_user_clusters
+    _ud = dict(user_data)
+    _ud['username'] = user
+    allowed = get_user_clusters(_ud)
+    if is_admin or allowed is None:
         return jsonify(schedules.get('actions', []))
-    
-    filtered = [
-        a for a in schedules.get('actions', [])
-        if not user_clusters or a.get('cluster_id') in user_clusters
-    ]
-    
+
+    filtered = [a for a in schedules.get('actions', []) if a.get('cluster_id') in allowed]
     return jsonify(filtered)
 
 

@@ -205,12 +205,23 @@ def list_rates():
 @bp.route('/api/power/rates/<cluster_id>', methods=['GET'])
 @require_auth()
 def get_one(cluster_id):
+    # NS Jul 2026 (CodeAnt IDOR) — tenant gate (skip the __default__ pseudo-cluster, no owner)
+    if cluster_id != '__default__':
+        from pegaprox.api.helpers import check_cluster_access
+        ok, err = check_cluster_access(cluster_id)
+        if not ok:
+            return err
     return jsonify(_get_rates(cluster_id))
 
 
 @bp.route('/api/power/rates/<cluster_id>', methods=['PUT'])
 @require_auth(perms=['cluster.config'])
 def upsert(cluster_id):
+    if cluster_id != '__default__':
+        from pegaprox.api.helpers import check_cluster_access
+        ok, err = check_cluster_access(cluster_id)
+        if not ok:
+            return err
     body = request.get_json(silent=True) or {}
     try:
         f = {k: float(body.get(k, _DEFAULT[k])) for k in
@@ -251,6 +262,10 @@ def upsert(cluster_id):
 def delete_rate(cluster_id):
     if cluster_id == '__default__':
         return jsonify({'error': 'cannot delete defaults'}), 400
+    from pegaprox.api.helpers import check_cluster_access
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     try:
         c = get_db().conn.cursor()
         c.execute('DELETE FROM power_rates WHERE cluster_id=?', (cluster_id,))

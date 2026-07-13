@@ -100,14 +100,23 @@ def _send_apprise(alert_data, cfg):
     urls = cfg.get('apprise_urls', [])
     if not urls:
         return False, 'No apprise URLs configured'
-    # MK: security audit — block SSRF-prone URL schemes
-    _blocked = ('file://', 'http://localhost', 'http://127.', 'http://0.', 'http://[::1]', 'http://10.', 'http://172.', 'http://192.168.')
+    # NS Jul 2026 (CodeAnt SSRF) — the prefix blocklist missed decimal/hex/IPv6/metadata-by-
+    # hostname encodings; run the real SSRF guard on http(s) apprise targets (other apprise
+    # schemes like discord://, tgram:// go to provider APIs, not arbitrary IPs, so leave them).
+    from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
     try:
         ap = apprise.Apprise()
         for u in urls:
-            if any(u.lower().startswith(b) for b in _blocked):
-                logging.warning(f"[Notifications] Blocked SSRF-prone apprise URL: {u[:50]}")
+            _ul = str(u).lower()
+            if _ul.startswith('file://'):
+                logging.warning("[Notifications] Blocked file:// apprise URL")
                 continue
+            if _ul.startswith(('http://', 'https://')):
+                try:
+                    sanitize_outbound_url(u, allowed_schemes=('http', 'https'), allow_private=False)
+                except SsrfError as _se:
+                    logging.warning(f"[Notifications] Blocked SSRF apprise URL: {_se}")
+                    continue
             ap.add(u)
         ok = ap.notify(
             title=f"PegaProx: {alert_data.get('alert_name', 'Alert')}",

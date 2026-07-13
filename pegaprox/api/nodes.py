@@ -1479,6 +1479,13 @@ def _safe_repo_url(u, default):
     u = (u or '').strip() or default
     if len(u) > 300 or not re.match(r'^https?://[A-Za-z0-9._~:/\-]+$', u):
         raise ValueError(f'unsafe repo/key url: {u[:60]}')
+    # NS Jul 2026 (CodeAnt SSRF) — this URL is curl'd / apt-fetched inside a ROOT bash script on
+    # the node; the charset check alone still allows internal/metadata IPs. Gate it (allow_private
+    # keeps internal package mirrors working; cloud-metadata endpoints stay blocked).
+    from pegaprox.utils.url_security import is_safe_outbound_url
+    _ok, _why = is_safe_outbound_url(u, allowed_schemes=('http', 'https'), allow_private=True)
+    if not _ok:
+        raise ValueError(f'repo/key url rejected by SSRF guard: {_why}')
     return u
 
 STARLVM_INSTALL_SCRIPT = """#!/usr/bin/env bash

@@ -90,6 +90,22 @@ def _row_to_target(row):
         settings = json.loads(row['settings'] or '{}')
     except Exception:
         settings = {}
+    # NS Jul 2026 (CodeAnt data-exposure) — SIEM target settings can hold auth secrets
+    # (token/password/api_key/secret/Authorization header); mask them before returning to the
+    # UI so a siem.view holder can't read the raw credential back out.
+    if isinstance(settings, dict):
+        _SECRET_KEYS = ('token', 'password', 'api_key', 'apikey', 'secret', 'auth', 'authorization')
+        def _mask(d):
+            out = {}
+            for k, v in d.items():
+                if isinstance(v, dict):
+                    out[k] = _mask(v)
+                elif v and any(s in str(k).lower() for s in _SECRET_KEYS):
+                    out[k] = '********'
+                else:
+                    out[k] = v
+            return out
+        settings = _mask(settings)
     return {
         'id': row['id'],
         'name': row['name'],

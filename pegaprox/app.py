@@ -180,11 +180,10 @@ def create_app():
         if (request.method in ('POST', 'PUT', 'PATCH', 'DELETE')
                 and request.path.startswith('/api/')
                 and request.path not in _CSRF_EXEMPT):
-            content_type = request.content_type or ''
-            sensitive = ('multipart/form-data' in content_type
-                         or 'application/json' in content_type
-                         or 'application/x-www-form-urlencoded' in content_type)
-            if sensitive:
+            # NS Jul 2026 (CodeAnt CSRF) — the CSRF check must run for EVERY state-changing
+            # non-exempt /api/* request, not only JSON/form bodies: a cross-site form with
+            # enctype=text/plain is a browser "simple request" that previously skipped this gate.
+            if True:
                 has_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
                 origin = request.headers.get('Origin', '')
                 referer = request.headers.get('Referer', '')
@@ -310,7 +309,9 @@ def create_app():
         # match the X-Frame-Options switch above. This is the modern equivalent.
         csp = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+            # NS Jul 2026 (CodeAnt config) — 'unsafe-eval' dropped: Babel is pre-compiled at build
+            # time (web/Dev/build.sh) and never runs in the browser, so nothing needs eval().
+            "script-src 'self' 'unsafe-inline' "
                 "https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline' "
                 "https://fonts.googleapis.com https://cdn.jsdelivr.net; "
@@ -1187,7 +1188,12 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
                     if fwd_proto == 'https' and _is_trusted_proxy(addr[0]):
                         continue
 
-                    redirect_host = host_header or 'localhost'
+                    # NS Jul 2026 (CodeAnt http-response-splitting) — host_header is untrusted;
+                    # strip CR/LF + reject non-hostname chars before it can reach the Location header.
+                    import re as _re
+                    redirect_host = (host_header or 'localhost').split('/')[0].strip()
+                    if not _re.match(r'^[A-Za-z0-9._\-\[\]:]+$', redirect_host):
+                        redirect_host = 'localhost'
                     if domain:
                         if ':' in domain and not domain.startswith('['):
                             redirect_host = domain.rsplit(':', 1)[0]
@@ -1478,6 +1484,13 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                         else:
                             host = host_value
                         break
+
+                # NS Jul 2026 (CodeAnt http-response-splitting) — the Host header is untrusted;
+                # reject non-hostname chars before it can reach the Location header (open-redirect
+                # / header injection). A configured _redirect_domain (below) always wins.
+                import re as _re
+                if not _re.match(r'^[A-Za-z0-9._\-\[\]:]+$', host or ''):
+                    host = 'localhost'
 
                 if self._redirect_domain:
                     d = self._redirect_domain
