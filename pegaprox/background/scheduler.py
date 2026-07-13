@@ -8,6 +8,7 @@ import os
 import time
 import json
 import logging
+from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
 import threading
 import uuid
 from datetime import datetime, timedelta
@@ -169,7 +170,7 @@ def execute_scheduled_task(task):
         return
     
     manager = cluster_managers[cluster_id]
-    logging.info(f"Executing scheduled task: {task.get('name')} - {action} on {target_type}/{target_id}")
+    logging.info(f"Executing scheduled task: {_sl(task.get('name'))} - {action} on {target_type}/{target_id}")
     
     try:
         if action == 'start':

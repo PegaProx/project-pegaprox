@@ -1955,7 +1955,7 @@ def update_ha_config(cluster_id):
                 try:
                     manager.logger.info("[HA] ═══════════════════════════════════════════════════════")
                     manager.logger.info("[HA] AUTO-INSTALLING NODE AGENTS FOR STORAGE HEARTBEAT")
-                    manager.logger.info(f"[HA] Storage path: {data['storage_heartbeat_path']}")
+                    manager.logger.info(f"[HA] Storage path: {_sl(data['storage_heartbeat_path'])}")
                     manager.logger.info("[HA] ═══════════════════════════════════════════════════════")
                     results = manager._ha_install_agents_on_all_nodes()
                     success_count = sum(1 for v in results.values() if v)

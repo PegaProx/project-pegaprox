@@ -6,6 +6,7 @@ import sys
 import json
 import time
 import logging
+from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
 import threading
 import uuid
 import hashlib
@@ -3455,7 +3456,7 @@ def vm_action_api(cluster_id, node, vm_type, vmid, action):
         if request.is_json and request.data:
             data = request.get_json(silent=True) or {}
             force = data.get('force', False)
-            logging.info(f"[VM-ACTION] Force parameter: {force}, raw data: {request.data}")
+            logging.info(f"[VM-ACTION] Force parameter: {_sl(force)}, raw data: {request.data}")
     except Exception as e:
         logging.warning(f"[VM-ACTION] Error parsing body: {e}")
     
@@ -8650,7 +8651,9 @@ async def ssh_handler(websocket):
     prefetched_ip = query.get('ip', [None])[0]  # IP pre-fetched by frontend
     if prefetched_ip:
         prefetched_ip = unquote(prefetched_ip)
-        print(f"Frontend provided IP: {prefetched_ip}")
+        # NS Jul 2026 (CodeAnt CWE-117) — prefetched_ip is unquoted user input; strip CR/LF so
+        # it can't forge log lines (self-contained: this runs in the standalone WS subprocess).
+        print("Frontend provided IP: " + str(prefetched_ip).replace(chr(10), ' ').replace(chr(13), ' '))
 
     # NS May 2026 — accept both shell and termproxy paths.
     # termproxy: /api/clusters/<cid>/vms/<node>/<vm_type>/<vmid>/termwebsocket
@@ -9074,7 +9077,9 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
     # Connect to PVE WS — Cookie uses session auth ticket; URL uses termproxy ticket.
     pve_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid_str}/vncwebsocket?port={pve_port}&vncticket={quote_plus(pve_ticket)}"
     pve_url = f"wss://{pve_host}:8006{pve_path}"
-    print(f"[TERMPROXY] connecting to PVE: {pve_url}")
+    # NS Jul 2026 (CodeAnt sensitive-data-in-url) — never log the vncticket (a live PVE console
+    # credential in the query string); redact it (self-contained: runs in the WS subprocess).
+    print("[TERMPROXY] connecting to PVE: " + pve_url.split('vncticket=')[0] + "vncticket=[REDACTED]")
     # MK 2026-06-04: TLS verify is gated by the per-cluster ssl_verify flag
     # (exposed via /api/internal/cluster-creds as `verify_pve_tls`). Default
     # is False because PVE ships self-signed certs by default; admins flip

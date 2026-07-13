@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import logging
+from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
 import threading
 import re
 from datetime import datetime
@@ -1016,7 +1017,7 @@ def serve_static(filename):
 @bp.route('/config/<path:filename>')
 def block_config_access(filename):
     """Block any attempt to access config files via HTTP"""
-    logging.warning(f"Blocked attempt to access config file: {filename} from {request.remote_addr}")
+    logging.warning(f"Blocked attempt to access config file: {_sl(filename)} from {request.remote_addr}")
     return jsonify({'error': 'Access denied'}), 403
 
 @bp.route('/config')
@@ -1466,10 +1467,10 @@ def update_server_settings():
             
             # NS: Feb 2026 - Log incoming LDAP data for debugging save issues
             if any(k in data for k in ldap_keys):
-                logging.info(f"[LDAP] Incoming save data: server='{data.get('ldap_server', '<missing>')}', "
-                           f"base_dn='{data.get('ldap_base_dn', '<missing>')}', "
-                           f"enabled={data.get('ldap_enabled', '<missing>')}, "
-                           f"bind_dn='{data.get('ldap_bind_dn', '<missing>')}'")
+                logging.info(f"[LDAP] Incoming save data: server='{_sl(data.get('ldap_server', '<missing>'))}', "
+                           f"base_dn='{_sl(data.get('ldap_base_dn', '<missing>'))}', "
+                           f"enabled={_sl(data.get('ldap_enabled', '<missing>'))}, "
+                           f"bind_dn='{_sl(data.get('ldap_bind_dn', '<missing>'))}'")
             
             for key, transform in ldap_keys.items():
                 if key in data:
@@ -2390,7 +2391,7 @@ def restore_config():
         if not backup_file.filename:
             return jsonify({'error': 'No backup file selected'}), 400
         
-        logging.debug(f"[Restore] Processing file: {backup_file.filename}")
+        logging.debug(f"[Restore] Processing file: {_sl(backup_file.filename)}")
         
         # Read and decrypt
         encrypted_data = backup_file.read()

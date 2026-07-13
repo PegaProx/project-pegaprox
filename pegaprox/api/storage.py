@@ -5,6 +5,7 @@ import os
 import json
 import time
 import logging
+from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
 import threading
 import uuid
 import hashlib
@@ -2312,7 +2313,7 @@ def download_from_url(cluster_id, node, storage):
                 download_data['checksum-algorithm'] = algo
                 download_data['checksum'] = hash_value
         
-        logging.info(f"Downloading {url} as {filename} to {storage}")
+        logging.info(f"Downloading {_sl(url)} as {_sl(filename)} to {_sl(storage)}")
         resp = manager._create_session().post(download_url, data=download_data, timeout=60)
         
         if resp.status_code == 200:
