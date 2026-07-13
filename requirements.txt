@@ -5,7 +5,7 @@
 # NS May 2026 — Flask 3.x floor: pulls werkzeug 3.x which patches the RCE
 # in 2.2.3 (debugger pin bypass). Verified no removed-in-3 APIs in our code
 # (no before_first_request, no JSONEncoder direct use, no _app_ctx_stack).
-flask>=3.0.3  # NS: werkzeug 3.0.3 RCE fix transit; CVE-2023-30861 long since fixed
+flask>=3.1.3  # NS: werkzeug 3.0.3 RCE fix transit; NS Jul 2026 — 3.1.3 patches CVE-2026-27205 (session cache info-disclosure, missing Vary:Cookie)
 # MK May 2026 — flask-cors 6.0.0 fixes 3 CVEs incl. CVE-2024-6221 (improper case
 # handling in Origin allowlist) + CVE-2024-6839/-6844 (source verification +
 # origin validation). Pre-6 versions are scanner-flagged High.

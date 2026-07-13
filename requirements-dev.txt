@@ -1,4 +1,6 @@
 # Dev / test-only dependencies (NOT needed at runtime — do not ship in the appliance).
 # Install:  pip install -r requirements-dev.txt
 # Run:      python -m pytest
-pytest>=8.0
+# NS Jul 2026 — >=9.0.3 patches CVE-2025-71176 (insecure /tmp/pytest-of-{user} tmpdir,
+# TOCTOU local priv-esc/DoS). Dev/CI-only; never ships in the appliance.
+pytest>=9.0.3
