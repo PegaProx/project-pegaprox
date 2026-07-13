@@ -362,6 +362,8 @@ Full documentation is available at **[docs.pegaprox.com](https://docs.pegaprox.c
 
 This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE) file for details.
 
+**Attribution (AGPL §7b):** Under Section 7(b) of the AGPL, the **"Powered by PegaProx"** attribution shown in the client portal is a *required* author attribution and must be preserved in every copy and modified/derivative version — see the [NOTICE](NOTICE) file. Note also that AGPL §13 requires anyone hosting a **modified** version for network users to publish that version's complete source to those users. PegaProx is AGPL-3.0 only — the attribution applies to everyone, without exception.
+
 ## 💬 Support
 
 - 💬 Discord: [Community Server](https://discord.gg/AJPf3H62QW)

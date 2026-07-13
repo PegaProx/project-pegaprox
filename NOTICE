@@ -1,0 +1,53 @@
+PegaProx — NOTICE
+=================
+
+Copyright (C) 2025-2026 PegaProx Team and contributors.
+
+PegaProx is free software licensed under the GNU Affero General Public License,
+version 3 (AGPL-3.0). The full license text is in the LICENSE file and at
+https://www.gnu.org/licenses/agpl-3.0.html.
+
+
+--------------------------------------------------------------------------------
+ADDITIONAL TERMS (Section 7 of the GNU AGPL v3)
+--------------------------------------------------------------------------------
+
+Pursuant to Section 7(b) of the GNU Affero General Public License, version 3,
+the following additional term applies to the Program and to every modified or
+derivative version of it:
+
+  ATTRIBUTION. You must retain, and must not remove, hide, obscure, disable, or
+  alter, the "Powered by PegaProx" author attribution and its accompanying legal
+  notice that the Program displays in its client portal user interface (and any
+  functionally equivalent attribution the Program displays elsewhere in its user
+  interface). The attribution must remain visible, legible, and functional —
+  including the link to https://pegaprox.com and the accompanying copyright,
+  source-code, and license references — in every copy you convey and in every
+  instance you make available to users over a network (see Section 13 below),
+  whether or not the Program has been modified.
+
+  This "Powered by PegaProx" attribution is a reasonable author attribution and
+  legal notice within the meaning of Section 7(b), and forms part of the
+  "Appropriate Legal Notices" of the Program.
+
+Removing, hiding, disabling, or replacing this attribution — for example, so that
+a hosted client panel no longer displays "Powered by PegaProx" — is a violation
+of this license.
+
+
+--------------------------------------------------------------------------------
+REMINDER — Section 13 (Remote Network Interaction)
+--------------------------------------------------------------------------------
+
+Independently of the attribution term above, Section 13 of the AGPL-3.0 requires
+that if you run a modified version of this Program and make it available to users
+over a computer network, you must offer those users access to the Corresponding
+Source of your modified version, free of charge, through a network server.
+
+In practice this means: if you modify PegaProx (including by editing or removing
+its branding) and host it for others to use, you must publish the complete source
+of your modified version to those users.
+
+PegaProx is distributed under the AGPL-3.0 only; there is no separate proprietary
+or "white-label" license. The attribution above therefore applies to every user
+of PegaProx without exception. Licensing questions: https://pegaprox.com.
