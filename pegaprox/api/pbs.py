@@ -21,8 +21,23 @@ bp = Blueprint('pbs', __name__)
 @require_auth(perms=['pbs.view'])
 def list_pbs_servers():
     """List all configured PBS servers"""
+    # NS Jul 2026 (CodeAnt IDOR) — scope the listing to PBS servers the caller can reach.
+    # Unfiltered enumeration here is what made the per-route PBS BOLA trivial to exploit.
+    # Mirrors check_pbs_access semantics but also covers disabled (DB-only) servers.
+    from pegaprox.utils.auth import load_users as _load_users
+    from pegaprox.utils.rbac import get_user_clusters as _guc
+    from pegaprox.models.permissions import ROLE_ADMIN as _RA
+    _lu = _load_users().get(request.session.get('user', ''), {})
+    _uc = _guc(_lu)  # None => all clusters (admin / default tenant)
+    def _pbs_visible(linked):
+        if _lu.get('role') == _RA or _uc is None:
+            return True
+        linked = linked or []
+        return (not linked) or any(c in _uc for c in linked)
     result = []
     for pbs_id, mgr in pbs_managers.items():
+        if not _pbs_visible(getattr(mgr, 'linked_clusters', None)):
+            continue
         info = mgr.to_dict()
         # Include quick status if connected
         if mgr.connected and mgr.last_status:
@@ -48,6 +63,8 @@ def list_pbs_servers():
                     linked = json.loads(row_dict.get('linked_clusters', '[]') or '[]')
                 except Exception:
                     pass
+                if not _pbs_visible(linked):
+                    continue
                 result.append({
                     'id': row_dict['id'],
                     'name': row_dict['name'],
@@ -277,6 +294,10 @@ def get_pbs_status(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_apt_updates(pbs_id):
     """List available APT updates on PBS server"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -291,6 +312,10 @@ def get_pbs_apt_updates(pbs_id):
 @bp.route('/api/pbs/<pbs_id>/apt/refresh', methods=['POST'])
 @require_auth(perms=['pbs.view'])
 def refresh_pbs_apt(pbs_id):
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -334,6 +359,10 @@ def start_pbs_update(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_update_status(pbs_id):
     """Get current PBS update status"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -604,6 +633,10 @@ def pbs_delete_snapshot(pbs_id, store):
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_tasks(pbs_id):
     """List PBS tasks"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -619,6 +652,10 @@ def get_pbs_tasks(pbs_id):
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_task_detail(pbs_id, upid):
     """Get task status and log"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -634,6 +671,10 @@ def get_pbs_task_detail(pbs_id, upid):
 @require_auth(perms=['pbs.jobs.view'])
 def get_pbs_jobs(pbs_id):
     """List all PBS jobs (sync, verify, prune)"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -681,6 +722,10 @@ def run_pbs_job(pbs_id, job_type, job_id):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_namespaces(pbs_id, store):
     """List namespaces in a datastore"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -692,6 +737,10 @@ def get_pbs_namespaces(pbs_id, store):
 @require_auth(perms=['pbs.disks.view'])
 def get_pbs_disks(pbs_id):
     """List disks on PBS server"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -703,6 +752,10 @@ def get_pbs_disks(pbs_id):
 @require_auth(perms=['pbs.view'])
 def get_pbs_remotes(pbs_id):
     """List configured remotes"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -725,6 +778,10 @@ def get_pbs_subscription(pbs_id):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_datastore_rrd(pbs_id, store):
     """Get RRD performance data for a datastore"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -740,6 +797,10 @@ def get_pbs_datastore_rrd(pbs_id, store):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_snapshot_notes(pbs_id, store):
     """Get notes for a specific snapshot"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -781,6 +842,10 @@ def set_pbs_snapshot_notes(pbs_id, store):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_group_notes(pbs_id, store):
     """Get notes for a backup group"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -905,6 +970,10 @@ def get_pbs_notifications(pbs_id):
 @require_auth(perms=['pbs.snapshot.browse'])
 def browse_pbs_catalog(pbs_id, store):
     """Browse file catalog of a backup snapshot"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -923,6 +992,10 @@ def browse_pbs_catalog(pbs_id, store):
 @require_auth(perms=['pbs.snapshot.browse'])
 def download_pbs_file(pbs_id, store):
     """Download a file from a backup snapshot (file-level restore)"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -962,6 +1035,10 @@ def download_pbs_file(pbs_id, store):
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_datastore_config(pbs_id, store):
     """Get datastore configuration (retention, GC schedule, notifications, etc.)"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1421,6 +1498,10 @@ def delete_pbs_traffic_control_rule(pbs_id, name):
 @require_auth(perms=['pbs.disks.smart'])
 def get_pbs_disk_smart(pbs_id, disk):
     """Get SMART data for a disk"""
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_disk_smart(disk)
@@ -1566,6 +1647,10 @@ def get_pbs_reports_summary(pbs_id):
     Query params:
       days      time window (default 30, max 365)
     """
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1709,6 +1794,10 @@ def get_pbs_reports_inventory(pbs_id):
       days=0         filter to snapshots newer than N days (0 = no filter)
       protected=1    only protected snapshots
     """
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1767,6 +1856,10 @@ def get_pbs_reports_protected_vms(pbs_id):
       days=7       a VM counts as protected if its most recent snapshot is
                    within this window. Older ones land in 'stale'.
     """
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -2789,6 +2882,10 @@ def diff_pbs_backups(pbs_id):
     (filenames + sizes + crypt-mode); good enough for "what changed in
     the .conf file" and "is the disk-image size deviating".
     """
+    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS not found'}), 404
     pbs = pbs_managers[pbs_id]
