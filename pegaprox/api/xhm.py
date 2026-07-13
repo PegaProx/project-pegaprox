@@ -193,13 +193,22 @@ def xhm_start():
 
 @bp.route('/api/xhm/migrations', methods=['GET'])
 @require_auth(perms=['vm.migrate'])
+def _xhm_reachable(t):
+    # NS Jul 2026 (CodeAnt IDOR) — show a migration only if the caller reaches one of its clusters.
+    from pegaprox.api.helpers import check_cluster_access
+    cids = [c for c in (getattr(t, 'target_cluster', None), getattr(t, 'source_cluster', None)) if c]
+    return (not cids) or any(check_cluster_access(c)[0] for c in cids)
+
+
 def xhm_list():
-    return jsonify([t.to_dict() for t in _xhm_migrations.values()])
+    return jsonify([t.to_dict() for t in _xhm_migrations.values() if _xhm_reachable(t)])
 
 
 @bp.route('/api/xhm/migrations/<mid>', methods=['GET'])
 @require_auth(perms=['vm.migrate'])
 def xhm_detail(mid):
     if mid not in _xhm_migrations:
+        return jsonify({'error': 'Migration not found'}), 404
+    if not _xhm_reachable(_xhm_migrations[mid]):
         return jsonify({'error': 'Migration not found'}), 404
     return jsonify(_xhm_migrations[mid].to_dict())

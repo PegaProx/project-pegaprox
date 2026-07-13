@@ -1126,9 +1126,16 @@ def start_vmware_migration(vmware_id, vm_id):
 
 @bp.route('/api/vmware/migrations', methods=['GET'])
 @require_auth(perms=['vmware.vm.migrate'])
+def _migration_reachable(t):
+    # NS Jul 2026 (CodeAnt IDOR) — a caller may see a migration only if they can reach one of the
+    # clusters it touches (source or target). Tasks with no determinable cluster are shown.
+    cids = [c for c in (getattr(t, 'target_cluster', None), getattr(t, 'source_cluster', None)) if c]
+    return (not cids) or any(check_cluster_access(c)[0] for c in cids)
+
+
 def list_vmware_migrations():
     """List all active and recent migrations"""
-    return jsonify([t.to_dict() for t in _vmware_migrations.values()])
+    return jsonify([t.to_dict() for t in _vmware_migrations.values() if _migration_reachable(t)])
 
 
 @bp.route('/api/vmware/migrations/<mid>', methods=['GET'])
@@ -1136,6 +1143,8 @@ def list_vmware_migrations():
 def get_vmware_migration_status(mid):
     """Get detailed status of a specific migration"""
     if mid not in _vmware_migrations:
+        return jsonify({'error': 'Migration not found'}), 404
+    if not _migration_reachable(_vmware_migrations[mid]):
         return jsonify({'error': 'Migration not found'}), 404
     return jsonify(_vmware_migrations[mid].to_dict())
 
