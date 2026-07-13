@@ -31,6 +31,9 @@ import time
 import base64
 import logging
 import urllib.parse
+import urllib.request  # NS Jul 2026 — module-level `class _NoRedirect(urllib.request...)` needs
+                       # this explicitly; `import urllib.parse` alone doesn't load urllib.request,
+                       # so a fresh import order (CI) hit AttributeError before something else did.
 from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request
 from concurrent.futures import ThreadPoolExecutor
