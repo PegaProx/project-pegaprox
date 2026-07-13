@@ -9746,7 +9746,12 @@ def remote_migrate_vm_api(cluster_id, node, vm_type, vmid):
         return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
+    # NS Jul 2026 (route-authz contract) — cross-cluster migrate is state-changing on
+    # this VM; gate it per-VM like the local migrate/clone routes (was missing).
+    denied = _require_vm_access(cluster_id, vmid, 'vm.migrate', vm_type)
+    if denied: return denied
+
     manager = cluster_managers[cluster_id]
     data = request.json or {}
     
