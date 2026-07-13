@@ -397,6 +397,22 @@ def _execute_drill(drill_id):
 
 # ── Endpoints ────────────────────────────────────────────────────────────
 
+def _require_plan_access(plan_row):
+    """NS Jul 2026 (CodeAnt IDOR) — DR-drill endpoints only had a role perm and never checked
+    that the caller can reach the plan's clusters, so any site_recovery.* holder could drill /
+    read another tenant's plan. Deny unless the caller reaches BOTH the source and target
+    cluster (mirrors site_recovery.py). Returns an error response tuple, or None if allowed."""
+    from pegaprox.api.helpers import check_cluster_access
+    pd = dict(plan_row) if plan_row is not None else {}
+    for cid in (pd.get('source_cluster'), pd.get('target_cluster')):
+        if not cid:
+            continue
+        ok, err = check_cluster_access(cid)
+        if not ok:
+            return err
+    return None
+
+
 @bp.route('/api/site-recovery/plans/<plan_id>/drill', methods=['POST'])
 @require_auth(perms=['site_recovery.failover'])
 def start_drill(plan_id):
@@ -406,6 +422,9 @@ def start_drill(plan_id):
     plan = c.fetchone()
     if not plan:
         return jsonify({'error': 'plan not found'}), 404
+    denied = _require_plan_access(plan)
+    if denied:
+        return denied
     drill_id = uuid.uuid4().hex[:12]
     user = _current_user()
     try:
@@ -434,6 +453,9 @@ def get_drill(drill_id):
         drow = c.fetchone()
         if not drow:
             return jsonify({'error': 'not found'}), 404
+        c.execute('SELECT source_cluster, target_cluster FROM site_recovery_plans WHERE id = ?', (drow['plan_id'],))
+        if _require_plan_access(c.fetchone()):
+            return jsonify({'error': 'not found'}), 404   # 404, not 403 — don't confirm existence
         c.execute('SELECT * FROM dr_drill_checks WHERE drill_id = ? ORDER BY sequence ASC', (drill_id,))
         checks = [dict(r) for r in c.fetchall()]
         d = dict(drow)
@@ -449,6 +471,9 @@ def get_drill(drill_id):
 def list_drills(plan_id):
     try:
         c = get_db().conn.cursor()
+        c.execute('SELECT source_cluster, target_cluster FROM site_recovery_plans WHERE id = ?', (plan_id,))
+        if _require_plan_access(c.fetchone()):
+            return jsonify({'error': 'not found'}), 404   # 404, not 403 — don't confirm existence
         c.execute('''SELECT id, started_at, finished_at, status, summary,
                      pass_count, warn_count, fail_count, started_by,
                      rpo_breach_seconds, estimated_rto_seconds

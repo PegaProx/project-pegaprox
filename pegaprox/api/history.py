@@ -23,7 +23,16 @@ bp = Blueprint('history', __name__)
 @require_auth(perms=['cluster.view'])
 def get_scheduled_tasks():
     """Get all scheduled tasks"""
-    return jsonify(load_scheduled_tasks())
+    config = load_scheduled_tasks()
+    # NS Jul 2026 (CodeAnt IDOR) — scope the task list to the caller's reachable clusters
+    # (was returning every tenant's scheduled tasks to any cluster.view holder).
+    from pegaprox.utils.rbac import get_user_clusters
+    from flask import g as _g
+    _allowed = get_user_clusters(getattr(_g, 'current_user', None) or {})
+    if _allowed is not None:
+        config = dict(config)
+        config['tasks'] = [t for t in config.get('tasks', []) if t.get('cluster_id') in _allowed]
+    return jsonify(config)
 
 @bp.route('/api/scheduled-tasks', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -241,7 +250,14 @@ def get_migration_history():
         migrations = [m for m in migrations if m.get('cluster_id') == cluster_id]
     if vmid:
         migrations = [m for m in migrations if str(m.get('vmid')) == str(vmid)]
-    
+
+    # NS Jul 2026 (CodeAnt IDOR) — scope the global migration log to the caller's clusters.
+    from pegaprox.utils.rbac import get_user_clusters
+    from flask import g as _g
+    _allowed = get_user_clusters(getattr(_g, 'current_user', None) or {})
+    if _allowed is not None:
+        migrations = [m for m in migrations if m.get('cluster_id') in _allowed]
+
     return jsonify(migrations[:limit])
 
 @bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/migration-history', methods=['GET'])
@@ -380,7 +396,19 @@ def get_affinity_rules(cluster_id=None):
     """Get affinity rules, optionally filtered by cluster"""
     config = load_affinity_rules()
     if cluster_id:
+        # NS Jul 2026 (CodeAnt IDOR) — path-scoped alias: enforce cluster access.
+        ok, err = check_cluster_access(cluster_id)
+        if not ok:
+            return err
         config['rules'] = [r for r in config['rules'] if r.get('cluster_id') == cluster_id]
+    else:
+        # NS Jul 2026 (CodeAnt IDOR) — scope the unfiltered list to reachable clusters.
+        from pegaprox.utils.rbac import get_user_clusters
+        from flask import g as _g
+        _allowed = get_user_clusters(getattr(_g, 'current_user', None) or {})
+        if _allowed is not None:
+            config = dict(config)
+            config['rules'] = [r for r in config.get('rules', []) if r.get('cluster_id') in _allowed]
     return jsonify(config)
 
 @bp.route('/api/affinity-rules', methods=['POST'])

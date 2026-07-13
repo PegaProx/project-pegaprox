@@ -519,7 +519,16 @@ def delete_cluster_affinity_rule(cluster_id, rule_id):
 @require_auth(perms=['cluster.view'])
 def get_alerts():
     """Get all alert configurations"""
-    return jsonify(load_alerts_config())
+    cfg = load_alerts_config()
+    # NS Jul 2026 (CodeAnt IDOR) — scope alert configs to the caller's reachable clusters
+    # (was exposing every tenant's alert rules — names, cluster/VM targets — to any viewer).
+    from pegaprox.utils.rbac import get_user_clusters
+    from flask import g as _g
+    _allowed = get_user_clusters(getattr(_g, 'current_user', None) or {})
+    if _allowed is not None:
+        cfg = dict(cfg)
+        cfg['alerts'] = [a for a in cfg.get('alerts', []) if a.get('cluster_id') in _allowed]
+    return jsonify(cfg)
 
 @bp.route('/api/alerts', methods=['POST'])
 @require_auth(perms=['alert.manage'])
