@@ -66,3 +66,15 @@ def test_clusterless_system_alert_reaches_all(api, seed, monkeypatch):
                          'severity': 'info', 'cluster_id': ''})
     for u in ('alice', 'bob', 'root'):
         assert u in delivered        # no cluster => not tenant-scoped
+
+
+def test_ghost_subscriber_fails_closed(api, seed, monkeypatch):
+    # CodeAnt re-scan: a subscription whose user record is MISSING/DELETED (still in
+    # push_subscriptions) must NOT be treated as an all-cluster admin and receive every
+    # tenant's alerts — it must fail CLOSED.
+    delivered = _setup(api, seed, monkeypatch)
+    _subscribe(seed.db, 'ghost')   # 'ghost' is NOT in the load_users map (deleted user)
+    push._alert_handler({'alert_name': 'CPU', 'message': '95%', 'severity': 'warning',
+                         'cluster_id': 'cluster_1'})
+    assert 'ghost' not in delivered   # missing record => no cluster-scoped alert (fail closed)
+    assert 'alice' in delivered       # a real tenant-a user still gets it

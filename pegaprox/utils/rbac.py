@@ -937,7 +937,25 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
                 vm_perms = vm_acl.get('permissions', [])
                 return permission in vm_perms
     
-    # No VM-specific ACL - use general permissions
+    # No VM-specific ACL — fall back to the general role permission, BUT gate it by the VMware
+    # server's tenant reach first. NS Jul 2026 (CodeAnt BOLA) — this fallback previously granted
+    # ANY vmware.vm.* holder access to EVERY VMware server's VMs regardless of tenant (the Proxmox
+    # user_can_access_vm has the equivalent guard at ~853; the VMware path was missing it). Mirror
+    # check_pbs_access: admin already returned above; an unlinked server stays backward-compat open;
+    # otherwise require the caller to reach one of the server's linked clusters.
+    try:
+        from pegaprox.globals import vmware_managers
+        _mgr = vmware_managers.get(vmware_id)
+        _linked = (getattr(_mgr, 'linked_clusters', None) or []) if _mgr else []
+        if _linked:
+            _uc = get_user_clusters(user)   # None => all clusters (admin/default-tenant)
+            if _uc is not None and not any(c in _uc for c in _linked):
+                logging.debug(f"[VMWARE-ACL] {username} cannot reach any linked cluster of {vmware_id} → deny {permission}")
+                return False
+    except Exception as _e:
+        logging.error(f"[VMWARE-ACL] tenant-gate error for {vmware_id}: {_e}")
+
+    # No VM-specific ACL - use general permissions (now tenant-gated)
     return has_permission(user, permission)
 
 

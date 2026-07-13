@@ -485,6 +485,14 @@ def set_user_perms(username):
                   f"Changed tenant permissions for {username} in {tenant_id}")
     else:
         # global permissions (old behavior)
+        # NS Jul 2026 (CodeAnt priv-esc) — GLOBAL permissions may ONLY be set by a GLOBAL admin.
+        # admin.users alone (which a tenant-scoped admin can hold) gated the tenant branch above
+        # but NOT this one, so a tenant admin could grant themselves/anyone global admin-equivalent
+        # perms. Mirror the tenant-branch check: non-global-admins are confined to tenant_permissions.
+        if request.session.get('role') != ROLE_ADMIN:
+            log_audit(request.session.get('user', ''), 'security.global_perms_denied',
+                      f"Denied setting GLOBAL permissions for {username} (caller is not a global admin)")
+            return jsonify({'error': 'Access denied: only a global admin may set global permissions'}), 403
         extra = data.get('permissions', [])
         denied = data.get('denied_permissions', [])
         

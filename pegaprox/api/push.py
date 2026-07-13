@@ -367,12 +367,21 @@ def _alert_handler(alert_data: dict):
         _all_users = load_users()
         for u in users:
             if cid:
+                # NS Jul 2026 (CodeAnt re-scan — fail-open fix) — a subscriber whose user record
+                # is MISSING/DELETED (still has a push_subscription row) previously reconstructed
+                # to {} -> get_user_clusters({}) -> None -> treated as all-cluster admin -> received
+                # EVERY tenant's alerts. Fail CLOSED: an unknown/deleted/tenant-less subscriber gets
+                # no cluster-scoped alert. (get_user_clusters returns None only for a *real* admin/
+                # default-tenant record, not for a missing one.)
+                urec = _all_users.get(u)
+                if not urec:
+                    continue
                 try:
-                    udict = dict(_all_users.get(u) or {})
+                    udict = dict(urec)
                     udict['username'] = u
-                    allowed = get_user_clusters(udict)   # None => all clusters (admin/default)
+                    allowed = get_user_clusters(udict)   # None => all clusters (real admin/default-tenant)
                 except Exception:
-                    allowed = []                          # fail closed — never leak on error
+                    continue                              # fail closed — never leak on error
                 if allowed is not None and cid not in allowed:
                     continue
             _push_to_inbox(u, title, body, sev, url, tag)
