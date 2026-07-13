@@ -96,7 +96,10 @@ ldap3>=2.9.0
 
 # === OIDC JWT Verification ===
 # >=2.12 patches CVE-2026-32597
-PyJWT[crypto]>=2.12.0
+# NS Jul 2026 — >=2.13.0 patches CVE-2026-48522..48526 in PyJWKClient (used in
+# utils/oidc.py): SSRF/token-forgery via non-http jwks schemes (file://, ftp://,
+# data:), verifier-side algorithm allow-list bypass, and unbounded-JWKS-request DoS.
+PyJWT[crypto]>=2.13.0
 
 # === ESXi Migration (Optional) ===
 pyvmomi>=8.0.0
