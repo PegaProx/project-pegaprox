@@ -3676,8 +3676,12 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
     host, port = mgr.host, mgr.api_port
 
     ssl_ctx = _ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = _ssl.CERT_NONE
+    # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
+    # (default off: PVE ships self-signed; honoured when the admin enables it).
+    _verify_tls = bool(getattr(mgr, '_ssl_verify', False))
+    if not _verify_tls:
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
 
     # login → vncproxy ticket/port (same flow as vnc_poll)
     login_data = urllib.parse.urlencode({'username': mgr.config.user, 'password': mgr.config.pass_}).encode('utf-8')
@@ -3724,7 +3728,7 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
     try:
         pve_ws = ws_client.create_connection(
             pve_ws_url,
-            sslopt={"cert_reqs": _ssl.CERT_NONE},
+            sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
             header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:{port}"},
             timeout=timeout,
         )
@@ -3854,8 +3858,12 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         host, port = mgr.host, mgr.api_port
 
         ssl_ctx = _ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = _ssl.CERT_NONE
+        # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
+        # (default off: PVE ships self-signed; honoured when the admin enables it).
+        _verify_tls = bool(getattr(mgr, '_ssl_verify', False))
+        if not _verify_tls:
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = _ssl.CERT_NONE
 
         try:
             login_data = urllib.parse.urlencode({
@@ -3923,7 +3931,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         try:
             pve_ws = ws_client.create_connection(
                 pve_ws_url,
-                sslopt={"cert_reqs": _ssl.CERT_NONE},
+                sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
                 header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:{port}"},
                 timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
@@ -7384,8 +7392,12 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         
         # Create SSL context
         ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
+        # (default off: PVE ships self-signed; honoured when the admin enables it).
+        _verify_tls = bool(getattr(manager, '_ssl_verify', False))
+        if not _verify_tls:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
         
         # Step 1: Login
         print(f"Step 1: Login...")
@@ -7446,7 +7458,7 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
 
         pve_ws = websocket.create_connection(
             pve_ws_url,
-            sslopt={"cert_reqs": ssl.CERT_NONE},
+            sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
             header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
@@ -7740,8 +7752,12 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             import websocket as ws_client
 
             ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
+            # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
+            # (default off: PVE ships self-signed; honoured when the admin enables it).
+            _verify_tls = bool(getattr(manager, '_ssl_verify', False))
+            if not _verify_tls:
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
 
             # Login to Proxmox to get auth ticket
             login_data = urlencode({
@@ -7899,7 +7915,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             pve_ws = await _asyncio_for_connect.to_thread(
                 ws_client.create_connection,
                 pve_ws_url,
-                sslopt={"cert_reqs": ssl.CERT_NONE},
+                sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
                 header=ws_auth_header,
                 timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
@@ -8314,8 +8330,12 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         
         # Create SSL context
         ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
+        # (default off: PVE ships self-signed; honoured when the admin enables it).
+        _verify_tls = bool(getattr(manager, '_ssl_verify', False))
+        if not _verify_tls:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
         
         # Step 1: Login
         print(f"Step 1: Login...")
@@ -8376,7 +8396,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
 
         pve_ws = websocket.create_connection(
             pve_ws_url,
-            sslopt={"cert_reqs": ssl.CERT_NONE},
+            sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
             header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
@@ -8510,8 +8530,12 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
     import urllib.request as _urlreq
     from urllib.parse import urlencode as _urlencode
     ssl_ctx = _ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = _ssl.CERT_NONE
+    # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
+    # (default off: PVE ships self-signed; honoured when the admin enables it).
+    _verify_tls = bool(getattr(mgr, '_ssl_verify', False))
+    if not _verify_tls:
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
     host, port = mgr.host, mgr.api_port
 
     # Step 1: real PVE session login

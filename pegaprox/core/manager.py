@@ -10817,8 +10817,11 @@ echo "AGENT_INSTALLED_OK"
             import urllib.request as _ur
             from urllib.parse import urlencode as _ue
             ctx = _ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = _ssl.CERT_NONE
+            # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag,
+            # matching the VNC/termproxy paths (default off: PVE self-signed).
+            if not getattr(self, '_ssl_verify', False):
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
             req = _ur.Request(
                 f"https://{self.host}:{self.api_port}/api2/json/access/ticket",
                 data=_ue({'username': usr, 'password': pwd}).encode('utf-8'),
