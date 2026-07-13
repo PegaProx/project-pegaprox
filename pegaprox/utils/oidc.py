@@ -377,6 +377,17 @@ def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
             jwks_uri = endpoints.get('jwks', '')
 
             if jwks_uri:
+                # NS Jul 2026 (CodeAnt SSRF) — gate the JWKS URI before fetching keys from it.
+                # Return (fail closed) rather than raise: the outer except falls back to an
+                # UNVERIFIED decode, so a raise here would DOWNGRADE signature verification.
+                # allow_private=True keeps internal IdPs (RFC1918) working while cloud-metadata
+                # endpoints stay blocked (always) + control chars/bad schemes rejected.
+                from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+                try:
+                    sanitize_outbound_url(jwks_uri, allow_private=True)
+                except SsrfError as _se:
+                    logging.warning(f"[OIDC] jwks_uri rejected by SSRF guard: {_se}")
+                    return {'error': 'OIDC JWKS endpoint rejected by SSRF guard'}
                 if jwks_uri not in _jwks_clients:
                     _jwks_clients[jwks_uri] = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
 

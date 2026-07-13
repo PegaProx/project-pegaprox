@@ -403,6 +403,15 @@ def add_custom_template():
             or any(ord(c) < 0x20 or c in (' ', ';', '|', '&', '`', '$', '\n', '\t', '"', "'", '\\') for c in image_url)):
         return jsonify({'error': 'image_url must be a clean http(s) URL'}), 400
 
+    # NS Jul 2026 (CodeAnt SSRF) — the char check above blocks shell metachars but NOT SSRF;
+    # this URL is wget'd on the PVE node. Gate it (allow_private=True keeps internal/air-gapped
+    # image mirrors working while cloud-metadata endpoints stay blocked).
+    from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+    try:
+        sanitize_outbound_url(image_url, allowed_schemes=('https', 'http'), allow_private=True)
+    except SsrfError as _se:
+        return jsonify({'error': f'image_url rejected by SSRF guard: {_se}'}), 400
+
     # MK: keep IDs predictable + URL-safe so frontend keys don't break
     import re, secrets
     base = re.sub(r'[^a-z0-9-]+', '-', name.lower()).strip('-')[:40] or 'tpl'
