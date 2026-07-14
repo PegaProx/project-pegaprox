@@ -683,21 +683,22 @@ def _run_xcpng_to_pve(task):
             disk_key = f"disk-{idx}"
             task.log(f"Transferring {vdi['name'] or f'disk {idx}'} ({vdi['size']/(1024**3):.1f} GB)")
 
-            # stream from XCP-ng -> PVE node via SSH pipe
-            export_url = f"{host_url}/export_raw_vdi?session_id={session_ref}&vdi={vdi['uuid']}&format=raw"
+            # stream from XCP-ng -> PVE node via SSH pipe, with retry + resume-by-range.
+            # #546: a single transient break in the XCP-ng export_raw_vdi stream used to
+            # kill the whole multi-GB transfer (BrokenPipe surfaced from iter_content on
+            # the READ side). We now allocate the target volume ONCE and resume the export
+            # from the last byte written, freeing the partial volume if all attempts fail.
+            base_export_url = f"{host_url}/export_raw_vdi?vdi={vdi['uuid']}&format=raw"
 
-            try:
-                export_resp = _req.get(export_url, stream=True, verify=ssl_verify, timeout=30)
-                export_resp.raise_for_status()
-            except Exception as e:
-                task.set_phase('failed', f'Failed to start VDI export: {e}')
-                return
-
-            # NS Mar 2026: stream directly to storage volume via pvesm alloc + dd
-            # avoids /tmp temp files that blow up on small root partitions
             total = vdi['size']
             copied = 0
-            size_kb = max(1, total // 1024)
+            size_kb = max(1, (total + 1023) // 1024)  # round UP so an exact seek_bytes write can't ENOSPC
+            vol_id = ''
+            dev_path = ''
+            ssh = None
+            _MAX_ATTEMPTS = 5
+            pve_host = pve_user = pve_pass = pve_key = None
+            pve_port = 22
 
             try:
                 pve_host = _resolve_pve_node_ip(tgt_mgr, task.target_node)
@@ -713,14 +714,12 @@ def _run_xcpng_to_pve(task):
                 ssh = _connect_ssh(pve_host, pve_user, pve_pass,
                                    key_path=pve_key, port=pve_port)
 
-                # allocate volume on target storage
+                # allocate the target volume ONCE (resume writes into it at an offset)
                 alloc_cmd = f"pvesm alloc {shlex.quote(task.target_storage)} {new_vmid} '' {size_kb}"
                 _, a_out, a_err = ssh.exec_command(alloc_cmd, timeout=30)
                 a_exit = a_out.channel.recv_exit_status()
                 alloc_output = a_out.read().decode('utf-8', errors='replace').strip()
                 # LVM spits warnings before the actual volume line
-                # grab the "successfully created 'xxx'" or last non-empty line
-                vol_id = ''
                 for line in alloc_output.splitlines():
                     line = line.strip()
                     m = re.search(r"successfully created '([^']+)'", line)
@@ -728,7 +727,6 @@ def _run_xcpng_to_pve(task):
                         vol_id = m.group(1)
                         break
                 if not vol_id:
-                    # fallback: last non-warning line
                     for line in reversed(alloc_output.splitlines()):
                         line = line.strip()
                         if line and not line.startswith('WARNING'):
@@ -749,35 +747,130 @@ def _run_xcpng_to_pve(task):
                     task.set_phase('failed', f'pvesm path returned empty for {vol_id}')
                     ssh.close()
                     return
+                # RBD storage returns URI like rbd:pool/image:conf=... which dd can't handle
+                # (#272) and qemu-img dd can't seek a pipe, so rbd can only restart from 0.
+                is_rbd = dev_path.startswith('rbd:')
 
-                # MK: stream XCP-ng export into the volume
-                # RBD storage returns URI like rbd:pool/image:conf=... which dd can't handle (#272)
-                if dev_path.startswith('rbd:'):
-                    write_cmd = f"qemu-img dd -f raw -O raw bs=4M if=/dev/stdin of='{dev_path}'"
-                else:
-                    write_cmd = f"dd of='{dev_path}' bs=4M conv=fdatasync 2>/dev/null"
-                dd_in, dd_out, dd_err = ssh.exec_command(write_cmd, timeout=7200)
+                # === retry/resume the export -> dd write loop ===
+                # #546: resume on transient breaks. The budget counts CONSECUTIVE
+                # no-progress attempts (a big disk on a flaky link that keeps advancing is
+                # never capped — "never downscale for scale"), with a size-scaled hard cap
+                # so a pathologically slow link still can't loop forever.
+                last_err = 'unknown'
+                transfer_ok = False
+                stalls = 0
+                attempts = 0
+                hard_cap = max(_MAX_ATTEMPTS, (total >> 30) + 10)  # ~1 resume per GB + margin
+                while stalls < _MAX_ATTEMPTS and attempts < hard_cap:
+                    attempts += 1
+                    progress_before = copied
+                    # re-read the session ref each attempt: the background XAPI poller may
+                    # have refreshed it, and a stale ref is one way XCP-ng drops the export.
+                    try:
+                        session_ref = src_mgr._session._session
+                    except Exception:
+                        pass
 
-                for chunk in export_resp.iter_content(chunk_size=_CHUNK_SIZE):
-                    if task.cancel_event.is_set():
-                        dd_in.close()
-                        ssh.close()
-                        task.set_phase('failed', 'Cancelled')
-                        return
-                    dd_in.write(chunk)
-                    copied += len(chunk)
-                    task.update_progress(disk_key, copied, total)
+                    headers = None
+                    if is_rbd:
+                        copied = 0  # rbd can't resume mid-pipe -> full re-send
+                    elif copied > 0:
+                        headers = {'Range': f'bytes={copied}-'}
 
-                dd_in.channel.shutdown_write()
-                dd_exit = dd_out.channel.recv_exit_status()
-                dd_errmsg = dd_err.read().decode('utf-8', errors='replace')[:300]
+                    export_url = f"{base_export_url}&session_id={session_ref}"
+                    export_resp = None
+                    try:
+                        try:
+                            export_resp = _req.get(export_url, stream=True, verify=ssl_verify,
+                                                   timeout=(30, 300), headers=headers)
+                            export_resp.raise_for_status()
+                        except Exception as e:
+                            last_err = f'export request failed: {type(e).__name__}: {str(e)[:160]}'
+                            task.log(f"  export request failed: {last_err}")
+                            stalls += 1
+                            time.sleep(min(30, 2 ** stalls))
+                            continue
 
-                if dd_exit != 0:
-                    task.log(f"  dd failed (exit {dd_exit}): {dd_errmsg}")
-                    # try to free the volume
-                    ssh.exec_command(f"pvesm free {vol_id}", timeout=15)
+                        # if we asked to resume, verify the server honoured it; otherwise
+                        # (HTTP 200, or a 206 starting elsewhere) restart the disk from 0.
+                        if copied > 0:
+                            if export_resp.status_code == 200:
+                                task.log("  resume: server ignored Range (HTTP 200) -> restarting from 0")
+                                copied = 0
+                            else:
+                                cr = export_resp.headers.get('Content-Range', '')
+                                mcr = re.match(r'bytes\s+(\d+)-', cr)
+                                if mcr and int(mcr.group(1)) != copied:
+                                    task.log(f"  resume: Content-Range {cr!r} != offset {copied} -> restarting from 0")
+                                    copied = 0
+
+                        seek = copied
+                        if is_rbd:
+                            write_cmd = f"qemu-img dd -f raw -O raw bs=4M if=/dev/stdin of='{dev_path}'"
+                        else:
+                            # status=none: stderr carries ONLY errors (ENOSPC/zvol-full), no summary noise
+                            write_cmd = (f"dd of='{dev_path}' bs=4M seek={seek} oflag=seek_bytes "
+                                         f"conv=notrunc,fdatasync status=none")
+                        dd_in, dd_out, dd_err = ssh.exec_command(write_cmd, timeout=7200)
+
+                        stream_ok = True
+                        try:
+                            for chunk in export_resp.iter_content(chunk_size=_CHUNK_SIZE):
+                                if task.cancel_event.is_set():
+                                    try: dd_in.close()
+                                    except Exception: pass
+                                    try: ssh.exec_command(f"pvesm free {vol_id}", timeout=15)
+                                    except Exception: pass
+                                    ssh.close()
+                                    task.set_phase('failed', 'Cancelled')
+                                    return
+                                dd_in.write(chunk)
+                                copied += len(chunk)
+                                task.update_progress(disk_key, copied, total)
+                        except Exception as e:
+                            # transient break (BrokenPipe/ProtocolError/ConnectionError)
+                            stream_ok = False
+                            last_err = f'{type(e).__name__}: {str(e)[:160]}'
+                            task.log(f"  export stream broke at {copied}/{total} bytes: {last_err}")
+
+                        # EOF -> dd flushes + fdatasyncs everything it received; drain stderr
+                        # BEFORE recv_exit_status so a full stderr buffer can't stall the reap.
+                        try:
+                            dd_in.channel.shutdown_write()
+                            dd_errmsg = dd_err.read().decode('utf-8', errors='replace')[:300]
+                            dd_exit = dd_out.channel.recv_exit_status()
+                        except Exception as e:
+                            dd_exit, dd_errmsg = -1, str(e)[:200]
+
+                        if dd_exit != 0:
+                            # dd did NOT drain cleanly -> `copied` bytes are not proven durable,
+                            # so it is not a safe resume offset: restart this disk from 0 (Issue 1).
+                            last_err = f'dd exit {dd_exit}: {dd_errmsg or "unknown"}'
+                            task.log(f"  dd write failed (exit {dd_exit}): {dd_errmsg} -> restarting from 0")
+                            copied = 0
+                        elif stream_ok and copied >= total:
+                            transfer_ok = True
+                    finally:
+                        if export_resp is not None:
+                            try: export_resp.close()
+                            except Exception: pass
+
+                    if transfer_ok:
+                        break
+                    # budget: made forward progress -> break was transient, keep going (reset);
+                    # otherwise count it as a stall.
+                    if copied > progress_before:
+                        stalls = 0
+                    else:
+                        stalls += 1
+                    time.sleep(min(30, 2 ** stalls))
+
+                if not transfer_ok:
+                    # free the partial volume so failed attempts don't leave orphans (#546)
+                    try: ssh.exec_command(f"pvesm free {vol_id}", timeout=15)
+                    except Exception: pass
                     ssh.close()
-                    task.set_phase('failed', f'dd to storage failed: {dd_errmsg or "unknown error"}')
+                    task.set_phase('failed', f'Transfer failed after {attempts} attempt(s): {last_err}')
                     return
 
                 task.log(f"  Written {copied/(1024**3):.1f} GB to {vol_id}")
@@ -789,6 +882,18 @@ def _run_xcpng_to_pve(task):
 
             except Exception as e:
                 logger.error(f"[XHM:{task.id}] transfer error: {e}")
+                try:
+                    if ssh: ssh.close()  # #546: don't leak the original SSH connection
+                except Exception:
+                    pass
+                # #546: don't leave the partial target volume behind on an unexpected error
+                if vol_id and pve_host:
+                    try:
+                        _s = _connect_ssh(pve_host, pve_user, pve_pass, key_path=pve_key, port=pve_port)
+                        _s.exec_command(f"pvesm free {vol_id}", timeout=15)
+                        _s.close()
+                    except Exception:
+                        pass
                 task.set_phase('failed', f'Transfer error: {e}')
                 return
 
@@ -1438,6 +1543,8 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
         try:
             client.connect(host, port=port, username=user,
                            key_filename=key_path, timeout=30)
+            try: client.get_transport().set_keepalive(30)  # #546: keep the channel alive through long disk transfers
+            except Exception: pass
             return client
         except Exception as e:
             logger.debug(f"[SSH] key auth failed for {user}@{host}: {e}")
@@ -1453,6 +1560,8 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
         transport.auth_interactive(user, _ki_handler)
         if transport.is_authenticated():
             client._transport = transport
+            try: transport.set_keepalive(30)  # #546: keep the channel alive through long disk transfers
+            except Exception: pass
             return client
         transport.close()
     except Exception as e:
@@ -1467,6 +1576,8 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
     client2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client2.connect(host, port=port, username=user, password=password,
                     timeout=30, allow_agent=False, look_for_keys=False)
+    try: client2.get_transport().set_keepalive(30)  # #546: keep the channel alive through long disk transfers
+    except Exception: pass
     return client2
 
 
