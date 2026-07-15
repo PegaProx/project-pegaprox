@@ -4253,7 +4253,8 @@
         // into both the corporate node-detail (a 'hardware' tab) and the default
         // NodeModal. Theme-adaptive via var(--color-text) + a shared status palette.
         function HardwareMonitoringPanel({ clusterId, node, t, addToast, getAuthHeaders }) {
-            const [consent, setConsent] = useState(null);   // {enabled, warning, current_version, acknowledged_by, acknowledged_at}
+            const { language } = useTranslation();   // request + record the localized warning (#609 phase 2)
+            const [consent, setConsent] = useState(null);   // {enabled, warning, current_version, acknowledged_by, acknowledged_at, ack_lang}
             const [hw, setHw] = useState(null);              // {available, health, sensors, chassis, power_w, fru, events} | {error}
             const [loading, setLoading] = useState(true);
             const [showWarn, setShowWarn] = useState(false);
@@ -4270,7 +4271,7 @@
             const statusColor = (s) => s === 'critical' ? '#f54f47' : s === 'warning' ? '#efc006' : s === 'ok' ? '#60b515' : '#8b98a5';
 
             const loadConsent = async () => {
-                const r = await hwFetch(`${API_URL}/hardware-monitoring/consent`);
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/consent?lang=${encodeURIComponent(language || 'en')}`);
                 if (r && r.ok) { const c = await r.json(); setConsent(c); return c; }
                 return null;
             };
@@ -4288,7 +4289,7 @@
                 if (c && c.enabled) await loadHw();
                 setLoading(false);
             };
-            useEffect(() => { refresh(); }, [clusterId, node]);
+            useEffect(() => { refresh(); }, [clusterId, node, language]);   // re-fetch localized warning on language switch
 
             const openWarn = () => {
                 setAckChecked(false);
@@ -4305,7 +4306,7 @@
                 setEnabling(true);
                 const r = await hwFetch(`${API_URL}/hardware-monitoring/consent`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ acknowledge: true, ack_version: consent && consent.current_version })
+                    body: JSON.stringify({ acknowledge: true, ack_version: consent && consent.current_version, lang: language || 'en' })
                 });
                 if (r && r.ok) { addToast(t('hwEnabled') || 'Hardware monitoring enabled', 'success'); setShowWarn(false); await refresh(); }
                 else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('error') || 'Error'), 'error'); }

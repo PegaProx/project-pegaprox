@@ -128,6 +128,51 @@ def test_enable_writes_audit_record(api, seed, monkeypatch):
 
 
 # ===========================================================================
+# Localized versioned warning (#609 phase 2) — same version, 7 languages
+# ===========================================================================
+
+def test_consent_warning_is_localized_by_lang(api, seed):
+    viewer = seed.user('ro', role='viewer', tenant_id='default')
+    en = api.as_user(viewer).get(CONSENT_ROUTE + '?lang=en').get_json()['warning']
+    de = api.as_user(viewer).get(CONSENT_ROUTE + '?lang=de').get_json()['warning']
+    fr = api.as_user(viewer).get(CONSENT_ROUTE + '?lang=fr').get_json()['warning']
+    # same version across languages, but distinct localized text
+    assert en['version'] == de['version'] == fr['version'] == bmc.HW_CONSENT_VERSION
+    assert 'IPMI' in en['title'] and 'aktivieren' in de['title'] and 'Activer' in fr['title']
+    assert de['title'] != en['title'] and fr['title'] != en['title']
+    assert len(de['points']) == 4 and de['confirm_label'] and de['compliance_note']
+
+
+def test_consent_warning_unknown_lang_falls_back_to_english(api, seed):
+    viewer = seed.user('ro', role='viewer', tenant_id='default')
+    w = api.as_user(viewer).get(CONSENT_ROUTE + '?lang=zz').get_json()['warning']
+    assert w['title'] == bmc.hw_consent_warning('en')['title']
+
+
+def test_enable_records_acknowledged_language(api, seed, monkeypatch):
+    audit = []
+    monkeypatch.setattr('pegaprox.api.nodes.log_audit',
+                        lambda u, a, d=None, **k: audit.append((u, a, d)))
+    admin = seed.user('root', role='admin', tenant_id='default')
+    resp = api.as_user(admin).post(CONSENT_ROUTE, json={
+        'acknowledge': True, 'ack_version': bmc.HW_CONSENT_VERSION, 'lang': 'de'})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.get_json()['ack_lang'] == 'de'
+    # the acknowledged language is part of the non-repudiation record
+    assert len(audit) == 1 and '[de]' in audit[0][2]
+    # and it is surfaced back on the status endpoint
+    assert api.as_user(admin).get(CONSENT_ROUTE).get_json()['ack_lang'] == 'de'
+
+
+def test_enable_unknown_language_is_recorded_as_english(api, seed):
+    admin = seed.user('root', role='admin', tenant_id='default')
+    resp = api.as_user(admin).post(CONSENT_ROUTE, json={
+        'acknowledge': True, 'ack_version': bmc.HW_CONSENT_VERSION, 'lang': 'zz'})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.get_json()['ack_lang'] == 'en'
+
+
+# ===========================================================================
 # READ ROUTE — refuses until consent, serves after, cluster-access enforced
 # ===========================================================================
 

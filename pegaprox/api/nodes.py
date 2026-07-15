@@ -254,7 +254,8 @@ def _hw_consent_state():
 @bp.route('/api/hardware-monitoring/consent', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_hw_monitoring_consent():
-    """Current consent status + the versioned warning the UI must present."""
+    """Current consent status + the versioned warning the UI must present, in the
+    requested language (?lang=de|en|fr|es|pt|ko|it; falls back to English)."""
     from pegaprox.core import bmc
     enabled, ack = _hw_consent_state()
     return jsonify({
@@ -262,8 +263,9 @@ def get_hw_monitoring_consent():
         'acknowledged_by': ack.get('acknowledged_by'),
         'acknowledged_at': ack.get('acknowledged_at'),
         'ack_version': ack.get('ack_version'),
+        'ack_lang': ack.get('ack_lang'),
         'current_version': bmc.HW_CONSENT_VERSION,
-        'warning': bmc.HW_CONSENT_WARNING,
+        'warning': bmc.hw_consent_warning(request.args.get('lang')),
     })
 
 
@@ -295,18 +297,23 @@ def set_hw_monitoring_consent():
         return jsonify({'enabled': False})
 
     if data.get('acknowledge') is True and _hw_int(data.get('ack_version')) == bmc.HW_CONSENT_VERSION:
+        # which localized text the user actually saw (part of the non-repudiation record)
+        ack_lang = (str(data.get('lang') or 'en').split('-')[0].lower())[:8]
+        if ack_lang not in bmc._HW_CONSENT_TEXT:
+            ack_lang = 'en'
         rec = {
             'enabled': True,
             'acknowledged_by': usr,
             'acknowledged_at': datetime.now().isoformat(),
             'ack_version': bmc.HW_CONSENT_VERSION,
+            'ack_lang': ack_lang,
         }
         settings['hardware_monitoring'] = rec
         save_server_settings(settings)
         # Durable, attributed non-repudiation record of the acknowledgement.
         log_audit(usr, 'hardware_monitoring.enabled',
                   'In-band hardware monitoring enabled; acknowledged compliance '
-                  'warning v%d' % bmc.HW_CONSENT_VERSION)
+                  'warning v%d [%s]' % (bmc.HW_CONSENT_VERSION, ack_lang))
         return jsonify(rec)
 
     return jsonify({
