@@ -348,6 +348,31 @@ def get_node_hardware_api(cluster_id, node):
     return jsonify(result)
 
 
+@bp.route('/api/clusters/<cluster_id>/hardware/health', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_hardware_health_api(cluster_id):
+    """Cluster-wide degraded-hardware rollup from the cached per-node BMC health
+    (#609 phase 2). Cache-only — no SSH on the request; the 5-min metrics collector
+    populates the cache. Consent-gated like the per-node read."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    from pegaprox.core import bmc
+    enabled, _ack = _hw_consent_state()
+    if not enabled:
+        return jsonify({'error': 'Hardware monitoring is not enabled',
+                        'code': 'CONSENT_REQUIRED',
+                        'current_version': bmc.HW_CONSENT_VERSION}), 403
+    mgr = cluster_managers[cluster_id]
+    # in-band BMC is proxmox-only; non-proxmox managers don't have the rollup helper.
+    rollup = getattr(mgr, 'get_cluster_hw_rollup', None)
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox' or not callable(rollup):
+        return jsonify({'health': 'unknown', 'available': False, 'checked': 0,
+                        'counts': {'ok': 0, 'warning': 0, 'critical': 0}, 'degraded': []})
+    return jsonify(rollup())
+
+
 # ipmitool one-click install (#609 step 3). Fully static script — no user-controlled
 # input reaches the shell (unlike the StarWind installer there is no repo/key URL), so
 # no SSRF/url-allowlist is needed. Read-only in-band IPMI (local KCS, no BMC creds).

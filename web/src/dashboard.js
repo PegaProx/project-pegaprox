@@ -759,7 +759,7 @@
         }
 
         // Cluster Sidebar Item Component - NS Jan 2026
-        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, setReconfigureCluster, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu }) {
+        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, setReconfigureCluster, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu, hwHealth }) {
             const offlineNodesCount = Object.values(nodeAlerts || {})
                 .filter(alert => alert.cluster_id === cluster.id && alert.status === 'offline')
                 .length;
@@ -798,6 +798,7 @@
                         {cluster.cluster_type === 'xcpng' && <span className="text-[9px] px-1 py-0 font-medium rounded" style={{background: 'rgba(34,211,238,0.12)', color: '#22d3ee'}}>XCP - Tech Preview</span>}
                         {cluster.connected === false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
                         {hasOfflineNodes && cluster.connected !== false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(239,192,6,0.15)', color: '#efc006'}}>{offlineNodesCount}&#9888;</span>}
+                        {cluster.connected !== false && (hwHealth === 'critical' || hwHealth === 'warning') && <span className="text-[9px] px-1 py-0 font-medium rounded" title={t('degradedHardware') || 'Degraded hardware'} style={{background: hwHealth === 'critical' ? 'rgba(245,79,71,0.15)' : 'rgba(239,192,6,0.15)', color: hwHealth === 'critical' ? '#f54f47' : '#efc006'}}>HW&#9888;</span>}
                         <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{background: clrStatusDot}} />
                     </div>
                 );
@@ -14081,6 +14082,16 @@
                             const tpl = t('clustersDisconnectedNamed') || '{count} cluster(s) disconnected: {names}';
                             alertMessages.push(fmt(tpl, { count: disconnected.length, names: truncateNames(names) }));
                         }
+                        // #609 phase 2 — clusters with degraded in-band hardware (from the cached rollup)
+                        const hwDegraded = clusters.filter(c => {
+                            const h = allClusterMetrics[c.id]?.data?.hardware?.health;
+                            return h === 'warning' || h === 'critical';
+                        });
+                        if (hwDegraded.length > 0) {
+                            const names = hwDegraded.map(c => c.name || c.id).filter(Boolean);
+                            const tpl = t('clustersDegradedHwNamed') || '{count} cluster(s) with degraded hardware: {names}';
+                            alertMessages.push(fmt(tpl, { count: hwDegraded.length, names: truncateNames(names) }));
+                        }
                         if (alertMessages.length === 0) return null;
                         return (
                             <div className="corp-warning-banner">
@@ -14383,6 +14394,7 @@
                                                                             isCorporate={isCorporate}
                                                                             expandedSidebarClusters={expandedSidebarClusters}
                                                                             toggleSidebarCluster={toggleSidebarCluster}
+                                                                            hwHealth={allClusterMetrics[cluster.id]?.data?.hardware?.health}
                                                                             onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                         />
                                                                         {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
@@ -14430,6 +14442,7 @@
                                                                     isCorporate={isCorporate}
                                                                     expandedSidebarClusters={expandedSidebarClusters}
                                                                     toggleSidebarCluster={toggleSidebarCluster}
+                                                                    hwHealth={allClusterMetrics[cluster.id]?.data?.hardware?.health}
                                                                     onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                 />
                                                                 {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
@@ -23251,6 +23264,7 @@
                                                 <option value="memory">Memory</option>
                                                 <option value="disk">Disk</option>
                                                 <option value="temperature">{t('temperatureC') || 'Temperature (°C)'}</option>
+                                                <option value="hardware_health">{t('hardwareHealth') || 'Hardware health'}</option>
                                                 <option value="backup_sla_breached_pct">{t('backupSlaBreachedPct') || 'Backup SLA breached %'}</option>
                                                 <option value="backup_sla_compliance_pct">{t('backupSlaCompliancePct') || 'Backup SLA compliance %'}</option>
                                             </select>
@@ -23259,12 +23273,20 @@
                                             <label className="block text-sm text-gray-400 mb-1">{t('condition') || 'Condition'}</label>
                                             <select name="operator" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value=">">&gt; above</option>
-                                                <option value="<">&lt; below</option>
+                                                {/* #609: '<' is nonsensical for the categorical hardware_health code — only offer '>' */}
+                                                {alertMetricSel !== 'hardware_health' && <option value="<">&lt; below</option>}
                                             </select>
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('threshold') || 'Threshold'} {alertMetricSel === 'temperature' ? '°C' : '%'}</label>
-                                            <input name="threshold" type="number" min="0" max={alertMetricSel === 'temperature' ? 150 : 100} defaultValue="80" required className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
+                                            <label className="block text-sm text-gray-400 mb-1">{t('threshold') || 'Threshold'} {alertMetricSel === 'temperature' ? '°C' : alertMetricSel === 'hardware_health' ? '' : '%'}</label>
+                                            {alertMetricSel === 'hardware_health' ? (
+                                                <select name="threshold" defaultValue="0" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
+                                                    <option value="0">{t('hwAlertWarnPlus') || 'Warning or worse'}</option>
+                                                    <option value="1">{t('hwAlertCritOnly') || 'Critical only'}</option>
+                                                </select>
+                                            ) : (
+                                                <input name="threshold" type="number" min="0" max={alertMetricSel === 'temperature' ? 150 : 100} defaultValue="80" required className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
+                                            )}
                                         </div>
                                     </div>
                                     <div>

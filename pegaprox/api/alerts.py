@@ -243,7 +243,9 @@ def create_cluster_alert(cluster_id):
         'name': data.get('name', 'Unnamed Alert'),
         'cluster_id': cluster_id,
         'metric': data.get('metric', 'cpu'),
-        'operator': data.get('operator', '>'),
+        # #609: the categorical hardware_health code (0/1/2) is only meaningful with '>';
+        # a '<' rule would silently never fire on degraded hardware — pin it to '>'.
+        'operator': '>' if data.get('metric') == 'hardware_health' else data.get('operator', '>'),
         'threshold': data.get('threshold', 80),
         'target_type': data.get('target_type', 'cluster'),
         'target_id': data.get('target_id'),
@@ -282,6 +284,9 @@ def update_cluster_alert(cluster_id, alert_id):
                 alert['channels'] = _sanitize_channels(data['channels'])
             if 'escalation' in data:
                 alert['escalation'] = _sanitize_escalation(data['escalation'])  # NS #501 (F1: bounded)
+            # #609: keep hardware_health rules on '>' (the categorical 0/1/2 ladder)
+            if alert.get('metric') == 'hardware_health':
+                alert['operator'] = '>'
             # ensure cluster_id is always present for older rows
             alert.setdefault('cluster_id', cluster_id)
             save_cluster_alerts(alerts)

@@ -237,6 +237,12 @@ class PegaProxManager:
         self._node_temp_cache = {}   # {node_name: {'temp': float_c, 'ts': epoch}}
         self._node_temp_lock = threading.Lock()
         self._node_temp_probe_backoff = {}  # {node_name: reprobe_after_epoch}
+        # #609 phase 2 — per-node in-band BMC health summary, refreshed by the 5-min
+        # metrics collector and READ by the 60s alert loop + the rollup endpoint
+        # (neither may SSH per-tick). Same backoff idea as temp for nodes w/o ipmitool.
+        self._node_hw_cache = {}   # {node_name: {'summary': {...}, 'ts': epoch}}
+        self._node_hw_lock = threading.Lock()
+        self._node_hw_probe_backoff = {}  # {node_name: reprobe_after_epoch}
 
         # maintenance mode
         self.nodes_in_maintenance = {}
@@ -13779,6 +13785,57 @@ echo "AGENT_INSTALLED_OK"
         if max_age and (_t.time() - ent.get('ts', 0)) > max_age:
             return None
         return ent.get('temp')
+
+    def get_cached_node_hardware(self, node: str, max_age: float = 900):
+        """#609 — last cached in-band BMC health summary for a node, or None if
+        missing/stale. Populated by the 5-min metrics collector (background/
+        metrics.py); read by the alert loop + rollup so nothing SSHes per-tick.
+        Summary shape: {'available', 'health', 'reason'?, 'power_w'?, 'bad':[...]}"""
+        import time as _t
+        with self._node_hw_lock:
+            ent = self._node_hw_cache.get(node)
+        if not ent:
+            return None
+        if max_age and (_t.time() - ent.get('ts', 0)) > max_age:
+            return None
+        return ent.get('summary')
+
+    def get_cluster_hw_rollup(self, max_age: float = 1800):
+        """#609 — cluster-wide degraded-hardware rollup from the cached per-node BMC
+        health (cache-only, no SSH). Returns {'health','available','checked',
+        'counts':{ok,warning,critical}, 'degraded':[{'node','health','reasons'}]}."""
+        import time as _t
+        now = _t.time()
+        with self._node_hw_lock:
+            items = list(self._node_hw_cache.items())
+        rank = {'ok': 0, 'warning': 1, 'critical': 2}
+        counts = {'ok': 0, 'warning': 0, 'critical': 0}
+        degraded = []
+        checked = 0
+        worst = 'ok'
+        any_avail = False
+        for nm, ent in items:
+            if max_age and (now - ent.get('ts', 0)) > max_age:
+                continue
+            summ = ent.get('summary') or {}
+            if not summ.get('available'):
+                continue
+            any_avail = True
+            checked += 1
+            h = summ.get('health', 'ok')
+            if h in counts:
+                counts[h] += 1
+            if rank.get(h, 0) > rank.get(worst, 0):
+                worst = h
+            if h in ('warning', 'critical'):
+                degraded.append({'node': nm, 'health': h, 'reasons': (summ.get('bad') or [])[:8]})
+        return {
+            'health': worst if any_avail else 'unknown',
+            'available': any_avail,
+            'checked': checked,
+            'counts': counts,
+            'degraded': degraded,
+        }
 
     def get_node_cluster_health(self, node: str) -> Dict[str, Any]:
         # MK May 2026 — SSH-side cluster health: corosync ring status,

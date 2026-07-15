@@ -49,6 +49,46 @@ def _node_hottest_temp(mgr, node):
     return round(max(temps), 1)
 
 
+def _node_hw_summary(mgr, node):
+    """#609 phase 2 — in-band ipmitool → compact hardware-health summary for one node,
+    or None. Mirrors _node_hottest_temp's backoff: a node without ipmitool/BMC (or an
+    SSH failure) is parked ~1h so we never storm SSH; an available node clears its
+    backoff. Returns {'available', 'health', 'reason'?, 'power_w'?, 'bad':[...]}.
+    """
+    import time as _t
+    from pegaprox.core import bmc
+    backoff = getattr(mgr, '_node_hw_probe_backoff', None)
+    if backoff is None:
+        backoff = mgr._node_hw_probe_backoff = {}
+    until = backoff.get(node, 0)
+    if until and _t.time() < until:
+        return None
+    try:
+        res = bmc.read_node_bmc_inband(mgr, node)
+    except Exception:
+        res = None
+    if not isinstance(res, dict):
+        backoff[node] = _t.time() + 3600
+        return None
+    if not res.get('available'):
+        backoff[node] = _t.time() + 3600  # ipmitool/BMC absent or unreachable → don't re-probe every cycle
+        return {'available': False, 'reason': res.get('reason', 'unavailable')}
+    backoff.pop(node, None)
+    bad = [s['name'] for s in (res.get('sensors') or [])
+           if s.get('status') in ('warning', 'critical') and s.get('name')]
+    bad += [(f"SEL: {e.get('sensor') or e.get('description') or 'event'}")
+            for e in (res.get('events') or []) if e.get('severity') in ('warning', 'critical')][:5]
+    chas = res.get('chassis') or {}
+    if (chas.get('intrusion') or '').lower() not in ('', 'inactive', 'not present', 'disabled'):
+        bad.append('chassis intrusion')
+    return {
+        'available': True,
+        'health': res.get('health', 'ok'),
+        'power_w': res.get('power_w'),
+        'bad': bad[:12],
+    }
+
+
 def load_metrics_history():
     """Load historical metrics from SQLite database.
 
@@ -249,6 +289,49 @@ def collect_metrics_snapshot():
                         logging.debug(f"[metrics] {cluster_id}: temp for {got}/{len(online_node_names)} node(s)")
             except Exception as _te:
                 logging.debug(f"[metrics] {cluster_id}: temp collection skipped: {_te}")
+
+            # #609 phase 2 — per-node in-band BMC health for the cluster degraded-
+            # hardware badge + the hardware_health alert metric. Same bounded SSH
+            # fan-out as temperature, but GATED on the compliance consent (never poll
+            # hardware the admin hasn't opted into) + proxmox-only. Off the hot-path;
+            # writes the manager hw-cache read by the 60s alert loop (which must not SSH).
+            try:
+                from pegaprox.api.nodes import _hw_consent_state
+                _hw_enabled = _hw_consent_state()[0]
+            except Exception:
+                _hw_enabled = False
+            if _hw_enabled and getattr(mgr, 'cluster_type', 'proxmox') == 'proxmox':
+                try:
+                    online_node_names = list(cluster_data['nodes'].keys())
+                    if online_node_names:
+                        hw_calls = {name: (lambda nm: _node_hw_summary(mgr, nm))
+                                    for name in online_node_names}
+                        hw_by_node = run_per_node(hw_calls, max_concurrent=8, timeout=90)
+                        now_ts = time.time()
+                        hcache = getattr(mgr, '_node_hw_cache', None)
+                        hlock = getattr(mgr, '_node_hw_lock', None)
+                        got = 0
+                        for nm, summ in (hw_by_node or {}).items():
+                            if summ is None:
+                                continue
+                            cluster_data['nodes'][nm]['hw_health'] = summ.get('health') if summ.get('available') else None
+                            got += 1
+                            if hcache is not None and hlock is not None:
+                                with hlock:
+                                    hcache[nm] = {'summary': summ, 'ts': now_ts}
+                        known = set(mgr.nodes or {})
+                        if known and hcache is not None and hlock is not None:
+                            with hlock:
+                                for k in [k for k in hcache if k not in known]:
+                                    hcache.pop(k, None)
+                            bo = getattr(mgr, '_node_hw_probe_backoff', None)
+                            if isinstance(bo, dict):
+                                for k in [k for k in bo if k not in known]:
+                                    bo.pop(k, None)
+                        if got:
+                            logging.debug(f"[metrics] {cluster_id}: hw-health for {got}/{len(online_node_names)} node(s)")
+                except Exception as _he:
+                    logging.debug(f"[metrics] {cluster_id}: hw-health collection skipped: {_he}")
 
             # Count VMs + per-VM samples for right-sizing (MK May 2026)
             cluster_data['vms'] = {}  # vmid -> {cpu_pct, mem_pct, maxmem, maxcpu, status}

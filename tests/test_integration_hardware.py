@@ -173,6 +173,78 @@ def test_enable_unknown_language_is_recorded_as_english(api, seed):
 
 
 # ===========================================================================
+# Cluster degraded-hardware rollup endpoint (#609 phase 2) — cache-only, gated
+# ===========================================================================
+
+ROLLUP_ROUTE = f'/api/clusters/{CID}/hardware/health'
+_ROLLUP = {'health': 'critical', 'available': True, 'checked': 3,
+           'counts': {'ok': 2, 'warning': 0, 'critical': 1},
+           'degraded': [{'node': 'pve2', 'health': 'critical', 'reasons': ['PSU2 fail']}]}
+
+
+def test_cluster_rollup_requires_consent_403(api, seed):
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api, get_cluster_hw_rollup=_ROLLUP))
+    resp = api.as_user(admin).get(ROLLUP_ROUTE)
+    assert resp.status_code == 403, resp.get_data(as_text=True)
+    assert resp.get_json()['code'] == 'CONSENT_REQUIRED'
+    _current_mgr().get_cluster_hw_rollup.assert_not_called()
+
+
+def test_cluster_rollup_after_consent_200(api, seed, monkeypatch):
+    _consent_on(api, seed, monkeypatch)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api, get_cluster_hw_rollup=_ROLLUP))
+    resp = api.as_user(admin).get(ROLLUP_ROUTE)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    body = resp.get_json()
+    assert body['health'] == 'critical' and body['checked'] == 3
+    assert body['degraded'][0]['node'] == 'pve2'
+
+
+def test_cluster_rollup_viewer_allowed(api, seed, monkeypatch):
+    _consent_on(api, seed, monkeypatch)
+    viewer = seed.user('ro', role='viewer', tenant_id='default')
+    api.set_manager(CID, _mgr(api, get_cluster_hw_rollup=_ROLLUP))
+    assert api.as_user(viewer).get(ROLLUP_ROUTE).status_code == 200
+
+
+def test_cluster_rollup_cross_tenant_403(api, seed, monkeypatch):
+    _consent_on(api, seed, monkeypatch)
+    seed.tenant('tenant_b', clusters=['cluster_2'])
+    bob = seed.user('bob', role='user', tenant_id='tenant_b')
+    api.set_manager(CID, _mgr(api, get_cluster_hw_rollup=_ROLLUP))
+    resp = api.as_user(bob).get(ROLLUP_ROUTE)
+    assert resp.status_code == 403, resp.get_data(as_text=True)
+    _current_mgr().get_cluster_hw_rollup.assert_not_called()
+
+
+def test_cluster_rollup_non_proxmox_is_graceful(api, seed, monkeypatch):
+    # in-band BMC is proxmox-only; a non-proxmox cluster must degrade to an empty
+    # 'unknown' rollup, NOT 500 (the manager lacks get_cluster_hw_rollup in prod).
+    _consent_on(api, seed, monkeypatch)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api, cluster_type='vmware', get_cluster_hw_rollup=_ROLLUP))
+    resp = api.as_user(admin).get(ROLLUP_ROUTE)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    body = resp.get_json()
+    assert body['available'] is False and body['health'] == 'unknown'
+    _current_mgr().get_cluster_hw_rollup.assert_not_called()   # short-circuited on cluster_type
+
+
+def test_hardware_health_alert_operator_coerced_to_gt(api, seed):
+    # '<' is nonsensical for the 0/1/2 code and would silently never fire — the
+    # create endpoint must pin hardware_health rules to '>'.
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    resp = api.as_user(admin).post(f'/api/clusters/{CID}/alerts', json={
+        'name': 'HW degraded', 'metric': 'hardware_health', 'operator': '<',
+        'threshold': 0, 'target_type': 'cluster'})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.get_json()['alert']['operator'] == '>'
+
+
+# ===========================================================================
 # READ ROUTE — refuses until consent, serves after, cluster-access enforced
 # ===========================================================================
 

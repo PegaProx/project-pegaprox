@@ -216,6 +216,23 @@ def get_datacenter_status(cluster_id):
                 'version': cluster_info.get('version', 0)
             }
 
+        # #609 phase 2 — compact degraded-hardware rollup for the overview/sidebar
+        # badge. Cache-only (populated by the 5-min collector); consent-gated; never
+        # SSH here so the hot overview poll stays cheap. None when disabled/no data.
+        hw_summary = None
+        try:
+            from pegaprox.api.nodes import _hw_consent_state
+            if _hw_consent_state()[0]:
+                _rollup = manager.get_cluster_hw_rollup()
+                if _rollup.get('available'):
+                    hw_summary = {
+                        'health': _rollup['health'],
+                        'degraded': len(_rollup.get('degraded') or []),
+                        'checked': _rollup.get('checked', 0),
+                    }
+        except Exception:
+            hw_summary = None
+
         return jsonify({
             'cluster': cluster_result,
             'nodes': {
@@ -231,7 +248,8 @@ def get_datacenter_status(cluster_id):
                 'cpu': {'total': total_cpu, 'used': used_cpu, 'percent': round(used_cpu / total_cpu * 100, 1) if total_cpu > 0 else 0},
                 'memory': {'total': total_mem, 'used': used_mem, 'percent': round(used_mem / total_mem * 100, 1) if total_mem > 0 else 0},
                 'storage': {'total': total_disk, 'used': used_disk, 'percent': round(used_disk / total_disk * 100, 1) if total_disk > 0 else 0}
-            }
+            },
+            'hardware': hw_summary
         })
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         logging.warning(f"[API] Cluster {cluster_id} unreachable for datacenter/status: {e}")

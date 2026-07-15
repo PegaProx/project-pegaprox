@@ -213,6 +213,21 @@ def check_and_send_alerts():
                                 temps.append(tv)
                         if temps:
                             current_value = max(temps)
+                    elif metric == 'hardware_health':
+                        # #609 — worst cached in-band BMC health across the cluster,
+                        # mapped ok/warning/critical -> 0/1/2. Populated by the 5-min
+                        # collector; we never SSH here. Wired as '>' threshold 0 (warning+)
+                        # or '>' threshold 1 (critical only) — matches the frontend selector.
+                        rank = {'ok': 0, 'warning': 1, 'critical': 2}
+                        worst = None
+                        for nname in list(getattr(manager, '_node_hw_cache', {}) or {}):
+                            summ = manager.get_cached_node_hardware(nname)
+                            if not summ or not summ.get('available'):
+                                continue
+                            code = rank.get(summ.get('health'), 0)
+                            worst = code if worst is None else max(worst, code)
+                        if worst is not None:
+                            current_value = worst
                     elif metric in ('backup_sla_breached_pct', 'backup_sla_compliance_pct'):
                         # MK May 2026 — Backup SLA-aware alerts. Run the same
                         # eval as the /backup-sla endpoint and feed the % into
@@ -336,6 +351,11 @@ def check_and_send_alerts():
                     elif metric == 'temperature':
                         # #601 — cached hottest-sensor temp (°C) for this node.
                         current_value = manager.get_cached_node_temp(target_id)
+                    elif metric == 'hardware_health':
+                        # #609 — cached in-band BMC health code (0/1/2) for this node.
+                        summ = manager.get_cached_node_hardware(target_id)
+                        if summ and summ.get('available'):
+                            current_value = {'ok': 0, 'warning': 1, 'critical': 2}.get(summ.get('health'), 0)
 
                 elif target_type == 'vm':
                     # MK: was `manager.get_resources()` which doesn't exist; the
@@ -378,10 +398,18 @@ def check_and_send_alerts():
             triggered = True
 
         # #601 — temperature is an absolute °C reading, every other metric is a %.
-        unit = '°C' if metric == 'temperature' else '%'
+        unit = '°C' if metric == 'temperature' else '' if metric == 'hardware_health' else '%'
+
+        # #609 — hardware_health's "value" is a categorical code (0/1/2). Show the label
+        # in human-facing text (email/message/eval-reason) while keeping the numeric
+        # current_value for the DB row + threshold comparison.
+        if metric == 'hardware_health':
+            _val_display = {0: 'OK', 1: 'WARNING', 2: 'CRITICAL'}.get(int(current_value), str(current_value))
+        else:
+            _val_display = f"{current_value:.1f}{unit}"
 
         if not triggered:
-            _record_eval(alert_id, reason=f'below threshold ({metric}={current_value:.1f}{unit} {operator} {threshold}{unit} → false)',
+            _record_eval(alert_id, reason=f'below threshold ({metric}={_val_display} {operator} {threshold}{unit} → false)',
                          cluster_id=cluster_id, metric=metric, current_value=round(current_value, 1),
                          threshold=threshold, operator=operator, triggered=False)
 
@@ -394,7 +422,7 @@ Alert: {alert_name}
 Target: {target_type.capitalize()} - {target_name}
 Metric: {metric.upper()}
 Condition: {metric} {operator} {threshold}{unit}
-Current Value: {current_value:.1f}{unit}
+Current Value: {_val_display}
 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Cluster: {cluster_id}
 
@@ -411,7 +439,7 @@ This is an automated alert from PegaProx.
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Target</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(target_type).capitalize())} - {_e(str(target_name))}</td></tr>
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Metric</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(metric).upper())}</td></tr>
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Condition</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{_e(str(metric))} {_e(str(operator))} {threshold}{unit}</td></tr>
-<tr style="background-color: #fee2e2;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Current Value</strong></td><td style="padding: 8px; border: 1px solid #ddd;"><strong>{current_value:.1f}{unit}</strong></td></tr>
+<tr style="background-color: #fee2e2;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Current Value</strong></td><td style="padding: 8px; border: 1px solid #ddd;"><strong>{_val_display}</strong></td></tr>
 <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Time</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
 </table>
 <p style="color: #666; font-size: 12px; margin-top: 20px;">This is an automated alert from PegaProx.</p>
@@ -458,6 +486,9 @@ This is an automated alert from PegaProx.
             elif metric == 'temperature':
                 # #601 — absolute °C thresholds for auto-severity (not the %-based ladder)
                 severity = 'critical' if current_value >= 85 else 'warning' if current_value >= 75 else 'info'
+            elif metric == 'hardware_health':
+                # #609 — 0=ok, 1=warning, 2=critical (the categorical rollup as a code)
+                severity = 'critical' if current_value >= 2 else 'warning' if current_value >= 1 else 'info'
             else:
                 severity = 'critical' if current_value > 90 else 'warning' if current_value > 70 else 'info'
             alert_data = {
@@ -471,7 +502,7 @@ This is an automated alert from PegaProx.
                 'cluster_id': cluster_id,
                 'severity': severity,
                 'timestamp': datetime.now().isoformat(),
-                'message': f"{target_type.capitalize()} {target_name}: {metric} is {current_value:.1f}{unit} (threshold: {operator} {threshold}{unit})",
+                'message': f"{target_type.capitalize()} {target_name}: {metric} is {_val_display} (threshold: {operator} {threshold}{unit})",
             }
             if _notification_handlers:
                 for handler in _notification_handlers:

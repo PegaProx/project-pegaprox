@@ -4114,6 +4114,12 @@
                 powerDraw: 'Leistungsaufnahme',
                 partNumber: 'Teilenummer',
                 chassisIntrusion: 'Gehäuseöffnung',
+                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
+                hardwareHealth: 'Hardware-Zustand',
+                degradedHardware: 'Hardware beeinträchtigt',
+                hwAlertWarnPlus: 'Warnung oder schlechter',
+                hwAlertCritOnly: 'Nur kritisch',
+                clustersDegradedHwNamed: '{count} Cluster mit beeinträchtigter Hardware: {names}',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Aggregate',
                 pools: 'Pools',
@@ -8310,6 +8316,12 @@
                 powerDraw: 'Power draw',
                 partNumber: 'Part No.',
                 chassisIntrusion: 'Chassis intrusion',
+                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
+                hardwareHealth: 'Hardware health',
+                degradedHardware: 'Degraded hardware',
+                hwAlertWarnPlus: 'Warning or worse',
+                hwAlertCritOnly: 'Critical only',
+                clustersDegradedHwNamed: '{count} cluster(s) with degraded hardware: {names}',
                 // MK + LW 2026-05-31 — cluster health panel
                 configVersion: 'Config v',
                 corosyncRings: 'Corosync Rings',
@@ -12126,6 +12138,12 @@
                 powerDraw: 'Consommation',
                 partNumber: 'Référence',
                 chassisIntrusion: 'Intrusion châssis',
+                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
+                hardwareHealth: 'État du matériel',
+                degradedHardware: 'Matériel dégradé',
+                hwAlertWarnPlus: 'Avertissement ou pire',
+                hwAlertCritOnly: 'Critique uniquement',
+                clustersDegradedHwNamed: '{count} cluster(s) avec matériel dégradé : {names}',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Agrégations',
                 pools: 'pools',
@@ -16068,6 +16086,12 @@
                 powerDraw: 'Consumo',
                 partNumber: 'N.º de pieza',
                 chassisIntrusion: 'Intrusión del chasis',
+                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
+                hardwareHealth: 'Estado del hardware',
+                degradedHardware: 'Hardware degradado',
+                hwAlertWarnPlus: 'Advertencia o peor',
+                hwAlertCritOnly: 'Solo crítico',
+                clustersDegradedHwNamed: '{count} clúster(es) con hardware degradado: {names}',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Agregaciones',
                 pools: 'pools',
@@ -19810,6 +19834,12 @@
                 powerDraw: 'Consumo',
                 partNumber: 'Número de peça',
                 chassisIntrusion: 'Intrusão do chassi',
+                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
+                hardwareHealth: 'Estado do hardware',
+                degradedHardware: 'Hardware degradado',
+                hwAlertWarnPlus: 'Aviso ou pior',
+                hwAlertCritOnly: 'Apenas crítico',
+                clustersDegradedHwNamed: '{count} cluster(s) com hardware degradado: {names}',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Agregações',
                 pools: 'pools',
@@ -23621,6 +23651,12 @@
                 powerDraw: '소비 전력',
                 partNumber: '부품 번호',
                 chassisIntrusion: '섀시 침입',
+                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
+                hardwareHealth: '하드웨어 상태',
+                degradedHardware: '하드웨어 저하',
+                hwAlertWarnPlus: '경고 이상',
+                hwAlertCritOnly: '심각만',
+                clustersDegradedHwNamed: '하드웨어가 저하된 클러스터 {count}개: {names}',
                 // MK + LW 2026-05-31 — sensors panel
                 sensors: 'Sensori',
                 sensor: 'Sensore',
@@ -23650,6 +23686,12 @@
                 powerDraw: 'Assorbimento',
                 partNumber: 'Codice ricambio',
                 chassisIntrusion: 'Intrusione chassis',
+                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
+                hardwareHealth: 'Stato hardware',
+                degradedHardware: 'Hardware degradato',
+                hwAlertWarnPlus: 'Avviso o peggio',
+                hwAlertCritOnly: 'Solo critico',
+                clustersDegradedHwNamed: '{count} cluster con hardware degradato: {names}',
                 // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: '집계',
                 pools: '풀',
