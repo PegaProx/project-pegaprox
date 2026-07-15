@@ -99,6 +99,9 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
   <a href="https://idkmanager.com/">
     <img src="images/sponsors/idkmanager.png" alt="IDK Manager" width="120"/>
   </a>
+  <a href="https://www.linet-services.de/">
+    <img src="images/sponsors/linet.png" alt="LINET Services GmbH" width="120"/>
+  </a>
 </p>
 
 <p align="center">
