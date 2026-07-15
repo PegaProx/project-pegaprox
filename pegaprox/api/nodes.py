@@ -223,6 +223,112 @@ def get_node_temperature_history_api(cluster_id, node):
     return jsonify({'series': series, 'unit': '°C', 'count': len(series)})
 
 
+# ── In-band hardware monitoring / BMC (#609) ──────────────────────────────────
+# Credential-free reads via local ipmitool on the node (see pegaprox/core/bmc.py).
+# Gated behind a one-time, versioned compliance acknowledgement that is written to
+# the audit log — so "I never enabled that" cannot hold ("dann heißt es nicht 'Ich
+# hab es nie bekommen'"). The read route refuses to serve until consent is on.
+
+def _hw_consent_state():
+    """(enabled, ack_record) for in-band hardware monitoring from server settings.
+    enabled == acknowledged AND the stored ack is at/above the current warning ver."""
+    from pegaprox.api.helpers import load_server_settings
+    from pegaprox.core import bmc
+    ack = (load_server_settings() or {}).get('hardware_monitoring') or {}
+    enabled = bool(ack.get('enabled')) and int(ack.get('ack_version') or 0) >= bmc.HW_CONSENT_VERSION
+    return enabled, ack
+
+
+@bp.route('/api/hardware-monitoring/consent', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_hw_monitoring_consent():
+    """Current consent status + the versioned warning the UI must present."""
+    from pegaprox.core import bmc
+    enabled, ack = _hw_consent_state()
+    return jsonify({
+        'enabled': enabled,
+        'acknowledged_by': ack.get('acknowledged_by'),
+        'acknowledged_at': ack.get('acknowledged_at'),
+        'ack_version': ack.get('ack_version'),
+        'current_version': bmc.HW_CONSENT_VERSION,
+        'warning': bmc.HW_CONSENT_WARNING,
+    })
+
+
+@bp.route('/api/hardware-monitoring/consent', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def set_hw_monitoring_consent():
+    """Enable (acknowledge current warning) or disable in-band hardware monitoring.
+
+    Enabling requires acknowledge=true AND ack_version == the current warning
+    version, so a stale UI cannot silently opt in under an old warning. The
+    acknowledgement is persisted to the audit log with who/when/which-version.
+    """
+    from pegaprox.api.helpers import load_server_settings, save_server_settings
+    from pegaprox.core import bmc
+    data = request.get_json(silent=True) or {}
+    usr = request.session.get('user', 'admin')
+    settings = load_server_settings() or {}
+
+    if data.get('enabled') is False:
+        settings['hardware_monitoring'] = {
+            'enabled': False,
+            'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(),
+            'ack_version': 0,
+        }
+        save_server_settings(settings)
+        log_audit(usr, 'hardware_monitoring.disabled',
+                  'In-band hardware monitoring disabled')
+        return jsonify({'enabled': False})
+
+    if data.get('acknowledge') is True and int(data.get('ack_version') or 0) == bmc.HW_CONSENT_VERSION:
+        rec = {
+            'enabled': True,
+            'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(),
+            'ack_version': bmc.HW_CONSENT_VERSION,
+        }
+        settings['hardware_monitoring'] = rec
+        save_server_settings(settings)
+        # Durable, attributed non-repudiation record of the acknowledgement.
+        log_audit(usr, 'hardware_monitoring.enabled',
+                  'In-band hardware monitoring enabled; acknowledged compliance '
+                  'warning v%d' % bmc.HW_CONSENT_VERSION)
+        return jsonify(rec)
+
+    return jsonify({
+        'error': 'Must acknowledge the current compliance warning to enable',
+        'code': 'ACK_REQUIRED',
+        'current_version': bmc.HW_CONSENT_VERSION,
+    }), 400
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardware', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_hardware_api(cluster_id, node):
+    """In-band hardware health for one node (sensors/power/FRU/SEL rollup).
+
+    Refuses with CONSENT_REQUIRED until the feature is enabled + acknowledged.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    from pegaprox.core import bmc
+    enabled, _ack = _hw_consent_state()
+    if not enabled:
+        return jsonify({
+            'error': 'Hardware monitoring is not enabled',
+            'code': 'CONSENT_REQUIRED',
+            'current_version': bmc.HW_CONSENT_VERSION,
+        }), 403
+    result = bmc.read_node_bmc_inband(cluster_managers[cluster_id], node)
+    return jsonify(result)
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])
 @require_auth(perms=['node.network'])
 def update_node_network_api(cluster_id, node, iface):

@@ -38,6 +38,28 @@ INBAND_PROBE_CMD = (
 # ipmitool sdr status tokens -> normalized health
 _SDR_STATUS = {'ok': 'ok', 'ns': 'na', 'nc': 'warning', 'cr': 'critical', 'nr': 'critical'}
 
+# --- In-band hardware-monitoring consent (#609) --------------------------------
+# The feature must be explicitly enabled with a mandatory compliance acknowledgement
+# before any read/install runs. The warning text lives HERE (single source) so the
+# audit record can reference an exact version — bump the version when the wording
+# materially changes and a stored ack below it re-prompts. (The network-Redfish
+# opt-in is a separate, sharper warning with an enforced delay — a later phase.)
+HW_CONSENT_VERSION = 1
+HW_CONSENT_WARNING = {
+    'version': HW_CONSENT_VERSION,
+    'require_delay_seconds': 0,   # in-band: mandatory confirm, no forced wait (Redfish will use >0)
+    'title': 'Enable in-band hardware monitoring (IPMI)',
+    'summary': 'PegaProx will read hardware health directly on each node through its local IPMI interface.',
+    'points': [
+        'Reads happen on the node over its local IPMI channel (/dev/ipmi0) — no BMC network credentials are stored, and the out-of-band management network is not accessed.',
+        'Only read-only IPMI commands are issued (sensors, event log, FRU inventory, power). No power, virtual-media or firmware operations.',
+        'If you enable installation, PegaProx will install the "ipmitool" package and may load the IPMI kernel modules on the node.',
+        'On strictly hardened systems the local IPMI interface may be intentionally disabled under a least-functionality baseline. Enabling this here does not override that — where the interface is absent, PegaProx reports no data rather than re-enabling it.',
+    ],
+    'compliance_note': 'Enabling this may be relevant to your least-functionality and BMC-hardening controls (e.g. CMMC / NIST 800-171 3.4.6 and 3.1.5, DISA STIG BMC/OOB guidance). Confirm with your compliance owner. This is not legal advice.',
+    'confirm_label': 'I understand, and I accept responsibility for enabling this',
+}
+
 
 def _num(s):
     """First numeric token in a string as float, or None."""
