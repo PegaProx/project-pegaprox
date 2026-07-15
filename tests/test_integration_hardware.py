@@ -205,3 +205,94 @@ def test_missing_cluster_manager_is_404_after_consent(api, seed, monkeypatch):
     resp = api.as_user(admin).get(HW_ROUTE)
     assert resp.status_code == 404, resp.get_data(as_text=True)
     assert 'not found' in resp.get_json()['error'].lower()
+
+
+# ===========================================================================
+# ipmitool INSTALL (step 3) — gates fire before the SSH fan-out. The actual
+# per-node apt install needs real hardware (like starlvm), so only the gates
+# are asserted here: admin-only, proxmox-only, and consent-required.
+# ===========================================================================
+
+INSTALL_ROUTE = f'/api/clusters/{CID}/hardware/ipmitool/install'
+
+
+def test_install_requires_admin_403(api, seed):
+    user = seed.user('joe', role='user', tenant_id='default')  # node.view, not admin.settings
+    api.set_manager(CID, _mgr(api))
+    resp = api.as_user(user).post(INSTALL_ROUTE, json={'nodes': [NODE]})
+    assert resp.status_code == 403, resp.get_data(as_text=True)
+
+
+def test_install_without_consent_is_403(api, seed):
+    # admin, proxmox cluster, but feature not enabled -> CONSENT_REQUIRED before fan-out.
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    resp = api.as_user(admin).post(INSTALL_ROUTE, json={'nodes': [NODE]})
+    assert resp.status_code == 403, resp.get_data(as_text=True)
+    assert resp.get_json()['code'] == 'CONSENT_REQUIRED'
+
+
+def test_install_non_proxmox_is_400(api, seed):
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api, cluster_type='vmware'))
+    resp = api.as_user(admin).post(INSTALL_ROUTE, json={'nodes': [NODE]})
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    assert 'proxmox' in resp.get_json()['error'].lower()
+
+
+def test_install_bad_node_name_is_400(api, seed, monkeypatch):
+    _consent_on(api, seed, monkeypatch)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    resp = api.as_user(admin).post(INSTALL_ROUTE, json={'nodes': ['bad;rm -rf']})
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+
+
+# ===========================================================================
+# Hardening regressions from the adversarial review (input hygiene / fail-closed)
+# ===========================================================================
+
+def test_install_non_string_node_is_400_not_500(api, seed, monkeypatch):
+    # crafted {"nodes":[123]} used to blow up _reject_bad_node's regex -> 500.
+    _consent_on(api, seed, monkeypatch)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    resp = api.as_user(admin).post(INSTALL_ROUTE, json={'nodes': [123]})
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+
+
+def test_install_unhashable_node_entry_is_400_not_500(api, seed, monkeypatch):
+    # a dict entry used to raise in set() before the loop even ran.
+    _consent_on(api, seed, monkeypatch)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    resp = api.as_user(admin).post(INSTALL_ROUTE, json={'nodes': [{'x': 1}]})
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+
+
+def test_install_nodes_not_a_list_is_400(api, seed, monkeypatch):
+    _consent_on(api, seed, monkeypatch)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    resp = api.as_user(admin).post(INSTALL_ROUTE, json={'nodes': 'pve1'})
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+
+
+def test_enable_non_int_ack_version_is_400_not_500(api, seed):
+    # POST {acknowledge:true, ack_version:'x'} used to raise int('x') -> 500.
+    admin = seed.user('root', role='admin', tenant_id='default')
+    resp = api.as_user(admin).post(CONSENT_ROUTE, json={'acknowledge': True, 'ack_version': 'x'})
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    assert resp.get_json()['code'] == 'ACK_REQUIRED'
+
+
+def test_corrupt_stored_ack_version_fails_closed(api, seed):
+    # a corrupt/crafted settings blob (e.g. via config-restore) with a non-int
+    # ack_version must NOT 500 the gate — it fails closed to CONSENT_REQUIRED.
+    from pegaprox.api.helpers import save_server_settings
+    save_server_settings({'hardware_monitoring': {'enabled': True, 'ack_version': 'abc'}})
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api, _get_node_ip='10.0.0.9', _ssh_run_command_output=SAMPLE))
+    resp = api.as_user(admin).get(HW_ROUTE)
+    assert resp.status_code == 403, resp.get_data(as_text=True)
+    assert resp.get_json()['code'] == 'CONSENT_REQUIRED'

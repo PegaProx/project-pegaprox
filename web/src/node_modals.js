@@ -1094,6 +1094,7 @@
                 { id: 'shell', label: 'Shell', icon: Icons.Terminal },
                 { id: 'network', label: 'Network', icon: Icons.Network },
                 { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'hardware', label: t('hardware') || 'Hardware', icon: Icons.Cpu },
                 { id: 'disks', label: 'Disks', icon: Icons.HardDrive },
                 { id: 'repos', label: 'Repositories', icon: Icons.Package },
                 { id: 'tasks', label: 'Tasks', icon: Icons.Play },
@@ -2656,6 +2657,10 @@
                                                 </div>
                                             </div>
                                         </div>
+                                    )}
+
+                                    {activeTab === 'hardware' && (
+                                        <HardwareMonitoringPanel clusterId={clusterId} node={node} t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
                                     )}
 
                                     {activeTab === 'disks' && (
@@ -4240,6 +4245,254 @@
         }
 
         // LW: Feb 2026 - Corporate Node Detail View (experimental)
+        // ── In-band hardware monitoring panel (#609) ──────────────────────────
+        // Self-contained: does its own consent + hardware fetch, renders the
+        // mandatory compliance-warning modal (text is server-versioned so the
+        // audit record references an exact version), offers the one-click
+        // ipmitool install, and shows the sensor/power/FRU/event rollup. Dropped
+        // into both the corporate node-detail (a 'hardware' tab) and the default
+        // NodeModal. Theme-adaptive via var(--color-text) + a shared status palette.
+        function HardwareMonitoringPanel({ clusterId, node, t, addToast, getAuthHeaders }) {
+            const [consent, setConsent] = useState(null);   // {enabled, warning, current_version, acknowledged_by, acknowledged_at}
+            const [hw, setHw] = useState(null);              // {available, health, sensors, chassis, power_w, fru, events} | {error}
+            const [loading, setLoading] = useState(true);
+            const [showWarn, setShowWarn] = useState(false);
+            const [ackChecked, setAckChecked] = useState(false);
+            const [enabling, setEnabling] = useState(false);
+            const [installing, setInstalling] = useState(false);
+            const [delayLeft, setDelayLeft] = useState(0);   // countdown for warning.require_delay_seconds (Redfish phase uses >0)
+
+            const hwFetch = async (url, opts = {}) => {
+                try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
+                catch (e) { console.error(e); return null; }
+            };
+
+            const statusColor = (s) => s === 'critical' ? '#f54f47' : s === 'warning' ? '#efc006' : s === 'ok' ? '#60b515' : '#8b98a5';
+
+            const loadConsent = async () => {
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/consent`);
+                if (r && r.ok) { const c = await r.json(); setConsent(c); return c; }
+                return null;
+            };
+            const loadHw = async () => {
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/hardware`);
+                if (!r) { setHw({ error: t('hwReadFailed') || 'Failed to read hardware' }); return; }
+                const body = await r.json().catch(() => ({}));
+                if (r.status === 403 && body.code === 'CONSENT_REQUIRED') { setHw(null); }
+                else if (r.ok) { setHw(body); }
+                else { setHw({ error: body.error || (t('hwReadFailed') || 'Failed to read hardware') }); }
+            };
+            const refresh = async () => {
+                setLoading(true);
+                const c = await loadConsent();
+                if (c && c.enabled) await loadHw();
+                setLoading(false);
+            };
+            useEffect(() => { refresh(); }, [clusterId, node]);
+
+            const openWarn = () => {
+                setAckChecked(false);
+                setDelayLeft((consent && consent.warning && consent.warning.require_delay_seconds) || 0);
+                setShowWarn(true);
+            };
+            useEffect(() => {
+                if (!showWarn || delayLeft <= 0) return;
+                const iv = setInterval(() => setDelayLeft(x => x <= 1 ? 0 : x - 1), 1000);
+                return () => clearInterval(iv);
+            }, [showWarn, delayLeft]);
+
+            const enable = async () => {
+                setEnabling(true);
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/consent`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ acknowledge: true, ack_version: consent && consent.current_version })
+                });
+                if (r && r.ok) { addToast(t('hwEnabled') || 'Hardware monitoring enabled', 'success'); setShowWarn(false); await refresh(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('error') || 'Error'), 'error'); }
+                setEnabling(false);
+            };
+            const install = async () => {
+                setInstalling(true);
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/hardware/ipmitool/install`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ nodes: [node] })
+                });
+                const body = r ? await r.json().catch(() => ({})) : {};
+                if (r && r.ok && body.success) { addToast(t('hwInstallDone') || 'ipmitool installed', 'success'); await loadHw(); }
+                else {
+                    const detail = (body.results && body.results[0] && body.results[0].error) || body.error;
+                    addToast(detail || (t('hwInstallFailed') || 'ipmitool install failed'), 'error');
+                }
+                setInstalling(false);
+            };
+
+            const w = consent && consent.warning;
+            const ipmitoolMissing = hw && hw.available === false && /ipmitool/i.test(hw.reason || '');
+            const card = { border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.02)' };
+            const cardHead = { padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderBottom: '1px solid rgba(255,255,255,0.10)' };
+            const txt = { color: 'var(--color-text, #e9ecef)' };
+            const sub = { color: 'var(--corp-text-secondary, #adbbc4)' };
+
+            if (loading) {
+                return (<div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>);
+            }
+
+            return (
+                <div className="space-y-4">
+                    {/* Feature disabled → mandatory consent gate */}
+                    {consent && !consent.enabled && (
+                        <div style={card}>
+                            <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hardwareMonitoring') || 'Hardware Monitoring'}</span></div>
+                            <div className="p-4 space-y-3">
+                                <p className="text-[13px]" style={sub}>{t('hardwareMonitoringDisabledDesc') || 'In-band hardware monitoring (IPMI) is not enabled. It reads sensors, power, inventory and the hardware event log directly on the node — credential-free, read-only.'}</p>
+                                <button onClick={openWarn}
+                                    className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5"
+                                    style={{background: '#49afd9', color: '#08131b'}}>
+                                    <Icons.Cpu className="w-3.5 h-3.5" />{t('enableHardwareMonitoring') || 'Enable hardware monitoring'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Enabled → data / install / reason */}
+                    {consent && consent.enabled && (
+                        <React.Fragment>
+                            {/* header row: health + refresh + enabled-by */}
+                            <div className="flex items-center justify-between flex-wrap gap-2">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[13px] font-medium" style={txt}>{t('hardwareMonitoring') || 'Hardware Monitoring'}</span>
+                                    {hw && hw.available && hw.health && (
+                                        <span className="px-2 py-0.5 rounded text-xs flex items-center gap-1.5"
+                                            style={{background: statusColor(hw.health) + '22', color: statusColor(hw.health)}}>
+                                            <span className="w-2 h-2 rounded-full" style={{background: statusColor(hw.health)}}></span>
+                                            {hw.health === 'ok' ? (t('healthy') || 'Healthy') : hw.health === 'warning' ? (t('warning') || 'Warning') : (t('critical') || 'Critical')}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    {consent.acknowledged_by && <span className="text-[11px]" style={sub}>{t('hwEnabledBy') || 'Enabled by'} {consent.acknowledged_by}</span>}
+                                    <button onClick={refresh} className="text-[12px] flex items-center gap-1" style={{color: '#49afd9'}}><Icons.RotateCw className="w-3 h-3" />{t('refresh') || 'Refresh'}</button>
+                                </div>
+                            </div>
+
+                            {/* ipmitool missing → install */}
+                            {ipmitoolMissing && (
+                                <div style={card}>
+                                    <div className="p-4 space-y-3">
+                                        <p className="text-[13px]" style={sub}>{t('hwIpmitoolMissing') || 'ipmitool is not installed on this node.'}</p>
+                                        <div className="border rounded p-2 text-[11px]" style={{borderColor: 'rgba(239,192,6,0.3)', background: 'rgba(239,192,6,0.05)', color: '#efc006'}}>
+                                            {t('hwInstallHint') || 'PegaProx will run apt-get install ipmitool on the node and may load the IPMI kernel modules. Read-only, local IPMI only.'}
+                                        </div>
+                                        <button onClick={install} disabled={installing}
+                                            className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50"
+                                            style={{background: '#49afd9', color: '#08131b'}}>
+                                            {installing ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Download className="w-3.5 h-3.5" />}
+                                            {installing ? (t('hwInstalling') || 'Installing…') : (t('hwInstallIpmitool') || 'Install ipmitool')}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* other unavailable reason (no BMC, unreachable, …) */}
+                            {hw && hw.available === false && !ipmitoolMissing && (
+                                <div style={card}><div className="p-4"><p className="text-[13px]" style={sub}>{hw.reason || hw.error || (t('hwNoData') || 'No hardware data available')}</p></div></div>
+                            )}
+
+                            {/* available → sensors / power / FRU / events */}
+                            {hw && hw.available && (
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                    {/* System info (FRU) + power */}
+                                    <div style={card}>
+                                        <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwSystemInfo') || 'System Information'}</span></div>
+                                        <table className="w-full text-[12px]"><tbody>
+                                            {hw.fru && hw.fru.manufacturer && <tr><td className="px-3 py-1.5" style={sub}>{t('manufacturer') || 'Manufacturer'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.manufacturer}</td></tr>}
+                                            {hw.fru && hw.fru.product && <tr><td className="px-3 py-1.5" style={sub}>{t('product') || 'Product'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.product}</td></tr>}
+                                            {hw.fru && hw.fru.serial && <tr><td className="px-3 py-1.5" style={sub}>{t('serialNumber') || 'Serial'}</td><td className="px-3 py-1.5" style={{...txt, fontFamily: 'monospace'}}>{hw.fru.serial}</td></tr>}
+                                            {hw.fru && hw.fru.part && <tr><td className="px-3 py-1.5" style={sub}>{t('partNumber') || 'Part No.'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.part}</td></tr>}
+                                            {typeof hw.power_w === 'number' && <tr><td className="px-3 py-1.5" style={sub}>{t('powerDraw') || 'Power draw'}</td><td className="px-3 py-1.5" style={txt}>{hw.power_w} W</td></tr>}
+                                            {hw.chassis && hw.chassis.intrusion && <tr><td className="px-3 py-1.5" style={sub}>{t('chassisIntrusion') || 'Chassis intrusion'}</td><td className="px-3 py-1.5" style={txt}>{hw.chassis.intrusion}</td></tr>}
+                                        </tbody></table>
+                                    </div>
+
+                                    {/* Sensors */}
+                                    <div style={card}>
+                                        <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwSensors') || 'Sensors'} {hw.sensors ? `(${hw.sensors.length})` : ''}</span></div>
+                                        <div className="max-h-72 overflow-y-auto">
+                                            <table className="w-full text-[12px]"><tbody>
+                                                {(hw.sensors || []).map((s, i) => (
+                                                    <tr key={i}>
+                                                        <td className="px-3 py-1" style={sub}>{s.name}</td>
+                                                        <td className="px-3 py-1 text-right" style={txt}>{s.reading || (s.value != null ? `${s.value} ${s.unit || ''}` : '-')}</td>
+                                                        <td className="px-2 py-1"><span className="inline-block w-2 h-2 rounded-full" style={{background: statusColor(s.status)}} title={s.status}></span></td>
+                                                    </tr>
+                                                ))}
+                                                {(!hw.sensors || hw.sensors.length === 0) && <tr><td className="px-3 py-2" style={sub}>{t('hwNoData') || 'No sensor data'}</td></tr>}
+                                            </tbody></table>
+                                        </div>
+                                    </div>
+
+                                    {/* Event log (SEL) */}
+                                    {hw.events && hw.events.length > 0 && (
+                                        <div style={card} className="lg:col-span-2">
+                                            <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwEventLog') || 'Hardware event log (SEL)'} ({hw.events.length})</span></div>
+                                            <div className="max-h-64 overflow-y-auto">
+                                                <table className="w-full text-[12px]"><tbody>
+                                                    {hw.events.map((e, i) => (
+                                                        <tr key={i}>
+                                                            <td className="px-2 py-1"><span className="inline-block w-2 h-2 rounded-full" style={{background: statusColor(e.severity)}} title={e.severity}></span></td>
+                                                            <td className="px-3 py-1 whitespace-nowrap" style={sub}>{e.time}</td>
+                                                            <td className="px-3 py-1" style={txt}>{e.sensor}</td>
+                                                            <td className="px-3 py-1" style={txt}>{e.description}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody></table>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </React.Fragment>
+                    )}
+
+                    {/* Mandatory compliance-warning modal (server-versioned text) */}
+                    {showWarn && w && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !enabling && setShowWarn(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" style={{background: 'var(--corp-card-bg, #1a2733)'}} onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold mb-1 flex items-center gap-2" style={txt}>
+                                    <Icons.AlertTriangle className="w-4 h-4" style={{color: '#efc006'}} />
+                                    {w.title || (t('enableHardwareMonitoring') || 'Enable hardware monitoring')}
+                                </h3>
+                                {w.summary && <p className="text-xs mb-3" style={sub}>{w.summary}</p>}
+                                {Array.isArray(w.points) && (
+                                    <ul className="text-[12px] space-y-1.5 mb-3 list-disc pl-5" style={sub}>
+                                        {w.points.map((p, i) => <li key={i}>{p}</li>)}
+                                    </ul>
+                                )}
+                                {w.compliance_note && (
+                                    <div className="border rounded p-2 mb-3 text-[11px]" style={{borderColor: 'rgba(239,192,6,0.3)', background: 'rgba(239,192,6,0.05)', color: '#efc006'}}>
+                                        {w.compliance_note}
+                                    </div>
+                                )}
+                                <label className="flex items-start gap-2 text-[12px] mb-4 cursor-pointer" style={txt}>
+                                    <input type="checkbox" className="mt-0.5" checked={ackChecked} onChange={e => setAckChecked(e.target.checked)} />
+                                    <span>{w.confirm_label || (t('hwConfirmDefault') || 'I understand and accept responsibility for enabling this')}</span>
+                                </label>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setShowWarn(false)} disabled={enabling} className="px-3 py-1.5 text-sm" style={sub}>{t('cancel') || 'Cancel'}</button>
+                                    <button onClick={enable} disabled={enabling || !ackChecked || delayLeft > 0}
+                                        className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50"
+                                        style={{background: '#49afd9', color: '#08131b'}}>
+                                        {enabling ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {delayLeft > 0 ? `${t('hwEnable') || 'Enable'} (${delayLeft})` : (t('hwEnable') || 'Enable')}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         function CorporateNodeDetailView({ node, clusterId, clusterHost, clusterMetrics, clusterResources, onBack, onOpenNodeConfig, onMaintenanceToggle, onNodeAction, onStartUpdate, onSelectVm, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, reverseProxyEnabled } = useAuth();
@@ -4529,9 +4782,9 @@
 
                     {/* Tab Strip */}
                     <div className="corp-tab-strip px-4">
-                        {['summary', 'monitor', 'configure', 'vms', 'shell', 'subscription'].map(tab => (
+                        {['summary', 'monitor', 'configure', 'hardware', 'vms', 'shell', 'subscription'].map(tab => (
                             <button key={tab} className={activeDetailTab === tab ? 'active' : ''} onClick={() => setActiveDetailTab(tab)}>
-                                {tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'vms' ? 'VMs' : tab === 'shell' ? 'Shell' : t('subscriptionInfo')}
+                                {tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'hardware' ? (t('hardware') || 'Hardware') : tab === 'vms' ? 'VMs' : tab === 'shell' ? 'Shell' : t('subscriptionInfo')}
                             </button>
                         ))}
                     </div>
@@ -5233,6 +5486,11 @@
                                     </tbody>
                                 </table>
                             </div>
+                        )}
+
+                        {/* Hardware Tab (#609 in-band BMC) */}
+                        {activeDetailTab === 'hardware' && (
+                            <HardwareMonitoringPanel clusterId={clusterId} node={node} t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
                         )}
 
                         {/* Shell Tab */}

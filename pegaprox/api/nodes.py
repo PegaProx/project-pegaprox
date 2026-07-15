@@ -133,8 +133,10 @@ _NODE_NAME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$')
 def _reject_bad_node(node):
     """Return (None, None) if node looks valid, (response, 400) otherwise.
     Used by the SSH-fronted node endpoints below as a defense-in-depth gate
-    even though the SSH commands themselves don't interpolate `node`."""
-    if not node or not _NODE_NAME_RE.match(node):
+    even though the SSH commands themselves don't interpolate `node`.
+    Non-strings (e.g. a crafted JSON list `{"nodes":[123]}`) are rejected as
+    invalid rather than blowing up the regex with a TypeError -> clean 400."""
+    if not isinstance(node, str) or not _NODE_NAME_RE.match(node):
         return jsonify({'error': 'Invalid node name'}), 400
     return None, None
 
@@ -229,13 +231,23 @@ def get_node_temperature_history_api(cluster_id, node):
 # the audit log — so "I never enabled that" cannot hold ("dann heißt es nicht 'Ich
 # hab es nie bekommen'"). The read route refuses to serve until consent is on.
 
+def _hw_int(v):
+    """Coerce a stored/posted ack_version to int, degrading to 0 on any bad value
+    (e.g. a corrupt/crafted settings blob with ack_version='x' or [1]) so the gate
+    fails CLOSED — returns disabled — rather than raising a 500 on every read."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _hw_consent_state():
     """(enabled, ack_record) for in-band hardware monitoring from server settings.
     enabled == acknowledged AND the stored ack is at/above the current warning ver."""
     from pegaprox.api.helpers import load_server_settings
     from pegaprox.core import bmc
     ack = (load_server_settings() or {}).get('hardware_monitoring') or {}
-    enabled = bool(ack.get('enabled')) and int(ack.get('ack_version') or 0) >= bmc.HW_CONSENT_VERSION
+    enabled = bool(ack.get('enabled')) and _hw_int(ack.get('ack_version')) >= bmc.HW_CONSENT_VERSION
     return enabled, ack
 
 
@@ -282,7 +294,7 @@ def set_hw_monitoring_consent():
                   'In-band hardware monitoring disabled')
         return jsonify({'enabled': False})
 
-    if data.get('acknowledge') is True and int(data.get('ack_version') or 0) == bmc.HW_CONSENT_VERSION:
+    if data.get('acknowledge') is True and _hw_int(data.get('ack_version')) == bmc.HW_CONSENT_VERSION:
         rec = {
             'enabled': True,
             'acknowledged_by': usr,
@@ -327,6 +339,119 @@ def get_node_hardware_api(cluster_id, node):
         }), 403
     result = bmc.read_node_bmc_inband(cluster_managers[cluster_id], node)
     return jsonify(result)
+
+
+# ipmitool one-click install (#609 step 3). Fully static script — no user-controlled
+# input reaches the shell (unlike the StarWind installer there is no repo/key URL), so
+# no SSRF/url-allowlist is needed. Read-only in-band IPMI (local KCS, no BMC creds).
+# Gated behind the SAME compliance acknowledgement as the read path: the install
+# MUTATES the node (package + IPMI kernel modules) so it must not run before the
+# warning is acknowledged. admin.settings + audited + idempotent + bounded-parallel.
+IPMITOOL_INSTALL_SCRIPT = """#!/usr/bin/env bash
+# PegaProx (#609) — install ipmitool for in-band hardware monitoring on this node.
+set -uo pipefail
+if command -v ipmitool >/dev/null 2>&1; then
+    ver="$(ipmitool -V 2>/dev/null | head -1 || echo ipmitool)"
+    echo "PP_OK already_installed $ver"; exit 0
+fi
+if ! command -v apt-get >/dev/null 2>&1; then echo 'PP_ERR no-apt-get'; exit 3; fi
+apt-get update -o Acquire::Retries=2 >/tmp/pp_ipmitool_apt.log 2>&1 || true
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ipmitool >>/tmp/pp_ipmitool_apt.log 2>&1; then
+    echo 'PP_ERR apt-install-failed'; exit 5
+fi
+command -v ipmitool >/dev/null 2>&1 || { echo 'PP_ERR not-installed-after-apt'; exit 6; }
+ver="$(ipmitool -V 2>/dev/null | head -1 || echo ipmitool)"
+echo "PP_OK installed $ver"
+"""
+
+
+@bp.route('/api/clusters/<cluster_id>/hardware/ipmitool/install', methods=['POST'])
+@require_auth(perms=['admin.settings'])  # root apt-install on nodes -> admin-only, like starlvm
+def install_ipmitool_api(cluster_id):
+    """Install ipmitool on cluster node(s) over SSH for in-band hardware monitoring.
+
+    Body (optional): {nodes: [names]} — defaults to all cluster nodes. Idempotent
+    per node (skips if ipmitool present). Requires the hardware-monitoring feature
+    to be enabled (compliance acknowledged) first — the install changes the node.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'ipmitool install is Proxmox-only'}), 400
+
+    # consent gate — do not mutate a node before the warning is acknowledged
+    from pegaprox.core import bmc
+    enabled, _ack = _hw_consent_state()
+    if not enabled:
+        return jsonify({'error': 'Hardware monitoring is not enabled',
+                        'code': 'CONSENT_REQUIRED',
+                        'current_version': bmc.HW_CONSENT_VERSION}), 403
+
+    raw_nodes = (request.get_json(silent=True) or {}).get('nodes') or []
+    if not isinstance(raw_nodes, list):
+        return jsonify({'error': 'nodes must be a list of node names'}), 400
+    # validate each entry BEFORE set() — a dict/list entry would raise in set()
+    for n in raw_nodes:
+        bad, code = _reject_bad_node(n)
+        if bad is not None:
+            return bad, code
+    only = set(raw_nodes)
+    nodes = _cluster_node_names(mgr)
+    if only:
+        nodes = [n for n in nodes if n in only]
+    if not nodes:
+        return jsonify({'error': 'No nodes found in cluster'}), 404
+
+    def _install_one(node):
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return {'node': node, 'success': False, 'error': 'no SSH-reachable IP'}
+        ssh = None
+        try:
+            for attempt in range(3):
+                ssh = mgr._ssh_connect(node_ip)
+                if ssh:
+                    break
+                if attempt < 2:
+                    time.sleep(1.5)
+            if not ssh:
+                return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
+            _ssh_write_file(ssh, '/tmp/pegaprox-ipmitool-install.sh', IPMITOOL_INSTALL_SCRIPT, 0o755)
+            out, _e = _ssh_run_checked(ssh, 'bash /tmp/pegaprox-ipmitool-install.sh', timeout=180)
+            try:
+                ssh.exec_command('rm -f /tmp/pegaprox-ipmitool-install.sh')
+            except Exception:
+                pass
+            last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
+            if 'PP_OK already_installed' in out:
+                return {'node': node, 'success': True, 'already_installed': True, 'detail': last}
+            if 'PP_OK installed' in out:
+                return {'node': node, 'success': True, 'already_installed': False, 'detail': last}
+            return {'node': node, 'success': False, 'error': last or 'unexpected installer output'}
+        except Exception as e:
+            return {'node': node, 'success': False, 'error': safe_error(e, 'install failed')}
+        finally:
+            if ssh:
+                try: ssh.close()
+                except Exception: pass
+
+    from pegaprox.utils.concurrent import run_per_node
+    res_map = run_per_node({n: _install_one for n in nodes}, max_concurrent=8, timeout=200)
+    results = [res_map.get(n) or {'node': n, 'success': False, 'error': 'timed out'} for n in nodes]
+    installed = sum(1 for r in results if r.get('success'))
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'hardware_monitoring.ipmitool_install',
+              f"ipmitool install: {installed}/{len(nodes)} node(s)",
+              cluster=mgr.config.name)
+    return jsonify({
+        'success': installed == len(nodes),
+        'installed': installed,
+        'total': len(nodes),
+        'results': results,
+    })
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])

@@ -2427,14 +2427,23 @@ def restore_config():
             try:
                 if not dry_run:
                     current = load_server_settings()
+                    # #609: hardware-monitoring consent is a versioned, audit-logged
+                    # toggle that must ONLY move through set_hw_monitoring_consent (which
+                    # records the acknowledgement — "dann heißt es nicht 'Ich hab es nie
+                    # bekommen'"). A generic config-restore must neither enable nor disable
+                    # it, so we drop the backup's value and preserve the live consent state.
+                    incoming_ss = {k: v for k, v in (data['server_settings'] or {}).items()
+                                   if k != 'hardware_monitoring'}
                     if mode == 'merge':
                         # Only update non-empty values
-                        for key, value in data['server_settings'].items():
+                        for key, value in incoming_ss.items():
                             if value not in [None, '', []]:
                                 current[key] = value
                         save_server_settings(current)
                     else:
-                        save_server_settings(data['server_settings'])
+                        if (current or {}).get('hardware_monitoring') is not None:
+                            incoming_ss['hardware_monitoring'] = current['hardware_monitoring']
+                        save_server_settings(incoming_ss)
                 results['restored']['server_settings'] = True
             except Exception as e:
                 results['errors'].append(f"Server settings: {str(e)}")
