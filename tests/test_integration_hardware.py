@@ -245,6 +245,129 @@ def test_hardware_health_alert_operator_coerced_to_gt(api, seed):
 
 
 # ===========================================================================
+# Out-of-band Redfish consent + BMC endpoint config (#609 phase 3)
+# ===========================================================================
+
+RF_CONSENT_ROUTE = '/api/hardware-monitoring/redfish-consent'
+BMC_ROUTE = f'/api/clusters/{CID}/nodes/{NODE}/bmc-endpoint'
+
+
+def _redfish_consent_on(api, seed):
+    from pegaprox.core import bmc
+    admin = seed.user('root', role='admin', tenant_id='default')
+    r = api.as_user(admin).post(RF_CONSENT_ROUTE, json={
+        'acknowledge': True, 'ack_version': bmc.REDFISH_CONSENT_VERSION, 'lang': 'en'})
+    assert r.status_code == 200, r.get_data(as_text=True)
+
+
+def test_redfish_consent_default_disabled_5s_delay(api, seed):
+    from pegaprox.core import bmc
+    viewer = seed.user('ro', role='viewer', tenant_id='default')
+    body = api.as_user(viewer).get(RF_CONSENT_ROUTE + '?lang=de').get_json()
+    assert body['enabled'] is False
+    assert body['current_version'] == bmc.REDFISH_CONSENT_VERSION
+    assert body['warning']['require_delay_seconds'] == 5   # enforced out-of-band wait
+    assert 'Out-of-Band' in body['warning']['title'] or 'Redfish' in body['warning']['title']
+
+
+def test_redfish_consent_user_cannot_enable_403(api, seed):
+    from pegaprox.core import bmc
+    user = seed.user('joe', role='user', tenant_id='default')
+    r = api.as_user(user).post(RF_CONSENT_ROUTE, json={
+        'acknowledge': True, 'ack_version': bmc.REDFISH_CONSENT_VERSION})
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+
+def test_redfish_consent_enable_records_lang_and_audit(api, seed, monkeypatch):
+    from pegaprox.core import bmc
+    audit = []
+    monkeypatch.setattr('pegaprox.api.nodes.log_audit',
+                        lambda u, a, d=None, **k: audit.append((u, a, d)))
+    admin = seed.user('root', role='admin', tenant_id='default')
+    r = api.as_user(admin).post(RF_CONSENT_ROUTE, json={
+        'acknowledge': True, 'ack_version': bmc.REDFISH_CONSENT_VERSION, 'lang': 'de'})
+    assert r.status_code == 200 and r.get_json()['ack_lang'] == 'de'
+    assert any(a[1] == 'hardware_monitoring_redfish.enabled' and '[de]' in (a[2] or '') for a in audit)
+
+
+def test_bmc_endpoint_requires_redfish_consent_403(api, seed):
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    r = api.as_user(admin).post(BMC_ROUTE, json={'host': '10.20.30.40', 'user': 'ro', 'password': 'x'})
+    assert r.status_code == 403, r.get_data(as_text=True)
+    assert r.get_json()['code'] == 'CONSENT_REQUIRED'
+
+
+def test_bmc_endpoint_rejects_ssrf_metadata_host_400(api, seed):
+    _redfish_consent_on(api, seed)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    r = api.as_user(admin).post(BMC_ROUTE, json={'host': '169.254.169.254', 'user': 'ro', 'password': 'x'})
+    assert r.status_code == 400, r.get_data(as_text=True)
+
+
+def test_bmc_endpoint_save_get_masked_delete(api, seed):
+    _redfish_consent_on(api, seed)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    # save
+    r = api.as_user(admin).post(BMC_ROUTE, json={
+        'host': '10.20.30.40', 'user': 'ro-monitor', 'password': 'S3cret!', 'verify_ssl': False})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    # GET is masked — the password never comes back to the browser
+    got = api.as_user(admin).get(BMC_ROUTE).get_json()
+    assert got['configured'] is True and got['host'] == '10.20.30.40' and got['user'] == 'ro-monitor'
+    assert got['password'] == '********'
+    # re-save with the mask keeps the stored password (no overwrite)
+    r2 = api.as_user(admin).post(BMC_ROUTE, json={'host': '10.20.30.50', 'user': 'ro-monitor', 'password': '********'})
+    assert r2.status_code == 200
+    from pegaprox.core.db import get_db
+    assert get_db().get_bmc_endpoint(CID, NODE)['password'] == 'S3cret!'  # unchanged
+    # delete
+    d = api.as_user(admin).delete(BMC_ROUTE)
+    assert d.status_code == 200 and d.get_json()['removed'] is True
+    assert api.as_user(admin).get(BMC_ROUTE).get_json()['configured'] is False
+
+
+def test_bmc_endpoint_new_requires_password_400(api, seed):
+    _redfish_consent_on(api, seed)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    r = api.as_user(admin).post(BMC_ROUTE, json={'host': '10.20.30.40', 'user': 'ro'})  # no password
+    assert r.status_code == 400, r.get_data(as_text=True)
+
+
+def test_bmc_endpoint_user_forbidden_403(api, seed):
+    _redfish_consent_on(api, seed)
+    user = seed.user('joe', role='user', tenant_id='default')   # not admin.settings
+    api.set_manager(CID, _mgr(api))
+    r = api.as_user(user).post(BMC_ROUTE, json={'host': '10.20.30.40', 'password': 'x'})
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+
+def test_hardware_read_served_with_redfish_consent_only(api, seed):
+    # with ONLY redfish consent (no in-band), the read route must not 403 —
+    # it serves (available False here since the fake node has no BMC endpoint).
+    _redfish_consent_on(api, seed)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api))
+    r = api.as_user(admin).get(HW_ROUTE)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json().get('available') is False   # no source configured for this fake node
+
+
+def test_cluster_rollup_served_with_redfish_consent_only(api, seed):
+    # phase-3 review fix: the rollup route must gate on (in-band OR redfish), so a
+    # Redfish-only deployment doesn't 403.
+    _redfish_consent_on(api, seed)
+    admin = seed.user('root', role='admin', tenant_id='default')
+    api.set_manager(CID, _mgr(api, get_cluster_hw_rollup=_ROLLUP))
+    r = api.as_user(admin).get(ROLLUP_ROUTE)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json()['health'] == 'critical'
+
+
+# ===========================================================================
 # READ ROUTE — refuses until consent, serves after, cluster-access enforced
 # ===========================================================================
 

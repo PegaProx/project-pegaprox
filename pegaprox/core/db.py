@@ -641,6 +641,24 @@ class PegaProxDB:
             )
         ''')
 
+        # #609 phase 3 — per-node out-of-band BMC (Redfish) endpoints. The password
+        # column holds an aes256: ciphertext (via _encrypt), never plaintext.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS node_bmc_endpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                node TEXT NOT NULL,
+                bmc_host TEXT NOT NULL,
+                bmc_user TEXT DEFAULT '',
+                bmc_password_encrypted TEXT DEFAULT '',
+                bmc_verify_ssl INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(cluster_id, node)
+            )
+        ''')
+
         # NS #501 Jun 2026 — persisted active (fired) alert instances for ack +
         # escalation tracking. The in-memory cooldown map only deduped sends; this
         # records each ongoing incident so the UI can acknowledge it and the loop
@@ -1888,7 +1906,70 @@ class PegaProxDB:
             return False
         # If it's not AES-256-GCM, it needs re-encryption
         return not data.startswith('aes256:')
-    
+
+    # --- #609 phase 3: per-node BMC (Redfish) endpoint store ------------------
+    # Passwords are always stored encrypted (_encrypt -> aes256:) and only ever
+    # decrypted server-side for an outbound Redfish read; API responses mask them.
+    def save_bmc_endpoint(self, cluster_id, node, host, user, password_plain,
+                          verify_ssl=False, enabled=True):
+        """Upsert a node's BMC endpoint. password_plain is encrypted at rest."""
+        cur = self.conn.cursor()
+        now = datetime.now().isoformat()
+        enc = self._encrypt(password_plain) if password_plain else ''
+        cur.execute('''
+            INSERT INTO node_bmc_endpoints
+              (cluster_id, node, bmc_host, bmc_user, bmc_password_encrypted, bmc_verify_ssl, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_id, node) DO UPDATE SET
+              bmc_host=excluded.bmc_host, bmc_user=excluded.bmc_user,
+              bmc_password_encrypted=excluded.bmc_password_encrypted,
+              bmc_verify_ssl=excluded.bmc_verify_ssl, enabled=excluded.enabled,
+              updated_at=excluded.updated_at
+        ''', (cluster_id, node, host, user or '', enc,
+              1 if verify_ssl else 0, 1 if enabled else 0, now, now))
+        self.conn.commit()
+
+    def get_bmc_endpoint(self, cluster_id, node, decrypt=True):
+        """One node's BMC endpoint or None. decrypt=True returns the plaintext
+        password (server-side use); decrypt=False leaves it out (never leak)."""
+        cur = self.conn.cursor()
+        cur.execute('SELECT * FROM node_bmc_endpoints WHERE cluster_id=? AND node=?',
+                    (cluster_id, node))
+        row = cur.fetchone()
+        if not row:
+            return None
+        out = {
+            'cluster_id': row['cluster_id'], 'node': row['node'],
+            'host': row['bmc_host'], 'user': row['bmc_user'],
+            'verify_ssl': bool(row['bmc_verify_ssl']),
+            'enabled': bool(row['enabled']),
+            'has_password': bool(row['bmc_password_encrypted']),
+        }
+        if decrypt:
+            try:
+                out['password'] = self._decrypt(row['bmc_password_encrypted']) if row['bmc_password_encrypted'] else ''
+            except Exception:
+                out['password'] = ''
+        return out
+
+    def list_bmc_endpoints(self, cluster_id):
+        """All configured BMC endpoints for a cluster (NEVER includes passwords)."""
+        cur = self.conn.cursor()
+        cur.execute('SELECT cluster_id, node, bmc_host, bmc_user, bmc_verify_ssl, enabled '
+                    'FROM node_bmc_endpoints WHERE cluster_id=?', (cluster_id,))
+        return [{
+            'cluster_id': r['cluster_id'], 'node': r['node'], 'host': r['bmc_host'],
+            'user': r['bmc_user'], 'verify_ssl': bool(r['bmc_verify_ssl']),
+            'enabled': bool(r['enabled']),
+        } for r in cur.fetchall()]
+
+    def delete_bmc_endpoint(self, cluster_id, node):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM node_bmc_endpoints WHERE cluster_id=? AND node=?',
+                    (cluster_id, node))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def _migrate_from_legacy(self):
         """Migrate data from legacy JSON/encrypted files to SQLite"""
         migrated_any = False

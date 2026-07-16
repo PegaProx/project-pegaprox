@@ -74,6 +74,12 @@ def _node_hw_summary(mgr, node):
         backoff[node] = _t.time() + 3600  # ipmitool/BMC absent or unreachable → don't re-probe every cycle
         return {'available': False, 'reason': res.get('reason', 'unavailable')}
     backoff.pop(node, None)
+    return _compact_hw(res)
+
+
+def _compact_hw(res):
+    """Full normalized hardware dict (bmc/redfish) → the compact cache summary
+    {available, health, power_w, bad[], source} used by the rollup + alert loop."""
     bad = [s['name'] for s in (res.get('sensors') or [])
            if s.get('status') in ('warning', 'critical') and s.get('name')]
     bad += [(f"SEL: {e.get('sensor') or e.get('description') or 'event'}")
@@ -86,7 +92,40 @@ def _node_hw_summary(mgr, node):
         'health': res.get('health', 'ok'),
         'power_w': res.get('power_w'),
         'bad': bad[:12],
+        'source': res.get('source', 'inband'),
     }
+
+
+def _node_hw_summary_redfish(mgr, cluster_id, node):
+    """#609 phase 3 — out-of-band Redfish → compact hardware summary for a node that
+    has a configured BMC endpoint, or None. Own backoff: a node without an endpoint,
+    or an unreachable BMC, is parked ~1h so we don't hammer the management network."""
+    import time as _t
+    from pegaprox.core import redfish
+    from pegaprox.core.db import get_db
+    backoff = getattr(mgr, '_node_rf_probe_backoff', None)
+    if backoff is None:
+        backoff = mgr._node_rf_probe_backoff = {}
+    until = backoff.get(node, 0)
+    if until and _t.time() < until:
+        return None
+    try:
+        ep = get_db().get_bmc_endpoint(cluster_id, node)
+    except Exception:
+        ep = None
+    if not (ep and ep.get('enabled') and ep.get('host')):
+        backoff[node] = _t.time() + 3600  # no endpoint configured → don't recheck every cycle
+        return None
+    try:
+        res = redfish.read_node_bmc_redfish(ep['host'], ep.get('user'), ep.get('password'),
+                                            ep.get('verify_ssl', False), timeout=8)
+    except Exception:
+        res = None
+    if not isinstance(res, dict) or not res.get('available'):
+        backoff[node] = _t.time() + 3600  # BMC unreachable/auth-fail → back off
+        return {'available': False, 'reason': (res or {}).get('reason', 'unavailable')} if isinstance(res, dict) else None
+    backoff.pop(node, None)
+    return _compact_hw(res)
 
 
 def load_metrics_history():
@@ -296,16 +335,26 @@ def collect_metrics_snapshot():
             # hardware the admin hasn't opted into) + proxmox-only. Off the hot-path;
             # writes the manager hw-cache read by the 60s alert loop (which must not SSH).
             try:
-                from pegaprox.api.nodes import _hw_consent_state
+                from pegaprox.api.nodes import _hw_consent_state, _redfish_consent_state
                 _hw_enabled = _hw_consent_state()[0]
+                _rf_enabled = _redfish_consent_state()[0]
             except Exception:
-                _hw_enabled = False
-            if _hw_enabled and getattr(mgr, 'cluster_type', 'proxmox') == 'proxmox':
+                _hw_enabled = _rf_enabled = False
+            if (_hw_enabled or _rf_enabled) and getattr(mgr, 'cluster_type', 'proxmox') == 'proxmox':
                 try:
                     online_node_names = list(cluster_data['nodes'].keys())
                     if online_node_names:
-                        hw_calls = {name: (lambda nm: _node_hw_summary(mgr, nm))
-                                    for name in online_node_names}
+                        # #609 phase 3 — prefer in-band; fall back to a configured
+                        # out-of-band Redfish endpoint. Defaults bind mgr/cluster_id at
+                        # definition time (safe against the outer loop rebinding them).
+                        def _hw_one(nm, _m=mgr, _cid=cluster_id, _ib=_hw_enabled, _rf=_rf_enabled):
+                            s = _node_hw_summary(_m, nm) if _ib else None
+                            if (s is None or not s.get('available')) and _rf:
+                                r = _node_hw_summary_redfish(_m, _cid, nm)
+                                if r is not None:
+                                    s = r
+                            return s
+                        hw_calls = {name: _hw_one for name in online_node_names}
                         hw_by_node = run_per_node(hw_calls, max_concurrent=8, timeout=90)
                         now_ts = time.time()
                         hcache = getattr(mgr, '_node_hw_cache', None)
@@ -324,10 +373,11 @@ def collect_metrics_snapshot():
                             with hlock:
                                 for k in [k for k in hcache if k not in known]:
                                     hcache.pop(k, None)
-                            bo = getattr(mgr, '_node_hw_probe_backoff', None)
-                            if isinstance(bo, dict):
-                                for k in [k for k in bo if k not in known]:
-                                    bo.pop(k, None)
+                            for _bname in ('_node_hw_probe_backoff', '_node_rf_probe_backoff'):
+                                bo = getattr(mgr, _bname, None)
+                                if isinstance(bo, dict):
+                                    for k in [k for k in bo if k not in known]:
+                                        bo.pop(k, None)
                         if got:
                             logging.debug(f"[metrics] {cluster_id}: hw-health for {got}/{len(online_node_names)} node(s)")
                 except Exception as _he:

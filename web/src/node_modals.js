@@ -4262,6 +4262,17 @@
             const [enabling, setEnabling] = useState(false);
             const [installing, setInstalling] = useState(false);
             const [delayLeft, setDelayLeft] = useState(0);   // countdown for warning.require_delay_seconds (Redfish phase uses >0)
+            // #609 phase 3 — out-of-band Redfish consent + per-node BMC endpoint
+            const [rfConsent, setRfConsent] = useState(null);
+            const [showRfWarn, setShowRfWarn] = useState(false);
+            const [rfAck, setRfAck] = useState(false);
+            const [rfEnabling, setRfEnabling] = useState(false);
+            const [rfDelayLeft, setRfDelayLeft] = useState(0);
+            const [bmc, setBmc] = useState(null);           // {configured, host, user, verify_ssl}
+            const [bmcForm, setBmcForm] = useState({ host: '', user: '', password: '', verify_ssl: false });
+            const [bmcSaving, setBmcSaving] = useState(false);
+            const [bmcTesting, setBmcTesting] = useState(false);
+            const [bmcTest, setBmcTest] = useState(null);   // {available, health, reason}
 
             const hwFetch = async (url, opts = {}) => {
                 try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
@@ -4327,7 +4338,67 @@
                 setInstalling(false);
             };
 
+            // #609 phase 3 — out-of-band Redfish consent + per-node BMC endpoint
+            const loadBmc = async () => {
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint`);
+                if (r && r.ok) {
+                    const b = await r.json();
+                    setBmc(b);
+                    if (b.configured) setBmcForm({ host: b.host || '', user: b.user || '', password: '********', verify_ssl: !!b.verify_ssl });
+                    else setBmcForm({ host: '', user: '', password: '', verify_ssl: false });
+                }
+            };
+            const loadRfConsent = async () => {
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/redfish-consent?lang=${encodeURIComponent(language || 'en')}`);
+                if (r && r.ok) { const c = await r.json(); setRfConsent(c); if (c.enabled) loadBmc(); return c; }
+                return null;
+            };
+            useEffect(() => { loadRfConsent(); }, [clusterId, node, language]);
+            const openRfWarn = () => {
+                setRfAck(false);
+                setRfDelayLeft((rfConsent && rfConsent.warning && rfConsent.warning.require_delay_seconds) || 0);
+                setShowRfWarn(true);
+            };
+            useEffect(() => {
+                if (!showRfWarn || rfDelayLeft <= 0) return;
+                const iv = setInterval(() => setRfDelayLeft(x => x <= 1 ? 0 : x - 1), 1000);
+                return () => clearInterval(iv);
+            }, [showRfWarn, rfDelayLeft]);
+            const enableRedfish = async () => {
+                setRfEnabling(true);
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/redfish-consent`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ acknowledge: true, ack_version: rfConsent && rfConsent.current_version, lang: language || 'en' })
+                });
+                if (r && r.ok) { addToast(t('hwEnabled') || 'Enabled', 'success'); setShowRfWarn(false); await loadRfConsent(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('error') || 'Error'), 'error'); }
+                setRfEnabling(false);
+            };
+            const saveBmc = async () => {
+                setBmcSaving(true);
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bmcForm)
+                });
+                if (r && r.ok) { addToast(t('bmcSaved') || 'BMC endpoint saved', 'success'); await loadBmc(); await refresh(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('error') || 'Error'), 'error'); }
+                setBmcSaving(false);
+            };
+            const testBmc = async () => {
+                setBmcTesting(true); setBmcTest(null);
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint/test`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bmcForm)
+                });
+                setBmcTest(r ? await r.json().catch(() => ({ available: false, reason: 'error' })) : { available: false, reason: 'no response' });
+                setBmcTesting(false);
+            };
+            const removeBmc = async () => {
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint`, { method: 'DELETE' });
+                if (r && r.ok) { addToast(t('bmcRemoved') || 'BMC endpoint removed', 'success'); setBmc(null); setBmcForm({ host: '', user: '', password: '', verify_ssl: false }); setBmcTest(null); await refresh(); }
+            };
+
             const w = consent && consent.warning;
+            const rw = rfConsent && rfConsent.warning;
+            const inputStyle = { background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)', color: 'var(--color-text, #e9ecef)' };
             const ipmitoolMissing = hw && hw.available === false && /ipmitool/i.test(hw.reason || '');
             const card = { border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.02)' };
             const cardHead = { padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderBottom: '1px solid rgba(255,255,255,0.10)' };
@@ -4455,6 +4526,58 @@
                         </React.Fragment>
                     )}
 
+                    {/* Out-of-band Redfish (#609 phase 3) — separate, sharper opt-in */}
+                    {rfConsent && (
+                        <div style={card}>
+                            <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('redfishOob') || 'Out-of-band (Redfish)'}</span></div>
+                            <div className="p-4 space-y-3">
+                                {!rfConsent.enabled && (
+                                    <React.Fragment>
+                                        <p className="text-[13px]" style={sub}>{t('redfishOobDesc') || 'Read hardware health over the management network via the BMC Redfish API — a credential-based, out-of-band fallback when in-band IPMI is unavailable.'}</p>
+                                        <button onClick={openRfWarn} className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5" style={{background: '#efc006', color: '#08131b'}}>
+                                            <Icons.Server className="w-3.5 h-3.5" />{t('enableRedfish') || 'Enable out-of-band monitoring'}
+                                        </button>
+                                    </React.Fragment>
+                                )}
+                                {rfConsent.enabled && (
+                                    <div className="space-y-2">
+                                        <p className="text-[12px]" style={sub}>{t('redfishBmcHint') || 'BMC endpoint for this node. The password is stored encrypted and never shown again.'}</p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            <label className="text-[11px] block" style={sub}>{t('bmcHost') || 'BMC host / IP'}
+                                                <input value={bmcForm.host} onChange={e => setBmcForm(f => ({ ...f, host: e.target.value }))} placeholder="10.0.0.10" className="w-full mt-0.5 px-2 py-1 text-[12px] rounded" style={inputStyle} />
+                                            </label>
+                                            <label className="text-[11px] block" style={sub}>{t('bmcUser') || 'BMC user'}
+                                                <input value={bmcForm.user} onChange={e => setBmcForm(f => ({ ...f, user: e.target.value }))} autoComplete="off" className="w-full mt-0.5 px-2 py-1 text-[12px] rounded" style={inputStyle} />
+                                            </label>
+                                            <label className="text-[11px] block" style={sub}>{t('bmcPassword') || 'BMC password'}
+                                                <input type="password" value={bmcForm.password} onChange={e => setBmcForm(f => ({ ...f, password: e.target.value }))} autoComplete="new-password" className="w-full mt-0.5 px-2 py-1 text-[12px] rounded" style={inputStyle} />
+                                            </label>
+                                            <label className="flex items-center gap-2 text-[11px] mt-4 cursor-pointer" style={sub}>
+                                                <input type="checkbox" checked={bmcForm.verify_ssl} onChange={e => setBmcForm(f => ({ ...f, verify_ssl: e.target.checked }))} />
+                                                {t('bmcVerifySsl') || 'Verify TLS certificate'}
+                                            </label>
+                                        </div>
+                                        {bmcTest && (
+                                            <div className="text-[12px] flex items-center gap-1.5" style={{ color: bmcTest.available ? '#60b515' : '#f54f47' }}>
+                                                <span className="w-2 h-2 rounded-full" style={{ background: bmcTest.available ? '#60b515' : '#f54f47' }}></span>
+                                                {bmcTest.available ? `${t('bmcTestOk') || 'Reachable'}${bmcTest.health ? ' — ' + bmcTest.health : ''}` : `${t('bmcTestFail') || 'Failed'}: ${bmcTest.reason || ''}`}
+                                            </div>
+                                        )}
+                                        <div className="flex items-center gap-2">
+                                            <button onClick={saveBmc} disabled={bmcSaving || !bmcForm.host} className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50" style={{ background: '#49afd9', color: '#08131b' }}>
+                                                {bmcSaving ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}{t('save') || 'Save'}
+                                            </button>
+                                            <button onClick={testBmc} disabled={bmcTesting || !bmcForm.host} className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50" style={{ border: '1px solid rgba(255,255,255,0.2)', color: 'var(--color-text, #e9ecef)' }}>
+                                                {bmcTesting ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Activity className="w-3.5 h-3.5" />}{t('bmcTest') || 'Test'}
+                                            </button>
+                                            {bmc && bmc.configured && <button onClick={removeBmc} className="px-3 py-1.5 text-sm" style={{ color: '#f54f47' }}>{t('remove') || 'Remove'}</button>}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Mandatory compliance-warning modal (server-versioned text) */}
                     {showWarn && w && (
                         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !enabling && setShowWarn(false)}>
@@ -4485,6 +4608,42 @@
                                         style={{background: '#49afd9', color: '#08131b'}}>
                                         {enabling ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
                                         {delayLeft > 0 ? `${t('hwEnable') || 'Enable'} (${delayLeft})` : (t('hwEnable') || 'Enable')}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Out-of-band Redfish warning modal — sharper, with the enforced delay */}
+                    {showRfWarn && rw && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !rfEnabling && setShowRfWarn(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" style={{background: 'var(--corp-card-bg, #1a2733)'}} onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold mb-1 flex items-center gap-2" style={txt}>
+                                    <Icons.AlertTriangle className="w-4 h-4" style={{color: '#f54f47'}} />
+                                    {rw.title || (t('enableRedfish') || 'Enable out-of-band monitoring')}
+                                </h3>
+                                {rw.summary && <p className="text-xs mb-3" style={sub}>{rw.summary}</p>}
+                                {Array.isArray(rw.points) && (
+                                    <ul className="text-[12px] space-y-1.5 mb-3 list-disc pl-5" style={sub}>
+                                        {rw.points.map((p, i) => <li key={i}>{p}</li>)}
+                                    </ul>
+                                )}
+                                {rw.compliance_note && (
+                                    <div className="border rounded p-2 mb-3 text-[11px]" style={{borderColor: 'rgba(245,79,71,0.3)', background: 'rgba(245,79,71,0.06)', color: '#f88'}}>
+                                        {rw.compliance_note}
+                                    </div>
+                                )}
+                                <label className="flex items-start gap-2 text-[12px] mb-4 cursor-pointer" style={txt}>
+                                    <input type="checkbox" className="mt-0.5" checked={rfAck} onChange={e => setRfAck(e.target.checked)} />
+                                    <span>{rw.confirm_label || (t('hwConfirmDefault') || 'I understand and accept responsibility for enabling this')}</span>
+                                </label>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setShowRfWarn(false)} disabled={rfEnabling} className="px-3 py-1.5 text-sm" style={sub}>{t('cancel') || 'Cancel'}</button>
+                                    <button onClick={enableRedfish} disabled={rfEnabling || !rfAck || rfDelayLeft > 0}
+                                        className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50"
+                                        style={{background: '#49afd9', color: '#08131b'}}>
+                                        {rfEnabling ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {rfDelayLeft > 0 ? `${t('hwEnable') || 'Enable'} (${rfDelayLeft})` : (t('hwEnable') || 'Enable')}
                                     </button>
                                 </div>
                             </div>

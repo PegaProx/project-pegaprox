@@ -153,6 +153,110 @@ def hw_consent_warning(lang=None):
 HW_CONSENT_WARNING = hw_consent_warning('en')
 
 
+# --- Out-of-band Redfish consent (#609 phase 3) --------------------------------
+# A SEPARATE, sharper opt-in from the in-band one: Redfish crosses onto the
+# management network and uses STORED CREDENTIALS, so it carries an enforced
+# 5-second delay before the confirm button can be pressed (require_delay_seconds).
+# Same versioning contract: one v1 warning in 7 languages, bumped together.
+REDFISH_CONSENT_VERSION = 1
+REDFISH_CONSENT_DELAY_SECONDS = 5   # out-of-band: sharper warning, enforced wait
+
+_REDFISH_CONSENT_TEXT = {
+    'en': {
+        'title': "Enable out-of-band hardware monitoring (Redfish)",
+        'summary': "PegaProx will read hardware health over the management network using the BMC Redfish API, with credentials you store per node.",
+        'points': [
+            "This is out-of-band and CREDENTIALED: PegaProx stores a BMC username and password per node and connects to the BMC over its management network — unlike in-band IPMI, which uses no credentials.",
+            "Only read-only Redfish requests are made (system status, thermal, power, event log). No power, virtual-media, BIOS or firmware operations.",
+            "Connecting the data plane to the out-of-band management network widens your attack surface. Ensure this crossing is acceptable under your network-segmentation and boundary-protection controls.",
+            "BMC credentials are stored encrypted, but a compromise of PegaProx would expose management-plane access. Use a dedicated read-only BMC account where your BMC supports it.",
+        ],
+        'compliance_note': "Out-of-band monitoring may be relevant to your boundary-protection and least-privilege controls (e.g. CMMC / NIST 800-171 3.13.1, 3.13.2 and 3.1.5, DISA STIG BMC/OOB guidance). Confirm with your compliance owner. This is not legal advice.",
+        'confirm_label': "I understand the out-of-band and credential risk, and I accept responsibility for enabling this",
+    },
+    'de': {
+        'title': "Out-of-Band-Hardware-Überwachung (Redfish) aktivieren",
+        'summary': "PegaProx liest den Hardware-Zustand über das Management-Netzwerk mittels BMC-Redfish-API, mit Zugangsdaten, die Sie pro Node speichern.",
+        'points': [
+            "Dies ist Out-of-Band und ZUGANGSDATEN-BASIERT: PegaProx speichert pro Node BMC-Benutzername und -Passwort und verbindet sich mit dem BMC über dessen Management-Netzwerk — anders als In-Band-IPMI, das keine Zugangsdaten nutzt.",
+            "Es werden ausschließlich lesende Redfish-Anfragen gestellt (Systemstatus, Thermik, Strom, Ereignisprotokoll). Keine Power-, Virtual-Media-, BIOS- oder Firmware-Operationen.",
+            "Die Verbindung der Datenebene mit dem Out-of-Band-Management-Netzwerk vergrößert Ihre Angriffsfläche. Stellen Sie sicher, dass diese Überschreitung mit Ihren Netzsegmentierungs- und Boundary-Protection-Kontrollen vereinbar ist.",
+            "BMC-Zugangsdaten werden verschlüsselt gespeichert, doch eine Kompromittierung von PegaProx würde Zugriff auf die Management-Ebene offenlegen. Verwenden Sie nach Möglichkeit ein dediziertes, nur-lesendes BMC-Konto.",
+        ],
+        'compliance_note': "Out-of-Band-Überwachung kann für Ihre Boundary-Protection- und Least-Privilege-Kontrollen relevant sein (z. B. CMMC / NIST 800-171 3.13.1, 3.13.2 und 3.1.5, DISA STIG BMC/OOB-Vorgaben). Stimmen Sie sich mit Ihrem Compliance-Verantwortlichen ab. Dies ist keine Rechtsberatung.",
+        'confirm_label': "Ich verstehe das Out-of-Band- und Zugangsdaten-Risiko und übernehme die Verantwortung für die Aktivierung",
+    },
+    'fr': {
+        'title': "Activer la surveillance matérielle hors bande (Redfish)",
+        'summary': "PegaProx lira l'état du matériel via le réseau de gestion à l'aide de l'API Redfish du BMC, avec des identifiants que vous stockez par nœud.",
+        'points': [
+            "Ceci est hors bande et BASÉ SUR DES IDENTIFIANTS : PegaProx stocke un nom d'utilisateur et un mot de passe BMC par nœud et se connecte au BMC via son réseau de gestion — contrairement à l'IPMI en bande, qui n'utilise aucun identifiant.",
+            "Seules des requêtes Redfish en lecture seule sont émises (état du système, thermique, alimentation, journal d'événements). Aucune opération d'alimentation, de média virtuel, de BIOS ou de micrologiciel.",
+            "Relier le plan de données au réseau de gestion hors bande élargit votre surface d'attaque. Assurez-vous que ce franchissement est acceptable selon vos contrôles de segmentation réseau et de protection des périmètres.",
+            "Les identifiants BMC sont stockés chiffrés, mais une compromission de PegaProx exposerait l'accès au plan de gestion. Utilisez un compte BMC dédié en lecture seule lorsque votre BMC le permet.",
+        ],
+        'compliance_note': "La surveillance hors bande peut concerner vos contrôles de protection des périmètres et de moindre privilège (par ex. CMMC / NIST 800-171 3.13.1, 3.13.2 et 3.1.5, recommandations DISA STIG BMC/OOB). Vérifiez avec votre responsable conformité. Ceci ne constitue pas un conseil juridique.",
+        'confirm_label': "Je comprends le risque hors bande et lié aux identifiants, et j'accepte la responsabilité de cette activation",
+    },
+    'es': {
+        'title': "Activar la supervisión de hardware fuera de banda (Redfish)",
+        'summary': "PegaProx leerá el estado del hardware a través de la red de gestión mediante la API Redfish del BMC, con credenciales que usted almacena por nodo.",
+        'points': [
+            "Esto es fuera de banda y BASADO EN CREDENCIALES: PegaProx almacena un usuario y una contraseña de BMC por nodo y se conecta al BMC a través de su red de gestión, a diferencia del IPMI en banda, que no usa credenciales.",
+            "Solo se realizan solicitudes Redfish de solo lectura (estado del sistema, térmica, alimentación, registro de eventos). Ninguna operación de encendido, medios virtuales, BIOS o firmware.",
+            "Conectar el plano de datos con la red de gestión fuera de banda amplía su superficie de ataque. Asegúrese de que este cruce sea aceptable según sus controles de segmentación de red y de protección del perímetro.",
+            "Las credenciales del BMC se almacenan cifradas, pero un compromiso de PegaProx expondría el acceso al plano de gestión. Use una cuenta de BMC dedicada de solo lectura cuando su BMC lo permita.",
+        ],
+        'compliance_note': "La supervisión fuera de banda puede ser relevante para sus controles de protección del perímetro y de mínimo privilegio (p. ej., CMMC / NIST 800-171 3.13.1, 3.13.2 y 3.1.5, directrices DISA STIG BMC/OOB). Confírmelo con su responsable de cumplimiento. Esto no es asesoramiento legal.",
+        'confirm_label': "Entiendo el riesgo fuera de banda y de credenciales, y acepto la responsabilidad de activar esto",
+    },
+    'pt': {
+        'title': "Ativar a monitorização de hardware fora de banda (Redfish)",
+        'summary': "O PegaProx lerá o estado do hardware através da rede de gestão usando a API Redfish do BMC, com credenciais que você armazena por nó.",
+        'points': [
+            "Isto é fora de banda e BASEADO EM CREDENCIAIS: o PegaProx armazena um nome de utilizador e uma palavra-passe de BMC por nó e liga-se ao BMC através da sua rede de gestão, ao contrário do IPMI em banda, que não usa credenciais.",
+            "Apenas são feitos pedidos Redfish de leitura (estado do sistema, térmica, energia, registo de eventos). Nenhuma operação de energia, media virtual, BIOS ou firmware.",
+            "Ligar o plano de dados à rede de gestão fora de banda aumenta a sua superfície de ataque. Garanta que esta travessia é aceitável de acordo com os seus controlos de segmentação de rede e de proteção do perímetro.",
+            "As credenciais do BMC são armazenadas cifradas, mas um comprometimento do PegaProx exporia o acesso ao plano de gestão. Use uma conta de BMC dedicada só de leitura quando o seu BMC o permitir.",
+        ],
+        'compliance_note': "A monitorização fora de banda pode ser relevante para os seus controlos de proteção do perímetro e de menor privilégio (por ex., CMMC / NIST 800-171 3.13.1, 3.13.2 e 3.1.5, orientações DISA STIG BMC/OOB). Confirme com o seu responsável de conformidade. Isto não constitui aconselhamento jurídico.",
+        'confirm_label': "Compreendo o risco fora de banda e de credenciais, e aceito a responsabilidade por ativar isto",
+    },
+    'ko': {
+        'title': "대역 외 하드웨어 모니터링(Redfish) 활성화",
+        'summary': "PegaProx는 노드별로 저장한 자격 증명으로 BMC Redfish API를 사용하여 관리 네트워크를 통해 하드웨어 상태를 읽습니다.",
+        'points': [
+            "이것은 대역 외이며 자격 증명 기반입니다. PegaProx는 노드별로 BMC 사용자 이름과 비밀번호를 저장하고 관리 네트워크를 통해 BMC에 연결합니다. 자격 증명을 사용하지 않는 대역 내 IPMI와 다릅니다.",
+            "읽기 전용 Redfish 요청만 수행됩니다(시스템 상태, 온도, 전원, 이벤트 로그). 전원, 가상 미디어, BIOS 또는 펌웨어 작업은 수행하지 않습니다.",
+            "데이터 평면을 대역 외 관리 네트워크에 연결하면 공격 표면이 넓어집니다. 이 경계 통과가 네트워크 분할 및 경계 보호 통제에 부합하는지 확인하십시오.",
+            "BMC 자격 증명은 암호화되어 저장되지만, PegaProx가 침해되면 관리 평면 접근이 노출됩니다. BMC가 지원하는 경우 전용 읽기 전용 BMC 계정을 사용하십시오.",
+        ],
+        'compliance_note': "대역 외 모니터링은 경계 보호 및 최소 권한 통제(예: CMMC / NIST 800-171 3.13.1, 3.13.2 및 3.1.5, DISA STIG BMC/OOB 지침)와 관련될 수 있습니다. 규정 준수 책임자와 확인하십시오. 이것은 법률 자문이 아닙니다.",
+        'confirm_label': "대역 외 및 자격 증명 위험을 이해했으며 활성화에 대한 책임을 수락합니다",
+    },
+    'it': {
+        'title': "Abilitare il monitoraggio hardware fuori banda (Redfish)",
+        'summary': "PegaProx leggerà lo stato dell'hardware tramite la rete di gestione usando l'API Redfish del BMC, con credenziali che memorizzi per ogni nodo.",
+        'points': [
+            "Questo è fuori banda e BASATO SU CREDENZIALI: PegaProx memorizza nome utente e password del BMC per ogni nodo e si connette al BMC tramite la sua rete di gestione, a differenza dell'IPMI in banda, che non usa credenziali.",
+            "Vengono effettuate solo richieste Redfish di sola lettura (stato del sistema, termica, alimentazione, registro eventi). Nessuna operazione di alimentazione, supporti virtuali, BIOS o firmware.",
+            "Collegare il piano dati alla rete di gestione fuori banda amplia la superficie di attacco. Assicurati che questo attraversamento sia accettabile secondo i tuoi controlli di segmentazione della rete e di protezione del perimetro.",
+            "Le credenziali del BMC sono memorizzate cifrate, ma una compromissione di PegaProx esporrebbe l'accesso al piano di gestione. Usa un account BMC dedicato di sola lettura quando il tuo BMC lo consente.",
+        ],
+        'compliance_note': "Il monitoraggio fuori banda può essere rilevante per i tuoi controlli di protezione del perimetro e di privilegio minimo (ad es. CMMC / NIST 800-171 3.13.1, 3.13.2 e 3.1.5, linee guida DISA STIG BMC/OOB). Verifica con il tuo responsabile della conformità. Questo non è un parere legale.",
+        'confirm_label': "Comprendo il rischio fuori banda e legato alle credenziali, e accetto la responsabilità di abilitare questa funzione",
+    },
+}
+
+
+def redfish_consent_warning(lang=None):
+    """The out-of-band Redfish consent warning for `lang` (falls back to English),
+    with the shared version + the enforced 5s delay injected."""
+    base = (lang or 'en').split('-')[0].lower()
+    text = _REDFISH_CONSENT_TEXT.get(base) or _REDFISH_CONSENT_TEXT['en']
+    return {'version': REDFISH_CONSENT_VERSION, 'require_delay_seconds': REDFISH_CONSENT_DELAY_SECONDS, **text}
+
+
 def _num(s):
     """First numeric token in a string as float, or None."""
     m = re.search(r'-?\d+(?:\.\d+)?', s or '')

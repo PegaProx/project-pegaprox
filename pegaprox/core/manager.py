@@ -243,6 +243,7 @@ class PegaProxManager:
         self._node_hw_cache = {}   # {node_name: {'summary': {...}, 'ts': epoch}}
         self._node_hw_lock = threading.Lock()
         self._node_hw_probe_backoff = {}  # {node_name: reprobe_after_epoch}
+        self._node_rf_probe_backoff = {}  # #609 phase 3 — Redfish probe backoff
 
         # maintenance mode
         self.nodes_in_maintenance = {}

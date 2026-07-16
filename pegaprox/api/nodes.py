@@ -251,6 +251,16 @@ def _hw_consent_state():
     return enabled, ack
 
 
+def _redfish_consent_state():
+    """(enabled, ack_record) for OUT-OF-BAND Redfish monitoring — a separate, sharper
+    opt-in from the in-band one (its own versioned warning + 5s delay)."""
+    from pegaprox.api.helpers import load_server_settings
+    from pegaprox.core import bmc
+    ack = (load_server_settings() or {}).get('hardware_monitoring_redfish') or {}
+    enabled = bool(ack.get('enabled')) and _hw_int(ack.get('ack_version')) >= bmc.REDFISH_CONSENT_VERSION
+    return enabled, ack
+
+
 @bp.route('/api/hardware-monitoring/consent', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_hw_monitoring_consent():
@@ -326,9 +336,10 @@ def set_hw_monitoring_consent():
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardware', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_node_hardware_api(cluster_id, node):
-    """In-band hardware health for one node (sensors/power/FRU/SEL rollup).
+    """Hardware health for one node (sensors/power/FRU/SEL rollup). Prefers in-band
+    ipmitool; falls back to a configured out-of-band Redfish endpoint (#609 phase 3).
 
-    Refuses with CONSENT_REQUIRED until the feature is enabled + acknowledged.
+    Refuses with CONSENT_REQUIRED until at least one source is enabled + acknowledged.
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
@@ -336,16 +347,200 @@ def get_node_hardware_api(cluster_id, node):
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    from pegaprox.core import bmc
-    enabled, _ack = _hw_consent_state()
-    if not enabled:
+    from pegaprox.core import bmc, redfish
+    inband_ok, _ = _hw_consent_state()
+    redfish_ok, _ = _redfish_consent_state()
+    if not (inband_ok or redfish_ok):
         return jsonify({
             'error': 'Hardware monitoring is not enabled',
             'code': 'CONSENT_REQUIRED',
             'current_version': bmc.HW_CONSENT_VERSION,
         }), 403
-    result = bmc.read_node_bmc_inband(cluster_managers[cluster_id], node)
+    result = redfish.read_node_hardware(cluster_managers[cluster_id], cluster_id, node,
+                                        inband_ok=inband_ok, redfish_ok=redfish_ok)
     return jsonify(result)
+
+
+# ── Out-of-band Redfish consent (#609 phase 3) ────────────────────────────────
+# A SEPARATE, sharper opt-in from the in-band one (its own versioned warning with
+# an enforced 5s delay). Same non-repudiation contract: the ack (with the language
+# the admin saw) is written to the audit log.
+
+@bp.route('/api/hardware-monitoring/redfish-consent', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_redfish_consent():
+    """Redfish consent status + the versioned out-of-band warning (?lang=...)."""
+    from pegaprox.core import bmc
+    enabled, ack = _redfish_consent_state()
+    return jsonify({
+        'enabled': enabled,
+        'acknowledged_by': ack.get('acknowledged_by'),
+        'acknowledged_at': ack.get('acknowledged_at'),
+        'ack_version': ack.get('ack_version'),
+        'ack_lang': ack.get('ack_lang'),
+        'current_version': bmc.REDFISH_CONSENT_VERSION,
+        'warning': bmc.redfish_consent_warning(request.args.get('lang')),
+    })
+
+
+@bp.route('/api/hardware-monitoring/redfish-consent', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def set_redfish_consent():
+    """Enable/disable out-of-band Redfish monitoring. Enabling requires the current
+    warning version to be acknowledged; the acknowledgement + language are audited."""
+    from pegaprox.api.helpers import load_server_settings, save_server_settings
+    from pegaprox.core import bmc
+    data = request.get_json(silent=True) or {}
+    usr = request.session.get('user', 'admin')
+    settings = load_server_settings() or {}
+
+    if data.get('enabled') is False:
+        settings['hardware_monitoring_redfish'] = {
+            'enabled': False, 'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(), 'ack_version': 0,
+        }
+        save_server_settings(settings)
+        log_audit(usr, 'hardware_monitoring_redfish.disabled',
+                  'Out-of-band Redfish hardware monitoring disabled')
+        return jsonify({'enabled': False})
+
+    if data.get('acknowledge') is True and _hw_int(data.get('ack_version')) == bmc.REDFISH_CONSENT_VERSION:
+        ack_lang = (str(data.get('lang') or 'en').split('-')[0].lower())[:8]
+        if ack_lang not in bmc._REDFISH_CONSENT_TEXT:
+            ack_lang = 'en'
+        rec = {
+            'enabled': True, 'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(),
+            'ack_version': bmc.REDFISH_CONSENT_VERSION, 'ack_lang': ack_lang,
+        }
+        settings['hardware_monitoring_redfish'] = rec
+        save_server_settings(settings)
+        log_audit(usr, 'hardware_monitoring_redfish.enabled',
+                  'Out-of-band Redfish hardware monitoring enabled; acknowledged '
+                  'compliance warning v%d [%s]' % (bmc.REDFISH_CONSENT_VERSION, ack_lang))
+        return jsonify(rec)
+
+    return jsonify({'error': 'Must acknowledge the current compliance warning to enable',
+                    'code': 'ACK_REQUIRED',
+                    'current_version': bmc.REDFISH_CONSENT_VERSION}), 400
+
+
+# ── Per-node BMC (Redfish) endpoint config (#609 phase 3) ─────────────────────
+# admin.settings only; the password is stored encrypted and NEVER returned to the
+# browser (masked as ********). Configuring an endpoint requires Redfish consent.
+
+def _require_redfish_consent():
+    from pegaprox.core import bmc
+    enabled, _ = _redfish_consent_state()
+    if not enabled:
+        return jsonify({'error': 'Out-of-band (Redfish) monitoring is not enabled',
+                        'code': 'CONSENT_REQUIRED',
+                        'current_version': bmc.REDFISH_CONSENT_VERSION}), 403
+    return None
+
+
+@bp.route('/api/clusters/<cluster_id>/bmc-endpoints', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def list_bmc_endpoints_api(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    return jsonify({'endpoints': get_db().list_bmc_endpoints(cluster_id)})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def get_bmc_endpoint_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    ep = get_db().get_bmc_endpoint(cluster_id, node, decrypt=False)
+    if not ep:
+        return jsonify({'configured': False})
+    ep['configured'] = True
+    ep['password'] = '********' if ep.pop('has_password', False) else ''
+    return jsonify(ep)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def set_bmc_endpoint_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    consent_err = _require_redfish_consent()
+    if consent_err is not None:
+        return consent_err
+    from pegaprox.core import redfish
+    data = request.get_json(silent=True) or {}
+    host = (data.get('host') or '').strip()
+    base, why = redfish._validate_host(host)
+    if base is None:
+        return jsonify({'error': why or 'invalid BMC host'}), 400
+    user = (data.get('user') or '').strip()[:128]
+    verify_ssl = bool(data.get('verify_ssl'))
+    enabled = data.get('enabled', True)
+    pw = data.get('password')
+    # keep the existing password when the UI submits the mask (never overwrite with ****)
+    if pw in (None, '', '********'):
+        existing = get_db().get_bmc_endpoint(cluster_id, node)
+        pw = (existing or {}).get('password', '')
+        if not pw:
+            return jsonify({'error': 'BMC password required'}), 400
+    if len(str(pw)) > 512:
+        return jsonify({'error': 'BMC password too long'}), 400
+    get_db().save_bmc_endpoint(cluster_id, node, host, user, str(pw),
+                               verify_ssl=verify_ssl, enabled=bool(enabled))
+    usr = request.session.get('user', 'admin')
+    log_audit(usr, 'hardware_monitoring_redfish.endpoint_set',
+              f'BMC/Redfish endpoint set for node {node} (host={host}, verify_ssl={verify_ssl})',
+              cluster=getattr(getattr(cluster_managers.get(cluster_id), 'config', None), 'name', cluster_id))
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def delete_bmc_endpoint_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    removed = get_db().delete_bmc_endpoint(cluster_id, node)
+    if removed:
+        usr = request.session.get('user', 'admin')
+        log_audit(usr, 'hardware_monitoring_redfish.endpoint_removed',
+                  f'BMC/Redfish endpoint removed for node {node}')
+    return jsonify({'success': True, 'removed': removed})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint/test', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def test_bmc_endpoint_api(cluster_id, node):
+    """Live read the stored (or posted) BMC endpoint over Redfish to validate it.
+    Returns {available, health?, reason?} — read-only, no config change."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    consent_err = _require_redfish_consent()
+    if consent_err is not None:
+        return consent_err
+    from pegaprox.core import redfish
+    data = request.get_json(silent=True) or {}
+    stored = get_db().get_bmc_endpoint(cluster_id, node) or {}
+    host = (data.get('host') or stored.get('host') or '').strip()
+    if not host:
+        return jsonify({'available': False, 'reason': 'no BMC host configured'}), 400
+    user = (data.get('user') or stored.get('user') or '').strip()
+    pw = data.get('password')
+    if pw in (None, '', '********'):
+        pw = stored.get('password', '')
+    verify_ssl = bool(data.get('verify_ssl', stored.get('verify_ssl', False)))
+    res = redfish.read_node_bmc_redfish(host, user, str(pw or ''), verify_ssl=verify_ssl, timeout=8)
+    return jsonify({'available': res.get('available', False),
+                    'health': res.get('health'), 'reason': res.get('reason'),
+                    'source': 'redfish'})
 
 
 @bp.route('/api/clusters/<cluster_id>/hardware/health', methods=['GET'])
@@ -359,8 +554,9 @@ def get_cluster_hardware_health_api(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     from pegaprox.core import bmc
-    enabled, _ack = _hw_consent_state()
-    if not enabled:
+    inband_ok, _ = _hw_consent_state()
+    redfish_ok, _ = _redfish_consent_state()
+    if not (inband_ok or redfish_ok):   # #609 phase 3 — a Redfish-only deployment must not 403
         return jsonify({'error': 'Hardware monitoring is not enabled',
                         'code': 'CONSENT_REQUIRED',
                         'current_version': bmc.HW_CONSENT_VERSION}), 403

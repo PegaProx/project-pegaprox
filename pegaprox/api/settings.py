@@ -2427,13 +2427,15 @@ def restore_config():
             try:
                 if not dry_run:
                     current = load_server_settings()
-                    # #609: hardware-monitoring consent is a versioned, audit-logged
-                    # toggle that must ONLY move through set_hw_monitoring_consent (which
-                    # records the acknowledgement — "dann heißt es nicht 'Ich hab es nie
-                    # bekommen'"). A generic config-restore must neither enable nor disable
-                    # it, so we drop the backup's value and preserve the live consent state.
+                    # #609: hardware-monitoring consent (in-band + out-of-band Redfish)
+                    # is a versioned, audit-logged toggle that must ONLY move through the
+                    # set_*_consent routes (which record the acknowledgement — "dann heißt
+                    # es nicht 'Ich hab es nie bekommen'"). A generic config-restore must
+                    # neither enable nor disable it, so we drop the backup's values and
+                    # preserve the live consent state for BOTH keys.
+                    _PROTECTED_CONSENT = ('hardware_monitoring', 'hardware_monitoring_redfish')
                     incoming_ss = {k: v for k, v in (data['server_settings'] or {}).items()
-                                   if k != 'hardware_monitoring'}
+                                   if k not in _PROTECTED_CONSENT}
                     if mode == 'merge':
                         # Only update non-empty values
                         for key, value in incoming_ss.items():
@@ -2441,8 +2443,9 @@ def restore_config():
                                 current[key] = value
                         save_server_settings(current)
                     else:
-                        if (current or {}).get('hardware_monitoring') is not None:
-                            incoming_ss['hardware_monitoring'] = current['hardware_monitoring']
+                        for _k in _PROTECTED_CONSENT:
+                            if (current or {}).get(_k) is not None:
+                                incoming_ss[_k] = current[_k]
                         save_server_settings(incoming_ss)
                 results['restored']['server_settings'] = True
             except Exception as e:
