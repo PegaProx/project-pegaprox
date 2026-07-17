@@ -234,6 +234,23 @@ def zfs_replicate_dataset(src_ssh, tgt_ssh, src_dataset, tgt_dataset,
     return res
 
 
+def zfs_prune_snapshots(ssh, dataset, keep_snaps, prefix, timeout=60, log=None):
+    """Delete replication snapshots (@<prefix>…) on a ZFS dataset except those in
+    keep_snaps — keeps the send/recv base chain bounded on both sides."""
+    out = _ssh_run(ssh, f"zfs list -t snapshot -o name -H {_q(dataset)} 2>/dev/null", timeout=timeout)
+    pruned = []
+    for line in (out or '').split('\n'):
+        line = line.strip()
+        if not line.startswith(f"{dataset}@"):
+            continue
+        snap = line.split('@', 1)[1]
+        if snap.startswith(prefix) and snap not in keep_snaps:
+            _ssh_run(ssh, f"zfs destroy {_q(line)} 2>/dev/null", timeout=timeout)
+            pruned.append(snap)
+            if log: log(f"pruned zfs snapshot {line}")
+    return pruned
+
+
 # ---------------------------------------------------------------- helpers ---
 
 def _q(s):

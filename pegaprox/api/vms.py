@@ -6488,6 +6488,16 @@ def _xcincr_rbd_pool(ssh, storage):
     return p or storage
 
 
+def _xcincr_zfs_pool(ssh, storage):
+    """ZFS dataset root behind a zfspool storage (from `pvesm config`); a disk
+    volume `vm-N-disk-M` lives at `<pool>/vm-N-disk-M`."""
+    import shlex
+    from pegaprox.core.incremental_repl import _ssh_run
+    out = _ssh_run(ssh, f"pvesm config {shlex.quote(storage)} 2>/dev/null | awk '/^[[:space:]]*pool /{{print $2}}'")
+    p = (out or '').strip().split('\n')[0].strip()
+    return p or storage
+
+
 def _xcincr_vm_exists(mgr, vmid):
     try:
         r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/resources", params={'type': 'vm'})
@@ -6591,7 +6601,8 @@ def _execute_replication_incremental(job):
     when the VM isn't eligible (some disk isn't rbd, target storage isn't rbd,
     LXC, missing creds…) so the caller falls back to the proven full path.
     """
-    from pegaprox.core.incremental_repl import rbd_replicate_disk, rbd_prune_snapshots
+    from pegaprox.core.incremental_repl import (rbd_replicate_disk, rbd_prune_snapshots,
+                                                zfs_replicate_dataset, zfs_prune_snapshots)
     db = get_db()
     job_id = job['id']; vmid = int(job['vmid'])
     vm_type = job.get('vm_type', 'qemu') or 'qemu'
@@ -6658,12 +6669,21 @@ def _execute_replication_incremental(job):
         tgt_types = {s['storage']: s.get('type', '') for s in tt.json().get('data', [])} if tt.status_code == 200 else {}
     except Exception:
         return False
-    if any(src_types.get(s) != 'rbd' for (_, s, _) in disks) or tgt_types.get(target_storage) != 'rbd':
-        logging.info(f"[XCINCR] Job {job_id}: disks/target not all rbd — falling back to full replication")
+    # every source disk must be ONE incremental-capable type (rbd or zfspool),
+    # and the target storage must be that same type (can't diff rbd -> zfs).
+    _INCR = {'rbd', 'zfspool'}
+    src_disk_types = {src_types.get(s) for (_, s, _) in disks}
+    if len(src_disk_types) != 1 or not src_disk_types.issubset(_INCR):
+        logging.info(f"[XCINCR] Job {job_id}: disks not one incremental type {src_disk_types} — full path")
+        return False
+    incr_type = src_disk_types.pop()
+    if tgt_types.get(target_storage) != incr_type:
+        logging.info(f"[XCINCR] Job {job_id}: target storage {target_storage} "
+                     f"({tgt_types.get(target_storage)}) != source type {incr_type} — full path")
         return False
 
     # --- we now OWN the job (return True even on failure) ---
-    logging.info(f"[XCINCR] Job {job_id}: incremental rbd repl VM {vmid}@{source_cid} -> {tgt_vmid}@{target_cid} "
+    logging.info(f"[XCINCR] Job {job_id}: incremental {incr_type} repl VM {vmid}@{source_cid} -> {tgt_vmid}@{target_cid} "
                  f"({len(disks)} disk(s), base={last_snap or 'none/seed'})")
     src_ssh = tgt_ssh = None
     try:
@@ -6696,20 +6716,26 @@ def _execute_replication_incremental(job):
                 _update_repl_status(db, job_id, 'error', rm_err); return True
 
         # 3. replicate each disk (seed when rebuilding, else the base..new delta)
-        tgt_pool = _xcincr_rbd_pool(tgt_ssh, target_storage)
         base_for_disk = None if rebuild else (last_snap or None)
+        _dlog = lambda m: logging.info(f"[XCINCR] {job_id}: {m}")
         replicated, total = [], 0
         for (key, storage, volume) in disks:
-            src_pool = _xcincr_rbd_pool(src_ssh, storage)
-            tgt_image = volume.replace(f"vm-{vmid}-", f"vm-{tgt_vmid}-", 1)
-            res = rbd_replicate_disk(src_ssh, tgt_ssh, src_pool, volume, tgt_pool, tgt_image, new_snap,
-                                     base_snap=base_for_disk,
-                                     log=lambda m: logging.info(f"[XCINCR] {job_id}: {m}"))
+            tgt_vol = volume.replace(f"vm-{vmid}-", f"vm-{tgt_vmid}-", 1)
+            if incr_type == 'rbd':
+                res = rbd_replicate_disk(src_ssh, tgt_ssh,
+                                         _xcincr_rbd_pool(src_ssh, storage), volume,
+                                         _xcincr_rbd_pool(tgt_ssh, target_storage), tgt_vol,
+                                         new_snap, base_snap=base_for_disk, log=_dlog)
+            else:  # zfspool
+                src_ds = f"{_xcincr_zfs_pool(src_ssh, storage)}/{volume}"
+                tgt_ds = f"{_xcincr_zfs_pool(tgt_ssh, target_storage)}/{tgt_vol}"
+                res = zfs_replicate_dataset(src_ssh, tgt_ssh, src_ds, tgt_ds, new_snap,
+                                            base_snap=base_for_disk, log=_dlog)
             if not res['ok']:
                 _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, new_snap)
                 _update_repl_status(db, job_id, 'error', f'disk {key} ({volume}) replicate failed: {res.get("error","")[:200]}')
                 return True
-            total += res['bytes']; replicated.append((key, tgt_image, res['mode']))
+            total += res['bytes']; replicated.append((key, tgt_vol, res['mode']))
         logging.info(f"[XCINCR] Job {job_id}: shipped {total/1e6:.1f} MB ({', '.join(m for _,_,m in replicated)})")
 
         # 4. build the replica VM shell on a (re)build (disks already seeded)
@@ -6725,10 +6751,14 @@ def _execute_replication_incremental(job):
         if last_snap:
             _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, last_snap)
         for (key, storage, volume) in disks:
-            tgt_image = volume.replace(f"vm-{vmid}-", f"vm-{tgt_vmid}-", 1)
+            tgt_vol = volume.replace(f"vm-{vmid}-", f"vm-{tgt_vmid}-", 1)
             try:
-                rbd_prune_snapshots(src_ssh, _xcincr_rbd_pool(src_ssh, storage), volume, {new_snap}, 'xcincr-')
-                rbd_prune_snapshots(tgt_ssh, tgt_pool, tgt_image, {new_snap}, 'xcincr-')
+                if incr_type == 'rbd':
+                    rbd_prune_snapshots(src_ssh, _xcincr_rbd_pool(src_ssh, storage), volume, {new_snap}, 'xcincr-')
+                    rbd_prune_snapshots(tgt_ssh, _xcincr_rbd_pool(tgt_ssh, target_storage), tgt_vol, {new_snap}, 'xcincr-')
+                else:
+                    zfs_prune_snapshots(src_ssh, f"{_xcincr_zfs_pool(src_ssh, storage)}/{volume}", {new_snap}, 'xcincr-')
+                    zfs_prune_snapshots(tgt_ssh, f"{_xcincr_zfs_pool(tgt_ssh, target_storage)}/{tgt_vol}", {new_snap}, 'xcincr-')
             except Exception:
                 pass
         _update_repl_status(db, job_id, 'ok', '')
