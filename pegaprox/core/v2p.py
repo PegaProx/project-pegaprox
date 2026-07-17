@@ -3119,6 +3119,60 @@ def _scsi_controller_args(pve_mgr, node, vmid, disk_bus):
     return f"-device {qemu_dev},id=scsihw0 "
 
 
+def _ensure_block_device(pve_mgr, node, vol_id, dev_path, storage_type):
+    """Make sure dev_path is a REAL block device before any dd writes to it.
+
+    NS 2026-07-17 (#538 oetti77): for a krbd RBD storage `pvesm path` returns
+    /dev/rbd-pve/<fsid>/<pool>/<image>, but that node only exists once the image
+    is actually kernel-mapped. `pvesm activate-volume` is best-effort (its rc is
+    unchecked), so on a udev race / transient map failure the path is NOT a
+    block device — and a later `dd of=<that path>` silently creates a PHANTOM
+    REGULAR FILE: dd reports the full byte count, but the bytes never reach Ceph
+    and the RBD image stays blank (guest then fails to start with
+    "'host_device' driver requires ... to be either a character or block device").
+
+    Returns True only when `test -b dev_path` actually passes. For RBD it polls
+    for the map to settle, then retries activate-volume + an explicit `rbd map`
+    (pool/image parsed from the rbd-pve path). Callers MUST treat False as a hard
+    allocation failure rather than writing to the path.
+    """
+    def _is_block():
+        rc, out, _ = _pve_node_exec(pve_mgr, node,
+            f"test -b {shlex.quote(dev_path)} && echo BLK || echo NOBLK", timeout=10)
+        s = str(out or '')
+        return ('BLK' in s) and ('NOBLK' not in s)
+    # udev can lag the map by a moment — poll briefly before doing anything.
+    for _ in range(6):
+        if _is_block():
+            return True
+        time.sleep(1)
+    # Still not a block device. For RBD, re-run activate then map explicitly.
+    if storage_type == 'rbd' or str(dev_path).startswith('/dev/rbd'):
+        _pve_node_exec(pve_mgr, node,
+            f"pvesm activate-volume {shlex.quote(vol_id)} 2>&1", timeout=30)
+        for _ in range(4):
+            if _is_block():
+                return True
+            time.sleep(1)
+        # Explicit krbd map. Parse pool + image from the authoritative rbd-pve
+        # path (/dev/rbd-pve/<fsid>/<pool>/<image>); fall back to the vol_id
+        # image name. Relies on the node's ceph.conf + storage keyring, same as
+        # PVE's own activate — no --id needed for the common client.admin case.
+        m = re.match(r'/dev/rbd-pve/[^/]+/([^/]+)/([^/]+)', str(dev_path or ''))
+        pool, img = (m.group(1), m.group(2)) if m else (None, None)
+        if not img and ':' in str(vol_id or ''):
+            img = vol_id.split(':', 1)[1]
+        if pool and img:
+            _pve_node_exec(pve_mgr, node,
+                f"rbd map -p {shlex.quote(pool)} {shlex.quote(img)} 2>/dev/null; "
+                f"udevadm settle 2>/dev/null || true", timeout=40)
+            for _ in range(5):
+                if _is_block():
+                    return True
+                time.sleep(1)
+    return _is_block()
+
+
 def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes, errbuf=None):
     """Robustly allocate a disk via pvesm alloc.
 
@@ -3236,6 +3290,26 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes, errb
                 # fail the alloc if activation errors (file storages don't need it).
                 _pve_node_exec(pve_mgr, node,
                     f"pvesm activate-volume {shlex.quote(vol_id)} 2>/dev/null", timeout=30)
+                # NS 2026-07-17 (#538 oetti77): for RBD (and any /dev/rbd path)
+                # confirm the kernel device really exists before handing the path
+                # back — otherwise a caller's `dd of=<path>` would create a phantom
+                # regular file on a stale /dev path and silently lose all the data
+                # (the RBD image stays blank; the guest won't boot). Scoped to RBD
+                # so the proven LVM/ZFS/dir paths are untouched.
+                if storage_type == 'rbd' or dev_path.startswith('/dev/rbd'):
+                    if not _ensure_block_device(pve_mgr, node, vol_id, dev_path, storage_type):
+                        logging.error(f"[V2P] {vol_id} → {dev_path} is not a block device after "
+                                      f"activate/map — failing alloc to avoid phantom-file data loss")
+                        if errbuf is not None:
+                            errbuf.append(
+                                f"volume {vol_id} allocated but its device {dev_path} never mapped to "
+                                f"a block device — refusing to write (would silently lose the data). "
+                                f"Ensure the RBD storage has 'krbd' enabled and the ceph keyring is "
+                                f"present on {node}.")
+                        # drop the empty volume so it doesn't orphan
+                        _pve_node_exec(pve_mgr, node,
+                            f"pvesm free {shlex.quote(vol_id)} 2>/dev/null", timeout=60)
+                        return None, None
                 logging.info(f"[V2P] Disk allocated: {vol_id} → {dev_path} (via: {attempt_cmd[:60]})")
                 return vol_id, dev_path
 
