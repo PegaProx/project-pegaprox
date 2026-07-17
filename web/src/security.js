@@ -2083,6 +2083,7 @@
             const [evacuationTimeout, setEvacuationTimeout] = useState(1800);  // NS: 30 min default
             const [rebootTimeout, setRebootTimeout] = useState(600);  // NS Apr 2026 (#328): 10 min default, extend for Ceph/slow-boot nodes
             const [allowLocalDisks, setAllowLocalDisks] = useState(false);  // #330
+            const [cephHealthGate, setCephHealthGate] = useState('off');  // NS #403 part 2 — 'off' | 'degraded' | 'strict'
             const [waitForReboot, setWaitForReboot] = useState(true);  // NS: GitHub #40 - wait for node online before next
             const [pauseOnEvacError, setPauseOnEvacError] = useState(true);  // NS: GitHub #40 - pause if VMs fail to migrate
             const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);  // NS: Toggle for timeouts
@@ -2386,6 +2387,7 @@
                             evacuation_timeout: evacuationTimeout,
                             reboot_timeout: rebootTimeout,  // NS Apr 2026 (#328): per-cluster override for slow-boot nodes
                             allow_local_disks: allowLocalDisks,  // #330
+                            ceph_health_gate: cephHealthGate,  // NS #403 part 2 — hold on unsafe Ceph
                         })
                     });
                     const data = await response.json();
@@ -3428,6 +3430,32 @@
                                                     )}
                                                 </div>
                                             </label>
+
+                                            {/* NS 2026-07-17 (#403 part 2, proxforge): Ceph health gate — hold the
+                                                rolling update instead of pulling the next node while a deployed Ceph
+                                                is still at risk (pulling a node with degraded PGs can take data offline). */}
+                                            <div className="mt-3">
+                                                <label className="text-sm text-white block mb-1">
+                                                    {t('cephHealthGate') || 'Ceph health gate'}
+                                                </label>
+                                                <select
+                                                    value={cephHealthGate}
+                                                    onChange={(e) => setCephHealthGate(e.target.value)}
+                                                    className="w-full bg-proxmox-darker border border-proxmox-border rounded px-3 py-1.5 text-sm text-white"
+                                                >
+                                                    <option value="off">{t('cephGateOff') || 'Off — warn and continue (current behaviour)'}</option>
+                                                    <option value="degraded">{t('cephGateDegraded') || 'Hold if data at risk (recommended for HCI)'}</option>
+                                                    <option value="strict">{t('cephGateStrict') || 'Strict — hold on any non-OK Ceph'}</option>
+                                                </select>
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                    {t('cephHealthGateHint') || 'On a Ceph/HCI cluster, hold the rolling update while Ceph has not recovered instead of pulling the next node. "Hold if data at risk" tolerates benign warnings (clock skew, backfill) and only holds on genuine redundancy loss (down OSDs, degraded/undersized PGs, HEALTH_ERR/unknown).'}
+                                                </p>
+                                                {cephHealthGate !== 'off' && (
+                                                    <p className="text-xs text-blue-400 mt-1">
+                                                        {t('cephHealthGateNote') || 'When held, the update pauses with a reason — fix Ceph, then Continue or Cancel. No effect on clusters without Ceph.'}
+                                                    </p>
+                                                )}
+                                            </div>
                                         </div>
                                     )}
                                 </div>

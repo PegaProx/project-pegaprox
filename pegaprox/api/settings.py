@@ -3900,6 +3900,47 @@ def get_cluster_update_status(cluster_id):
     })
 
 
+# NS 2026-07-17 (#403 part 2, proxforge): decide whether a DEPLOYED Ceph is unsafe
+# to pull the next node under the rolling-update health gate. Returns a short human
+# reason string when unsafe (caller HOLDS the update), or None when safe enough to
+# proceed. `summary` is get_ceph_health_summary()'s dict (None = ceph not deployed,
+# handled by the caller before this is reached).
+def _ceph_gate_unsafe(summary, gate):
+    if not summary:
+        return None
+    status = summary.get('status', 'unknown')
+    if status == 'HEALTH_OK':
+        return None
+    if status == 'HEALTH_ERR':
+        return 'HEALTH_ERR'
+    if status == 'unknown':
+        return 'health unknown — cluster may be unreachable'
+    # HEALTH_WARN from here down.
+    if gate == 'strict':
+        return 'HEALTH_WARN (strict gate)'
+    # gate == 'degraded': hold ONLY on genuine data-at-risk, tolerate benign warnings
+    # (clock skew, a leftover flag, a recently-crashed daemon, etc.).
+    try:
+        osd_up = int(summary.get('osd_up') or 0)
+        osd_in = int(summary.get('osd_in') or 0)
+    except (TypeError, ValueError):
+        osd_up = osd_in = 0
+    if osd_in and osd_up < osd_in:
+        return f'{osd_in - osd_up} OSD(s) down'
+    pgs = str(summary.get('pgs', '')).lower()
+    # under-replicated / unavailable PG states — NOT the benign misplaced/backfill ones.
+    risky = ('degraded', 'undersized', 'incomplete', 'stale', 'inactive', 'down', 'unfound', 'inconsistent')
+    hit = [tok for tok in risky if tok in pgs]
+    if hit:
+        return 'PGs ' + '+'.join(hit)
+    warns = ' '.join(str(w) for w in (summary.get('warnings') or [])).lower()
+    for w in ('degraded data redundancy', 'reduced data availability', 'pgs inactive',
+              'osds down', 'osd down', 'are down', 'insufficient standby', 'insufficient'):
+        if w in warns:
+            return 'warning: ' + w
+    return None
+
+
 @bp.route('/api/clusters/<cluster_id>/updates/rolling', methods=['POST'])
 @require_auth(perms=['node.update'])
 def start_rolling_update(cluster_id):
@@ -3937,6 +3978,16 @@ def start_rolling_update(cluster_id):
     # instead of skipping them outright. Off by default — it copies blocks over the
     # cluster network and can take ages on bigger VMs.
     allow_local_disks = bool(data.get('allow_local_disks', False))
+    # NS 2026-07-17 (#403 part 2, proxforge): opt-in Ceph-health gate. When a
+    # DEPLOYED Ceph doesn't return to a safe state after a node, HOLD the rolling
+    # update instead of pulling the next node (which can drop copies below
+    # min_size and take data offline). 'off' = old behaviour (warn + continue),
+    # 'degraded' = hold only on genuine data-at-risk (HEALTH_ERR / unknown / down
+    # OSDs / degraded/undersized/incomplete/inactive PGs; a benign HEALTH_WARN is
+    # tolerated), 'strict' = hold on anything that isn't HEALTH_OK.
+    ceph_health_gate = str(data.get('ceph_health_gate', 'off')).lower()
+    if ceph_health_gate not in ('off', 'degraded', 'strict'):
+        ceph_health_gate = 'off'
 
     # MK: Configurable timeouts (GitHub Issue fix)
     evacuation_timeout = data.get('evacuation_timeout', 1800)  # 30 minutes default (was 5 min!)
@@ -3982,6 +4033,7 @@ def start_rolling_update(cluster_id):
         'wait_for_reboot': wait_for_reboot,  # NS: GitHub #40
         'pause_on_evacuation_error': pause_on_evacuation_error,  # NS: GitHub #40
         'allow_local_disks': allow_local_disks,  # NS #330
+        'ceph_health_gate': ceph_health_gate,  # NS #403 part 2
         'force_all': force_all,
         'evacuation_timeout': evacuation_timeout,
         'update_timeout': update_timeout,
@@ -4011,7 +4063,7 @@ def start_rolling_update(cluster_id):
         try:
             logging.info(f"[RollingUpdate] Starting rolling update for cluster, nodes: {nodes_to_update}")
             _log("Rolling update started")
-            _log(f"Settings: skip_up_to_date={skip_up_to_date}, skip_evacuation={skip_evacuation}, evacuation_timeout={evacuation_timeout}s")
+            _log(f"Settings: skip_up_to_date={skip_up_to_date}, skip_evacuation={skip_evacuation}, evacuation_timeout={evacuation_timeout}s, ceph_health_gate={ceph_health_gate}")
 
             if skip_evacuation:
                 _log("⚠️ WARNING: VM evacuation disabled - VMs may be affected if update fails!")
@@ -4354,7 +4406,41 @@ def start_rolling_update(cluster_id):
                             if status == 'HEALTH_OK':
                                 _log(f"Ceph recovered to HEALTH_OK after {ceph_waited}s")
                             else:
-                                _log(f"⚠ Ceph still {status} after {ceph_waited}s — continuing, but verify cluster health after completion")
+                                # NS 2026-07-17 (#403 part 2, proxforge): opt-in gate — don't pull
+                                # the next node while a deployed Ceph is still at risk.
+                                gate_reason = _ceph_gate_unsafe(ceph_after, ceph_health_gate) if ceph_health_gate != 'off' else None
+                                if gate_reason:
+                                    _log(f"⛔ Ceph is {status} ({gate_reason}) — HOLDING the rolling update before the next node "
+                                         f"(ceph_health_gate={ceph_health_gate}). Fix Ceph, then Continue or Cancel.")
+                                    mgr._rolling_update['status'] = 'paused'
+                                    mgr._rolling_update['paused_reason'] = 'ceph_unhealthy'
+                                    mgr._rolling_update['paused_details'] = {
+                                        'node': node_name,
+                                        'ceph_status': status,
+                                        'pgs': ceph_after.get('pgs', ''),
+                                        'reason': gate_reason,
+                                        'message': (f"Ceph is {status} ({gate_reason}) after updating {node_name}. Pulling the "
+                                                    f"next node now could drop data below min_size and take it offline. Restore "
+                                                    f"Ceph health, then Continue — or Cancel.")
+                                    }
+                                    while mgr._rolling_update.get('status') == 'paused':
+                                        time.sleep(2)
+                                    if mgr._rolling_update.get('status') == 'cancelled':
+                                        break
+                                    elif mgr._rolling_update.get('status') == 'running':
+                                        mgr._rolling_update['paused_reason'] = None
+                                        mgr._rolling_update['paused_details'] = None
+                                        try:
+                                            _c = mgr.get_ceph_health_summary() or {}
+                                            _log(f"▶ Resumed after Ceph-health hold — Ceph now {_c.get('status', 'unknown')} · "
+                                                 f"{_c.get('osd_up', 0)}/{_c.get('osd_in', 0)} OSDs up")
+                                        except Exception:
+                                            _log("▶ Resumed after Ceph-health hold")
+                                elif ceph_health_gate != 'off':
+                                    _log(f"⚠ Ceph still {status} after {ceph_waited}s but data redundancy looks intact — "
+                                         f"continuing (ceph_health_gate={ceph_health_gate})")
+                                else:
+                                    _log(f"⚠ Ceph still {status} after {ceph_waited}s — continuing, but verify cluster health after completion")
 
                     mgr._rolling_update['completed_nodes'].append(node_name)
                     _log(f"✓ {node_name} updated successfully")
