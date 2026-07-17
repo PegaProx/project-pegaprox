@@ -3280,7 +3280,13 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes, errb
             # volume exists, regardless of the alloc command's rc/warnings.
             rc_p, out_p, _ = _pve_node_exec(pve_mgr, node,
                 f"pvesm path {shlex.quote(vol_id)} 2>&1", timeout=10)
-            dev_path = str(out_p or '').strip().split('\n')[0]
+            # NS 2026-07-17: `2>&1` merges stderr, so a mis-behaving storage plugin's
+            # warning (e.g. a custom plugin "implementing an older storage API") can be
+            # printed BEFORE the path and mask it. Pick the line that actually looks like
+            # a device path / librbd URI rather than blindly taking line 0.
+            _plines = [l.strip() for l in str(out_p or '').split('\n') if l.strip()]
+            dev_path = next((l for l in _plines if l.startswith('/') or l.startswith('rbd:')),
+                            (_plines[0] if _plines else ''))
             if dev_path.startswith('/') and rc_p == 0:
                 # MK 2026-06-10 (#538 oetti77 / #272): `pvesm path` only computes the path
                 # string; for RBD (and other block storages) the kernel device isn't mapped
