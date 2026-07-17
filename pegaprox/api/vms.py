@@ -6461,6 +6461,291 @@ def _tag_as_replica(mgr, node, vmid, vm_type, job_id):
         logging.warning(f"[XCREPL] Could not tag replica {vmid}: {e}")
 
 
+# ============================================================================
+# #174 aderumier — incremental cross-cluster replication (RBD)
+# ============================================================================
+
+def _xcincr_node_ip(mgr, node):
+    """Resolve a cluster node name to an IP for SSH (cluster/status)."""
+    try:
+        r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/status")
+        if r.status_code == 200:
+            for it in r.json().get('data', []):
+                if it.get('type') == 'node' and it.get('name') == node and it.get('ip'):
+                    return it['ip']
+    except Exception:
+        pass
+    return node
+
+
+def _xcincr_rbd_pool(ssh, storage):
+    """Ceph pool backing an rbd storage (from `pvesm config`); falls back to the
+    storage name."""
+    import shlex
+    from pegaprox.core.incremental_repl import _ssh_run
+    out = _ssh_run(ssh, f"pvesm config {shlex.quote(storage)} 2>/dev/null | awk '/^[[:space:]]*pool /{{print $2}}'")
+    p = (out or '').strip().split('\n')[0].strip()
+    return p or storage
+
+
+def _xcincr_vm_exists(mgr, vmid):
+    try:
+        r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/resources", params={'type': 'vm'})
+        if r.status_code == 200:
+            return any(int(x.get('vmid', 0)) == int(vmid) for x in r.json().get('data', []))
+    except Exception:
+        pass
+    return False
+
+
+def _xcincr_remove_existing_replica(target_mgr, tgt_vmid, vm_type, job_id):
+    """Before a (re)seed, tear down an existing target VM so its RBD images are
+    freed and can be re-created. Same safety gate as the full path (#413): only
+    remove a VM we can prove is THIS job's replica; refuse otherwise so a mis-set
+    target VMID never nukes a bystander. Returns (ok, error)."""
+    node = None
+    try:
+        r = target_mgr._api_get(f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/cluster/resources", params={'type': 'vm'})
+        if r.status_code == 200:
+            for x in r.json().get('data', []):
+                if int(x.get('vmid', 0)) == int(tgt_vmid):
+                    node = x.get('node'); break
+    except Exception:
+        pass
+    if not node:
+        return True, None   # nothing there
+    if not _is_replica_of_job(target_mgr, node, tgt_vmid, vm_type, job_id):
+        return False, (f"Target VM {tgt_vmid} on {node} is not tagged as this job's replica "
+                       f"({_job_tag(job_id)} missing) — refusing to overwrite. Pick a free target VMID "
+                       f"or tag it if it really is a stranded replica.")
+    try:
+        base = f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{tgt_vmid}"
+        sr = target_mgr._api_post(f"{base}/status/stop", data={})
+        if sr.status_code == 200 and sr.json().get('data'):
+            _wait_for_task(target_mgr, sr.json().get('data'), timeout=60)
+        dr = target_mgr._api_delete(base, params={'purge': 1, 'destroy-unreferenced-disks': 1})
+        if dr.status_code == 200 and dr.json().get('data'):
+            ok, det = _wait_for_task(target_mgr, dr.json().get('data'), timeout=600)
+            if not ok:
+                return False, f"delete of old replica {tgt_vmid} failed: {det}"
+        elif dr.status_code != 200:
+            return False, f"delete of old replica {tgt_vmid} failed: {dr.status_code} {dr.text[:150]}"
+        return True, None
+    except Exception as e:
+        return False, f"could not remove old replica {tgt_vmid}: {e}"
+
+
+# config keys copied verbatim onto the replica (identity/hardware that isn't a
+# disk, net, or a runtime-only field). Disks + nets are rebuilt separately.
+_XCINCR_COPY_KEYS = (
+    'name', 'memory', 'balloon', 'cores', 'sockets', 'vcpus', 'cpu', 'cpulimit',
+    'cpuunits', 'numa', 'ostype', 'bios', 'machine', 'agent', 'scsihw', 'vga',
+    'tablet', 'kvm', 'hotplug', 'boot', 'bootdisk', 'onboot', 'protection',
+    'rng0', 'tpmstate0', 'args', 'description',
+)
+
+
+def _build_incremental_replica_vm(target_mgr, target_node, tgt_vmid, src_cfg, replicated,
+                                  target_storage, job):
+    """Create the replica VM shell on the target and attach the already-seeded
+    RBD disks. Disks are referenced by their existing volume ids (the seed
+    created them), so PVE adopts them rather than reallocating."""
+    payload = {'vmid': int(tgt_vmid)}
+    for k in _XCINCR_COPY_KEYS:
+        if k in src_cfg and src_cfg[k] not in (None, ''):
+            payload[k] = src_cfg[k]
+    # net: keep the source model + MAC, remap the bridge to the job's target bridge
+    tgt_bridge = (job.get('target_bridge') or 'vmbr0').split(',')[0].split(':')[-1] or 'vmbr0'
+    for k, v in src_cfg.items():
+        if k.startswith('net') and k[3:].isdigit() and isinstance(v, str):
+            parts = [p for p in v.split(',') if not p.startswith('bridge=')]
+            parts.append(f'bridge={tgt_bridge}')
+            payload[k] = ','.join(parts)
+    # disks: attach the seeded target volumes, preserving the source disk options
+    for (key, tgt_image, _mode) in replicated:
+        opts = ''
+        srcv = src_cfg.get(key, '')
+        if isinstance(srcv, str) and ',' in srcv:
+            opts = ',' + srcv.split(',', 1)[1]      # size=..,cache=.., etc.
+        payload[key] = f"{target_storage}:{tgt_image}{opts}"
+    # create (idempotent-ish: if the VMID exists we reconfigure via the same call
+    # path — a fresh seed removes the stale replica beforehand in the caller).
+    url = f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/nodes/{target_node}/qemu"
+    r = target_mgr._api_post(url, data=payload)
+    if r.status_code != 200:
+        raise RuntimeError(f"replica VM create failed: {r.status_code} {r.text[:200]}")
+    task = r.json().get('data')
+    if task:
+        ok, det = _wait_for_task(target_mgr, task, timeout=300)
+        if not ok:
+            raise RuntimeError(f"replica VM create task failed: {det}")
+
+
+def _execute_replication_incremental(job):
+    """#174 aderumier — incremental cross-cluster replication for a VM whose disks
+    are ALL Ceph RBD on both source and target. Ships only the snapshot delta via
+    the PegaProx byte-relay (core/incremental_repl) instead of full-cloning +
+    remote-migrating the whole disk every cycle.
+
+    Returns True if it handled the job (success OR a reported failure), or False
+    when the VM isn't eligible (some disk isn't rbd, target storage isn't rbd,
+    LXC, missing creds…) so the caller falls back to the proven full path.
+    """
+    from pegaprox.core.incremental_repl import rbd_replicate_disk, rbd_prune_snapshots
+    db = get_db()
+    job_id = job['id']; vmid = int(job['vmid'])
+    vm_type = job.get('vm_type', 'qemu') or 'qemu'
+    if vm_type != 'qemu':
+        return False
+    source_cid = job['source_cluster']; target_cid = job['target_cluster']
+    target_storage = (job.get('target_storage') or '').strip()
+    target_node = job.get('target_node', '')
+    tgt_vmid = int(job.get('target_vmid') or 0) or vmid
+    last_snap = (job.get('last_snapshot') or '').strip()
+    source_mgr = cluster_managers.get(source_cid); target_mgr = cluster_managers.get(target_cid)
+    if not (source_mgr and target_mgr and source_mgr.is_connected and target_mgr.is_connected and target_storage):
+        return False
+
+    # locate source node
+    source_node = None
+    try:
+        r = source_mgr._api_get(f"https://{source_mgr.host}:{source_mgr.api_port}/api2/json/cluster/resources", params={'type': 'vm'})
+        if r.status_code == 200:
+            for it in r.json().get('data', []):
+                if int(it.get('vmid', 0)) == vmid:
+                    source_node = it.get('node'); break
+    except Exception:
+        return False
+    if not source_node:
+        return False
+    if not target_node:
+        try:
+            r = target_mgr._api_get(f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/nodes")
+            if r.status_code == 200:
+                for n in r.json().get('data', []):
+                    if n.get('status') == 'online':
+                        target_node = n['node']; break
+        except Exception:
+            pass
+    if not target_node:
+        return False
+
+    # source config -> disk list
+    try:
+        cfg_r = source_mgr._api_get(f"https://{source_mgr.host}:{source_mgr.api_port}/api2/json/nodes/{source_node}/qemu/{vmid}/config")
+        cfg = cfg_r.json().get('data', {}) if cfg_r.status_code == 200 else {}
+    except Exception:
+        return False
+    _pfx = ('scsi', 'virtio', 'sata', 'ide')
+    disks = []
+    for k, v in cfg.items():
+        if not any(k.startswith(p) and k[len(p):].isdigit() for p in _pfx):
+            continue
+        if not isinstance(v, str) or ':' not in v or 'media=cdrom' in v:
+            continue
+        volspec = v.split(',')[0]
+        storage, _, volume = volspec.partition(':')
+        if storage and storage != 'none' and volume.startswith('vm-'):
+            disks.append((k, storage, volume))
+    if not disks:
+        return False
+
+    # eligibility: every source storage + the target storage must be rbd
+    try:
+        st = source_mgr._api_get(f"https://{source_mgr.host}:{source_mgr.api_port}/api2/json/storage")
+        src_types = {s['storage']: s.get('type', '') for s in st.json().get('data', [])} if st.status_code == 200 else {}
+        tt = target_mgr._api_get(f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/storage")
+        tgt_types = {s['storage']: s.get('type', '') for s in tt.json().get('data', [])} if tt.status_code == 200 else {}
+    except Exception:
+        return False
+    if any(src_types.get(s) != 'rbd' for (_, s, _) in disks) or tgt_types.get(target_storage) != 'rbd':
+        logging.info(f"[XCINCR] Job {job_id}: disks/target not all rbd — falling back to full replication")
+        return False
+
+    # --- we now OWN the job (return True even on failure) ---
+    logging.info(f"[XCINCR] Job {job_id}: incremental rbd repl VM {vmid}@{source_cid} -> {tgt_vmid}@{target_cid} "
+                 f"({len(disks)} disk(s), base={last_snap or 'none/seed'})")
+    src_ssh = tgt_ssh = None
+    try:
+        src_ssh = source_mgr._ssh_connect(_xcincr_node_ip(source_mgr, source_node))
+        tgt_ssh = target_mgr._ssh_connect(_xcincr_node_ip(target_mgr, target_node))
+        if not src_ssh or not tgt_ssh:
+            _update_repl_status(db, job_id, 'error', 'SSH to source/target node failed (incremental needs SSH creds on both clusters)')
+            return True
+        identity = _capture_vm_identity(source_mgr, source_node, vmid, vm_type)
+        new_snap = f"xcincr-{job_id}-{int(time.time())}"
+
+        # 1. guest snapshot on the source (-> rbd @new_snap on every disk)
+        sr = source_mgr._api_post(
+            f"https://{source_mgr.host}:{source_mgr.api_port}/api2/json/nodes/{source_node}/qemu/{vmid}/snapshot",
+            data={'snapname': new_snap, 'description': f'incremental replication {job_id}'})
+        if sr.status_code != 200:
+            _update_repl_status(db, job_id, 'error', f'snapshot failed: {sr.text[:200]}'); return True
+        ok, det = _wait_for_task(source_mgr, sr.json().get('data'))
+        if not ok:
+            _update_repl_status(db, job_id, 'error', f'snapshot failed: {det}'); return True
+
+        # 2. decide (re)build + remove a stale replica FIRST so its RBD images
+        #    are freed and a seed can recreate them (a seed can't `rbd rm` an
+        #    image that an existing replica VM still has open).
+        rebuild = (not last_snap) or (not _xcincr_vm_exists(target_mgr, tgt_vmid))
+        if rebuild and _xcincr_vm_exists(target_mgr, tgt_vmid):
+            ok_rm, rm_err = _xcincr_remove_existing_replica(target_mgr, tgt_vmid, vm_type, job_id)
+            if not ok_rm:
+                _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, new_snap)
+                _update_repl_status(db, job_id, 'error', rm_err); return True
+
+        # 3. replicate each disk (seed when rebuilding, else the base..new delta)
+        tgt_pool = _xcincr_rbd_pool(tgt_ssh, target_storage)
+        base_for_disk = None if rebuild else (last_snap or None)
+        replicated, total = [], 0
+        for (key, storage, volume) in disks:
+            src_pool = _xcincr_rbd_pool(src_ssh, storage)
+            tgt_image = volume.replace(f"vm-{vmid}-", f"vm-{tgt_vmid}-", 1)
+            res = rbd_replicate_disk(src_ssh, tgt_ssh, src_pool, volume, tgt_pool, tgt_image, new_snap,
+                                     base_snap=base_for_disk,
+                                     log=lambda m: logging.info(f"[XCINCR] {job_id}: {m}"))
+            if not res['ok']:
+                _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, new_snap)
+                _update_repl_status(db, job_id, 'error', f'disk {key} ({volume}) replicate failed: {res.get("error","")[:200]}')
+                return True
+            total += res['bytes']; replicated.append((key, tgt_image, res['mode']))
+        logging.info(f"[XCINCR] Job {job_id}: shipped {total/1e6:.1f} MB ({', '.join(m for _,_,m in replicated)})")
+
+        # 4. build the replica VM shell on a (re)build (disks already seeded)
+        if rebuild:
+            _build_incremental_replica_vm(target_mgr, target_node, tgt_vmid, cfg, replicated, target_storage, job)
+            try: _restore_vm_identity(target_mgr, target_node, tgt_vmid, vm_type, identity)
+            except Exception as e: logging.warning(f"[XCINCR] {job_id}: identity: {e}")
+            try: _tag_as_replica(target_mgr, target_node, tgt_vmid, vm_type, job_id)
+            except Exception as e: logging.warning(f"[XCINCR] {job_id}: tag: {e}")
+
+        # 4. advance the base: keep @new_snap (next diff base), drop the old one, prune strays
+        db.execute("UPDATE cross_cluster_replications SET last_snapshot=? WHERE id=?", (new_snap, job_id))
+        if last_snap:
+            _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, last_snap)
+        for (key, storage, volume) in disks:
+            tgt_image = volume.replace(f"vm-{vmid}-", f"vm-{tgt_vmid}-", 1)
+            try:
+                rbd_prune_snapshots(src_ssh, _xcincr_rbd_pool(src_ssh, storage), volume, {new_snap}, 'xcincr-')
+                rbd_prune_snapshots(tgt_ssh, tgt_pool, tgt_image, {new_snap}, 'xcincr-')
+            except Exception:
+                pass
+        _update_repl_status(db, job_id, 'ok', '')
+        logging.info(f"[XCINCR] Job {job_id}: done, base advanced to {new_snap}")
+        return True
+    except Exception as e:
+        logging.error(f"[XCINCR] Job {job_id}: {e}")
+        _update_repl_status(db, job_id, 'error', str(e))
+        return True
+    finally:
+        for s in (src_ssh, tgt_ssh):
+            try:
+                if s: s.close()
+            except Exception:
+                pass
+
+
 def _execute_replication(job):
     """
     Run a single cross-cluster replication cycle for one job.
@@ -6471,7 +6756,19 @@ def _execute_replication(job):
     NS: This is basically the same flow as manual cross-cluster migration,
     but we snapshot first so the source VM stays untouched. The clone gets
     migrated and then deleted on the source side.
+
+    #174 aderumier — if the job opted into incremental mode, try the RBD delta
+    path first; it returns True when it handled the job and False when the VM
+    isn't eligible (non-rbd disks etc.), in which case we fall through to this
+    full clone+migrate flow.
     """
+    if (job.get('mode') or 'full') == 'incremental':
+        try:
+            if _execute_replication_incremental(job):
+                return
+            logging.info(f"[XCREPL] Job {job.get('id')}: incremental not applicable — using full replication")
+        except Exception as e:
+            logging.error(f"[XCREPL] Job {job.get('id')}: incremental path crashed, falling back to full: {e}")
     db = get_db()
     job_id = job['id']
     vmid = int(job['vmid'])
@@ -7080,13 +7377,19 @@ def create_cross_cluster_replication():
         if not (100 <= target_vmid <= 999999999):
             return jsonify({'error': 'target_vmid out of range (100–999999999)'}), 400
     delete_target = 1 if data.get('delete_target') else 0
+    # #174 aderumier — opt-in incremental mode. Validated here; the engine still
+    # falls back to 'full' at run time if the VM's disks aren't rbd/zfspool on
+    # both sides, so this is a preference, not a guarantee.
+    mode = str(data.get('mode', 'full')).lower()
+    if mode not in ('full', 'incremental'):
+        mode = 'full'
 
     db.execute('''
         INSERT INTO cross_cluster_replications
         (id, source_cluster, target_cluster, vmid, vm_type, schedule, retention,
          target_storage, target_bridge, target_node, target_vmid, delete_target,
-         enabled, created_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         mode, enabled, created_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
     ''', (
         job_id,
         source_cluster,
@@ -7100,6 +7403,7 @@ def create_cross_cluster_replication():
         target_node,
         target_vmid,
         delete_target,
+        mode,
         getattr(request, 'session', {}).get('user', 'system'),
         now, now,
     ))

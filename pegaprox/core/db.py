@@ -1281,6 +1281,16 @@ class PegaProxDB:
             if 'delete_target' not in cols:
                 cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN delete_target INTEGER DEFAULT 0")
                 logging.info("Added delete_target column to cross_cluster_replications")
+            # NS Jul 2026 (#174 aderumier) — opt-in incremental replication for
+            # RBD/ZFS. `mode`='full' keeps the clone+remote-migrate flow; 'incremental'
+            # ships only the snapshot delta when the VM's disks are rbd/zfspool on both
+            # sides. `last_snapshot` is the common base snapshot the next delta diffs from.
+            if 'mode' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN mode TEXT DEFAULT 'full'")
+                logging.info("Added mode column to cross_cluster_replications")
+            if 'last_snapshot' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN last_snapshot TEXT DEFAULT ''")
+                logging.info("Added last_snapshot column to cross_cluster_replications")
         except Exception:
             pass
 

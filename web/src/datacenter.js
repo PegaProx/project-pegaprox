@@ -52,7 +52,7 @@
             const [showAddReplication, setShowAddReplication] = useState(false);
             const [replVms, setReplVms] = useState([]);  // available VMs for replication
             const [replType, setReplType] = useState('snapshot');  // 'zfs' or 'snapshot'
-            const [newReplication, setNewReplication] = useState({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '', target_vmid: '' });
+            const [newReplication, setNewReplication] = useState({ vmid: '', target: '', schedule: '*/15', rate: '', comment: '', target_storage: '', target_vmid: '', mode: 'full' });
             const [replLoading, setReplLoading] = useState(false);
             const [firewallOptions, setFirewallOptions] = useState({});
             const [firewallRules, setFirewallRules] = useState([]);
@@ -1394,6 +1394,9 @@
                             retention: 1,  // keep one replica
                             // #552 - optional pinned replica VMID (else PVE nextid)
                             target_vmid: newReplication.target_vmid ? parseInt(newReplication.target_vmid, 10) : null,
+                            // #174 - opt-in incremental (rbd/zfs ship only the snapshot delta;
+                            // engine falls back to full if disks aren't rbd/zfs on both sides)
+                            mode: newReplication.mode || 'full',
                         };
                         const res = await fetch(`${API_URL}/cross-cluster-replications`, {
                             method: 'POST', credentials: 'include',
@@ -5499,6 +5502,7 @@
                                                 </div>
                                                 {/* Target storage - only for snapshot mode */}
                                                 {replType === 'snapshot' && (
+                                                    <>
                                                     <div>
                                                         <label className="block text-sm text-gray-400 mb-1">{t('targetStorage') || 'Target Storage'}</label>
                                                         <select
@@ -5512,6 +5516,22 @@
                                                             ))}
                                                         </select>
                                                     </div>
+                                                    {/* #174 aderumier — replication transfer mode */}
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('replMode') || 'Transfer mode'}</label>
+                                                        <select
+                                                            value={newReplication.mode || 'full'}
+                                                            onChange={e => setNewReplication({...newReplication, mode: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
+                                                        >
+                                                            <option value="full">{t('replModeFull') || 'Full (clone + migrate every run)'}</option>
+                                                            <option value="incremental">{t('replModeIncremental') || 'Incremental (RBD/ZFS delta — scales for big VMs)'}</option>
+                                                        </select>
+                                                        <p className="text-xs text-gray-500 mt-1">
+                                                            {t('replModeHint') || 'Incremental ships only the changed blocks since the last snapshot when the VM\'s disks are Ceph RBD (or ZFS) on both clusters; otherwise it falls back to full.'}
+                                                        </p>
+                                                    </div>
+                                                    </>
                                                 )}
                                                 {/* Target VMID - snapshot mode only (#552) */}
                                                 {replType === 'snapshot' && (
