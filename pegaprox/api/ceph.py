@@ -368,9 +368,20 @@ def create_ceph_osd(cluster_id, node):
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
+    priv = None
     try:
-        data = request.json or {}
-        r = manager._create_session().post(_ceph_url(manager, node, '/osd'), data=data, timeout=30)
+        data = request.get_json(silent=True) or {}
+        # NS 2026-07-17: PVE rejects OSD-create via API tokens (returns
+        # "user != root@pam") because it wipes a raw disk. When this manager is
+        # token-authed, mint a fresh password-based root@pam ticket for just this
+        # call; password-authed clusters use the normal session unchanged.
+        session = manager._create_session()
+        if getattr(manager, '_api_token', None):
+            priv, priv_err = manager.create_privileged_session()
+            if priv_err:
+                return jsonify({'error': priv_err}), 400
+            session = priv
+        r = session.post(_ceph_url(manager, node, '/osd'), data=data, timeout=30)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.osd.create', f"Created OSD on {node}: {data.get('dev', '')}", cluster=manager.config.name)
@@ -378,6 +389,10 @@ def create_ceph_osd(cluster_id, node):
         return jsonify({'error': r.text}), r.status_code
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
+    finally:
+        if priv is not None:
+            try: priv.close()
+            except Exception: pass
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/osd/<int:osdid>', methods=['DELETE'])
@@ -387,16 +402,25 @@ def destroy_ceph_osd(cluster_id, node, osdid):
     if not ok: return err
 
     # NS: Feb 2026 - SECURITY: require confirmation for destructive operations
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     if str(data.get('confirm_name', '')) != str(osdid):
         return jsonify({'error': 'Confirmation required: send confirm_name matching the OSD ID'}), 400
     manager, error = get_connected_manager(cluster_id)
     if error: return error
+    priv = None
     try:
         params = {}
         if request.args.get('cleanup'):
             params['cleanup'] = 1
-        r = manager._create_session().delete(_ceph_url(manager, node, f'/osd/{osdid}'), params=params, timeout=60)
+        # NS 2026-07-17: like OSD-create, PVE gates OSD-destroy to real root@pam
+        # (it zaps the disk), so a token-authed manager needs a password ticket.
+        session = manager._create_session()
+        if getattr(manager, '_api_token', None):
+            priv, priv_err = manager.create_privileged_session()
+            if priv_err:
+                return jsonify({'error': priv_err}), 400
+            session = priv
+        r = session.delete(_ceph_url(manager, node, f'/osd/{osdid}'), params=params, timeout=60)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.osd.destroy', f"Destroyed OSD {osdid} on {node}", cluster=manager.config.name)
@@ -404,6 +428,10 @@ def destroy_ceph_osd(cluster_id, node, osdid):
         return jsonify({'error': r.text}), r.status_code
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
+    finally:
+        if priv is not None:
+            try: priv.close()
+            except Exception: pass
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/osd/<int:osdid>/<action>', methods=['POST'])
@@ -457,7 +485,7 @@ def create_ceph_mon(cluster_id, node, monid):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         r = manager._create_session().post(_ceph_url(manager, node, f'/mon/{monid}'), data=data, timeout=30)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
@@ -547,7 +575,7 @@ def destroy_ceph_mds(cluster_id, node, name):
 
 
 # ============================================
-# MGR (Manager) - Read Only
+# MGR (Manager) Management
 # ============================================
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mgr', methods=['GET'])
@@ -565,6 +593,49 @@ def get_ceph_mgr(cluster_id, node):
         return jsonify([])
     except:
         return jsonify([])
+
+
+# NS 2026-07-17: Ceph deploy needs at least one MGR (the cluster HEALTH_WARNs
+# without one), but there was no create endpoint — the UI could list managers
+# but never add or remove one. Forwards to PVE /ceph/mgr/<id> like the mon
+# endpoints. MGR create does not touch disks, so the API token works fine here.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mgr/<mgrid>', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def create_ceph_mgr(cluster_id, node, mgrid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        r = manager._create_session().post(_ceph_url(manager, node, f'/mgr/{mgrid}'), data=data, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mgr.create', f"Created manager {mgrid} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return jsonify({'error': r.text}), r.status_code
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph manager operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mgr/<mgrid>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def destroy_ceph_mgr(cluster_id, node, mgrid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        r = manager._create_session().delete(_ceph_url(manager, node, f'/mgr/{mgrid}'), timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mgr.destroy', f"Destroyed manager {mgrid} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return jsonify({'error': r.text}), r.status_code
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph manager operation failed')}), 500
 
 
 # ============================================
@@ -597,7 +668,7 @@ def create_ceph_pool(cluster_id, node):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         r = manager._create_session().post(_ceph_url(manager, node, '/pool'), data=data, timeout=30)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
@@ -617,7 +688,7 @@ def update_ceph_pool(cluster_id, node, name):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         r = manager._create_session().put(_ceph_url(manager, node, f'/pool/{name}'), data=data, timeout=10)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
@@ -635,7 +706,7 @@ def destroy_ceph_pool(cluster_id, node, name):
     if not ok: return err
 
     # NS: Feb 2026 - SECURITY: require confirmation for destructive operations
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     if data.get('confirm_name') != name:
         return jsonify({'error': 'Confirmation required: send confirm_name matching the pool name'}), 400
     manager, error = get_connected_manager(cluster_id)
@@ -686,11 +757,21 @@ def create_ceph_fs(cluster_id, node):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        data = request.json or {}
-        r = manager._create_session().post(_ceph_url(manager, node, '/fs'), data=data, timeout=30)
+        data = request.get_json(silent=True) or {}
+        # NS 2026-07-17: PVE's CephFS-create endpoint is POST /ceph/fs/<name>
+        # (name in the URL) — this used to POST to the collection /ceph/fs, which
+        # PVE has no POST handler for, so every create returned 501. Take the name
+        # from the body, validate it (it goes into the URL path), and forward to
+        # /fs/<name> with the remaining params (pg_num; add-storage on PVE 9,
+        # add-storages on PVE 7/8 — the caller sends the version-appropriate one).
+        fs_name = str(data.get('name', '')).strip()
+        if not fs_name or not _POOL_RE.match(fs_name):
+            return jsonify({'error': 'Invalid or missing CephFS name'}), 400
+        fwd = {k: v for k, v in data.items() if k != 'name'}
+        r = manager._create_session().post(_ceph_url(manager, node, f'/fs/{fs_name}'), data=fwd, timeout=30)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
-            log_audit(usr, 'ceph.fs.create', f"Created CephFS {data.get('name', '')}", cluster=manager.config.name)
+            log_audit(usr, 'ceph.fs.create', f"Created CephFS {fs_name}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
         return jsonify({'error': r.text}), r.status_code
     except Exception as e:
@@ -704,13 +785,23 @@ def destroy_ceph_fs(cluster_id, node, name):
     if not ok: return err
 
     # NS: Feb 2026 - SECURITY: require confirmation for destructive operations
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     if data.get('confirm_name') != name:
         return jsonify({'error': 'Confirmation required: send confirm_name matching the CephFS name'}), 400
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        r = manager._create_session().delete(_ceph_url(manager, node, f'/fs/{name}'), timeout=30)
+        # NS 2026-07-17 (adversarial review): PVE's DELETE .../ceph/fs/<name>
+        # accepts remove-storages / remove-pools; without them the CephFS's
+        # metadata+data pools and the PVE storage entry orphan and the name can't
+        # be reused (this is exactly what stalled the live cleanup). Plumb them
+        # through like destroy_ceph_pool does for its remove-* params.
+        params = {}
+        if request.args.get('remove_storages'):
+            params['remove-storages'] = 1
+        if request.args.get('remove_pools'):
+            params['remove-pools'] = 1
+        r = manager._create_session().delete(_ceph_url(manager, node, f'/fs/{name}'), params=params, timeout=30)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.fs.destroy', f"Destroyed CephFS {name}", cluster=manager.config.name)
@@ -756,7 +847,7 @@ def ceph_service_action(cluster_id, node, action):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         r = manager._create_session().post(_ceph_url(manager, node, f'/{action}'), data=data, timeout=30)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
@@ -776,7 +867,7 @@ def init_ceph(cluster_id, node):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         r = manager._create_session().post(_ceph_url(manager, node, '/init'), data=data, timeout=60)
         if r.status_code == 200:
             usr = getattr(request, 'session', {}).get('user', 'system')
@@ -882,7 +973,7 @@ def enable_mirror_pool(cluster_id, pool):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
 
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
     mode = body.get('mode', 'image')
     if mode not in ('pool', 'image'):
         return jsonify({'error': 'Mode must be "pool" or "image"'}), 400
@@ -936,7 +1027,7 @@ def add_mirror_peer(cluster_id, pool):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
 
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
     client = body.get('client', 'client.admin')
     site = body.get('site_name', '')
     mon_host = body.get('mon_host', '')
@@ -1071,7 +1162,7 @@ def enable_mirror_image(cluster_id, pool, image):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
 
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
     mode = body.get('mode', 'snapshot')
     if mode not in ('snapshot', 'journal'):
         return jsonify({'error': 'Mode must be "snapshot" or "journal"'}), 400
@@ -1122,7 +1213,7 @@ def promote_mirror_image(cluster_id, pool, image):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
 
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
     force = body.get('force', False)
 
     node, node_err = _get_any_online_node(manager)
@@ -1205,7 +1296,17 @@ def get_mirror_schedules(cluster_id, pool):
     node_ip = _resolve_node_ip(manager, node)
 
     data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule list --pool {pool}')
-    if cmd_err: return cmd_err
+    # NS 2026-07-17: `rbd mirror snapshot schedule list` exits non-zero on a pool
+    # that has no mirroring configured — that's "no schedules", not a failure, so
+    # return an empty list for that benign case. But _rbd_cmd also returns errors
+    # for a genuinely broken node — rbd-not-installed (501) or SSH failure (503) —
+    # which we must NOT swallow, or a real outage silently reads as "no schedules".
+    # (adversarial review 2026-07-17: only collapse the rbd-exited-non-zero case.)
+    if cmd_err:
+        status = cmd_err[1] if isinstance(cmd_err, tuple) and len(cmd_err) > 1 else 500
+        if status in (501, 503):
+            return cmd_err
+        return jsonify([])
     return jsonify(data if isinstance(data, list) else [])
 
 
@@ -1220,7 +1321,7 @@ def add_mirror_schedule(cluster_id, pool):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
 
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
     interval = body.get('interval', '')
     if not _SCHED_RE.match(interval):
         return jsonify({'error': 'Invalid interval format (e.g. 5m, 1h, 1d)'}), 400
@@ -1248,7 +1349,7 @@ def remove_mirror_schedule(cluster_id, pool):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
 
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
     interval = body.get('interval', '')
     if not _SCHED_RE.match(interval):
         return jsonify({'error': 'Invalid interval format (e.g. 5m, 1h, 1d)'}), 400

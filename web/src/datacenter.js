@@ -132,6 +132,28 @@
             const [showCreateMon, setShowCreateMon] = useState(false);
             const [showCreateMds, setShowCreateMds] = useState(false);
             const [cephSubTab, setCephSubTab] = useState('status');
+            // NS 2026-07-17: Ceph create-UI (OSD deploy / Manager add-remove / CephFS create)
+            const [showCreateOsd, setShowCreateOsd] = useState(false);
+            const [osdForm, setOsdForm] = useState({ node: '', dev: '' });
+            const [nodeDisks, setNodeDisks] = useState([]);
+            const [disksLoading, setDisksLoading] = useState(false);
+            const [showCreateMgr, setShowCreateMgr] = useState(false);
+            const [showCreateFs, setShowCreateFs] = useState(false);
+            const [newFs, setNewFs] = useState({ name: '', pg_num: 128, add_storage: true });
+            // Load a node's block devices for the OSD disk-picker (PVE disks/list).
+            const loadNodeDisks = async (node) => {
+                if (!node) { setNodeDisks([]); return; }
+                setDisksLoading(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks`);
+                    const data = res?.ok ? await res.json().catch(() => []) : [];
+                    setNodeDisks(Array.isArray(data) ? data : (data?.disks || []));
+                } catch (e) {
+                    setNodeDisks([]);
+                } finally {
+                    setDisksLoading(false);
+                }
+            };
 
             // MK: RBD Mirroring state
             const [mirrorData, setMirrorData] = useState(null);
@@ -6820,7 +6842,7 @@
                                                         { label: 'Monitors', value: cephData.mon?.length || 0, color: 'purple' },
                                                         { label: 'Pools', value: cephData.pools?.length || 0, color: 'green' },
                                                         { label: 'MDS', value: cephData.mds?.data?.length || 0, color: 'yellow' },
-                                                        { label: 'MGR', value: cephData.mgr ? 1 : 0, color: 'cyan' },
+                                                        { label: 'MGR', value: cephData.mgr?.length || 0, color: 'cyan' },
                                                     ].map(item => (
                                                         <div key={item.label} className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 text-center">
                                                             <div className={`text-2xl font-bold text-${item.color}-400`}>{item.value}</div>
@@ -6836,9 +6858,22 @@
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                                     <h3 className="font-semibold">OSDs ({(cephData.osd || []).length})</h3>
-                                                    <button onClick={fetchCephData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
-                                                        <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
-                                                    </button>
+                                                    <div className="flex gap-2">
+                                                        <button
+                                                            onClick={() => {
+                                                                const n = cephNode || (clusterNodes || []).filter(nn => nn.online !== 0)[0]?.name || '';
+                                                                setOsdForm({ node: n, dev: '' });
+                                                                setShowCreateOsd(true);
+                                                                loadNodeDisks(n);
+                                                            }}
+                                                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
+                                                        >
+                                                            <Icons.Plus /> {t('cephCreateOsd') || 'Create OSD'}
+                                                        </button>
+                                                        <button onClick={fetchCephData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
+                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                        </button>
+                                                    </div>
                                                 </div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full">
@@ -6933,6 +6968,7 @@
 
                                         {/* Monitors Tab */}
                                         {cephSubTab === 'monitors' && (
+                                            <>
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                                     <h3 className="font-semibold">{t('cephMons') || 'Monitors'} ({(cephData.mon || []).length})</h3>
@@ -7005,6 +7041,71 @@
                                                     </table>
                                                 </div>
                                             </div>
+                                            {/* NS 2026-07-17: Managers (mgr) — a Ceph cluster needs >=1 active mgr */}
+                                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden mt-4">
+                                                <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                                    <h3 className="font-semibold">{t('cephMgrs') || 'Managers'} ({(cephData.mgr || []).length})</h3>
+                                                    <button
+                                                        onClick={() => { const n = cephNode || (clusterNodes || []).filter(nn => nn.online !== 0)[0]?.name || ''; setCephNode(n); setShowCreateMgr(true); }}
+                                                        className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
+                                                    >
+                                                        <Icons.Plus /> {t('add')}
+                                                    </button>
+                                                </div>
+                                                {(!cephData.mgr || cephData.mgr.length === 0) ? (
+                                                    <div className="p-6 text-center text-gray-500 text-sm">{t('cephNoMgr') || 'No managers — a Ceph cluster needs at least one active manager'}</div>
+                                                ) : (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full">
+                                                            <thead className="bg-proxmox-dark">
+                                                                <tr>
+                                                                    <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
+                                                                    <th className="text-left p-3 text-sm text-gray-400">{t('host')}</th>
+                                                                    <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
+                                                                    <th className="text-left p-3 text-sm text-gray-400">Address</th>
+                                                                    <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {cephData.mgr.map((mgr, idx) => (
+                                                                    <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                        <td className="p-3 font-medium">{mgr.name}</td>
+                                                                        <td className="p-3 text-gray-300">{mgr.host || mgr.name}</td>
+                                                                        <td className="p-3">
+                                                                            <span className={`px-2 py-0.5 rounded text-xs ${(mgr.state === 'active' || mgr.status === 'active') ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/20 text-gray-400'}`}>
+                                                                                {mgr.state || mgr.status || 'standby'}
+                                                                            </span>
+                                                                        </td>
+                                                                        <td className="p-3 font-mono text-xs text-gray-300">{mgr.addr || '-'}</td>
+                                                                        <td className="p-3">
+                                                                            <button
+                                                                                onClick={async () => {
+                                                                                    if (!confirm(`Delete manager "${mgr.name}"?`)) return;
+                                                                                    const host = mgr.host || mgr.name;
+                                                                                    try {
+                                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${host}/ceph/mgr/${mgr.name}`, { method: 'DELETE' });
+                                                                                        if (res?.ok) {
+                                                                                            addToast(t('cephMgrDeleted') || `Manager "${mgr.name}" deleted`, 'success');
+                                                                                            fetchCephData();
+                                                                                        } else {
+                                                                                            const err = await res.json().catch(() => ({}));
+                                                                                            addToast(err.error || `Failed to delete manager (HTTP ${res?.status || '?'})`, 'error');
+                                                                                        }
+                                                                                    } catch (e) { addToast(`Failed to delete manager: ${e.message || e}`, 'error'); }
+                                                                                }}
+                                                                                className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
+                                                                            >
+                                                                                <Icons.Trash />
+                                                                            </button>
+                                                                        </td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            </>
                                         )}
 
                                         {/* Pools Tab */}
@@ -7054,8 +7155,14 @@
                                                                                 // MK May 2026 (#408): silent catch swallowed PVE
                                                                                 // permission errors / 404s — reporter saw "no
                                                                                 // effect". Now surfaces the actual outcome.
+                                                                                // NS 2026-07-17: backend requires confirm_name in the
+                                                                                // body (empty DELETE always 400'd) + drop the storage entry.
                                                                                 try {
-                                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/pool/${name}`, { method: 'DELETE' });
+                                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/pool/${name}?remove_storages=1`, {
+                                                                                        method: 'DELETE',
+                                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                                        body: JSON.stringify({ confirm_name: name })
+                                                                                    });
                                                                                     if (res?.ok) {
                                                                                         addToast(t('cephPoolDeleted') || `Pool "${name}" deleted`, 'success');
                                                                                         fetchCephData();
@@ -7085,9 +7192,24 @@
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                                     <h3 className="font-semibold">CephFS ({(cephData.fs || []).length})</h3>
-                                                    <button onClick={fetchCephData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
-                                                        <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
-                                                    </button>
+                                                    <div className="flex gap-2">
+                                                        <button
+                                                            onClick={() => { const n = cephNode || (clusterNodes || []).filter(nn => nn.online !== 0)[0]?.name || ''; setCephNode(n); setShowCreateMds(true); }}
+                                                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors"
+                                                            title={t('cephCreateMdsHint') || 'A CephFS needs at least one running MDS'}
+                                                        >
+                                                            <Icons.Plus /> {t('cephCreateMds') || 'Create MDS'}
+                                                        </button>
+                                                        <button
+                                                            onClick={() => { const n = cephNode || (clusterNodes || []).filter(nn => nn.online !== 0)[0]?.name || ''; setCephNode(n); setNewFs({ name: '', pg_num: 128, add_storage: true }); setShowCreateFs(true); }}
+                                                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
+                                                        >
+                                                            <Icons.Plus /> {t('cephCreateFs') || 'Create CephFS'}
+                                                        </button>
+                                                        <button onClick={fetchCephData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
+                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                        </button>
+                                                    </div>
                                                 </div>
                                                 {(!cephData.fs || cephData.fs.length === 0) ? (
                                                     <div className="p-8 text-center text-gray-500">No CephFS filesystems configured</div>
@@ -7106,8 +7228,17 @@
                                                                         onClick={async () => {
                                                                             if (!confirm(`Delete CephFS "${fs.name}"? This will destroy all data!`)) return;
                                                                             // MK May 2026 (#408 family): destructive DELETE with silent catch.
+                                                                            // NS 2026-07-17: send confirm_name (empty DELETE 400'd) + always
+                                                                            // remove the storage entry; ask separately before nuking the
+                                                                            // underlying data/metadata pools (otherwise they orphan).
+                                                                            const rmPools = confirm(`Also delete the underlying data + metadata pools for "${fs.name}"?\n\nOK = permanently delete all pool data.\nCancel = keep the pools (you can remove them later).`);
+                                                                            const q = rmPools ? '?remove_storages=1&remove_pools=1' : '?remove_storages=1';
                                                                             try {
-                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/fs/${fs.name}`, { method: 'DELETE' });
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/fs/${fs.name}${q}`, {
+                                                                                    method: 'DELETE',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ confirm_name: fs.name })
+                                                                                });
                                                                                 if (res?.ok) {
                                                                                     addToast(`CephFS "${fs.name}" deleted`, 'success');
                                                                                     fetchCephData();
@@ -7686,6 +7817,171 @@
                                                         >
                                                             {t('create') || 'Create'}
                                                         </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* NS 2026-07-17: Create OSD Modal (node + disk picker) */}
+                                        {showCreateOsd && (
+                                            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateOsd(false)}>
+                                                <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="p-4 border-b border-proxmox-border">
+                                                        <h3 className="font-semibold">{t('cephCreateOsd') || 'Create OSD'}</h3>
+                                                    </div>
+                                                    <div className="p-4 space-y-4">
+                                                        <div>
+                                                            <label className="text-sm text-gray-400 mb-1 block">{t('node')}</label>
+                                                            <select value={osdForm.node} onChange={e => { const n = e.target.value; setOsdForm(f => ({ ...f, node: n, dev: '' })); loadNodeDisks(n); }} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
+                                                                {(clusterNodes || []).filter(n => n.online !== 0).map(n => (<option key={n.name} value={n.name}>{n.name}</option>))}
+                                                            </select>
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-sm text-gray-400 mb-1 block">{t('cephOsdDisk') || 'Disk'}</label>
+                                                            {disksLoading ? (
+                                                                <div className="text-sm text-gray-500 p-2">{t('loading') || 'Loading…'}</div>
+                                                            ) : (
+                                                                <select value={osdForm.dev} onChange={e => setOsdForm(f => ({ ...f, dev: e.target.value }))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
+                                                                    <option value="">{t('cephSelectDisk') || 'Select a disk…'}</option>
+                                                                    {(nodeDisks || []).map(d => {
+                                                                        const gb = d.size ? `${(d.size / 1e9).toFixed(0)} GB` : '';
+                                                                        const busy = d.used ? ` — in use: ${d.used}` : (d.osdid >= 0 ? ` — osd.${d.osdid}` : '');
+                                                                        return <option key={d.devpath} value={d.devpath} disabled={!!d.used || d.osdid >= 0}>{d.devpath} {gb} {d.type || ''}{busy}</option>;
+                                                                    })}
+                                                                </select>
+                                                            )}
+                                                            <div className="text-xs text-gray-500 mt-1">{t('cephOsdDiskHint') || 'In-use disks are disabled. Creating an OSD erases the disk.'}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                        <button onClick={() => setShowCreateOsd(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                        <button
+                                                            onClick={async () => {
+                                                                if (!osdForm.node || !osdForm.dev) { addToast(t('cephSelectDisk') || 'Select a node and disk', 'error'); return; }
+                                                                if (!confirm(`Create OSD on ${osdForm.node}:${osdForm.dev}? This ERASES the disk.`)) return;
+                                                                try {
+                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${osdForm.node}/ceph/osd`, {
+                                                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify({ dev: osdForm.dev })
+                                                                    });
+                                                                    if (res?.ok) { addToast(t('cephOsdCreated') || `OSD created on ${osdForm.dev}`, 'success'); setShowCreateOsd(false); fetchCephData(); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create OSD (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`Failed to create OSD: ${e.message || e}`, 'error'); }
+                                                            }}
+                                                            className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                        >{t('create') || 'Create'}</button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* NS 2026-07-17: Create Manager Modal */}
+                                        {showCreateMgr && (
+                                            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateMgr(false)}>
+                                                <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="p-4 border-b border-proxmox-border">
+                                                        <h3 className="font-semibold">{t('cephCreateMgr') || 'Create Manager'}</h3>
+                                                    </div>
+                                                    <div className="p-4 space-y-4">
+                                                        <div>
+                                                            <label className="text-sm text-gray-400 mb-1 block">{t('node')}</label>
+                                                            <select value={cephNode} onChange={e => setCephNode(e.target.value)} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
+                                                                {(clusterNodes || []).filter(n => n.online !== 0).map(n => (<option key={n.name} value={n.name}>{n.name}</option>))}
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                    <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                        <button onClick={() => setShowCreateMgr(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                        <button
+                                                            onClick={async () => {
+                                                                if (!cephNode) { addToast(t('selectNodeFirst') || 'Select a node first', 'error'); return; }
+                                                                try {
+                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/mgr/${cephNode}`, { method: 'POST' });
+                                                                    if (res?.ok) { addToast(t('cephMgrCreated') || `Manager created on ${cephNode}`, 'success'); setShowCreateMgr(false); fetchCephData(); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create manager (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`Failed to create manager: ${e.message || e}`, 'error'); }
+                                                            }}
+                                                            className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                        >{t('create') || 'Create'}</button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* NS 2026-07-17: Create MDS Modal */}
+                                        {showCreateMds && (
+                                            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateMds(false)}>
+                                                <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="p-4 border-b border-proxmox-border">
+                                                        <h3 className="font-semibold">{t('cephCreateMds') || 'Create MDS'}</h3>
+                                                    </div>
+                                                    <div className="p-4 space-y-4">
+                                                        <div>
+                                                            <label className="text-sm text-gray-400 mb-1 block">{t('node')}</label>
+                                                            <select value={cephNode} onChange={e => setCephNode(e.target.value)} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
+                                                                {(clusterNodes || []).filter(n => n.online !== 0).map(n => (<option key={n.name} value={n.name}>{n.name}</option>))}
+                                                            </select>
+                                                            <div className="text-xs text-gray-500 mt-1">{t('cephCreateMdsHint') || 'A CephFS needs at least one running MDS.'}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                        <button onClick={() => setShowCreateMds(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                        <button
+                                                            onClick={async () => {
+                                                                if (!cephNode) { addToast(t('selectNodeFirst') || 'Select a node first', 'error'); return; }
+                                                                try {
+                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/mds/${cephNode}`, { method: 'POST' });
+                                                                    if (res?.ok) { addToast(t('cephMdsCreated') || `MDS created on ${cephNode}`, 'success'); setShowCreateMds(false); fetchCephData(); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create MDS (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`Failed to create MDS: ${e.message || e}`, 'error'); }
+                                                            }}
+                                                            className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                        >{t('create') || 'Create'}</button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* NS 2026-07-17: Create CephFS Modal */}
+                                        {showCreateFs && (
+                                            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateFs(false)}>
+                                                <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="p-4 border-b border-proxmox-border">
+                                                        <h3 className="font-semibold">{t('cephCreateFs') || 'Create CephFS'}</h3>
+                                                    </div>
+                                                    <div className="p-4 space-y-4">
+                                                        <div>
+                                                            <label className="text-sm text-gray-400 mb-1 block">{t('name')}</label>
+                                                            <input type="text" value={newFs.name} onChange={e => setNewFs(f => ({ ...f, name: e.target.value }))} placeholder="e.g. cephfs" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-sm text-gray-400 mb-1 block">PGs</label>
+                                                            <select value={newFs.pg_num} onChange={e => setNewFs(f => ({ ...f, pg_num: parseInt(e.target.value) }))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
+                                                                {[8, 16, 32, 64, 128, 256].map(n => <option key={n} value={n}>{n}</option>)}
+                                                            </select>
+                                                        </div>
+                                                        <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                            <input type="checkbox" checked={newFs.add_storage} onChange={e => setNewFs(f => ({ ...f, add_storage: e.target.checked }))} />
+                                                            {t('cephFsAddStorage') || 'Add as PVE storage'}
+                                                        </label>
+                                                        <div className="text-xs text-gray-500">{t('cephCreateFsHint') || 'Creates <name>_data + <name>_metadata pools. Requires a running MDS.'}</div>
+                                                    </div>
+                                                    <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                        <button onClick={() => setShowCreateFs(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                        <button
+                                                            onClick={async () => {
+                                                                if (!newFs.name || !cephNode) { addToast(t('cephFsNameRequired') || 'Enter a name', 'error'); return; }
+                                                                try {
+                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/fs`, {
+                                                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify({ name: newFs.name, 'add-storage': newFs.add_storage ? 1 : 0, pg_num: newFs.pg_num })
+                                                                    });
+                                                                    if (res?.ok) { addToast(t('cephFsCreated') || `CephFS "${newFs.name}" created`, 'success'); setShowCreateFs(false); fetchCephData(); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create CephFS (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`Failed to create CephFS: ${e.message || e}`, 'error'); }
+                                                            }}
+                                                            className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                        >{t('create') || 'Create'}</button>
                                                     </div>
                                                 </div>
                                             </div>

@@ -10848,6 +10848,73 @@ echo "AGENT_INSTALLED_OK"
             self.logger.warning(f"[CONSOLE] auth-ticket mint failed: {type(e).__name__}")
             return None
 
+    def create_privileged_session(self):
+        """Return a requests.Session authenticated with a FRESH password-based
+        root@pam ticket (+CSRFPreventionToken), for the handful of PVE
+        operations that reject API tokens and demand the real root@pam user —
+        notably Ceph OSD create/destroy (they wipe a raw disk, so PVE hard-gates
+        them to root@pam, never a token).
+
+        Returns (session, None) on success, or (None, error_message) when the
+        cluster has no stored password — a token-only cluster genuinely cannot
+        perform these ops, and the caller should surface that to the user.
+
+        NS 2026-07-17: mirrors mint_console_auth_ticket()'s ticket mint but also
+        carries the CSRF token so the session can POST/DELETE. Caller must
+        .close() the returned session.
+        """
+        usr = getattr(self.config, 'user', None) or 'root@pam'
+        # NS 2026-07-17 (adversarial review): an inline-token cluster stores
+        # 'user@realm!tokenid' in config.user and the token SECRET (not a
+        # password) in config.pass_ — that can NEVER mint a password ticket, so
+        # don't POST a token secret as a password and then blame a "password
+        # failure". Also: PVE gates OSD create/destroy to the real root@pam user
+        # specifically, so any other identity would fail the OSD call even with
+        # a valid ticket. Reject both cases up front with a clear message.
+        if '!' in usr:
+            return None, ('This cluster authenticates with an API token and has no '
+                          'root@pam password stored. Proxmox forbids OSD create/destroy '
+                          'over an API token — reconfigure the cluster with the root@pam '
+                          'password to enable it.')
+        if usr != 'root@pam':
+            return None, (f'Proxmox restricts OSD create/destroy to root@pam, but this '
+                          f'cluster authenticates as "{usr}". Configure root@pam '
+                          f'credentials to enable it.')
+        pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
+        if not pwd:
+            return None, ('This operation requires the cluster root@pam password '
+                          '(Proxmox rejects API tokens for OSD create/destroy). '
+                          'Add the password in the cluster settings.')
+        s = None
+        try:
+            s = requests.Session()
+            s.trust_env = False
+            _pool_kw = dict(pool_connections=2, pool_maxsize=4, pool_block=False, max_retries=0)
+            if self._ssl_verify:
+                _ca = ssl.get_default_verify_paths()
+                s.verify = _ca.cafile or _ca.openssl_cafile or True
+                s.mount('https://', HTTPAdapter(**_pool_kw))
+            else:
+                s.verify = False
+                s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
+            # self.host is already IPv6-bracketed by the property — use it directly.
+            login_url = f"https://{self.host}:{self.api_port}/api2/json/access/ticket"
+            resp = s.post(login_url, data={'username': usr, 'password': pwd}, timeout=10)
+            if resp.status_code != 200:
+                try: s.close()
+                except Exception: pass
+                return None, f'root@pam password authentication failed (HTTP {resp.status_code})'
+            data = resp.json()['data']
+            s.cookies.set('PVEAuthCookie', data['ticket'])
+            s.headers.update({'CSRFPreventionToken': data['CSRFPreventionToken']})
+            return s, None
+        except Exception as e:
+            if s is not None:
+                try: s.close()
+                except Exception: pass
+            self.logger.warning(f"[CEPH] privileged-session mint failed: {type(e).__name__}")
+            return None, f'Could not mint root@pam session: {type(e).__name__}'
+
     def get_vnc_ticket(self, node: str, vmid: int, vm_type: str) -> Dict[str, Any]:
 
         if not self.is_connected:
