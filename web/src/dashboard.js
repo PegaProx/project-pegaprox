@@ -14916,7 +14916,13 @@
                                                 {/* NS: cluster overview summary cards with donut gauges */}
                                                 {isCorporate && selectedCluster && (() => {
                                                     const metrics = Object.values(clusterMetrics).filter(m => m && m.cpu_percent != null);
-                                                    const avgCpu = metrics.length ? metrics.reduce((s, m) => s + (m.cpu_percent || 0), 0) / metrics.length : 0;
+                                                    // NS #618-followup: use the SAME core-weighted cluster CPU as the all-clusters
+                                                    // overview (Σ node.cpu×cores / Σ cores, from datacenter/status) so the two views
+                                                    // agree; fall back to a simple per-node average until that data has loaded.
+                                                    const _dcRes = allClusterMetrics[selectedCluster.id]?.data?.resources;
+                                                    const avgCpu = (_dcRes && _dcRes.cpu && _dcRes.cpu.percent != null)
+                                                        ? _dcRes.cpu.percent
+                                                        : (metrics.length ? metrics.reduce((s, m) => s + (m.cpu_percent || 0), 0) / metrics.length : 0);
                                                     const totalMem = metrics.reduce((s, m) => s + (m.mem_total || (m.memory && m.memory.total) || 0), 0);
                                                     const usedMem = metrics.reduce((s, m) => s + (m.mem_used || (m.memory && m.memory.used) || 0), 0);
                                                     const memPct = totalMem > 0 ? (usedMem / totalMem) * 100 : 0;

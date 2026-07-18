@@ -134,7 +134,7 @@ def get_datacenter_status(cluster_id):
             return jsonify({
                 'cluster': {'name': manager.config.name, 'quorate': None, 'standalone': False, 'version': 0, 'cluster_type': 'xcpng'},
                 'nodes': {'online': nodes_online, 'offline': len(nodes) - nodes_online, 'total': len(nodes)},
-                'guests': {'vms': {'running': vms_running, 'stopped': vms_stopped}, 'containers': {'running': 0, 'stopped': 0}},
+                'guests': {'vms': {'running': vms_running, 'stopped': vms_stopped, 'total': len(vms)}, 'containers': {'running': 0, 'stopped': 0, 'total': 0}},
                 'resources': {
                     'cpu': {'total': st.get('total_cpu', 0), 'used': 0, 'percent': 0},
                     'memory': {'total': st.get('total_mem', 0), 'used': st.get('used_mem', 0), 'percent': round(st['used_mem'] / st['total_mem'] * 100, 1) if st.get('total_mem') else 0},
@@ -190,6 +190,11 @@ def get_datacenter_status(cluster_id):
         vms_stopped = sum(1 for r in resources_data if r.get('type') == 'qemu' and r.get('status') == 'stopped')
         cts_running = sum(1 for r in resources_data if r.get('type') == 'lxc' and r.get('status') == 'running')
         cts_stopped = sum(1 for r in resources_data if r.get('type') == 'lxc' and r.get('status') == 'stopped')
+        # NS #618-followup: explicit per-type totals count EVERY guest (running, stopped,
+        # paused/suspended, templates) so the all-clusters overview denominator matches
+        # the cluster-detail 'allVms.length' and can never render total < running.
+        vms_total = sum(1 for r in resources_data if r.get('type') == 'qemu')
+        cts_total = sum(1 for r in resources_data if r.get('type') == 'lxc')
 
         # Calculate total resources
         total_cpu = sum(r.get('maxcpu', 0) for r in resources_data if r.get('type') == 'node')
@@ -241,8 +246,8 @@ def get_datacenter_status(cluster_id):
                 'total': nodes_online + nodes_offline
             },
             'guests': {
-                'vms': {'running': vms_running, 'stopped': vms_stopped},
-                'containers': {'running': cts_running, 'stopped': cts_stopped}
+                'vms': {'running': vms_running, 'stopped': vms_stopped, 'total': vms_total},
+                'containers': {'running': cts_running, 'stopped': cts_stopped, 'total': cts_total}
             },
             'resources': {
                 'cpu': {'total': total_cpu, 'used': used_cpu, 'percent': round(used_cpu / total_cpu * 100, 1) if total_cpu > 0 else 0},

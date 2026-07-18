@@ -3880,7 +3880,12 @@
 
                 const vmsRunning = (guests.vms?.running || 0) + (guests.containers?.running || 0);
                 const vmsStopped = (guests.vms?.stopped || 0) + (guests.containers?.stopped || 0);
-                const totalVms = vmsRunning + vmsStopped;
+                // NS #618-followup: prefer the explicit per-type totals (all guests incl.
+                // paused/templates) so this matches the cluster-detail count and can never
+                // render total < running; fall back to running+stopped for older backends.
+                const totalVms = (guests.vms?.total != null || guests.containers?.total != null)
+                    ? ((guests.vms?.total || 0) + (guests.containers?.total || 0))
+                    : (vmsRunning + vmsStopped);
 
                 // health score - weighted average of metrics
                 const healthScore = cluster.connected
@@ -4620,7 +4625,12 @@
                 
                 const vmsRunning = (guests.vms?.running || 0) + (guests.containers?.running || 0);
                 const vmsStopped = (guests.vms?.stopped || 0) + (guests.containers?.stopped || 0);
-                const totalVms = vmsRunning + vmsStopped;
+                // NS #618-followup: prefer the explicit per-type totals (all guests incl.
+                // paused/templates) so this matches the cluster-detail count and can never
+                // render total < running; fall back to running+stopped for older backends.
+                const totalVms = (guests.vms?.total != null || guests.containers?.total != null)
+                    ? ((guests.vms?.total || 0) + (guests.containers?.total || 0))
+                    : (vmsRunning + vmsStopped);
                 
                 // health score calculation - cpu/ram/storage weighted
                 const healthScore = cluster.connected 
