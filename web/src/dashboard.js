@@ -8439,6 +8439,7 @@
             const [activeAlerts, setActiveAlerts] = useState([]);  // NS #501 — firing incidents
             const [escSteps, setEscSteps] = useState([]);  // NS #501 — escalation steps in the create modal
             const [alertMetricSel, setAlertMetricSel] = useState('cpu');  // #601 — drives the threshold unit (% vs °C)
+            const [editingAlert, setEditingAlert] = useState(null);  // #618 — alert being edited (null = create)
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
             
@@ -9895,6 +9896,41 @@
                 }
             };
             
+            // #618 — update an existing alert (backend PUT already supports every field)
+            const updateClusterAlert = async (alertId, alertData) => {
+                if (!selectedCluster?.id) return;
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/alerts/${alertId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(alertData)
+                    });
+                    if (response && response.ok) {
+                        setShowAlertModal(false);
+                        setEditingAlert(null);
+                        loadClusterAlerts(selectedCluster.id);
+                        addToast(t('alertUpdated') || 'Alert updated', 'success');
+                    }
+                } catch (err) {
+                    console.error('Failed to update alert:', err);
+                }
+            };
+
+            // #618 — open the create-modal pre-filled with an existing alert's config
+            const openEditAlert = async (alert) => {
+                setEditingAlert(alert);
+                setAlertMetricSel(alert.metric || 'cpu');
+                setPickedChannels(Array.isArray(alert.channels) ? alert.channels : []);
+                setEscSteps(Array.isArray(alert.escalation)
+                    ? alert.escalation.map(s => ({ after_minutes: s.after_minutes, channels: Array.isArray(s.channels) ? s.channels : [] }))
+                    : []);
+                setShowAlertModal(true);
+                try {
+                    const r = await fetch('/api/alert-channels', { credentials: 'include' });
+                    if (r.ok) { const j = await r.json(); setAlertChannels(Array.isArray(j) ? j : []); }
+                } catch (e) { /* keep dropdown usable even if load fails */ }
+            };
+
             const deleteClusterAlert = async (alertId) => {
                 if (!selectedCluster?.id) return;
                 try {
@@ -16046,6 +16082,8 @@
                                                             <p className="text-sm text-gray-400">{t('alertsDesc') || 'Get notified when resources exceed thresholds'}</p>
                                                             <button
                                                                 onClick={async () => {
+                                                                    setEditingAlert(null);  // #618 — fresh create
+                                                                    setAlertMetricSel('cpu');
                                                                     setShowAlertModal(true);
                                                                     setPickedChannels(['email']);
                                                                     setEscSteps([]);  // NS #501
@@ -16131,9 +16169,14 @@
                                                                                 </div>
                                                                             </div>
                                                                         </div>
-                                                                        <button onClick={() => deleteClusterAlert(alert.id)} className="p-1.5 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400">
-                                                                            <Icons.Trash className="w-4 h-4" />
-                                                                        </button>
+                                                                        <div className="flex items-center gap-1">
+                                                                            <button onClick={() => openEditAlert(alert)} title={t('editAlert') || 'Edit Alert'} className="p-1.5 hover:bg-proxmox-hover rounded text-gray-500 hover:text-proxmox-orange">
+                                                                                <Icons.Edit className="w-4 h-4" />
+                                                                            </button>
+                                                                            <button onClick={() => deleteClusterAlert(alert.id)} title={t('delete') || 'Delete'} className="p-1.5 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400">
+                                                                                <Icons.Trash className="w-4 h-4" />
+                                                                            </button>
+                                                                        </div>
                                                                     </div>
                                                                 ))}
                                                             </div>
@@ -23204,15 +23247,15 @@
 
                     {/* Alert Modal - NS Jan 2026 - Supports Cluster/Node/VM targeting */}
                     {showAlertModal && (
-                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setShowAlertModal(false)}>
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => { setShowAlertModal(false); setEditingAlert(null); }}>
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-md" onClick={e => e.stopPropagation()}>
                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                    <h3 className="text-lg font-semibold">{t('newAlert') || 'New Alert'}</h3>
-                                    <button onClick={() => setShowAlertModal(false)} className="p-1 hover:bg-proxmox-hover rounded">
+                                    <h3 className="text-lg font-semibold">{editingAlert ? (t('editAlert') || 'Edit Alert') : (t('newAlert') || 'New Alert')}</h3>
+                                    <button onClick={() => { setShowAlertModal(false); setEditingAlert(null); }} className="p-1 hover:bg-proxmox-hover rounded">
                                         <Icons.X />
                                     </button>
                                 </div>
-                                <form onSubmit={async (e) => {
+                                <form key={editingAlert ? 'edit-' + editingAlert.id : 'new-alert'} onSubmit={async (e) => {
                                     e.preventDefault();
                                     const form = e.target;
                                     // NS Apr 2026 #213 — channels is the new field; keep `action`
@@ -23221,7 +23264,7 @@
                                     const legacyAction = channels.length === 0 ? 'log'
                                         : (channels.length === 1 && channels[0] === 'email') ? 'email'
                                         : 'all';
-                                    await createClusterAlert({
+                                    const payload = {
                                         name: form.name.value,
                                         target_type: form.target_type.value,
                                         target_id: form.target_id.value || null,
@@ -23231,20 +23274,24 @@
                                         channels,
                                         severity: form.severity.value,  // NS #501
                                         escalation: escSteps.filter(s => s.after_minutes > 0),  // NS #501
-                                        action: legacyAction,
-                                        enabled: true
-                                    });
+                                        action: legacyAction
+                                    };
+                                    if (editingAlert) {  // #618 — edit keeps the alert's current enabled state
+                                        await updateClusterAlert(editingAlert.id, payload);
+                                    } else {
+                                        await createClusterAlert({ ...payload, enabled: true });
+                                    }
                                 }} className="p-4 space-y-4">
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'}</label>
-                                        <input name="name" required placeholder="High CPU Alert" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
+                                        <input name="name" required placeholder="High CPU Alert" defaultValue={editingAlert ? editingAlert.name : ''} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
                                     </div>
                                     
                                     {/* Target Type Selection */}
                                     <div className="grid grid-cols-2 gap-3">
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('targetType') || 'Apply to'}</label>
-                                            <select name="target_type" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
+                                            <select name="target_type" defaultValue={editingAlert ? editingAlert.target_type : 'cluster'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value="cluster">{t('entireCluster') || 'Entire Cluster'}</option>
                                                 <option value="node">{t('specificNode') || 'Specific Node'}</option>
                                                 <option value="vm">{t('specificVm') || 'Specific VM'}</option>
@@ -23252,7 +23299,7 @@
                                         </div>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('targetId') || 'Target'} <span className="text-xs text-gray-600">({t('optional') || 'optional'})</span></label>
-                                            <input name="target_id" placeholder="node1 or VMID" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
+                                            <input name="target_id" placeholder="node1 or VMID" defaultValue={editingAlert ? (editingAlert.target_id || '') : ''} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
                                         </div>
                                     </div>
                                     
@@ -23271,7 +23318,7 @@
                                         </div>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('condition') || 'Condition'}</label>
-                                            <select name="operator" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
+                                            <select name="operator" defaultValue={editingAlert ? editingAlert.operator : '>'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value=">">&gt; above</option>
                                                 {/* #609: '<' is nonsensical for the categorical hardware_health code — only offer '>' */}
                                                 {alertMetricSel !== 'hardware_health' && <option value="<">&lt; below</option>}
@@ -23280,12 +23327,12 @@
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('threshold') || 'Threshold'} {alertMetricSel === 'temperature' ? '°C' : alertMetricSel === 'hardware_health' ? '' : '%'}</label>
                                             {alertMetricSel === 'hardware_health' ? (
-                                                <select name="threshold" defaultValue="0" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
+                                                <select name="threshold" defaultValue={editingAlert ? String(editingAlert.threshold) : '0'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                     <option value="0">{t('hwAlertWarnPlus') || 'Warning or worse'}</option>
                                                     <option value="1">{t('hwAlertCritOnly') || 'Critical only'}</option>
                                                 </select>
                                             ) : (
-                                                <input name="threshold" type="number" min="0" max={alertMetricSel === 'temperature' ? 150 : 100} defaultValue="80" required className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
+                                                <input name="threshold" type="number" min="0" max={alertMetricSel === 'temperature' ? 150 : 100} defaultValue={editingAlert ? editingAlert.threshold : 80} required className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
                                             )}
                                         </div>
                                     </div>
@@ -23333,7 +23380,7 @@
                                     {/* NS #501 — severity + escalation steps */}
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">{t('severity') || 'Severity'}</label>
-                                        <select name="severity" defaultValue="auto" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
+                                        <select name="severity" defaultValue={editingAlert ? (editingAlert.severity || 'auto') : 'auto'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                             <option value="auto">{t('severityAuto') || 'Auto (by value)'}</option>
                                             <option value="critical">Critical</option>
                                             <option value="warning">Warning</option>
@@ -23365,11 +23412,11 @@
                                         </div>
                                     </div>
                                     <div className="flex gap-2 justify-end pt-2">
-                                        <button type="button" onClick={() => setShowAlertModal(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg">
+                                        <button type="button" onClick={() => { setShowAlertModal(false); setEditingAlert(null); }} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg">
                                             {t('cancel') || 'Cancel'}
                                         </button>
                                         <button type="submit" className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg">
-                                            {t('create') || 'Create'}
+                                            {editingAlert ? (t('save') || 'Save') : (t('create') || 'Create')}
                                         </button>
                                     </div>
                                 </form>
