@@ -95,7 +95,7 @@
             const auth = useContext(AuthContext);
             const switchLang = (auth && auth.isAuthenticated) ? changeLanguage : applyLanguage;
             const langs = [
-                { code: 'de', flag: '🇦🇹', label: 'DE', title: 'Deutsch' },
+                { code: 'de', flag: '🇩🇪', label: 'DE', title: 'Deutsch' },
                 { code: 'en', flag: '🇬🇧', label: 'EN', title: 'English' },
                 { code: 'it', flag: '🇮🇹', label: 'IT', title: 'Italiano' },
                 { code: 'fr', flag: '🇫🇷', label: 'FR', title: 'Français' },
