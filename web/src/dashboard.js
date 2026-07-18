@@ -8440,6 +8440,7 @@
             const [escSteps, setEscSteps] = useState([]);  // NS #501 — escalation steps in the create modal
             const [alertMetricSel, setAlertMetricSel] = useState('cpu');  // #601 — drives the threshold unit (% vs °C)
             const [editingAlert, setEditingAlert] = useState(null);  // #618 — alert being edited (null = create)
+            const [sessionExpired, setSessionExpired] = useState(false);  // any 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
             
@@ -8523,6 +8524,10 @@
                     // #144: detect session loss early — don't auto-logout on auth/check or SSE
                     if (res.status === 401 && !url.includes('/auth/') && !url.includes('/sse')) {
                         console.warn('[authFetch] 401 on', url.split('?')[0]);
+                        // Session invalid/expired (server restart, timeout, revoked token) — surface a
+                        // clear overlay instead of letting every poll fail silently. Idempotent, so
+                        // a burst of concurrent 401s only shows the prompt once.
+                        setSessionExpired(true);
                     }
                     setConnectionError(null);
                     return res;
@@ -23044,6 +23049,24 @@
                                 React.createElement(Toast, { key: toast.id, message: toast.message, type: toast.type, onClose: () => removeToast(toast.id) })
                             )
                         ),
+                        document.body
+                    )}
+
+                    {/* Session-expired overlay — any 401 (server restart, idle timeout, revoked token)
+                        surfaces this instead of silently failing every poll. Portal to body so it sits
+                        above the whole app regardless of layout z-index. */}
+                    {sessionExpired && ReactDOM.createPortal(
+                        <div className="fixed inset-0 flex items-center justify-center p-4" style={{ zIndex: 100000, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(2px)' }}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-sm p-7 text-center">
+                                <div className="mx-auto mb-4 rounded-full bg-yellow-500/15 flex items-center justify-center" style={{ width: 52, height: 52 }}>
+                                    <Icons.Lock className="w-6 h-6 text-yellow-400" />
+                                </div>
+                                <h3 className="text-lg font-semibold mb-5">{t('sessionExpired') || 'Session expired'}</h3>
+                                <button onClick={() => { setSessionExpired(false); logout(); }} className="w-full px-4 py-2.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg font-medium">
+                                    {t('login') || 'Log in'}
+                                </button>
+                            </div>
+                        </div>,
                         document.body
                     )}
 
