@@ -2440,13 +2440,20 @@
                                                         disk.media === 'cdrom' ||
                                                         (disk.volume || '').includes('iso')
                                                     );
+                                                    // #610: an empty CD/DVD drive is `none,media=cdrom` (no ISO). Show it as a
+                                                    // first-class mount slot instead of hiding it, so users mount/eject media.
+                                                    const cdromEmpty = isCdrom && String(disk.value || '').replace(/\s+/g, '').startsWith('none');
                                                     return (
                                                     <div key={disk.id} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                         <div className="flex items-center justify-between mb-3">
                                                             <div className="flex items-center gap-3">
                                                                 {isCdrom ? <Icons.Disc /> : <Icons.HardDrive />}
                                                                 <span className="font-medium text-white">{disk.id}</span>
-                                                                <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded">{disk.storage}</span>
+                                                                {disk.storage ? (
+                                                                    <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded">{disk.storage}</span>
+                                                                ) : cdromEmpty ? (
+                                                                    <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded italic">{t('noMedia') || 'No media'}</span>
+                                                                ) : null}
                                                                 {isCdrom && (
                                                                     <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30">CD</span>
                                                                 )}
@@ -2459,9 +2466,18 @@
                                                                     <button
                                                                         onClick={() => { setMountIsoInitialDrive(disk.id); setShowMountISO(true); }}
                                                                         className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-blue-400 transition-colors"
-                                                                        title={t('changeIso') || 'Change ISO'}
+                                                                        title={cdromEmpty ? (t('mountIso') || 'Mount ISO') : (t('changeIso') || 'Change ISO')}
                                                                     >
                                                                         <Icons.Disc />
+                                                                    </button>
+                                                                )}
+                                                                {isCdrom && !cdromEmpty && (
+                                                                    <button
+                                                                        onClick={() => handleMountISO(null, disk.id)}
+                                                                        className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-red-400 transition-colors"
+                                                                        title={t('eject') || 'Eject'}
+                                                                    >
+                                                                        <Icons.Unplug />
                                                                     </button>
                                                                 )}
                                                                 {/* MK: Edit disk bus type — not for CD-ROMs */}

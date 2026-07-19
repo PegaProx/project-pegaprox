@@ -2875,6 +2875,7 @@
 
                 // Config Modal Tabs
                 mountIso: 'ISO einbinden',
+                noMedia: 'Kein Medium',
                 noIsoEject: 'Kein ISO (auswerfen)',
                 device: 'Device',
                 target: 'Ziel',
@@ -7134,6 +7135,7 @@
 
                 // Config Modal Tabs
                 mountIso: 'Mount ISO',
+                noMedia: 'No media',
                 noIsoEject: 'No ISO (eject)',
                 device: 'Device',
                 target: 'Target',
@@ -11160,6 +11162,7 @@
 
                 // Config Modal Tabs
                 mountIso: 'Monter un ISO',
+                noMedia: 'Aucun média',
                 noIsoEject: 'Aucun ISO (éjecter)',
                 device: 'Dispositif',
                 target: 'Cible',
@@ -15014,6 +15017,7 @@
 
                 // Config Modal Tabs / Pestaña de configuración modal
                 mountIso: 'Montar ISO',
+                noMedia: 'Sin medio',
                 noIsoEject: 'Sin ISO (expulsar)',
                 device: 'Dispositivo',
                 target: 'Objetivo',
@@ -18931,6 +18935,7 @@
 
                 // Config Modal Tabs
                 mountIso: 'Montar ISO',
+                noMedia: 'Sem media',
                 noIsoEject: 'Sem ISO (ejetar)',
                 device: 'Dispositivo',
                 cdrom: 'CD-ROM',
@@ -22721,6 +22726,7 @@
 
                 // Config Modal Tabs
                 mountIso: 'ISO 마운트',
+                noMedia: '미디어 없음',
                 noIsoEject: 'ISO 없음 (꺼내기)',
                 device: '장치',
                 target: '대상',
@@ -26588,6 +26594,7 @@
 
                 // Config Modal Tabs
                 mountIso: 'Monta ISO',
+                noMedia: 'Nessun supporto',
                 noIsoEject: 'Nessuna ISO (espelli)',
                 device: 'Dispositivo',
                 target: 'Destinazione',
@@ -30353,6 +30360,7 @@
 
                 // Config Modal Tabs
                 mountIso: 'Monta ISO',
+                noMedia: 'Nessun supporto',
                 noIsoEject: 'Nessuna ISO (espelli)',
                 device: 'Dispositivo',
                 target: 'Destinazione',

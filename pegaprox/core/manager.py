@@ -11366,6 +11366,19 @@ echo "AGENT_INSTALLED_OK"
                             'value': value,
                             **self._parse_disk_string(value)
                         })
+                    elif isinstance(value, str) and 'media=cdrom' in value:
+                        # #610: an EMPTY CD/DVD drive is `ide2: none,media=cdrom` — it has no
+                        # storage volume, hence no colon, so the branch above dropped it and the
+                        # drive became invisible. Surface it as a first-class row so users mount/
+                        # eject media instead of adding or removing whole drives.
+                        parsed['disks'].append({
+                            'id': key,
+                            'value': value,
+                            'storage': '',
+                            'size': '',
+                            'media': 'cdrom',
+                            'volume': 'none',
+                        })
                 
                 # MK: Unused disks - these are detached but not deleted
                 if key.startswith('unused'):
