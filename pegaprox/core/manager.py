@@ -4831,8 +4831,13 @@ class PegaProxManager:
                 # Power off via ipmitool
                 result = subprocess.run(
                     ['ipmitool', '-I', 'lanplus', '-H', ipmi_host, 
-                     '-U', ipmi_user, '-P', ipmi_pass, 'power', 'off'],
-                    capture_output=True, timeout=30
+                     '-U', ipmi_user, '-E', 'power', 'off'],
+                    capture_output=True, timeout=30,
+                    # NS: pass the IPMI password via the environment (-E reads
+                    # IPMITOOL_PASSWORD; older ipmitool builds use IPMI_PASSWORD) instead
+                    # of -P on the argv, which is visible in `ps` to any local user during
+                    # a fence.
+                    env={**os.environ, 'IPMITOOL_PASSWORD': ipmi_pass, 'IPMI_PASSWORD': ipmi_pass}
                 )
                 
                 if result.returncode == 0:

@@ -2154,7 +2154,7 @@ class PegaProxDB:
                     cluster.get('ssh_user', ''),
                     self._encrypt(cluster.get('ssh_key', '')),
                     cluster.get('ssh_port', 22),
-                    json.dumps(cluster.get('ha_settings', {})),
+                    self._encrypt(json.dumps(cluster.get('ha_settings', {}))),
                     now, now
                 ))
             except Exception as e:
@@ -2833,7 +2833,7 @@ class PegaProxDB:
                 'ssh_user': row['ssh_user'] or '',
                 'ssh_key': self._decrypt(row['ssh_key_encrypted'] or ''),
                 'ssh_port': row['ssh_port'] or 22,
-                'ha_settings': json.loads(row['ha_settings'] or '{}'),
+                'ha_settings': json.loads(self._decrypt(row['ha_settings'] or '') or '{}'),
                 'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
                 'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
                 'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
@@ -2919,7 +2919,7 @@ class PegaProxDB:
             'ssh_user': row['ssh_user'] or '',
             'ssh_key': decrypted_ssh_key,
             'ssh_port': row['ssh_port'] or 22,
-            'ha_settings': json.loads(row['ha_settings'] or '{}'),
+            'ha_settings': json.loads(self._decrypt(row['ha_settings'] or '') or '{}'),
             'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
             'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
             'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
@@ -3006,7 +3006,7 @@ class PegaProxDB:
             data.get('ssh_user', ''),
             self._encrypt(data.get('ssh_key', '')),
             data.get('ssh_port', 22),
-            json.dumps(data.get('ha_settings', {})),
+            self._encrypt(json.dumps(data.get('ha_settings', {}))),
             json.dumps(data.get('excluded_nodes', [])),
             json.dumps(data.get('smbios_autoconfig', {})),
             data.get('api_token_user', ''),
