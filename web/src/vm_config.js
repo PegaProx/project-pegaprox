@@ -2432,7 +2432,25 @@
                                             </div>
                                             
                                             {config.disks?.length > 0 ? (
-                                                config.disks.map((disk) => {
+                                                // #610 follow-up: order the list sensibly instead of raw PVE config
+                                                // order — data disks first (by bus then index), then CD/DVD drives,
+                                                // then firmware volumes (EFI / TPM) last. LXC: rootfs, then mp0..n.
+                                                [...config.disks].sort((a, b) => {
+                                                    const rank = (d) => {
+                                                        const id = String(d.id || '');
+                                                        const mm = id.match(/^([a-z]+)(\d*)$/) || [];
+                                                        const bus = mm[1] || id;
+                                                        const idx = mm[2] ? parseInt(mm[2]) : 0;
+                                                        const isCd = String(d.value || '').includes('media=cdrom') || d.media === 'cdrom' || (d.volume || '').includes('iso');
+                                                        const isSys = bus === 'efidisk' || bus === 'tpmstate';
+                                                        const cat = isSys ? 2 : (isCd ? 1 : 0);
+                                                        const busOrder = { rootfs: 0, scsi: 1, virtio: 2, sata: 3, ide: 4, mp: 5, efidisk: 8, tpmstate: 9 };
+                                                        return [cat, busOrder[bus] != null ? busOrder[bus] : 6, idx];
+                                                    };
+                                                    const ka = rank(a), kb = rank(b);
+                                                    for (let i = 0; i < 3; i++) { if (ka[i] !== kb[i]) return ka[i] - kb[i]; }
+                                                    return 0;
+                                                }).map((disk) => {
                                                     // NS May 2026 — single source of truth for the cdrom check
                                                     // (used to swap the row's actions for an ISO-aware set).
                                                     const isCdrom = isQemu && (
