@@ -3943,7 +3943,7 @@
                     addToast(t('powerNoData') || 'No data', 'warning');
                     return;
                 }
-                const symX = ({ EUR: 'EUR', USD: 'USD', GBP: 'GBP', CHF: 'CHF', JPY: 'JPY' }[cur] || cur);
+                const symX = ({ EUR: 'EUR', USD: 'USD', GBP: 'GBP', CHF: 'CHF', JPY: 'JPY', BRL: 'BRL' }[cur] || cur);
                 const pf = (n) => `${symX} ${(n || 0).toFixed(2)}`;
                 const kwh = (n) => `${(n || 0).toFixed(1)} kWh`;
                 const co2 = (n) => `${(n || 0).toFixed(1)} kg`;
@@ -4268,7 +4268,7 @@
 
             const fmt = (n) => {
                 const cur = summary?.rates?.currency || 'EUR';
-                const sym = ({ EUR: '€', USD: '$', GBP: '£', CHF: 'CHF', JPY: '¥' }[cur] || cur);
+                const sym = ({ EUR: '€', USD: '$', GBP: '£', CHF: 'CHF', JPY: '¥', BRL: 'R$' }[cur] || cur);
                 return `${sym} ${(n || 0).toFixed(2)}`;
             };
 
@@ -4338,7 +4338,7 @@
                     return;
                 }
                 const cur = summary.rates.currency || 'EUR';
-                const sym = ({ EUR: 'EUR', USD: 'USD', GBP: 'GBP', CHF: 'CHF', JPY: 'JPY' }[cur] || cur);
+                const sym = ({ EUR: 'EUR', USD: 'USD', GBP: 'GBP', CHF: 'CHF', JPY: 'JPY', BRL: 'BRL' }[cur] || cur);
                 const pf = (n) => `${sym} ${(n || 0).toFixed(2)}`;
 
                 const blocks = [];
@@ -4592,6 +4592,7 @@
                                             <option value="GBP">GBP (£)</option>
                                             <option value="CHF">CHF</option>
                                             <option value="JPY">JPY (¥)</option>
+                                            <option value="BRL">BRL (R$)</option>
                                         </select>
                                     </div>
                                     <div>
