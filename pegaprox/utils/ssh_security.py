@@ -59,6 +59,20 @@ def strict_host_keys_enabled() -> bool:
         '1', 'true', 'yes', 'on')
 
 
+def cli_hostkey_opts():
+    """Host-key options for subprocess ``ssh``/``scp``/``sshfs`` commands.
+
+    Returns ``(strict_value, known_hosts_path)`` to replace the insecure
+    ``StrictHostKeyChecking=no`` + ``UserKnownHostsFile=/dev/null`` combo:
+    * ``accept-new`` accepts a brand-new host but REJECTS a changed key (MitM),
+      upgraded to ``yes`` (reject unknown too) under strict mode;
+    * pinned to the SAME known_hosts file the paramiko paths use, so a key learned
+      by one path is verified by the other.
+    """
+    hkc = 'yes' if strict_host_keys_enabled() else 'accept-new'
+    return hkc, _KNOWN_HOSTS
+
+
 def _make_policy(paramiko):
     strict = strict_host_keys_enabled()
 

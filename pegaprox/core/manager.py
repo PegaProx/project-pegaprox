@@ -16,6 +16,7 @@ import hashlib
 import subprocess
 import re
 import shlex
+from pegaprox.utils.ssh_security import cli_hostkey_opts  # secure host-key opts for subprocess ssh/scp
 import requests
 import urllib3
 from datetime import datetime, timedelta
@@ -4855,8 +4856,10 @@ class PegaProxManager:
                 
                 self.logger.info(f"[HA] Fencing node {node} via SSH shutdown")
 
+                _hkc, _kh = cli_hostkey_opts()
                 result = subprocess.run(
-                    ['ssh', '-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=no',
+                    ['ssh', '-o', 'ConnectTimeout=5', '-o', f'StrictHostKeyChecking={_hkc}',
+                     '-o', f'UserKnownHostsFile={_kh}',
                      f'{ssh_user}@{ssh_host}', 'poweroff'],
                     capture_output=True, timeout=15
                 )
@@ -6300,8 +6303,10 @@ echo "AGENT_INSTALLED_OK"
 
         try:
             ct = self.ha_config.get('ssh_connect_timeout', 10)
+            _hkc, _kh = cli_hostkey_opts()
             result = subprocess.run(
-                ['ssh', '-o', f'ConnectTimeout={ct}', '-o', 'StrictHostKeyChecking=no',
+                ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
+                 '-o', f'UserKnownHostsFile={_kh}',
                  '-o', 'BatchMode=yes', f'{user}@{host}', command],
                 capture_output=True, text=True, timeout=timeout
             )
@@ -6341,8 +6346,10 @@ echo "AGENT_INSTALLED_OK"
             
             ct = self.ha_config.get('ssh_connect_timeout', 10)
             try:
+                _hkc, _kh = cli_hostkey_opts()
                 result = subprocess.run(
-                    ['ssh', '-o', f'ConnectTimeout={ct}', '-o', 'StrictHostKeyChecking=no',
+                    ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
+                     '-o', f'UserKnownHostsFile={_kh}',
                      '-i', key_file, f'{user}@{host}', command],
                     capture_output=True, text=True, timeout=timeout
                 )
@@ -6379,8 +6386,10 @@ echo "AGENT_INSTALLED_OK"
             env['SSHPASS'] = password
             
             ct = self.ha_config.get('ssh_connect_timeout', 10)
+            _hkc, _kh = cli_hostkey_opts()
             result = subprocess.run(
-                ['sshpass', '-e', 'ssh', '-o', f'ConnectTimeout={ct}', '-o', 'StrictHostKeyChecking=no',
+                ['sshpass', '-e', 'ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
+                 '-o', f'UserKnownHostsFile={_kh}',
                  f'{user}@{host}', command],
                 capture_output=True, text=True, timeout=timeout, env=env
             )
@@ -7204,7 +7213,8 @@ echo "AGENT_INSTALLED_OK"
         
         try:
             ct = self.ha_config.get('ssh_connect_timeout', 10)
-            ssh_cmd = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', f'ConnectTimeout={ct}', '-o', 'BatchMode=yes']
+            _hkc, _kh = cli_hostkey_opts()
+            ssh_cmd = ['ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}', '-o', 'BatchMode=yes']
             if key_file:
                 ssh_cmd.extend(['-i', key_file])
             ssh_cmd.append(f'{user}@{host}')
@@ -7310,9 +7320,10 @@ echo "AGENT_INSTALLED_OK"
                 return self._ssh_run_command(host, user, command)
             
             ct = self.ha_config.get('ssh_connect_timeout', 10)
+            _hkc, _kh = cli_hostkey_opts()
             ssh_cmd = [
                 'sshpass', '-e',
-                'ssh', '-o', 'StrictHostKeyChecking=no', '-o', f'ConnectTimeout={ct}',
+                'ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}',
                 f'{user}@{host}',
                 command
             ]
@@ -12269,12 +12280,16 @@ echo "AGENT_INSTALLED_OK"
             try:
                 ssh_src = self._ssh_connect(src_ip)
                 # try with sshpass if password available
+                # NOTE: this scp runs node->node (executed ON the source PVE node), so
+                # it uses that node's own ~/.ssh/known_hosts, not the hub's. Just harden
+                # accept-new (reject a changed target key) rather than pinning the hub file.
+                _hkc, _ = cli_hostkey_opts()
                 if ssh_pass:
                     import shlex
                     escaped_pass = shlex.quote(ssh_pass)
-                    scp_cmd = f"sshpass -p {escaped_pass} scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 '{src_file}' {ssh_user}@{tgt_ip}:'{tgt_path}/'"
+                    scp_cmd = f"sshpass -p {escaped_pass} scp -o StrictHostKeyChecking={_hkc} -o ConnectTimeout=10 '{src_file}' {ssh_user}@{tgt_ip}:'{tgt_path}/'"
                 else:
-                    scp_cmd = f"scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 '{src_file}' {ssh_user}@{tgt_ip}:'{tgt_path}/'"
+                    scp_cmd = f"scp -o StrictHostKeyChecking={_hkc} -o ConnectTimeout=10 '{src_file}' {ssh_user}@{tgt_ip}:'{tgt_path}/'"
                 _, scp_out, scp_err = ssh_src.exec_command(scp_cmd, timeout=3600)
                 rc = scp_out.channel.recv_exit_status()
                 ssh_src.close()
