@@ -1717,9 +1717,10 @@ def rescan_storage(cluster_id, storage_id):
                             node_host = host if node == nodes[0] else f"{node}.{host.split('.', 1)[1] if '.' in host else host}"
                             
                             # Try to connect via SSH
+                            from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys
                             ssh = paramiko.SSHClient()
-                            ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
-                            
+                            apply_host_key_policy(ssh, paramiko)
+
                             connect_kwargs = {
                                 'hostname': node_host,
                                 'port': ssh_port,
@@ -1758,7 +1759,8 @@ def rescan_storage(cluster_id, storage_id):
                             
                             try:
                                 ssh.connect(**connect_kwargs)
-                                
+                                persist_host_keys(ssh)
+
                                 # 1. SCSI bus rescan (detects new LUNs AND size changes)
                                 if storage_type in ['iscsi', 'iscsidirect', 'lvm', 'lvmthin', 'starlvm']:
                                     stdin, stdout, stderr = ssh.exec_command(

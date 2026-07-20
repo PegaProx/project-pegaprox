@@ -304,8 +304,9 @@ class PBSManager:
         else:
             ssh_user = 'root'
 
+        from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        apply_host_key_policy(client, paramiko)
 
         # try key-based first if we have one
         if self.ssh_key:
@@ -322,6 +323,7 @@ class PBSManager:
                     client.connect(self.host, port=self.ssh_port, username=ssh_user,
                                    pkey=key, timeout=15, banner_timeout=15, auth_timeout=15,
                                    allow_agent=False, look_for_keys=False)
+                    persist_host_keys(client)
                     return client, None
             except Exception as e:
                 logging.warning(f"[PBS:{self.name}] SSH key auth failed: {e}")
@@ -332,6 +334,7 @@ class PBSManager:
                 client.connect(self.host, port=self.ssh_port, username=ssh_user,
                                password=self.password, timeout=15, banner_timeout=15, auth_timeout=15,
                                allow_agent=False, look_for_keys=False)
+                persist_host_keys(client)
                 return client, None
             except Exception as e:
                 return None, f"SSH auth failed for {ssh_user}@{self.host}: {e}"

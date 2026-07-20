@@ -8401,9 +8401,10 @@ echo "AGENT_INSTALLED_OK"
                 else:
                     self.logger.info(f"Connecting to {host}:{ssh_port} as {username}...")
                 
+                from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys
                 ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
-                
+                apply_host_key_policy(ssh, paramiko)
+
                 connect_kwargs = {
                     'hostname': host,
                     'port': ssh_port,
@@ -8442,6 +8443,7 @@ echo "AGENT_INSTALLED_OK"
                     connect_kwargs['password'] = self.config.pass_
                 
                 ssh.connect(**connect_kwargs)
+                persist_host_keys(ssh)
                 self.logger.info(f"SSH connected to {host}" + (f" (attempt {attempt})" if attempt > 1 else ""))
                 
                 # SUCCESS - release semaphore immediately, connection is established

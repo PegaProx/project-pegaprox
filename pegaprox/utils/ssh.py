@@ -11,6 +11,7 @@ import threading
 import socket
 
 from pegaprox.constants import SSH_MAX_CONCURRENT
+from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
 from pegaprox.globals import (
     _ssh_active_connections, _ssh_connection_lock,
     _auth_action_attempts, _auth_action_lock,
@@ -157,15 +158,12 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         import paramiko
         
         client = paramiko.SSHClient()
-        # MK: Mar 2026 - TOFU: trust on first use, reject if key changes
-        _known_hosts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                    'config', '.ssh_known_hosts')
-        try:
-            if os.path.exists(_known_hosts):
-                client.load_host_keys(_known_hosts)
-        except Exception:
-            pass
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # MK: Mar 2026 - TOFU: trust on first use, reject if key changes.
+        # Single source of truth for the known_hosts path (the real runtime config
+        # dir), shared with the system-ssh fallback below so both verify the same file.
+        import pegaprox.utils.ssh_security as _sshsec
+        _known_hosts = _sshsec._KNOWN_HOSTS
+        apply_host_key_policy(client, paramiko)
 
         connected = False
         transport = None
@@ -178,10 +176,13 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
             transport = paramiko.Transport(_sock)
             _configure_transport_algorithms(transport)
             transport.connect()
-            
+            # verify the server key BEFORE sending credentials (a manual Transport
+            # bypasses the SSHClient host-key policy). Raises on changed/unknown key.
+            verify_transport_host_key(transport, host, paramiko)
+
             def _ki_handler(title, instructions, prompt_list):
                 return [password] * len(prompt_list)
-            
+
             transport.auth_interactive(user, _ki_handler)
             
             if transport.is_authenticated():
@@ -199,12 +200,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         if not connected:
             try:
                 client2 = paramiko.SSHClient()
-                try:
-                    if os.path.exists(_known_hosts):
-                        client2.load_host_keys(_known_hosts)
-                except Exception:
-                    pass
-                client2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                apply_host_key_policy(client2, paramiko)
                 
                 _sock2 = _make_sock()
                 if _sock2 is None:
@@ -212,7 +208,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
                 transport2 = paramiko.Transport(_sock2)
                 _configure_transport_algorithms(transport2)
                 transport2.connect()
-                
+                verify_transport_host_key(transport2, host, paramiko)
+
                 def _ki_handler2(title, instructions, prompt_list):
                     return [password] * len(prompt_list)
                 
@@ -238,12 +235,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         if not connected:
             try:
                 client3 = paramiko.SSHClient()
-                try:
-                    if os.path.exists(_known_hosts):
-                        client3.load_host_keys(_known_hosts)
-                except Exception:
-                    pass
-                client3.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                apply_host_key_policy(client3, paramiko)
                 # NS May 2026 — `timeout` here is paramiko's CONNECT timeout
                 # (TCP+auth), not command-exec. Use the dedicated connect
                 # phase budget so dead hosts fail in 8s rather than 30s.
@@ -262,11 +254,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
             err_detail = '; '.join(errors)
             raise Exception(f'Paramiko auth failed ({len(errors)} methods): {err_detail}')
         
-        # MK: Mar 2026 - persist host keys (TOFU model)
-        try:
-            client.save_host_keys(_known_hosts)
-        except Exception:
-            pass  # config dir might not be writable
+        # MK: Mar 2026 - persist host keys (TOFU model) — reject-on-change next time
+        persist_host_keys(client)
 
         # Execute command
         try:
@@ -287,10 +276,15 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     # Fallback: sshpass + ssh subprocess (handles keyboard-interactive via PreferredAuthentications)
     try:
         import subprocess
+        from pegaprox.utils.ssh_security import strict_host_keys_enabled
         env = os.environ.copy()
         env['SSHPASS'] = password
+        # accept-new = TOFU (accept unknown, REJECT a changed key). strict mode
+        # upgrades to `yes` (reject unknown too). Keeps the system-ssh fallback's
+        # host-key behaviour in lock-step with the paramiko paths.
+        _hkc = 'yes' if strict_host_keys_enabled() else 'accept-new'
         ssh_args = ['sshpass', '-e', 'ssh',
-             '-o', 'StrictHostKeyChecking=accept-new',
+             '-o', f'StrictHostKeyChecking={_hkc}',
              '-o', f'UserKnownHostsFile={_known_hosts}',
              '-o', 'LogLevel=ERROR',
              '-o', 'PreferredAuthentications=keyboard-interactive,password',

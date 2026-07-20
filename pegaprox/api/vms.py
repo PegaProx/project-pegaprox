@@ -7,6 +7,7 @@ import json
 import time
 import logging
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
+from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys  # TOFU SSH host-key verification
 import threading
 import uuid
 import hashlib
@@ -2530,8 +2531,9 @@ def test_node_connection(cluster_id):
     try:
         # Connect via SSH
         ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+        apply_host_key_policy(ssh, paramiko)
         ssh.connect(node_ip, port=ssh_port, username=username, password=password, timeout=15)
+        persist_host_keys(ssh)
 
         # Get hostname
         stdin, stdout, stderr = ssh.exec_command('hostname')
@@ -2704,8 +2706,9 @@ def join_node_to_cluster(cluster_id):
         
         # Connect to new node via SSH
         ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+        apply_host_key_policy(ssh, paramiko)
         ssh.connect(node_ip, port=ssh_port, username=username, password=password, timeout=30)
+        persist_host_keys(ssh)
         
         # NS: Feb 2026 - Clean old cluster config if force rejoin
         # This is needed when a node was removed from a cluster but still has
@@ -2755,8 +2758,9 @@ def join_node_to_cluster(cluster_id):
             ssh.close()
             time.sleep(2)
             ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+            apply_host_key_policy(ssh, paramiko)
             ssh.connect(node_ip, port=ssh_port, username=username, password=password, timeout=30)
+            persist_host_keys(ssh)
         
         # Use interactive shell for pvecm add (it prompts for password)
         channel = ssh.invoke_shell()
@@ -3016,7 +3020,7 @@ def remove_node_from_cluster(cluster_id, node_name):
         
         # Connect to an online node via SSH
         ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+        apply_host_key_policy(ssh, paramiko)
         
         # Try SSH key first, then password
         connected = False
@@ -3046,7 +3050,8 @@ def remove_node_from_cluster(cluster_id, node_name):
         
         if not connected:
             return jsonify({'success': False, 'error': 'Could not authenticate via SSH. Configure SSH key or password.'}), 500
-        
+        persist_host_keys(ssh)
+
         # Execute pvecm delnode command. MK Apr 2026: shlex.quote belt-and-braces
         # — node_name is already regex-validated at the top of the function,
         # but the second layer keeps things safe if the regex ever loosens.
@@ -3074,7 +3079,7 @@ def remove_node_from_cluster(cluster_id, node_name):
             try:
                 logging.info(f"[RemoveNode] Cleaning up cluster config on removed node {node_name} ({removed_node_ip})")
                 ssh_cleanup = paramiko.SSHClient()
-                ssh_cleanup.set_missing_host_key_policy(paramiko.WarningPolicy())
+                apply_host_key_policy(ssh_cleanup, paramiko)
                 
                 # Try to connect to the removed node
                 cleanup_connected = False
@@ -3093,6 +3098,9 @@ def remove_node_from_cluster(cluster_id, node_name):
                             except:
                                 continue
                         if pkey:
+                            # no persist here: this connects to a node being REMOVED —
+                            # pinning its key would wrongly reject-on-change if the node
+                            # is later reinstalled and re-added.
                             ssh_cleanup.connect(removed_node_ip, port=22, username=ssh_user, pkey=pkey, timeout=15)
                             cleanup_connected = True
                     except:
@@ -9205,10 +9213,30 @@ async def ssh_handler(websocket):
     # Send connecting status
     await websocket.send('{"status":"connecting"}')
     
-    # Connect SSH
+    # Connect SSH — TOFU host-key verification (standalone WS subprocess, policy
+    # inlined; known_hosts path handed in via env, shared with the main app).
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
-    
+    _ssh_kh = os.environ.get('PEGAPROX_SSH_KNOWN_HOSTS') or os.path.abspath(os.path.join('config', '.ssh_known_hosts'))
+    try:
+        if os.path.exists(_ssh_kh):
+            ssh.load_host_keys(_ssh_kh)
+    except Exception:
+        pass
+    class _TofuPolicy(paramiko.MissingHostKeyPolicy):
+        def missing_host_key(self, _c, _h, _k):
+            if os.environ.get('PEGAPROX_SSH_STRICT_HOST_KEYS', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+                raise paramiko.SSHException("strict host-key checking: unknown SSH host key for " + str(_h))
+            try:
+                _c._host_keys.add(_h, _k.get_name(), _k)
+            except Exception:
+                pass
+    ssh.set_missing_host_key_policy(_TofuPolicy())
+    def _persist_ssh_hostkeys():
+        try:
+            ssh.save_host_keys(_ssh_kh)
+        except Exception:
+            pass
+
     try:
         print(f"Connecting SSH to {ssh_user}@{node_ip}...")
         
@@ -9234,6 +9262,7 @@ async def ssh_handler(websocket):
                 if pkey:
                     print(f"Using SSH key authentication")
                     ssh.connect(node_ip, port=22, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
+                    _persist_ssh_hostkeys()
                 else:
                     raise Exception("Could not parse SSH key - unsupported format")
                     
@@ -9244,7 +9273,8 @@ async def ssh_handler(websocket):
         else:
             # Password authentication
             ssh.connect(node_ip, port=22, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
-        
+            _persist_ssh_hostkeys()
+
         channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)
         channel.settimeout(0.1)
 
@@ -9618,6 +9648,13 @@ if __name__ == '__main__':
         # Set environment variables for the subprocess
         env = os.environ.copy()
         env['PEGAPROX_PKG_BASE'] = pkg_base  # #528: subprocess may live outside the pkg dir now
+        # hand the shared known_hosts path to the WS subprocess so its TOFU host-key
+        # verification uses the SAME file as the main app (reject-on-change works).
+        try:
+            from pegaprox.utils.ssh_security import _KNOWN_HOSTS as _shared_kh
+            env['PEGAPROX_SSH_KNOWN_HOSTS'] = _shared_kh
+        except Exception:
+            pass
         env['SSH_WS_PORT'] = str(port)
         env['SSH_WS_HOST'] = host  # Issue #71: IPv6 support
         main_port = port - 2
@@ -9804,7 +9841,7 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
     try:
         # Create SSH client
         ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+        apply_host_key_policy(ssh, paramiko)
         
         # Connect
         ssh.connect(
@@ -9816,7 +9853,8 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
             allow_agent=False,
             look_for_keys=False
         )
-        
+        persist_host_keys(ssh)
+
         logging.info(f"Step 4: SSH connected! Opening shell...")
         
         # Get interactive shell

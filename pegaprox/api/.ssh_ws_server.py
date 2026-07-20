@@ -42,7 +42,9 @@ async def ssh_handler(websocket):
     prefetched_ip = query.get('ip', [None])[0]  # IP pre-fetched by frontend
     if prefetched_ip:
         prefetched_ip = unquote(prefetched_ip)
-        print(f"Frontend provided IP: {prefetched_ip}")
+        # NS Jul 2026 (CodeAnt CWE-117) — prefetched_ip is unquoted user input; strip CR/LF so
+        # it can't forge log lines (self-contained: this runs in the standalone WS subprocess).
+        print("Frontend provided IP: " + str(prefetched_ip).replace(chr(10), ' ').replace(chr(13), ' '))
 
     # NS May 2026 — accept both shell and termproxy paths.
     # termproxy: /api/clusters/<cid>/vms/<node>/<vm_type>/<vmid>/termwebsocket
@@ -237,10 +239,30 @@ async def ssh_handler(websocket):
     # Send connecting status
     await websocket.send('{"status":"connecting"}')
     
-    # Connect SSH
+    # Connect SSH — TOFU host-key verification (standalone WS subprocess, policy
+    # inlined; known_hosts path handed in via env, shared with the main app).
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
-    
+    _ssh_kh = os.environ.get('PEGAPROX_SSH_KNOWN_HOSTS') or os.path.abspath(os.path.join('config', '.ssh_known_hosts'))
+    try:
+        if os.path.exists(_ssh_kh):
+            ssh.load_host_keys(_ssh_kh)
+    except Exception:
+        pass
+    class _TofuPolicy(paramiko.MissingHostKeyPolicy):
+        def missing_host_key(self, _c, _h, _k):
+            if os.environ.get('PEGAPROX_SSH_STRICT_HOST_KEYS', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+                raise paramiko.SSHException("strict host-key checking: unknown SSH host key for " + str(_h))
+            try:
+                _c._host_keys.add(_h, _k.get_name(), _k)
+            except Exception:
+                pass
+    ssh.set_missing_host_key_policy(_TofuPolicy())
+    def _persist_ssh_hostkeys():
+        try:
+            ssh.save_host_keys(_ssh_kh)
+        except Exception:
+            pass
+
     try:
         print(f"Connecting SSH to {ssh_user}@{node_ip}...")
         
@@ -266,6 +288,7 @@ async def ssh_handler(websocket):
                 if pkey:
                     print(f"Using SSH key authentication")
                     ssh.connect(node_ip, port=22, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
+                    _persist_ssh_hostkeys()
                 else:
                     raise Exception("Could not parse SSH key - unsupported format")
                     
@@ -276,7 +299,8 @@ async def ssh_handler(websocket):
         else:
             # Password authentication
             ssh.connect(node_ip, port=22, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
-        
+            _persist_ssh_hostkeys()
+
         channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)
         channel.settimeout(0.1)
 
@@ -466,7 +490,9 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
     # Connect to PVE WS — Cookie uses session auth ticket; URL uses termproxy ticket.
     pve_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid_str}/vncwebsocket?port={pve_port}&vncticket={quote_plus(pve_ticket)}"
     pve_url = f"wss://{pve_host}:8006{pve_path}"
-    print(f"[TERMPROXY] connecting to PVE: {pve_url}")
+    # NS Jul 2026 (CodeAnt sensitive-data-in-url) — never log the vncticket (a live PVE console
+    # credential in the query string); redact it (self-contained: runs in the WS subprocess).
+    print("[TERMPROXY] connecting to PVE: " + pve_url.split('vncticket=')[0] + "vncticket=[REDACTED]")
     # MK 2026-06-04: TLS verify is gated by the per-cluster ssl_verify flag
     # (exposed via /api/internal/cluster-creds as `verify_pve_tls`). Default
     # is False because PVE ships self-signed certs by default; admins flip
@@ -572,7 +598,7 @@ async def main():
     # crcro on issue #388 reported the exact SSH-WS InvalidUpgrade trace this fixes.
     _lpr_ssh = None
     try:
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        sys.path.insert(0, os.environ.get('PEGAPROX_PKG_BASE') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_ssh
     except Exception as _e:
         print(f"[SSH-WS] WARNING: lenient_process_request not importable ({_e}) — strict handshake only")

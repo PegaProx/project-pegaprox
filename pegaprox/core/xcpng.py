@@ -3106,8 +3106,9 @@ class XcpngManager:
 
         for attempt in range(retries):
             try:
+                from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys
                 client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                apply_host_key_policy(client, paramiko)
 
                 # try key auth first
                 ssh_key = getattr(self.config, 'ssh_key', '')
@@ -3119,6 +3120,7 @@ class XcpngManager:
                     client.connect(host, port=ssh_port, username=ssh_user,
                                    password=self.config.pass_, timeout=15,
                                    allow_agent=False, look_for_keys=False)
+                persist_host_keys(client)
                 return client
             except Exception as e:
                 if attempt == retries - 1:

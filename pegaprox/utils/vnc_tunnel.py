@@ -209,8 +209,9 @@ class SshVncTunnelPool:
                 except Exception: pass
                 self._clients.pop(cluster_id, None)
 
+            from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys
             client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            apply_host_key_policy(client, paramiko)
 
             connect_kwargs = dict(
                 hostname=pve_host, port=ssh_port, username=ssh_user,
@@ -235,6 +236,7 @@ class SshVncTunnelPool:
                 connect_kwargs['password'] = ssh_password
 
             client.connect(**connect_kwargs)
+            persist_host_keys(client)
 
             # SSH-level keepalive — prevents stateful FW from dropping the persistent transport
             try:

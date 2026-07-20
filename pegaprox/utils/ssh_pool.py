@@ -241,6 +241,10 @@ def get_pooled_transport(host, port, user, password=None, pkey=None, pkey_data=N
         transport = paramiko.Transport(sock_args)
         transport.banner_timeout = connect_timeout
         transport.start_client(timeout=connect_timeout)
+        # verify the server key before sending credentials (manual Transport bypasses
+        # the SSHClient host-key policy). Raises on changed/unknown key.
+        from pegaprox.utils.ssh_security import verify_transport_host_key
+        verify_transport_host_key(transport, host, paramiko)
         if pkey is not None:
             transport.auth_publickey(user, pkey)
         elif password is not None:

@@ -1534,15 +1534,17 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
     """Connect to SSH with multiple auth methods (matches _ssh_exec behavior).
     Returns connected paramiko.SSHClient or raises Exception."""
     import paramiko
+    from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    apply_host_key_policy(client, paramiko)
 
     # try key-based first
     if key_path and os.path.exists(key_path):
         try:
             client.connect(host, port=port, username=user,
                            key_filename=key_path, timeout=30)
+            persist_host_keys(client)
             try: client.get_transport().set_keepalive(30)  # #546: keep the channel alive through long disk transfers
             except Exception: pass
             return client
@@ -1553,6 +1555,7 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
     try:
         transport = paramiko.Transport((host, port))
         transport.connect()
+        verify_transport_host_key(transport, host, paramiko)
 
         def _ki_handler(title, instructions, prompt_list):
             return [password] * len(prompt_list)
@@ -1573,9 +1576,10 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
 
     # standard password auth
     client2 = paramiko.SSHClient()
-    client2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    apply_host_key_policy(client2, paramiko)
     client2.connect(host, port=port, username=user, password=password,
                     timeout=30, allow_agent=False, look_for_keys=False)
+    persist_host_keys(client2)
     try: client2.get_transport().set_keepalive(30)  # #546: keep the channel alive through long disk transfers
     except Exception: pass
     return client2
