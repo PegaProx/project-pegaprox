@@ -137,6 +137,48 @@ def persist_host_keys(client):
         pass  # config dir might not be writable — non-fatal
 
 
+def remove_host_keys(hostnames):
+    """Drop known_hosts entries for the given hosts/IPs.
+
+    Call this when a cluster or node is REMOVED from PegaProx so that re-adding it
+    later works cleanly: if the box was reinstalled in the meantime it presents a
+    new host key, and without this the stale pinned key would trip reject-on-change
+    and block the reconnect. Text-based (handles ``host``, ``h1,h2`` and
+    ``[host]:port`` line forms); returns the number of lines removed.
+    """
+    targets = set(str(h).strip() for h in (hostnames or []) if h and str(h).strip())
+    if not targets or not os.path.exists(_KNOWN_HOSTS):
+        return 0
+    removed = 0
+    try:
+        with _persist_lock:
+            with open(_KNOWN_HOSTS) as f:
+                lines = f.readlines()
+            kept = []
+            for ln in lines:
+                if not ln.strip():
+                    kept.append(ln)
+                    continue
+                first = ln.split(None, 1)[0]
+                hosts_in_line = [h.replace('[', '').split(']')[0].split(':')[0]
+                                 for h in first.split(',')]
+                if any(h in targets for h in hosts_in_line):
+                    removed += 1
+                else:
+                    kept.append(ln)
+            if removed:
+                with open(_KNOWN_HOSTS, 'w') as f:
+                    f.writelines(kept)
+                try:
+                    _log.info("removed %d known_hosts entr%s for %s",
+                              removed, 'y' if removed == 1 else 'ies', sorted(targets))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return removed
+
+
 def verify_transport_host_key(transport, hostname, paramiko):
     """Verify the server key of a MANUALLY-built ``paramiko.Transport``.
 

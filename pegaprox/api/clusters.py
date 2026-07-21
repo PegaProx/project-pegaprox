@@ -500,9 +500,36 @@ def delete_cluster(cluster_id):
         except Exception as e:
             logging.debug(f"Token revocation failed (non-critical): {e}")
 
+    # Clean up pinned SSH host keys for this cluster's hosts BEFORE stopping the
+    # manager (so re-adding a node that was reinstalled meanwhile works via TOFU
+    # rather than tripping reject-on-change on the stale key).
+    try:
+        from pegaprox.utils.ssh_security import remove_host_keys
+        from pegaprox.utils.ssh import _node_ip_cache
+        hosts_to_clean = set()
+        for attr in ('host',):
+            v = getattr(mgr, attr, None) or getattr(mgr.config, attr, None)
+            if v:
+                hosts_to_clean.add(v)
+        for (cid, _node), val in list(_node_ip_cache.items()):
+            if cid == cluster_id and val and val[0]:
+                hosts_to_clean.add(val[0])
+        try:
+            for n in (mgr.get_nodes() or []):
+                ip = (n or {}).get('ip') or (n or {}).get('host')
+                if ip:
+                    hosts_to_clean.add(ip)
+        except Exception:
+            pass
+        n_removed = remove_host_keys(hosts_to_clean)
+        if n_removed:
+            logging.info(f"Removed {n_removed} SSH host-key pin(s) for deleted cluster {cluster_id}")
+    except Exception as e:
+        logging.debug(f"known_hosts cleanup on cluster delete failed (non-critical): {e}")
+
     mgr.stop()
     del cluster_managers[cluster_id]
-    
+
     # MK: Delete cluster and all related data from database
     try:
         db = get_db()
