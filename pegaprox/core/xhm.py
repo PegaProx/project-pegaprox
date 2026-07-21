@@ -1555,7 +1555,7 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
     try:
         transport = paramiko.Transport((host, port))
         transport.connect()
-        verify_transport_host_key(transport, host, paramiko)
+        verify_transport_host_key(transport, host, paramiko, port=port)
 
         def _ki_handler(title, instructions, prompt_list):
             return [password] * len(prompt_list)

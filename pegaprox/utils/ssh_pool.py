@@ -244,7 +244,7 @@ def get_pooled_transport(host, port, user, password=None, pkey=None, pkey_data=N
         # verify the server key before sending credentials (manual Transport bypasses
         # the SSHClient host-key policy). Raises on changed/unknown key.
         from pegaprox.utils.ssh_security import verify_transport_host_key
-        verify_transport_host_key(transport, host, paramiko)
+        verify_transport_host_key(transport, host, paramiko, port=int(port or 22))
         if pkey is not None:
             transport.auth_publickey(user, pkey)
         elif password is not None:

@@ -137,6 +137,22 @@ def persist_host_keys(client):
         pass  # config dir might not be writable — non-fatal
 
 
+def _known_hosts_token_host(tok):
+    """Extract the bare host from one known_hosts host-field token.
+
+    Handles ``host``, ``192.168.1.2``, the bracketed non-standard-port form
+    ``[host]:2222`` / ``[2001:db8::1]:2222`` and a bare IPv6 (``2001:db8::1``).
+    A naive ``split(':')[0]`` truncates IPv6 addresses at their first colon, so
+    only strip a ``:port`` suffix when the token is in the bracketed form.
+    """
+    tok = tok.strip()
+    if tok.startswith('['):
+        rb = tok.rfind(']')
+        if rb != -1:
+            return tok[1:rb]
+    return tok
+
+
 def remove_host_keys(hostnames):
     """Drop known_hosts entries for the given hosts/IPs.
 
@@ -160,8 +176,7 @@ def remove_host_keys(hostnames):
                     kept.append(ln)
                     continue
                 first = ln.split(None, 1)[0]
-                hosts_in_line = [h.replace('[', '').split(']')[0].split(':')[0]
-                                 for h in first.split(',')]
+                hosts_in_line = [_known_hosts_token_host(h) for h in first.split(',')]
                 if any(h in targets for h in hosts_in_line):
                     removed += 1
                 else:
@@ -179,7 +194,7 @@ def remove_host_keys(hostnames):
     return removed
 
 
-def verify_transport_host_key(transport, hostname, paramiko):
+def verify_transport_host_key(transport, hostname, paramiko, port=22):
     """Verify the server key of a MANUALLY-built ``paramiko.Transport``.
 
     Keyboard-interactive auth is done over a Transport we build ourselves
@@ -196,16 +211,30 @@ def verify_transport_host_key(transport, hostname, paramiko):
     """
     try:
         key = transport.get_remote_server_key()
-    except Exception:
-        return  # no key available — nothing to verify against
+    except Exception as e:
+        # A transport that completed key exchange always carries a server key;
+        # a failure here is anomalous. Fail CLOSED — never let auth proceed
+        # unverified. Every caller wraps this call in its connect try/except, so
+        # the raise is handled exactly like a changed/rejected key.
+        raise paramiko.SSHException(
+            "could not retrieve SSH host key for %s to verify (failing closed): %s"
+            % (hostname, e))
     keytype = key.get_name()
+    # known_hosts keys a non-standard port as "[host]:port"; port 22 is the bare
+    # host. Look up and pin under the same normalized name or a non-22 host would
+    # be treated as unknown on every connect (TOFU re-add, never actually pinned).
+    try:
+        _port = int(port or 22)
+    except (TypeError, ValueError):
+        _port = 22
+    lookup_name = hostname if _port == 22 else '[%s]:%d' % (hostname, _port)
     hostkeys = paramiko.hostkeys.HostKeys()
     try:
         if os.path.exists(_KNOWN_HOSTS):
             hostkeys.load(_KNOWN_HOSTS)
     except Exception:
         pass
-    entry = hostkeys.lookup(hostname)
+    entry = hostkeys.lookup(lookup_name)
     if entry is not None:
         # host is already known — the offered key MUST match one of its pinned keys.
         if keytype in entry:
@@ -225,7 +254,7 @@ def verify_transport_host_key(transport, hostname, paramiko):
         raise paramiko.SSHException(
             "strict host-key checking: unknown SSH host key for "
             f"{hostname} ({keytype}); seed config/.ssh_known_hosts first")
-    hostkeys.add(hostname, keytype, key)
+    hostkeys.add(lookup_name, keytype, key)
     try:
         with _persist_lock:
             hostkeys.save(_KNOWN_HOSTS)

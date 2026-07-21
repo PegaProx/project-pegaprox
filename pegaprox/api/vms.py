@@ -8999,6 +8999,12 @@ except ImportError as e:
     print(f"Missing library: {e}")
     sys.exit(1)
 
+import threading
+# Serialize known_hosts writes across concurrent WS connections in this
+# subprocess: a TOFU host-key save must not race another and corrupt the file
+# (mirrors the main app's _persist_lock, which this standalone can't import).
+_KH_WRITE_LOCK = threading.Lock()
+
 async def ssh_handler(websocket):
     """SSH WebSocket handler with user credential prompt and SSH key support
     
@@ -9216,7 +9222,15 @@ async def ssh_handler(websocket):
     # Connect SSH — TOFU host-key verification (standalone WS subprocess, policy
     # inlined; known_hosts path handed in via env, shared with the main app).
     ssh = paramiko.SSHClient()
-    _ssh_kh = os.environ.get('PEGAPROX_SSH_KNOWN_HOSTS') or os.path.abspath(os.path.join('config', '.ssh_known_hosts'))
+    _ssh_kh = os.environ.get('PEGAPROX_SSH_KNOWN_HOSTS')
+    if not _ssh_kh:
+        # The launcher normally hands us the main app's absolute known_hosts path.
+        # If it is missing we fall back to a cwd-relative path — announce it loudly
+        # so a silent trust-store mismatch (pinning that never matches the app) is
+        # visible in the [SSH-WS] log rather than bypassing verification quietly.
+        _ssh_kh = os.path.abspath(os.path.join('config', '.ssh_known_hosts'))
+        print("[SSH-WS] WARNING: PEGAPROX_SSH_KNOWN_HOSTS not set; falling back to "
+              + _ssh_kh + " — host-key pinning may not match the main app")
     try:
         if os.path.exists(_ssh_kh):
             ssh.load_host_keys(_ssh_kh)
@@ -9233,7 +9247,8 @@ async def ssh_handler(websocket):
     ssh.set_missing_host_key_policy(_TofuPolicy())
     def _persist_ssh_hostkeys():
         try:
-            ssh.save_host_keys(_ssh_kh)
+            with _KH_WRITE_LOCK:
+                ssh.save_host_keys(_ssh_kh)
         except Exception:
             pass
 
