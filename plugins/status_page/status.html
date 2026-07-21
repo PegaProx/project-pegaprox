@@ -218,11 +218,15 @@ function fmtTime(isoStr) {
     if (!isoStr) return '';
     try {
         var d = new Date(isoStr);
-        if (isNaN(d.getTime())) return isoStr;
+        // A valid date renders as a safe formatted string. If it does NOT parse,
+        // the value is concatenated into HTML downstream, so it must be escaped —
+        // a malicious admin could otherwise store markup (e.g. a <link>/<img> to an
+        // attacker HTTPS resource) in started_at/resolved_at. (Aikido #338694499)
+        if (isNaN(d.getTime())) return escapeHtml(String(isoStr));
         return d.toLocaleString(undefined, {
             month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
         });
-    } catch (e) { return isoStr; }
+    } catch (e) { return escapeHtml(String(isoStr)); }
 }
 
 function fmtDuration(startIso, endIso) {
