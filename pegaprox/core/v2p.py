@@ -772,7 +772,7 @@ def _run_v2p_migration(task):
         #   negative_timeout=3600: cache "file not found" for 1h
         #   no_check_root: skip root dir check (faster mount)
         sshfs_ssh_opts = (
-            "StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,"
+            "StrictHostKeyChecking=accept-new,"
             "allow_other,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,"
             "cache=yes,kernel_cache,"
             "max_read=1048576,max_write=1048576,big_writes,large_read,"
@@ -801,7 +801,7 @@ def _run_v2p_migration(task):
             mount_cmd2 = (
                 f"mkdir -p {mnt_path} && "
                 f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,"
+                f"StrictHostKeyChecking=accept-new,"
                 f"allow_other,reconnect,ServerAliveInterval=15,"
                 f"cache=yes,kernel_cache,"
                 f"max_read=1048576,big_writes,large_read,"
@@ -813,7 +813,7 @@ def _run_v2p_migration(task):
             mount_cmd3 = (
                 f"mkdir -p {mnt_path} && "
                 f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,"
+                f"StrictHostKeyChecking=accept-new,"
                 f"allow_other,reconnect,ServerAliveInterval=15,"
                 f"cache=yes "
                 f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
@@ -2466,8 +2466,10 @@ def _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, cmd, timeout=30):
     Major contributor to the AccountLockFailures we previously hit on ESXi.
     """
     import subprocess, shlex as _sh
+    from pegaprox.utils.ssh_security import cli_hostkey_opts
+    _hkc, _kh = cli_hostkey_opts()
     full = ['sshpass', '-p', esxi_pass, 'ssh',
-            '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', 'HashKnownHosts=no',
             '-o', 'BatchMode=no', '-o', 'ConnectTimeout=10']
     try:
         from pegaprox.utils.ssh_pool import controlmaster_args
@@ -3389,8 +3391,7 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     
     # SSH options for key-based verification (after deployment)
     ESXI_SSH_OPTS = (
-        "-o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=/dev/null "
+        "-o StrictHostKeyChecking=accept-new "
         "-o LogLevel=ERROR "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 "
         "-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -3503,8 +3504,7 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
         f"  HostName {esxi_host}\n"
         f"  User {esxi_user}\n"
         f"  IdentityFile {key_path}\n"
-        f"  StrictHostKeyChecking no\n"
-        f"  UserKnownHostsFile /dev/null\n"
+        f"  StrictHostKeyChecking accept-new\n"
         f"  HostKeyAlgorithms +ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256\n"
         f"  PubkeyAcceptedAlgorithms +ssh-rsa,ssh-ed25519\n"
         f"  KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group14-sha256\n"
@@ -3528,7 +3528,7 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     ssh_config_path = f"/tmp/v2p-sshcfg-{key_id}"
     
     ESXI_SSH_OPTS = (
-        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        "-o StrictHostKeyChecking=accept-new"
         "-o LogLevel=ERROR "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
         "-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -3691,14 +3691,14 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     )
     if key_path:
         ssh_base = (
-            f"-i {key_path} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            f"-i {key_path} -o StrictHostKeyChecking=accept-new"
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
         SSH_PREFIX = "ssh"
     else:
         ssh_base = (
-            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            f"-o StrictHostKeyChecking=accept-new"
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
@@ -4506,7 +4506,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             f"fusermount -u {mnt_path} 2>/dev/null; "
             f"mkdir -p {mnt_path} && "
             f"printf '%s' {safe_pass_r} | sshfs -o password_stdin,"
-            f"StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,"
+            f"StrictHostKeyChecking=accept-new,"
             f"allow_other,reconnect,ServerAliveInterval=15,"
             f"cache=yes,{sshfs_algo} "
             f"{esxi_user}@{esxi_host}:{shlex.quote(ds_remount)} {mnt_path} 2>&1",
@@ -4702,7 +4702,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     BS = BS_MB * 1024 * 1024
     
     bg_ssh_base = (
-        f"-i {key_path} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        f"-i {key_path} -o StrictHostKeyChecking=accept-new"
         f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
         f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
         f"-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -6231,8 +6231,8 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"
 
             ssh_cmd = (
-                f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking=no "  # NS Feb 2026 - env var instead of -p
-                f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "
+                f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking=accept-new "  # NS Feb 2026 - env var instead of -p
+                f"-o ConnectTimeout=15 "
                 f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
                 f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
                 f"{esxi_user}@{esxi_host} "
@@ -6400,7 +6400,7 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     xfer_lines = ['#!/bin/bash', 'ERRORS=0']
     for i in diff_blocks:
         xfer_lines.append(
-            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking=accept-new"
             f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
             f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
             f"{esxi_user}@{esxi_host} "

@@ -1892,7 +1892,7 @@ def _run_esxi_to_pve(task):
                 mount_dir = f"{mount_base}-{idx}"
                 mount_cmds = [
                     f"mkdir -p {_q_local(mount_dir)}",
-                    f"sshfs -o StrictHostKeyChecking=no,password_stdin "
+                    f"sshfs -o StrictHostKeyChecking=accept-new,password_stdin "
                     f"{_q_local(esxi_user + '@' + esxi_host + ':/vmfs/volumes/' + datastore_name)} "
                     f"{_q_local(mount_dir)} <<< {_q_local(esxi_pass)}",
                 ]
@@ -1923,7 +1923,7 @@ def _run_esxi_to_pve(task):
                     remote_src = f"{esxi_user}@{esxi_host}:" + _q_remote('/vmfs/volumes/' + datastore_name + '/' + flat_path)
                     scp_cmd = (
                         f"sshpass -p {_q_local(esxi_pass)} "
-                        f"scp -o StrictHostKeyChecking=no "
+                        f"scp -o StrictHostKeyChecking=accept-new "
                         f"{_q_local(remote_src)} {_q_local(tmp_path)}"
                     )
                     _, scp_out, scp_err = ssh_pve.exec_command(scp_cmd, timeout=7200)
@@ -2237,9 +2237,11 @@ def _run_esxi_to_xcpng(task):
                 # argv string.
                 _remote_path = '/vmfs/volumes/' + datastore_name + '/' + flat_path
                 _q_remote_path = "'" + _remote_path.replace("'", "'\"'\"'") + "'"
+                from pegaprox.utils.ssh_security import cli_hostkey_opts
+                _hkc, _kh = cli_hostkey_opts()
                 scp_cmd = [
                     'sshpass', '-p', esxi_pass,
-                    'scp', '-o', 'StrictHostKeyChecking=no',
+                    'scp', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', 'HashKnownHosts=no',
                     f'{esxi_user}@{esxi_host}:{_q_remote_path}',
                     tmp_vmdk
                 ]
