@@ -215,7 +215,10 @@ def create_app():
                     if ',' not in hp:
                         return hp
                     parts = [p.strip() for p in hp.split(',') if p.strip()]
-                    if parts and all(p == parts[0] for p in parts):
+                    # Host names are case-insensitive, so "Example.com, example.com"
+                    # is still one host — collapse it. Genuinely different hosts
+                    # (even ignoring case) are left intact and fail the match.
+                    if parts and all(p.lower() == parts[0].lower() for p in parts):
                         return parts[0]
                     return hp
 
@@ -264,6 +267,14 @@ def create_app():
                     if not u.hostname:
                         return False
                     cand_host = u.hostname.lower()
+                    # A portless Origin implies its scheme's default port
+                    # (https -> 443, http -> 80). Comparing that *effective* port
+                    # (NS Jul 2026, #626 hardening) keeps an https Origin from ever
+                    # matching a :80 target, while the common reverse-proxy cases
+                    # (portless Origin vs the site's default-port Host, or vs a
+                    # proxy-dropped unknown port) still pass. https://host:9999 is
+                    # never accepted against an unknown-port target.
+                    eff_cand = cand_port if cand_port is not None else (443 if u.scheme == 'https' else 80)
                     # accept against request host or proxy-forwarded host
                     targets = [(req_host, req_port)]
                     if fwd_h:
@@ -271,29 +282,14 @@ def create_app():
                     for t_host, t_port in targets:
                         if cand_host != t_host:
                             continue
-                        # Port handling — strict by RFC 6454. If Origin has an
-                        # explicit port, it must match the target. We accept a
-                        # bit of slack only when the target port is unknown
-                        # (Flask sometimes drops the port from request.host
-                        # behind certain proxy setups), but only when Origin's
-                        # port matches the *default* port for its scheme — so
-                        # https://example.com:9999 is never accepted against
-                        # an unknown-port target.
-                        if cand_port is None and t_port is None:
+                        if t_port is None:
+                            # target port unknown (proxy dropped it) — accept only a
+                            # standard :80/:443 origin, never e.g. https://host:9999.
+                            if eff_cand in (80, 443):
+                                return True
+                        elif eff_cand == t_port:
                             return True
-                        if cand_port == t_port:
-                            return True
-                        if t_port is None and cand_port in (80, 443):
-                            return True
-                        # NS Jul 2026 (#626) — symmetric mirror of the rule above:
-                        # a portless Origin (the browser default) must also match a
-                        # target that carries an explicit default port, e.g. a proxy
-                        # that sets `Host: example.com:443`. Same host, default port,
-                        # so this is not a real port mismatch. Non-default explicit
-                        # target ports (e.g. :9999) still fall through to reject.
-                        if cand_port is None and t_port in (80, 443):
-                            return True
-                        # any other combination is a port mismatch → reject
+                        # any other combination is a real port mismatch → reject
                     return False
 
                 # accept either a same-origin Origin/Referer OR XHR + same-origin
