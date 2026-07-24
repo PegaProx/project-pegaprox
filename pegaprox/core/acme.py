@@ -10,6 +10,7 @@ import hashlib
 import base64
 import requests
 import secrets
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding, utils
@@ -85,7 +86,7 @@ def _jws_header(account_key, url, nonce, kid=None):
     return header
 
 
-def _signed_request(url, payload, account_key, nonce, kid=None):
+def _signed_request(url, payload, account_key, nonce, kid=None, trusted_hosts=()):
     """Send a JWS-signed POST to an ACME endpoint"""
     header = _jws_header(account_key, url, nonce, kid)
     protected = _b64url(json.dumps(header))
@@ -104,24 +105,24 @@ def _signed_request(url, payload, account_key, nonce, kid=None):
         'payload': payload_b64,
         'signature': _b64url(signature),
     }
-    _guard_acme_url(url)
+    _guard_acme_url(url, trusted_hosts)
     resp = requests.post(url, json=body, headers={'Content-Type': 'application/jose+json'},
                          timeout=30, allow_redirects=False)
     return resp
 
 
-def _guard_acme_url(url):
+def _guard_acme_url(url, trusted_hosts):
     """M-8/M-9 (security audit): every ACME follow-on URL pulled out of the
     directory doc (newNonce/newAccount/newOrder/finalize/certificate/authz/
     challenge) must pass the SAME SSRF guard as the directory itself — a
     hostile/MITM'd directory response could point them at 169.254.169.254 /
     RFC1918. Public CAs (Let's Encrypt) are unaffected. Raises SsrfError."""
     from pegaprox.utils.url_security import sanitize_outbound_url
-    return sanitize_outbound_url(url)  # https-only + block-private (matches directory guard)
+    return sanitize_outbound_url(url, trusted_hosts=trusted_hosts)  # https-only + block-private (matches directory guard)
 
 
-def _get_nonce(directory):
-    _guard_acme_url(directory['newNonce'])
+def _get_nonce(directory, trusted_hosts=()):
+    _guard_acme_url(directory['newNonce'], trusted_hosts)
     resp = requests.head(directory['newNonce'], timeout=10, allow_redirects=False)
     return resp.headers['Replay-Nonce']
 
@@ -209,14 +210,14 @@ def _rfc2136_update(config, dns_name, dns_value, action='present'):
         return {'success': False, 'message': f'RFC 2136 DNS update failed: {e}'}
 
 
-def _validate_challenge(authz_url, challenge_url, account_key, nonce, kid, token=None):
+def _validate_challenge(authz_url, challenge_url, account_key, nonce, kid, token=None, trusted_hosts=()):
     """Notify ACME that the selected challenge is ready and poll authorization."""
-    ch_resp = _signed_request(challenge_url, {}, account_key, nonce, kid)
+    ch_resp = _signed_request(challenge_url, {}, account_key, nonce, kid, trusted_hosts=trusted_hosts)
     nonce = ch_resp.headers.get('Replay-Nonce', nonce)
 
     for attempt in range(30):
         time.sleep(2)
-        poll_resp = _signed_request(authz_url, None, account_key, nonce, kid)
+        poll_resp = _signed_request(authz_url, None, account_key, nonce, kid, trusted_hosts=trusted_hosts)
         nonce = poll_resp.headers.get('Replay-Nonce', nonce)
         authz_status = poll_resp.json()
 
@@ -238,7 +239,7 @@ def _validate_challenge(authz_url, challenge_url, account_key, nonce, kid, token
     return {'success': False, 'message': 'Challenge validation timed out (60s)'}
 
 
-def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
+def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid, trusted_hosts=()):
     """Generate the domain key/CSR, finalize the ACME order, and save cert files."""
     domain_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     csr = (
@@ -251,7 +252,7 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
 
     finalize_url = order['finalize']
     fin_payload = {'csr': _b64url(csr_der)}
-    fin_resp = _signed_request(finalize_url, fin_payload, account_key, nonce, kid)
+    fin_resp = _signed_request(finalize_url, fin_payload, account_key, nonce, kid, trusted_hosts=trusted_hosts)
     nonce = fin_resp.headers.get('Replay-Nonce', nonce)
 
     if fin_resp.status_code not in (200, 201):
@@ -263,14 +264,14 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
         if order_data.get('status') == 'valid' and order_data.get('certificate'):
             break
         time.sleep(2)
-        poll_resp = _signed_request(order_url, None, account_key, nonce, kid)
+        poll_resp = _signed_request(order_url, None, account_key, nonce, kid, trusted_hosts=trusted_hosts)
         nonce = poll_resp.headers.get('Replay-Nonce', nonce)
         order_data = poll_resp.json()
     else:
         return {'success': False, 'message': 'Timed out waiting for certificate'}
 
     cert_url = order_data['certificate']
-    cert_resp = _signed_request(cert_url, None, account_key, nonce, kid)
+    cert_resp = _signed_request(cert_url, None, account_key, nonce, kid, trusted_hosts=trusted_hosts)
     cert_pem = cert_resp.text
 
     os.makedirs(ssl_dir, exist_ok=True)
@@ -305,13 +306,14 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
 def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
     """Create an ACME order and return the selected authorization context."""
     acme_url = _get_directory_url(staging=staging, directory_url=directory_url)
+    trusted_hosts = {urlparse(acme_url).hostname}
     account_key_path = os.path.join(ssl_dir, 'acme_account.key')
 
     env = 'custom' if (directory_url or '').strip() else ('staging' if staging else 'production')
     logging.info(f"[ACME] Starting certificate request for {domain} ({env}) via {acme_url}")
     try:
         from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
-        sanitize_outbound_url(acme_url)
+        sanitize_outbound_url(acme_url, trusted_hosts=trusted_hosts)
     except SsrfError as guard_err:
         return {'success': False, 'message': f'ACME directory URL rejected: {guard_err}'}
 
@@ -321,18 +323,18 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
 
     account_key = _load_or_create_account_key(account_key_path)
 
-    nonce = _get_nonce(directory)
+    nonce = _get_nonce(directory, trusted_hosts)
     reg_payload = {'termsOfServiceAgreed': True}
     if email:
         reg_payload['contact'] = [f'mailto:{email}']
 
-    reg_resp = _signed_request(directory['newAccount'], reg_payload, account_key, nonce)
+    reg_resp = _signed_request(directory['newAccount'], reg_payload, account_key, nonce, trusted_hosts=trusted_hosts)
     nonce = reg_resp.headers.get('Replay-Nonce', nonce)
     kid = reg_resp.headers['Location']
     logging.info(f"[ACME] Account registered/found: {kid}")
 
     order_payload = {'identifiers': [{'type': 'dns', 'value': domain}]}
-    order_resp = _signed_request(directory['newOrder'], order_payload, account_key, nonce, kid)
+    order_resp = _signed_request(directory['newOrder'], order_payload, account_key, nonce, kid, trusted_hosts=trusted_hosts)
     nonce = order_resp.headers.get('Replay-Nonce', nonce)
 
     if order_resp.status_code not in (200, 201):
@@ -341,7 +343,7 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
 
     order = order_resp.json()
     authz_url = order['authorizations'][0]
-    authz_resp = _signed_request(authz_url, None, account_key, nonce, kid)
+    authz_resp = _signed_request(authz_url, None, account_key, nonce, kid, trusted_hosts=trusted_hosts)
     nonce = authz_resp.headers.get('Replay-Nonce', nonce)
 
     return {
@@ -353,6 +355,7 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
         'order_url': order_resp.headers.get('Location', ''),
         'authz_url': authz_url,
         'authz': authz_resp.json(),
+        'trusted_hosts': trusted_hosts,
     }
 
 
@@ -402,13 +405,13 @@ def request_certificate(domain, email, ssl_dir, staging=False, directory_url=Non
         _pending_challenges[token] = key_authorization
         logging.info(f"[ACME] Challenge token set, waiting for validation...")
 
-        result = _validate_challenge(authz_url, http_challenge['url'], account_key, nonce, kid, token=token)
+        result = _validate_challenge(authz_url, http_challenge['url'], account_key, nonce, kid, token=token, trusted_hosts=context.get('trusted_hosts', ()))
         if not result.get('success'):
             return result
         nonce = result['nonce']
 
         _pending_challenges.pop(token, None)
-        return _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid)
+        return _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid, trusted_hosts=context.get('trusted_hosts', ()))
 
     except Exception as e:
         logging.error(f"[ACME] Certificate request failed: {e}")
@@ -612,3 +615,4 @@ def check_and_renew(domain, email, ssl_dir, staging=False, days_before=30, direc
     else:
         logging.error(f"[ACME] Renewal failed: {result['message']}")
         return False
+
