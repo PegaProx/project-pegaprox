@@ -200,6 +200,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 - 📊 **Public Status Page** - Cluster health dashboard for monitoring screens with URL-based auth key (no login required)
 - 🔔 **Notifications Plugin** - ntfy + Apprise integration for unified channel routing
 - 🐳 **Docker Swarm Manager** *(Community)* - Manage Swarm services from the same UI
+- 🗄️ **TrueNAS SCALE Manager** *(Community)* - Monitor and administer TrueNAS SCALE (pools, datasets, snapshots, SMB/NFS shares, replication, apps/VMs, services, data-protection posture, telemetry) over JSON-RPC 2.0
 - 🔌 **Plugin Config Editor** - Edit plugin configuration directly from the UI
 
 ### Advanced Features
