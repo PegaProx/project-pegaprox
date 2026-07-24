@@ -204,9 +204,25 @@ def create_app():
                 # HTTPS enforcement happens elsewhere (HSTS, secure cookie flag).
                 from urllib.parse import urlparse
 
+                def _collapse_folded_host(hp):
+                    # NS Jul 2026 (#626) — a duplicated `Host` header (e.g. a reverse
+                    # proxy injecting its own Host on top of one the client already
+                    # sent) is folded by the WSGI layer into a comma-joined value such
+                    # as "example.com, example.com". Collapse it ONLY when every part
+                    # is identical; a value carrying genuinely different hosts is
+                    # ambiguous/hostile and is left intact so it fails the match below
+                    # (fail-closed — we never pick one host out of a conflicting set).
+                    if ',' not in hp:
+                        return hp
+                    parts = [p.strip() for p in hp.split(',') if p.strip()]
+                    if parts and all(p == parts[0] for p in parts):
+                        return parts[0]
+                    return hp
+
                 def _host_port(hp):
                     # split request.host or fwd_host into (host, port|None)
                     if not hp: return ('', None)
+                    hp = _collapse_folded_host(hp)
                     if ':' in hp:
                         h, _, p = hp.rpartition(':')
                         try: return (h.lower(), int(p))
@@ -268,6 +284,14 @@ def create_app():
                         if cand_port == t_port:
                             return True
                         if t_port is None and cand_port in (80, 443):
+                            return True
+                        # NS Jul 2026 (#626) — symmetric mirror of the rule above:
+                        # a portless Origin (the browser default) must also match a
+                        # target that carries an explicit default port, e.g. a proxy
+                        # that sets `Host: example.com:443`. Same host, default port,
+                        # so this is not a real port mismatch. Non-default explicit
+                        # target ports (e.g. :9999) still fall through to reject.
+                        if cand_port is None and t_port in (80, 443):
                             return True
                         # any other combination is a port mismatch → reject
                     return False
