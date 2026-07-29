@@ -1314,6 +1314,13 @@ class PegaProxManager:
                 metric = row.get('metric')
                 if metric not in ('net_in', 'net_out'):
                     continue
+                # Only differentiate a cumulative counter. If PVE ever reports
+                # net_in as a `gauge` (an already-computed rate), treating it as
+                # a counter would produce garbage. Tolerate the field being
+                # absent so a future rename degrades to rrddata, not nonsense.
+                rtype = row.get('type')
+                if rtype is not None and rtype != 'derive':
+                    continue
                 value, ts = row.get('value'), row.get('timestamp')
                 if not isinstance(value, (int, float)) or not isinstance(ts, (int, float)):
                     continue
@@ -1330,6 +1337,12 @@ class PegaProxManager:
                 if ts is None or ni is None or no is None:
                     continue
                 prev = self._node_net_counters.get(name)
+                if prev and ts < prev['ts']:
+                    # Out-of-order sample: a retried request landing late, or the
+                    # node's clock stepping back. Hold the rate and keep the
+                    # NEWER baseline - regressing it would make the next window
+                    # span a wrong interval and under-report the rate.
+                    continue
                 if prev and ts > prev['ts']:
                     dt = ts - prev['ts']
                     # max(0, ...) covers the counter reset a node reboot brings:

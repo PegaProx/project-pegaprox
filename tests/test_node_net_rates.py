@@ -168,6 +168,37 @@ def test_malformed_rows_are_skipped_not_raised():
     assert rates['pve1'][0] == pytest.approx(10 * MB)
 
 
+def test_gauge_rows_never_get_treated_as_a_counter():
+    # A `gauge` net_in would be an already-computed rate. Differentiating it
+    # produces garbage, so it must not land in the counter state - not even when
+    # it arrives after a valid derive row for the same node.
+    m = _mgr()
+    _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)))
+    poisoned = _rows(1010, 200 * MB, 200 * MB) + [
+        {'id': 'node/pve1', 'metric': 'net_in', 'value': 7, 'type': 'gauge', 'timestamp': 1010},
+        {'id': 'node/pve1', 'metric': 'net_out', 'value': 7, 'type': 'gauge', 'timestamp': 1010},
+    ]
+    rates = _feed(m, _Resp(poisoned))
+    assert rates['pve1'][0] == pytest.approx(10 * MB)   # not 7, not derived from 7
+    assert m._node_net_counters['pve1']['netin'] == 200 * MB
+    # and a row with no `type` at all is still accepted (future-proofing)
+    untyped = [{k: v for k, v in r.items() if k != 'type'} for r in _rows(1020, 300 * MB, 300 * MB)]
+    assert _feed(m, _Resp(untyped))['pve1'][0] == pytest.approx(10 * MB)
+
+
+def test_out_of_order_sample_does_not_regress_the_baseline():
+    m = _mgr()
+    _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)))
+    _feed(m, _Resp(_rows(1020, 300 * MB, 300 * MB)))     # 200 MB / 20s = 10 MB/s
+    # a stale response lands late (retry, or the node's clock stepped back)
+    held = _feed(m, _Resp(_rows(1005, 150 * MB, 150 * MB)))
+    assert held['pve1'][0] == pytest.approx(10 * MB)      # rate held, not recomputed
+    assert m._node_net_counters['pve1']['ts'] == 1020     # baseline NOT regressed
+    # next real sample differentiates against 1020, not against the stale 1005
+    nxt = _feed(m, _Resp(_rows(1030, 400 * MB, 400 * MB)))
+    assert nxt['pve1'][0] == pytest.approx(10 * MB)       # 100 MB / 10s
+
+
 def test_concurrent_callers_do_not_stampede_the_endpoint():
     # _api_get yields to the gevent hub, so a second caller can arrive mid-fetch.
     # The throttle window is claimed before the request precisely so that caller
