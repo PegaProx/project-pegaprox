@@ -407,6 +407,12 @@ class PegaProxManager:
         self._last_reconnect_attempt = 0  # NS: Feb 2026 - throttle reconnection attempts in broadcast loop
         self._consecutive_empty_responses = 0  # NS: Feb 2026 - detect stale tickets (connected but empty data)
 
+        # SP Jul 2026 (#419 follow-up) - live node network rate state, see
+        # _get_live_node_net_rates(). counters: node -> {ts, netin, netout, rate}
+        self._node_net_counters = {}
+        self._node_net_rates = {}   # node -> (netin_bps, netout_bps), last computed
+        self._node_net_fetched_at = 0.0  # time.monotonic() of last metrics/export pull
+
         # MK May 2026 (#444) — auth-circuit-breaker. surreal70 reported a DoS where
         # stale root creds made our workers spam /access/ticket until pveproxy
         # locked out everything (including the legit Proxmox web UI). Three
@@ -1246,7 +1252,87 @@ class PegaProxManager:
     def _get_api_url(self, path: str) -> str:
         host = self.host
         return f"https://{host}:{self.api_port}/api2/json{path}"
-    
+
+    # pvestatd broadcasts node counters every 10s, so polling faster than that
+    # is a wasted roundtrip. Half the interval still catches every sample.
+    _NODE_NET_MIN_INTERVAL = 5.0
+
+    def _get_live_node_net_rates(self) -> Dict[str, Any]:
+        """Live per-node network rate (bytes/sec), differentiated from counters.
+
+        SP Jul 2026 (#419 follow-up): /nodes/{name}/rrddata gives a rate, but the
+        'hour' timeframe has a 60s RRD step and PVE leaves the last 1-2 averaging
+        windows null, so the dashboard value is 60s-coarse AND 60-120s behind.
+
+        /cluster/metrics/export is the pvestatd feed behind the external metric
+        servers (pve-manager >= 8.2.5). One cluster-wide call returns
+        node/{name} net_in + net_out as `derive` - cumulative /proc/net/dev
+        byte counters over physical NICs only, the exact same source RRD stores -
+        refreshed every 10s. Differentiating two samples gives a ~10s-fresh rate.
+
+        Returns {node: (netin_bps, netout_bps)}. A node missing from the dict
+        means "no answer, fall back to rrddata": endpoint not there
+        (pve-manager < 8.2.5), token without Sys.Audit on /, or we have only
+        seen one counter sample so far (one counter is not a rate).
+        """
+        now = time.monotonic()
+        if now - self._node_net_fetched_at < self._NODE_NET_MIN_INTERVAL:
+            return self._node_net_rates
+
+        try:
+            resp = self._api_get(self._get_api_url('/cluster/metrics/export'))
+            self._node_net_fetched_at = now
+            if resp.status_code != 200:
+                # 403 = token lacks Sys.Audit on /, 404 = pve-manager < 8.2.5
+                self.logger.debug(f"metrics/export unavailable (HTTP {resp.status_code}), using rrddata")
+                return self._node_net_rates
+            # This endpoint returns an object, so over HTTP it is double-wrapped:
+            # {"data": {"data": [ {id, metric, value, timestamp, type}, ... ]}}.
+            # `pvesh` strips the outer layer, the API does not.
+            payload = resp.json().get('data') or {}
+            rows = payload.get('data') if isinstance(payload, dict) else payload
+            rows = rows or []
+        except Exception as e:
+            self._node_net_fetched_at = now
+            self.logger.debug(f"metrics/export failed ({e}), using rrddata")
+            return self._node_net_rates
+
+        samples = {}
+        for row in rows:
+            rid = row.get('id') or ''
+            if not rid.startswith('node/'):
+                continue
+            metric = row.get('metric')
+            if metric not in ('net_in', 'net_out'):
+                continue
+            s = samples.setdefault(rid[len('node/'):], {})
+            s[metric] = row.get('value')
+            s['ts'] = row.get('timestamp')
+
+        for name, s in samples.items():
+            ts, ni, no = s.get('ts'), s.get('net_in'), s.get('net_out')
+            if ts is None or ni is None or no is None:
+                continue
+            prev = self._node_net_counters.get(name)
+            if prev and ts > prev['ts']:
+                dt = ts - prev['ts']
+                # max(0, ...) covers the counter reset a node reboot brings:
+                # one 0 B/s sample, then it resyncs on the next window.
+                rate = (max(0.0, (ni - prev['netin']) / dt),
+                        max(0.0, (no - prev['netout']) / dt))
+            elif prev:
+                # Same pvestatd window as our last pull - we poll faster than
+                # 10s. Hold the last rate; recomputing over dt=0 flaps to zero.
+                rate = prev['rate']
+            else:
+                rate = None  # first sighting, nothing to differentiate against
+            self._node_net_counters[name] = {'ts': ts, 'netin': ni, 'netout': no, 'rate': rate}
+
+        self._node_net_rates = {
+            n: c['rate'] for n, c in self._node_net_counters.items() if c['rate'] is not None
+        }
+        return self._node_net_rates
+
     def get_node_status(self) -> Dict[str, Any]:
         # gets node status, calculates load score
         # MK: made this parallel, was super slow before
@@ -1330,12 +1416,19 @@ class PegaProxManager:
                 # rate (bytes/sec, AVERAGE over the timeframe step). Fold the
                 # RRD fetch into fetch_node_details() so it rides the same
                 # parallel pool as the status call and walls don't double.
+                # That RRD path is now the FALLBACK only — see
+                # _get_live_node_net_rates() for the live 10s source.
                 api_nodes = set()
+
+                # SP Jul 2026 (#419 follow-up): one cluster-wide call for live
+                # ~10s rates. Nodes it cannot answer for fall through to the
+                # per-node rrddata pull below, so nothing regresses.
+                live_net = self._get_live_node_net_rates()
 
                 def fetch_node_details(node):
                     node_name = node['node']
                     status_data = None
-                    netio = (0, 0)  # (netin, netout) bytes/sec, fall back to 0
+                    netio = live_net.get(node_name, (0, 0))  # (netin, netout) bytes/sec
 
                     # MK May 2026 — short-circuit nodes in breaker backoff so a
                     # dead node doesn't burn the full per-node timeout × every
@@ -1358,9 +1451,10 @@ class PegaProxManager:
                     except Exception:
                         self._register_node_failure(node_name)
 
-                    # RRD pull — only attempt if status came back (no point
+                    # RRD fallback — only when metrics/export gave us no live rate
+                    # for this node, and only if status came back (no point
                     # spending an HTTP roundtrip on a clearly-dead node).
-                    if status_data is not None:
+                    if status_data is not None and node_name not in live_net:
                         try:
                             rrd_url = f"https://{host}:{self.api_port}/api2/json/nodes/{node_name}/rrddata"
                             rr = sess.get(rrd_url, params={'timeframe': 'hour', 'cf': 'AVERAGE'}, timeout=self.per_node_timeout)
@@ -1458,8 +1552,9 @@ class PegaProxManager:
                         disk_total = rootfs.get('total', 1)
                         disk_percent = (disk_used / disk_total) * 100 if disk_total > 0 else 0
                         
-                        # Network stats — from /nodes/{name}/rrddata (rate, bytes/sec)
-                        # see fetch_node_details() above and #419 for the why.
+                        # Network stats — bytes/sec rate. Live (~10s) from
+                        # /cluster/metrics/export, else /nodes/{name}/rrddata (60s).
+                        # See fetch_node_details() above and #419 for the why.
                         netin, netout = netio
                         
                         # weighted scoring — configurable via balance_*_weight settings
