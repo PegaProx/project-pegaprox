@@ -16,6 +16,9 @@
 #
 # No network here: the method is driven with a stubbed _api_get.
 
+import logging
+import threading
+
 import pytest
 
 from pegaprox.core.manager import PegaProxManager
@@ -29,7 +32,8 @@ def _mgr():
     m._node_net_counters = {}
     m._node_net_rates = {}
     m._node_net_fetched_at = 0.0
-    m.logger = __import__('logging').getLogger('test')
+    m._node_net_lock = threading.Lock()
+    m.logger = logging.getLogger('test')
     m._get_api_url = lambda path: 'https://stub' + path
     return m
 
@@ -119,14 +123,66 @@ def test_guest_and_non_net_rows_are_ignored():
     assert list(rates) == ['pve1']
 
 
-def test_endpoint_unavailable_keeps_last_known_rates():
+def test_endpoint_unavailable_falls_back_instead_of_serving_a_stale_rate():
+    # An earlier cut of this returned the cached rates here. get_node_status()
+    # gates its rrddata fallback on `node not in live_net`, so a cached entry
+    # suppressed the fallback and the node froze on its last known rate for as
+    # long as the endpoint stayed broken - worse than the 60s RRD step this
+    # whole change is about. Empty dict must mean "use rrddata".
+    for code in (403, 404, 500):
+        m = _mgr()
+        _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)))
+        assert _feed(m, _Resp(_rows(1010, 200 * MB, 200 * MB)))['pve1'][0] == pytest.approx(10 * MB)
+        assert _feed(m, _Resp([], status_code=code)) == {}
+
+
+def test_failure_also_clears_the_throttle_window_cache():
     m = _mgr()
     _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)))
     _feed(m, _Resp(_rows(1010, 200 * MB, 200 * MB)))
-    # pve-manager < 8.2.5 (404) or token without Sys.Audit on / (403)
-    for code in (403, 404, 500):
-        rates = _feed(m, _Resp([], status_code=code))
-        assert rates['pve1'][0] == pytest.approx(10 * MB)
+    assert _feed(m, _Resp([], status_code=403)) == {}
+    # a caller arriving inside the 5s throttle window must not get the pre-failure
+    # rate back out of the cache
+    assert m._get_live_node_net_rates() == {}
+
+
+def test_node_dropping_out_of_the_feed_loses_its_live_rate():
+    m = _mgr()
+    _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)))
+    assert 'pve1' in _feed(m, _Resp(_rows(1010, 200 * MB, 200 * MB)))
+    # node gone from the response (offline, or not in --node-list): it must fall
+    # back to rrddata rather than keep serving the rate we last computed
+    assert _feed(m, _Resp(_rows(1020, 1 * MB, 1 * MB, node='pve2'))) == {}
+
+
+def test_malformed_rows_are_skipped_not_raised():
+    # This used to be outside the try/except, so an AttributeError propagated
+    # through get_node_status() and lost EVERY node's status, not just net rates.
+    m = _mgr()
+    junk = ['a string', None, 42, {'id': None}, {'id': 'node/pve1'},
+            {'id': 'node/pve1', 'metric': 'net_in', 'value': 'not-a-number', 'timestamp': 1000},
+            {'id': 'node/pve1', 'metric': 'net_in', 'value': 1 * MB, 'timestamp': 'not-a-ts'}]
+    assert _feed(m, _Resp(junk)) == {}
+    assert _feed(m, _Resp(junk + _rows(1000, 100 * MB, 100 * MB))) == {}
+    rates = _feed(m, _Resp(junk + _rows(1010, 200 * MB, 200 * MB)))
+    assert rates['pve1'][0] == pytest.approx(10 * MB)
+
+
+def test_concurrent_callers_do_not_stampede_the_endpoint():
+    # _api_get yields to the gevent hub, so a second caller can arrive mid-fetch.
+    # The throttle window is claimed before the request precisely so that caller
+    # returns the cache instead of firing its own cluster-wide pull.
+    m = _mgr()
+    calls = []
+
+    def reentrant(url, **kw):
+        calls.append(url)
+        assert m._get_live_node_net_rates() == {}   # sees the claimed window
+        return _Resp(_rows(1000, 100 * MB, 100 * MB))
+
+    m._api_get = reentrant
+    m._get_live_node_net_rates()
+    assert len(calls) == 1
 
 
 def test_flat_payload_shape_is_tolerated():

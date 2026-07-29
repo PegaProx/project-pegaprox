@@ -412,6 +412,7 @@ class PegaProxManager:
         self._node_net_counters = {}
         self._node_net_rates = {}   # node -> (netin_bps, netout_bps), last computed
         self._node_net_fetched_at = 0.0  # time.monotonic() of last metrics/export pull
+        self._node_net_lock = threading.Lock()  # get_node_status() runs concurrently
 
         # MK May 2026 (#444) — auth-circuit-breaker. surreal70 reported a DoS where
         # stale root creds made our workers spam /access/ticket until pveproxy
@@ -1272,66 +1273,95 @@ class PegaProxManager:
 
         Returns {node: (netin_bps, netout_bps)}. A node missing from the dict
         means "no answer, fall back to rrddata": endpoint not there
-        (pve-manager < 8.2.5), token without Sys.Audit on /, or we have only
-        seen one counter sample so far (one counter is not a rate).
+        (pve-manager < 8.2.5), token without Sys.Audit on /, the endpoint is
+        failing, or we have only seen one counter sample so far (one counter is
+        not a rate). An empty dict must always mean "use rrddata" - never a
+        cached value, or a node freezes on a stale rate for as long as the
+        endpoint stays broken, which is worse than the 60s RRD step.
         """
         now = time.monotonic()
-        if now - self._node_net_fetched_at < self._NODE_NET_MIN_INTERVAL:
-            return self._node_net_rates
+        with self._node_net_lock:
+            if now - self._node_net_fetched_at < self._NODE_NET_MIN_INTERVAL:
+                return self._node_net_rates
+            # Claim the window BEFORE the request. _api_get yields to the gevent
+            # hub, so otherwise every concurrent get_node_status() caller (the
+            # SSE broadcast thread + one per open dashboard) sails past the
+            # throttle and fires its own cluster-wide fetch.
+            self._node_net_fetched_at = now
 
         try:
             resp = self._api_get(self._get_api_url('/cluster/metrics/export'))
-            self._node_net_fetched_at = now
             if resp.status_code != 200:
                 # 403 = token lacks Sys.Audit on /, 404 = pve-manager < 8.2.5
                 self.logger.debug(f"metrics/export unavailable (HTTP {resp.status_code}), using rrddata")
-                return self._node_net_rates
+                return self._drop_live_node_net_rates()
             # This endpoint returns an object, so over HTTP it is double-wrapped:
             # {"data": {"data": [ {id, metric, value, timestamp, type}, ... ]}}.
             # `pvesh` strips the outer layer, the API does not.
             payload = resp.json().get('data') or {}
             rows = payload.get('data') if isinstance(payload, dict) else payload
-            rows = rows or []
+
+            samples = {}
+            for row in rows or []:
+                # a shape surprise here used to raise straight through
+                # get_node_status() and lose every node's status, not just the
+                # net rates - so validate instead of trusting the payload
+                if not isinstance(row, dict):
+                    continue
+                rid = row.get('id') or ''
+                if not isinstance(rid, str) or not rid.startswith('node/'):
+                    continue
+                metric = row.get('metric')
+                if metric not in ('net_in', 'net_out'):
+                    continue
+                value, ts = row.get('value'), row.get('timestamp')
+                if not isinstance(value, (int, float)) or not isinstance(ts, (int, float)):
+                    continue
+                s = samples.setdefault(rid[len('node/'):], {})
+                s[metric] = value
+                s['ts'] = ts
         except Exception as e:
-            self._node_net_fetched_at = now
             self.logger.debug(f"metrics/export failed ({e}), using rrddata")
+            return self._drop_live_node_net_rates()
+
+        with self._node_net_lock:
+            for name, s in samples.items():
+                ts, ni, no = s.get('ts'), s.get('net_in'), s.get('net_out')
+                if ts is None or ni is None or no is None:
+                    continue
+                prev = self._node_net_counters.get(name)
+                if prev and ts > prev['ts']:
+                    dt = ts - prev['ts']
+                    # max(0, ...) covers the counter reset a node reboot brings:
+                    # one 0 B/s sample, then it resyncs on the next window.
+                    rate = (max(0.0, (ni - prev['netin']) / dt),
+                            max(0.0, (no - prev['netout']) / dt))
+                elif prev:
+                    # Same pvestatd window as our last pull - we poll faster than
+                    # 10s. Hold the last rate; recomputing over dt=0 flaps to zero.
+                    rate = prev['rate']
+                else:
+                    rate = None  # first sighting, nothing to differentiate against
+                self._node_net_counters[name] = {'ts': ts, 'netin': ni, 'netout': no, 'rate': rate}
+
+            # Built from THIS response only. A node that drops out of the feed
+            # has to fall back to rrddata, not keep serving its last known rate.
+            self._node_net_rates = {
+                n: self._node_net_counters[n]['rate'] for n in samples
+                if self._node_net_counters.get(n, {}).get('rate') is not None
+            }
             return self._node_net_rates
 
-        samples = {}
-        for row in rows:
-            rid = row.get('id') or ''
-            if not rid.startswith('node/'):
-                continue
-            metric = row.get('metric')
-            if metric not in ('net_in', 'net_out'):
-                continue
-            s = samples.setdefault(rid[len('node/'):], {})
-            s[metric] = row.get('value')
-            s['ts'] = row.get('timestamp')
+    def _drop_live_node_net_rates(self) -> Dict[str, Any]:
+        """Forget the live rates so callers fall back to rrddata.
 
-        for name, s in samples.items():
-            ts, ni, no = s.get('ts'), s.get('net_in'), s.get('net_out')
-            if ts is None or ni is None or no is None:
-                continue
-            prev = self._node_net_counters.get(name)
-            if prev and ts > prev['ts']:
-                dt = ts - prev['ts']
-                # max(0, ...) covers the counter reset a node reboot brings:
-                # one 0 B/s sample, then it resyncs on the next window.
-                rate = (max(0.0, (ni - prev['netin']) / dt),
-                        max(0.0, (no - prev['netout']) / dt))
-            elif prev:
-                # Same pvestatd window as our last pull - we poll faster than
-                # 10s. Hold the last rate; recomputing over dt=0 flaps to zero.
-                rate = prev['rate']
-            else:
-                rate = None  # first sighting, nothing to differentiate against
-            self._node_net_counters[name] = {'ts': ts, 'netin': ni, 'netout': no, 'rate': rate}
-
-        self._node_net_rates = {
-            n: c['rate'] for n, c in self._node_net_counters.items() if c['rate'] is not None
-        }
-        return self._node_net_rates
+        Counter history is kept: once the endpoint answers again, the next
+        sample differentiates against it over the longer gap, which is still a
+        valid average for a cumulative counter.
+        """
+        with self._node_net_lock:
+            self._node_net_rates = {}
+        return {}
 
     def get_node_status(self) -> Dict[str, Any]:
         # gets node status, calculates load score
