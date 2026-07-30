@@ -1324,6 +1324,11 @@ class PegaProxManager:
                 value, ts = row.get('value'), row.get('timestamp')
                 if not isinstance(value, (int, float)) or not isinstance(ts, (int, float)):
                     continue
+                # Last-wins per id+metric. Correct only because pvestatd emits ONE
+                # aggregated net_in/net_out per node (summed over physical NICs,
+                # pvestatd.pm via ip_link_is_physical). If PVE ever emitted a row
+                # per NIC, this would silently keep just the last one and
+                # under-report throughput - sum them here instead.
                 s = samples.setdefault(rid[len('node/'):], {})
                 s[metric] = value
                 s['ts'] = ts
