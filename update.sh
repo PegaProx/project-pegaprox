@@ -364,6 +364,13 @@ if [ "$EUID" -eq 0 ] && [ -n "$ORIGINAL_OWNER" ] && [ "$ORIGINAL_OWNER" != "root
     chown -R "$ORIGINAL_OWNER" web/ 2>/dev/null
     [ -d "pegaprox" ] && chown -R "$ORIGINAL_OWNER" pegaprox/ 2>/dev/null
     chown -R "$ORIGINAL_OWNER" backups/ 2>/dev/null
+    # images/ was missing here - left root:root on a non-root install (#633)
+    [ -d "images" ] && chown -R "$ORIGINAL_OWNER" images/ 2>/dev/null
+    # config/ too: we chmod 700 it further down, so a single root-owned file in
+    # there (a root-run import can create config/ssl/cert.pem) locks the service
+    # user out of its own certs. ORIGINAL_OWNER is read from config/ itself, so
+    # this only ever repairs children (#633).
+    [ -d "config" ] && chown -R "$ORIGINAL_OWNER" config/ 2>/dev/null
     echo -e "${GREEN}OK${NC}"
 fi
 

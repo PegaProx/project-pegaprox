@@ -77,16 +77,34 @@ STATIC_DIR = 'static'
 IMAGES_DIR = 'images'
 PLUGINS_DIR = 'plugins'
 
+# SP Jul 2026 (#633): everything below runs at IMPORT time, so any script that
+# merely imports pegaprox.* as another user does it as that user. A root-run
+# helper (a test runner, in the reported case) created config/ssl and copied the
+# certs there as root, the service started as its own user, could not read them,
+# and the old startup path answered that by serving cleartext on the TLS port.
+# So: only touch config/ when we own it, i.e. when files we create there would
+# belong to its owner anyway. Nothing here is load-bearing for a foreign user -
+# main() creates what it needs before generating a cert.
+def _config_owned_by_us():
+    try:
+        return os.stat(CONFIG_DIR).st_uid == os.geteuid()
+    except OSError:
+        return True      # not there yet, we are the one creating it
+
+
+CONFIG_OWNED_BY_US = _config_owned_by_us()
+
 # Ensure directories exist
 Path(LOG_DIR).mkdir(exist_ok=True)
 Path(PLUGINS_DIR).mkdir(exist_ok=True)
 Path(WEB_DIR).mkdir(exist_ok=True)
-Path(SSL_DIR).mkdir(parents=True, exist_ok=True)
-Path(BRANDING_DIR).mkdir(parents=True, exist_ok=True)
-try:
-    os.chmod(SSL_DIR, 0o700)
-except Exception:
-    pass
+if CONFIG_OWNED_BY_US:
+    Path(SSL_DIR).mkdir(parents=True, exist_ok=True)
+    Path(BRANDING_DIR).mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SSL_DIR, 0o700)
+    except Exception:
+        pass
 
 # One-time migration: legacy 'ssl/cert.pem' / 'images/login_bg.*' → config/
 # Runs every startup but only when the legacy file exists AND the persistent
@@ -94,6 +112,10 @@ except Exception:
 # read-only fallback so a misconfigured downgrade doesn't lose certs.
 def _migrate_to_config():
     import shutil
+    if not CONFIG_OWNED_BY_US:
+        # a foreign user would leave root-owned certs behind and lock the service
+        # out of its own config/ssl (#633)
+        return
     try:
         for src, dst in ((SSL_CERT_FILE_LEGACY, SSL_CERT_FILE),
                          (SSL_KEY_FILE_LEGACY, SSL_KEY_FILE)):

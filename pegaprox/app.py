@@ -7,6 +7,8 @@ Creates and configures the Flask application.
 import os
 import sys
 import time
+import errno
+import stat
 import logging
 import threading
 import signal
@@ -610,6 +612,141 @@ export * from '/static/js/novnc/core/rfb.js';
     return failed == 0
 
 
+def _path_diagnostics(path):
+    """owner/mode of a path and of its parent, plus who we are.
+
+    #633: the operator needs to compare the two. The whole bug was a cert the
+    service user could not reach, and the log said nothing about who owned it.
+    """
+    try:
+        import pwd
+        import grp
+    except ImportError:      # non-POSIX, ids only
+        pwd = grp = None
+
+    def _name(getter, attr, num):
+        if getter is None:
+            return str(num)
+        try:
+            return getattr(getter(num), attr)
+        except (KeyError, OSError):
+            return str(num)
+
+    lines = []
+    target = os.path.abspath(path)
+    for p in (target, os.path.dirname(target)):
+        try:
+            st = os.stat(p)
+            lines.append("  %s owner=%s:%s mode=%s" % (
+                p,
+                _name(pwd and pwd.getpwuid, 'pw_name', st.st_uid),
+                _name(grp and grp.getgrgid, 'gr_name', st.st_gid),
+                oct(stat.S_IMODE(st.st_mode))))
+        except OSError as e:
+            lines.append("  %s cannot stat: %s" % (p, e.strerror))
+    lines.append("  this process uid=%s(%s) gid=%s(%s)" % (
+        os.geteuid(), _name(pwd and pwd.getpwuid, 'pw_name', os.geteuid()),
+        os.getegid(), _name(grp and grp.getgrgid, 'gr_name', os.getegid())))
+    return "\n".join(lines)
+
+
+def _tls_setup_failed(reason, path):
+    """Fail closed, or return None if plaintext was asked for explicitly.
+
+    #633: this used to print a WARNING and fall through with ssl_context=None,
+    which bound cleartext HTTP on the port that was meant to be TLS. TLS clients
+    then got "Invalid http version: '\\x16\\x03\\x01...'" and the dashboard was
+    down while the service looked healthy. A downgrade has to be a decision, not
+    an accident.
+    """
+    detail = "TLS is enabled but there is no usable certificate: %s\n%s" % (
+        reason, _path_diagnostics(path))
+    if os.environ.get('PEGAPROX_ALLOW_PLAINTEXT', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        logging.getLogger(__name__).error(
+            "%s\n  PEGAPROX_ALLOW_PLAINTEXT is set, so serving PLAINTEXT HTTP on the "
+            "TLS port anyway - every TLS client will fail against it.", detail)
+        return None
+    raise SystemExit(
+        "%s\n  Refusing to serve plaintext on the TLS port. Fix the certificate, or put "
+        "PegaProx behind a reverse proxy (the reverse_proxy setting), or set "
+        "PEGAPROX_ALLOW_PLAINTEXT=1 to serve cleartext there on purpose." % detail)
+
+
+def _unreadable(path):
+    """The OSError from opening path, or None if it opens fine.
+
+    os.path.exists() is not enough: it is False for a cert in a directory we
+    cannot search, which is how EACCES ended up in the "no certificates" branch
+    and got a valid cert overwritten (#633).
+    """
+    try:
+        with open(path, 'rb'):
+            return None
+    except OSError as e:
+        return e
+
+
+def _generate_self_signed(cert_file, key_file, domain, app_name):
+    from OpenSSL import crypto
+    key = crypto.PKey()
+    key.generate_key(crypto.TYPE_RSA, 2048)
+    cert = crypto.X509()
+    cert.get_subject().C = "DE"
+    cert.get_subject().ST = "State"
+    cert.get_subject().L = "City"
+    cert.get_subject().O = app_name or "PegaProx"
+    cert.get_subject().OU = app_name or "PegaProx"
+    cert.get_subject().CN = domain or app_name or "PegaProx"
+    cert.set_serial_number(1000)
+    cert.gmtime_adj_notBefore(0)
+    cert.gmtime_adj_notAfter(365 * 24 * 60 * 60)
+    cert.set_issuer(cert.get_subject())
+    cert.set_pubkey(key)
+    cert.sign(key, 'sha256')
+    with open(cert_file, "wb") as f:
+        f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+    with open(key_file, "wb") as f:
+        f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, key))
+    os.chmod(key_file, 0o600)
+
+
+def _resolve_ssl_context(reverse_proxy, domain='', app_name='PegaProx',
+                         cert_file=SSL_CERT_FILE, key_file=SSL_KEY_FILE):
+    """(cert, key) for the TLS listener, or None for plaintext.
+
+    Posture (#633): TLS unless a reverse proxy terminates it for us. If TLS is
+    the posture and we cannot load or generate a usable pair, we do not come up.
+    """
+    if reverse_proxy:
+        return None      # nginx/haproxy/traefik owns TLS, plain HTTP on the bind
+
+    cert_err, key_err = _unreadable(cert_file), _unreadable(key_file)
+    if cert_err is None and key_err is None:
+        print("SSL certificates found - starting with HTTPS")
+        return (cert_file, key_file)
+
+    # Present but not readable is NOT "missing". Never generate over it - that
+    # would report the wrong problem, and destroy a working cert if the write
+    # happened to succeed.
+    for path, err in ((cert_file, cert_err), (key_file, key_err)):
+        if err is not None and err.errno != errno.ENOENT:
+            return _tls_setup_failed("cannot read %s: %s" % (path, err.strerror), path)
+
+    # MK 2026-06-08 (#531): generate into the persisted config/ssl dir, and
+    # create the dir first - on a fresh container the old target did not exist,
+    # generation failed with ENOENT and we fell back to plain HTTP.
+    print("No SSL certificates found. Generating self-signed certificate...")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(cert_file)), exist_ok=True)
+        _generate_self_signed(cert_file, key_file, domain, app_name)
+    except ImportError:
+        return _tls_setup_failed("pyOpenSSL is not installed (pip install pyOpenSSL)", cert_file)
+    except Exception as e:
+        return _tls_setup_failed("could not generate one: %s" % e, cert_file)
+    print("Self-signed certificate generated: %s" % cert_file)
+    return (cert_file, key_file)
+
+
 def main(debug_mode=False):
     """Main entry point - starts PegaProx server."""
     from pegaprox.utils.auth import load_users, load_sessions, backfill_initialized_marker, is_initialized
@@ -935,77 +1072,22 @@ def main(debug_mode=False):
             bind_host = '0.0.0.0'
 
     # MK: when behind proxy, SSL is handled by nginx/haproxy - we run plain HTTP
-    ssl_enabled = server_settings.get('ssl_enabled', False) and not reverse_proxy
+    #
+    # SP Jul 2026: the `ssl_enabled` setting is deliberately NOT read here. The old
+    # code only used it as a fast path, and its else-branch generated a cert and
+    # served HTTPS anyway, so with the setting off (the default, api/helpers.py)
+    # every install still ran TLS. Reading it now would drop those installs to
+    # cleartext on upgrade. Posture stays "TLS unless a reverse proxy terminates
+    # it"; making the toggle mean something is a separate change.
     domain = server_settings.get('domain', '')
     app_name = server_settings.get('app_name', 'PegaProx')
     if reverse_proxy:
         print("SSL disabled (handled by reverse proxy)")
 
-    # Check for SSL certificates (skip entirely behind reverse proxy)
-    ssl_context = None
-    if reverse_proxy:
-        pass  # nginx handles SSL
-    elif ssl_enabled and os.path.exists(SSL_CERT_FILE) and os.path.exists(SSL_KEY_FILE):
-        ssl_context = (SSL_CERT_FILE, SSL_KEY_FILE)
-        print("Custom SSL certificates found - starting with HTTPS")
-    else:
-
-        # We validate this path for the Debian package
-        if Path("/usr/lib/pegaprox").exists():
-            DATA_DIR = Path("/var/lib/pegaprox")
-        else:
-            DATA_DIR = Path(__file__).resolve().parent.parent
-
-        SSL_DIR = DATA_DIR / "ssl"
-
-        # MK 2026-06-08 (#531): generate the self-signed cert into the persisted
-        # config/ssl dir (the same path the custom-cert check above uses + the one
-        # that survives a `docker compose pull`) AND create it first. On a fresh
-        # container the old /app/ssl target didn't exist, so generation failed with
-        # ENOENT, PegaProx fell back to plain HTTP, and a browser hitting it over
-        # HTTPS got a TLS-to-HTTP "connection error" — login was impossible.
-        cert_file = SSL_CERT_FILE
-        key_file = SSL_KEY_FILE
-        try:
-            os.makedirs(os.path.dirname(cert_file), exist_ok=True)
-        except Exception:
-            pass
-
-        if os.path.exists(cert_file) and os.path.exists(key_file):
-            ssl_context = (cert_file, key_file)
-            print("SSL certificates found - starting with HTTPS")
-        else:
-            print("No SSL certificates found. Generating self-signed certificate...")
-            try:
-                from OpenSSL import crypto
-                key = crypto.PKey()
-                key.generate_key(crypto.TYPE_RSA, 2048)
-                cert = crypto.X509()
-                cert.get_subject().C = "DE"
-                cert.get_subject().ST = "State"
-                cert.get_subject().L = "City"
-                cert.get_subject().O = app_name or "PegaProx"
-                cert.get_subject().OU = app_name or "PegaProx"
-                cert.get_subject().CN = domain or app_name or "PegaProx"
-                cert.set_serial_number(1000)
-                cert.gmtime_adj_notBefore(0)
-                cert.gmtime_adj_notAfter(365 * 24 * 60 * 60)
-                cert.set_issuer(cert.get_subject())
-                cert.set_pubkey(key)
-                cert.sign(key, 'sha256')
-                with open(cert_file, "wb") as f:
-                    f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
-                with open(key_file, "wb") as f:
-                    f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, key))
-                os.chmod(key_file, 0o600)
-                ssl_context = (cert_file, key_file)
-                print(f"Self-signed certificate generated: {cert_file}")
-            except ImportError:
-                print("WARNING: pyOpenSSL not installed. Run: pip install pyOpenSSL")
-                print("Starting without HTTPS (noVNC may not work)")
-            except Exception as e:
-                print(f"WARNING: Could not generate SSL certificate: {e}")
-                print("Starting without HTTPS (noVNC may not work)")
+    # Check for SSL certificates (skip entirely behind reverse proxy).
+    # SP Jul 2026 (#633): fail closed - see _resolve_ssl_context(). This used to warn
+    # and fall through to plain HTTP on the port that was meant to be TLS.
+    ssl_context = _resolve_ssl_context(reverse_proxy, domain, app_name)
 
     # Start HTTP redirect server if SSL is enabled (not needed behind reverse proxy)
     http_redirect_port = server_settings.get('http_redirect_port', 0)
