@@ -637,11 +637,11 @@ def _path_diagnostics(path):
     for p in (target, os.path.dirname(target)):
         try:
             st = os.stat(p)
-            lines.append("  %s owner=%s:%s mode=%s" % (
+            lines.append("  %s owner=%s:%s mode=0o%03o" % (
                 p,
                 _name(pwd and pwd.getpwuid, 'pw_name', st.st_uid),
                 _name(grp and grp.getgrgid, 'gr_name', st.st_gid),
-                oct(stat.S_IMODE(st.st_mode))))
+                stat.S_IMODE(st.st_mode)))
         except OSError as e:
             lines.append("  %s cannot stat: %s" % (p, e.strerror))
     lines.append("  this process uid=%s(%s) gid=%s(%s)" % (
