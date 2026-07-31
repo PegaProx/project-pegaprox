@@ -59,6 +59,24 @@ class _Resp:
         return {'data': {'data': self._rows}}
 
 
+class _RawResp:
+    """Arbitrary JSON body, for payload shapes _Resp cannot express.
+
+    Pass an Exception instance to make .json() itself blow up, which is what a
+    truncated or HTML error body does.
+    """
+
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
 def _rows(ts, netin, netout, node='pve1', extra=True):
     rows = [
         {'id': f'node/{node}', 'metric': 'net_in', 'value': netin, 'type': 'derive', 'timestamp': ts},
@@ -168,6 +186,77 @@ def test_malformed_rows_are_skipped_not_raised():
     assert rates['pve1'][0] == pytest.approx(10 * MB)
 
 
+@pytest.mark.parametrize('payload', [
+    {},                                     # no envelope at all
+    {'data': None},
+    {'data': 'oops'},                       # str - iterating it yields characters
+    {'data': 42},                           # not iterable at all
+    {'data': {}},                           # envelope, no rows
+    {'data': {'data': None}},
+    {'data': {'data': 'oops'}},
+    {'data': {'data': {'node/pve1': 5}}},   # dict - iterating it yields keys, not rows
+    ValueError('Expecting value: line 1 column 1'),   # body was not JSON
+])
+def test_malformed_payload_container_falls_back_instead_of_raising(payload):
+    # HTTP 200 with a body we cannot parse. The row loop lives outside the
+    # per-row try/except of the old cut, so a container surprise here raised
+    # through get_node_status() and lost EVERY node's status. It has to look
+    # exactly like "no live answer": empty dict, caller uses rrddata.
+    m = _mgr()
+    assert _feed(m, _RawResp(payload)) == {}
+
+
+def test_malformed_container_does_not_wipe_the_counter_history():
+    m = _mgr()
+    _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)))
+    assert _feed(m, _RawResp({'data': {'data': 'oops'}})) == {}
+    # counters survive a bad response, so the next good sample differentiates
+    # over the longer gap - a cumulative counter makes that a valid average
+    rates = _feed(m, _Resp(_rows(1020, 300 * MB, 300 * MB)))
+    assert rates['pve1'][0] == pytest.approx(10 * MB)   # 200 MB over 20s
+
+
+def test_half_a_node_pair_never_produces_a_rate():
+    # net_out missing (row dropped, or a partial pvestatd broadcast). Half a
+    # pair must not be stored, otherwise the next full sample differentiates
+    # net_out against a counter we never saw.
+    m = _mgr()
+    half = [{'id': 'node/pve1', 'metric': 'net_in', 'value': 100 * MB,
+             'type': 'derive', 'timestamp': 1000}]
+    assert _feed(m, _Resp(half)) == {}
+    assert 'pve1' not in m._node_net_counters
+    # so the first complete pair is a first sighting, not a rate
+    assert _feed(m, _Resp(_rows(1010, 200 * MB, 200 * MB))) == {}
+    assert _feed(m, _Resp(_rows(1020, 300 * MB, 300 * MB)))['pve1'][0] == pytest.approx(10 * MB)
+
+
+def test_a_node_reporting_only_gauge_rows_stays_on_rrddata():
+    # never-seen node whose net_in/net_out arrive as `gauge` - already a rate.
+    # Two of those must not become counter state and must not be differentiated,
+    # or the dashboard shows a number derived from two rates.
+    m = _mgr()
+    gauge = [
+        {'id': 'node/pve2', 'metric': 'net_in', 'value': 5 * MB, 'type': 'gauge', 'timestamp': 1000},
+        {'id': 'node/pve2', 'metric': 'net_out', 'value': 5 * MB, 'type': 'gauge', 'timestamp': 1000},
+    ]
+    assert _feed(m, _Resp(gauge)) == {}
+    assert 'pve2' not in m._node_net_counters
+    assert _feed(m, _Resp([dict(r, timestamp=1010, value=9 * MB) for r in gauge])) == {}
+    assert 'pve2' not in m._node_net_counters
+
+
+def test_two_nodes_keep_independent_counter_state():
+    # state is per node, including the timestamp - a single shared `ts` would
+    # divide one node's delta by the other node's interval
+    m = _mgr()
+    _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)
+                   + _rows(1000, 500 * MB, 500 * MB, node='pve2', extra=False)))
+    rates = _feed(m, _Resp(_rows(1010, 200 * MB, 200 * MB)
+                           + _rows(1015, 650 * MB, 650 * MB, node='pve2', extra=False)))
+    assert rates['pve1'][0] == pytest.approx(10 * MB)          # 100 MB over 10s
+    assert rates['pve2'][0] == pytest.approx(150 * MB / 15)    # 150 MB over its own 15s
+
+
 def test_gauge_rows_never_get_treated_as_a_counter():
     # A `gauge` net_in would be an already-computed rate. Differentiating it
     # produces garbage, so it must not land in the counter state - not even when
@@ -233,6 +322,24 @@ def test_transport_failure_does_not_raise():
 
     m._api_get = boom
     assert m._get_live_node_net_rates() == {}
+
+
+def test_transport_failure_keeps_counter_history_for_the_next_good_sample():
+    # _drop_live_node_net_rates() forgets the RATES so callers fall back, but it
+    # must keep the counters. Forgetting those too costs an extra poll cycle with
+    # no live rate every time the endpoint hiccups.
+    m = _mgr()
+    _feed(m, _Resp(_rows(1000, 100 * MB, 100 * MB)))
+
+    def boom(url, **kw):
+        raise RuntimeError('connection reset')
+
+    m._node_net_fetched_at = 0.0
+    m._api_get = boom
+    assert m._get_live_node_net_rates() == {}
+
+    rates = _feed(m, _Resp(_rows(1030, 400 * MB, 400 * MB)))
+    assert rates['pve1'][0] == pytest.approx(10 * MB)   # 300 MB over 30s
 
 
 def test_throttle_skips_refetch_within_the_window():
