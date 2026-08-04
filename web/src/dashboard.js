@@ -14029,8 +14029,8 @@
                                         </div>
                                     )}
                                     
-                                    {/* Task Bar Toggle - disabled for debugging */}
-                                    {false && !showTaskBar && tasks.length > 0 && (
+                                    {/* Task Bar Toggle - shown whenever taskbar is hidden */}
+                                    {!showTaskBar && (
                                         <button
                                             onClick={() => setShowTaskBar(true)}
                                             className="relative flex items-center gap-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors"
