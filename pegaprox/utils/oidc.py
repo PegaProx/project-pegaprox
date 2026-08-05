@@ -17,6 +17,11 @@ from urllib.parse import urlencode, urlparse, urlunparse
 # NS May 2026 — SSRF guard for admin-supplied OIDC URLs (discovery / token / userinfo).
 from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
 
+# auth_source values that mean "this row is owned by an OIDC-family IdP", i.e.
+# the ones whose oidc_sub is meaningful. 'local' and 'ldap' rows are excluded on
+# purpose -- they must never be adopted by an OIDC login.
+OIDC_AUTH_SOURCES = ('oidc', 'entra')
+
 
 # MK May 2026 (CodeAnt #500) — pre-validate the authority URL before composing the
 # discovery URL. The existing sanitize_outbound_url() catches the same family of
@@ -621,6 +626,52 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     return result
 
 
+def oidc_derive_username(user_info: dict, users: dict = None) -> str:
+    """Derive the local username key from OIDC claims.
+
+    LW: keep the full preferred_username including the domain. Truncating at
+    '@' collapsed bob@corp.com and bob@partner.com onto one account, so the
+    second one to log in inherited the first one's role and tenant.
+
+    `users` is the already-loaded users table. Callers in the login path have
+    one in hand; passing it avoids a second full-table read per login.
+    """
+    from pegaprox.utils.auth import load_users
+
+    raw_username = (user_info.get('preferred_username')
+                    or user_info.get('email', ''))
+
+    # Char set matches sanitize_username()'s allowlist. '+' belongs here for the
+    # same reason '@' does: dropping it silently merges identities, so
+    # a+b@example.com would derive onto a real ab@example.com account.
+    username = ''.join(c for c in raw_username.lower()
+                       if c.isalnum() or c in '._-@+')
+    if not username:
+        return f"oidc_{user_info.get('sub', 'unknown')[:12]}"
+
+    # Back-compat: installs before this change stored the part before '@'.
+    # An existing account keeps its old key so it isn't orphaned -- but only if
+    # it is provably the SAME identity. Reusing 'bob' merely because a local
+    # part matches would re-open the very collision this function closed:
+    # bob@partner.com would land on the 'bob' row that bob@corp.com created and
+    # inherit its role and tenant. The stored oidc_sub is the IdP's stable,
+    # non-reassignable identifier for the subject, so require it to match the
+    # incoming one exactly. A sub is only unique within an issuer; installs that
+    # repoint at a different IdP have to rekey manually (no issuer is recorded
+    # on the user row to check against).
+    if '@' in username:
+        sub = user_info.get('sub', '')
+        legacy = username.split('@')[0]
+        if legacy and sub:
+            existing = (users if users is not None else load_users()).get(legacy)
+            if (existing
+                    and existing.get('auth_source', 'local') in OIDC_AUTH_SOURCES
+                    and existing.get('oidc_sub') == sub):
+                return legacy
+
+    return username
+
+
 def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 'oidc') -> dict:
     from pegaprox.utils.auth import load_users, save_users
     """Create or update local user from OIDC authentication
@@ -630,25 +681,13 @@ def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 
     """
     # Derive username from OIDC claims
     email = user_info.get('email') or user_info.get('preferred_username', '')
-    raw_username = user_info.get('preferred_username') or email
-    
-    # LW: Sanitize username - use part before @ for email-style usernames
-    if '@' in raw_username:
-        username = raw_username.split('@')[0].lower()
-    else:
-        username = raw_username.lower()
-    
-    # NS: Ensure we have a valid username
-    username = ''.join(c for c in username if c.isalnum() or c in '._-')
-    if not username:
-        username = f"oidc_{user_info.get('sub', 'unknown')[:12]}"
-    
-    display_name = user_info.get('name') or user_info.get('given_name', '') 
+    users = load_users()
+    username = oidc_derive_username(user_info, users)
+
+    display_name = user_info.get('name') or user_info.get('given_name', '')
     if not display_name:
         display_name = username
-    
-    users = load_users()
-    
+
     if username in users:
         # NS: SECURITY - Don't allow OIDC to overwrite a local-only user
         # This prevents account takeover if someone creates an IdP account matching a local username

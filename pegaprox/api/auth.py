@@ -32,6 +32,7 @@ from pegaprox.utils.oidc import (
     get_oidc_settings, get_oidc_endpoints, oidc_build_auth_url,
     oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info,
     oidc_get_user_groups, oidc_map_groups_to_role, oidc_provision_user,
+    oidc_derive_username,
 )
 from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID
 from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error, effective_reverse_proxy
@@ -213,13 +214,8 @@ def oidc_callback():
         # Check if user already exists
         # MK: this has to match the logic in oidc_provision_user or we get mismatches
         # (had a bug where "john.doe" here vs "johndoe" in provision caused 403s)
-        email = user_info.get('email') or user_info.get('preferred_username', '')
-        raw_username = user_info.get('preferred_username') or email
-        check_username = raw_username.split('@')[0].lower() if '@' in raw_username else raw_username.lower()
-        check_username = ''.join(c for c in check_username if c.isalnum() or c in '._-')
-        if not check_username:
-            check_username = f"oidc_{user_info.get('sub', 'unknown')[:12]}"
         users = load_users()
+        check_username = oidc_derive_username(user_info, users)
         if check_username not in users:
             return jsonify({'error': 'User account does not exist. Contact an administrator.'}), 403
     
