@@ -126,3 +126,5 @@ defusedxml>=0.7.1
 setuptools>=83.0.0  # >=83 clears AIKIDO-2026-293625
 zipp>=3.19.1        # CVE-2024-5569 infinite loop in Path._next
 idna>=3.15          # CVE-2024-3651 ReDoS/DoS in idna<3.7 (transitive via requests; Snyk PR #530)
+
+cryptography==50.0.0
