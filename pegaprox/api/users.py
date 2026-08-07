@@ -748,22 +748,32 @@ def create_user():
     if not is_valid_role(role):
         return jsonify({'error': 'Invalid role'}), 400
     
+    # tenant-scoped admins create only inside their own tenant, and nobody can mint a
+    # user that outranks them
+    _ct = _caller_tenant_or_none()
+    
     # MK: Auto-set tenant_id if role belongs to a specific tenant
+    # SEC: For tenant-scoped admins, validate the role belongs to their tenant BEFORE auto-assignment
     if role not in BUILTIN_ROLES:
         custom_roles = load_custom_roles()
+        role_tenant_id = None
         for tid, roles in custom_roles.get('tenants', {}).items():
             if role in roles:
-                tenant_id = tid  # override with role's tenant
+                role_tenant_id = tid
                 break
+        
+        # If role belongs to a tenant, validate tenant-scoped admin can only use roles from their tenant
+        if role_tenant_id is not None:
+            if _ct is not None and role_tenant_id != _ct:
+                return jsonify({'error': 'Access denied: cannot assign roles from other tenants'}), 403
+            tenant_id = role_tenant_id  # override with role's tenant
     
     # validate tenant exists
     tenants = load_tenants()
     if tenant_id not in tenants:
         return jsonify({'error': 'Invalid tenant_id'}), 400
 
-    # tenant-scoped admins create only inside their own tenant, and nobody can mint a
-    # user that outranks them
-    _ct = _caller_tenant_or_none()
+    # Final tenant boundary check for tenant-scoped admins
     if _ct is not None and tenant_id != _ct:
         return jsonify({'error': 'Access denied: cannot create users in other tenants'}), 403
     if not _role_at_or_below_caller(role):
@@ -854,27 +864,39 @@ def update_user(username):
             admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
             if admin_count <= 1:
                 return jsonify({'error': 'Cannot remove admin role from last admin'}), 400
+        
+        # SEC: For custom roles, validate tenant boundaries BEFORE assignment
+        # MK: Auto-set tenant_id when assigning a tenant-specific role, but enforce tenant scope
+        role_derived_tenant = None
+        if data['role'] not in BUILTIN_ROLES:
+            custom_roles = load_custom_roles()
+            # check if role belongs to a tenant
+            for tid, roles in custom_roles.get('tenants', {}).items():
+                if data['role'] in roles:
+                    role_derived_tenant = tid
+                    break
+            
+            # SEC: Tenant-scoped admins can only assign roles from their own tenant
+            # This prevents cross-tenant account hijacking via foreign custom roles
+            if role_derived_tenant is not None and _ct is not None:
+                if role_derived_tenant != _ct:
+                    return jsonify({'error': 'Access denied: cannot assign roles from other tenants'}), 403
+            
+            # LW: Also check global roles (they don't change tenant)
+            if role_derived_tenant is None and data['role'] not in custom_roles.get('global', {}):
+                # Role exists (passed is_valid_role) but is neither tenant-specific nor global
+                # This shouldn't happen, but handle defensively
+                logging.warning(f"Role {data['role']} passed validation but not found in tenants or global")
+        
         user['role'] = data['role']
         # clear portal_only if promoted to admin
         if data['role'] == ROLE_ADMIN and user.get('portal_only'):
             user['portal_only'] = False
-
-        # MK: Auto-set tenant_id when assigning a tenant-specific role
-        # This ensures the user is properly associated with the tenant
-        if data['role'] not in BUILTIN_ROLES:
-            custom_roles = load_custom_roles()
-            # check if role belongs to a tenant
-            found_tenant = False
-            for tid, roles in custom_roles.get('tenants', {}).items():
-                if data['role'] in roles:
-                    user['tenant_id'] = tid
-                    found_tenant = True
-                    logging.info(f"Auto-set tenant_id={tid} for user with role {data['role']}")
-                    break
-            
-            # LW: Also check global roles (they don't change tenant)
-            if not found_tenant and data['role'] in custom_roles.get('global', {}):
-                logging.debug(f"Role {data['role']} is global, keeping existing tenant_id")
+        
+        # Auto-set tenant_id for tenant-specific roles (already validated above)
+        if role_derived_tenant is not None:
+            user['tenant_id'] = role_derived_tenant
+            logging.info(f"Auto-set tenant_id={role_derived_tenant} for user with role {data['role']}")
     
     if 'display_name' in data:
         user['display_name'] = data['display_name']
@@ -905,6 +927,10 @@ def update_user(username):
         tenants = load_tenants()
         if data['tenant_id'] not in tenants:
             return jsonify({'error': 'Invalid tenant_id'}), 400
+        # SEC: Revalidate tenant boundary for tenant-scoped admins
+        # This check is redundant with line 849 but provides defense in depth
+        if _ct is not None and data['tenant_id'] != _ct:
+            return jsonify({'error': 'Access denied: cannot move users to other tenants'}), 403
         user['tenant_id'] = data['tenant_id']
     
     _password_changed = False
