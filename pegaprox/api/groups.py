@@ -132,9 +132,10 @@ def update_cluster_group(group_id):
     ip = request.remote_addr
 
     # Check tenant access - non-admins can only edit their tenant's groups
+    # Fix: reject NULL tenant_id (global groups) for non-admins to prevent cross-tenant privilege escalation
     if user.get('role') != ROLE_ADMIN:
         user_tenant = _user_tenant(user)
-        if group['tenant_id'] and group['tenant_id'] != user_tenant:
+        if group['tenant_id'] != user_tenant:
             log_audit(usr, 'cluster_group.update_denied', f"Access denied to group '{group['name']}' (ID: {group_id}) - tenant mismatch", ip_address=ip)
             return jsonify({'error': 'Access denied - group belongs to different tenant'}), 403
     
@@ -201,10 +202,11 @@ def delete_cluster_group(group_id):
     user = users.get(usr, {})
     ip = request.remote_addr
     
-    # Check tenant access
+    # Check tenant access - non-admins can only delete their tenant's groups
+    # Fix: reject NULL tenant_id (global groups) for non-admins to prevent cross-tenant privilege escalation
     if user.get('role') != ROLE_ADMIN:
         user_tenant = _user_tenant(user)
-        if group['tenant_id'] and group['tenant_id'] != user_tenant:
+        if group['tenant_id'] != user_tenant:
             log_audit(usr, 'cluster_group.delete_denied', f"Access denied to delete group '{group['name']}' (ID: {group_id}) - tenant mismatch", ip_address=ip)
             return jsonify({'error': 'Access denied - group belongs to different tenant'}), 403
     
@@ -304,10 +306,11 @@ def assign_cluster_to_group(cluster_id):
         if not group:
             return jsonify({'error': 'Group not found'}), 404
         
-        # Check tenant access to target group
+        # Check tenant access to target group - non-admins can only assign to their tenant's groups
+        # Fix: reject NULL tenant_id (global groups) for non-admins to prevent cross-tenant privilege escalation
         if user.get('role') != ROLE_ADMIN:
             user_tenant = _user_tenant(user)
-            if group['tenant_id'] and group['tenant_id'] != user_tenant:
+            if group['tenant_id'] != user_tenant:
                 log_audit(usr, 'cluster.group_assign_denied', f"Access denied to assign cluster {cluster_id} to group '{group['name']}' - tenant mismatch", ip_address=ip)
                 return jsonify({'error': 'Access denied - group belongs to different tenant'}), 403
         
@@ -367,12 +370,13 @@ def get_cluster_group_status(group_id):
             return jsonify({'error': 'Group not found'}), 404
 
         # tenant check - same logic as the list endpoint
+        # Fix: reject NULL tenant_id (global groups) for non-admins to prevent information disclosure
         usr = getattr(request, 'session', {}).get('user', 'system')
         users = load_users()
         user = users.get(usr, {})
         tenant_id = _user_tenant(user)
         if tenant_id:
-            if group['tenant_id'] and group['tenant_id'] != tenant_id:
+            if group['tenant_id'] != tenant_id:
                 return jsonify({'error': 'Access denied'}), 403
 
         clusters = db.query('SELECT id FROM clusters WHERE group_id = ?', (group_id,))
@@ -515,9 +519,10 @@ def trigger_xclb_balance_now(group_id):
     # M-3 (BOLA): this spawns REAL cross-cluster VM migrations — gate it on group
     # ownership, not just the cluster.config perm. A tenant user must not trigger
     # rebalancing on another tenant's group. Admins/default tenant unscoped.
+    # Fix: reject NULL tenant_id (global groups) for non-admins to prevent cross-tenant VM migration
     usr = getattr(request, 'session', {}).get('user', 'system')
     _ut = _user_tenant(load_users().get(usr, {}))
-    if _ut and group.get('tenant_id') and group.get('tenant_id') != _ut:
+    if _ut and group.get('tenant_id') != _ut:
         log_audit(usr, 'xclb.manual_denied',
                   f"Denied cross-cluster balance on group {_sl(str(group.get('name', group_id)))} (tenant mismatch)")
         return jsonify({'error': 'Access denied'}), 403
