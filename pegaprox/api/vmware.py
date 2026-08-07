@@ -103,8 +103,8 @@ def update_vmware_server(vmware_id):
             return jsonify({'error': 'VMware server not found'}), 404
     
     # MK May 2026 (#469 port) — cred-exfil guard. If host changes WHILE the
-    # password is preserved (came in as ********), don't auto-connect — that
-    # would ship the saved credential to a potentially attacker-controlled host.
+    # password is preserved (came in as ********), CLEAR the password to prevent
+    # credential exfiltration to an attacker-controlled host via diagnose endpoint.
     credentials_preserved = False
     host_changed = False
 
@@ -114,8 +114,16 @@ def update_vmware_server(vmware_id):
            (data.get('port') and int(data.get('port', 443)) != old_mgr.port):
             host_changed = True
         if data.get('password') == '********':
-            data['password'] = old_mgr.password
             credentials_preserved = True
+            if host_changed:
+                # SECURITY: Clear the password when host changes with masked password.
+                # This prevents credential exfiltration via diagnose or other endpoints
+                # that would send the preserved credential to the attacker-controlled host.
+                data['password'] = ''
+                logging.warning(f"[VMware:{_sl(getattr(old_mgr, 'name', vmware_id))}] Cleared preserved password after host/port change (cred-exfil mitigation)")
+            else:
+                # Host unchanged, safe to preserve password
+                data['password'] = old_mgr.password
 
     save_vmware_server(vmware_id, data)
 
@@ -124,10 +132,9 @@ def update_vmware_server(vmware_id):
         if host_changed and credentials_preserved:
             try:
                 mgr.connected = False
-                mgr.last_error = 'Host changed — auto-connect skipped for security (preserved credentials). Use Test Connection manually after verifying the new host.'
+                mgr.last_error = 'Host/port changed with masked password — credentials cleared for security. Please re-enter the password and test the connection.'
             except Exception:
                 pass
-            logging.warning(f"[VMware:{_sl(getattr(mgr, 'name', vmware_id))}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
         else:
             mgr.connect()
     vmware_managers[vmware_id] = mgr
@@ -209,6 +216,24 @@ def diagnose_vmware_connection(vmware_id):
         'mgr_connection_type': mgr._connection_type,
         'mgr_last_error': mgr.last_error,
     }
+    
+    # SECURITY: Defense-in-depth - verify credentials are present before attempting connection.
+    # This prevents credential exfiltration if the password was cleared due to host change.
+    if not mgr.password or not stored_enc:
+        result['fresh_soap_test'] = 'SKIPPED: No password configured (may have been cleared after host change for security)'
+        return jsonify(result)
+    
+    # SECURITY: Verify that the current host matches the DB host to prevent credential
+    # exfiltration to an attacker-controlled host. The update endpoint clears the password
+    # when host changes, but this is defense-in-depth in case of race conditions or
+    # direct manager manipulation.
+    if mgr.host != row_d.get('host') or mgr.port != row_d.get('port'):
+        result['fresh_soap_test'] = 'SKIPPED: Host/port mismatch between manager and DB (security check)'
+        logging.warning(
+            f"[VMware:{getattr(mgr, 'name', vmware_id)}] Diagnose blocked: "
+            f"host mismatch (mgr={mgr.host}:{mgr.port}, db={row_d.get('host')}:{row_d.get('port')})"
+        )
+        return jsonify(result)
     
     # Try fresh SOAP connection with stored credentials.
     # MK 2026-06-04: honour the per-cluster `ssl_verify` flag instead of

@@ -75,6 +75,13 @@ class VMwareManager:
         moved under VCF-specific paths. We handle both transparently.
         Older ESXi (pre-6.5) uses /rest/com/vmware/cis/session instead.
         """
+        # SECURITY: Prevent connection attempts with empty/missing credentials.
+        # This can occur after host change with masked password (cred-exfil mitigation).
+        if not self.password:
+            self.last_error = 'Password required - please configure credentials'
+            self.connected = False
+            return False
+        
         try:
             import requests
             import urllib3
