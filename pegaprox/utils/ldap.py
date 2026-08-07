@@ -337,21 +337,12 @@ def ldap_provision_user(ldap_result: dict) -> dict:
         user['ldap_dn'] = ldap_result.get('user_dn', '')
         user['last_ldap_sync'] = datetime.now().isoformat()
         
-        # MK: Sync tenant assignment from LDAP group mapping
-        if ldap_result.get('tenant'):
-            user['tenant_id'] = ldap_result['tenant']  # NS: Must be tenant_id (not tenant) for code compatibility
-        
-        # LW: Merge extra permissions from LDAP group mappings
-        if ldap_result.get('permissions'):
-            existing_perms = user.get('permissions', [])
-            merged = list(set(existing_perms + ldap_result['permissions']))
-            user['permissions'] = merged
-        
-        # NS: Sync tenant-specific roles/permissions
-        if ldap_result.get('tenant_permissions'):
-            if 'tenant_permissions' not in user:
-                user['tenant_permissions'] = {}
-            user['tenant_permissions'].update(ldap_result['tenant_permissions'])
+        # SECURITY: Always replace permissions/tenant_permissions with current LDAP mapping
+        # This ensures stale privileges are cleared when group membership changes
+        # Empty mappings explicitly clear privileges rather than preserving old grants
+        user['tenant_id'] = ldap_result.get('tenant', '')
+        user['permissions'] = ldap_result.get('permissions', [])
+        user['tenant_permissions'] = ldap_result.get('tenant_permissions', {})
         
         logging.info(f"[LDAP] Updated existing user '{username}' from LDAP (role={user['role']}, tenant={user.get('tenant')})")
     else:

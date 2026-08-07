@@ -657,27 +657,37 @@ def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 
             logging.warning(f"[OIDC] Rejected login for '{username}' - local account exists, cannot overwrite with OIDC")
             return None  # Caller should handle None return
         
+        # SECURITY: Verify that the OIDC subject matches the stored identity
+        # This prevents account takeover when two different OIDC identities normalize to the same username
+        incoming_sub = user_info.get('sub', '')
+        stored_sub = users[username].get('oidc_sub', '')
+        
+        if stored_sub and incoming_sub and stored_sub != incoming_sub:
+            # Different OIDC identity attempting to use an existing username
+            logging.warning(
+                f"[OIDC] Rejected login for '{username}' - OIDC subject mismatch. "
+                f"Stored sub: {stored_sub[:20]}..., Incoming sub: {incoming_sub[:20]}... "
+                f"This indicates a username collision between different OIDC identities."
+            )
+            return None
+        
         # Update existing OIDC/LDAP user
         user = users[username]
         user['display_name'] = display_name
         user['email'] = email
         user['role'] = role_mapping.get('role', user.get('role', ROLE_VIEWER))
         user['auth_source'] = auth_source
-        user['oidc_sub'] = user_info.get('sub', '')
+        user['oidc_sub'] = incoming_sub
         user['last_oidc_sync'] = datetime.now().isoformat()
         
-        # Sync tenant/permissions from group mappings
-        if role_mapping.get('tenant'):
-            user['tenant_id'] = role_mapping['tenant']  # NS: Must be tenant_id
-        if role_mapping.get('permissions'):
-            existing_perms = user.get('permissions', [])
-            user['permissions'] = list(set(existing_perms + role_mapping['permissions']))
-        if role_mapping.get('tenant_permissions'):
-            if 'tenant_permissions' not in user:
-                user['tenant_permissions'] = {}
-            user['tenant_permissions'].update(role_mapping['tenant_permissions'])
+        # SECURITY: Always replace permissions/tenant_permissions with current mapping
+        # This ensures stale privileges are cleared when group membership changes
+        # Empty mappings explicitly clear privileges rather than preserving old grants
+        user['tenant_id'] = role_mapping.get('tenant', '')
+        user['permissions'] = role_mapping.get('permissions', [])
+        user['tenant_permissions'] = role_mapping.get('tenant_permissions', {})
         
-        logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source})")
+        logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source}, sub={incoming_sub[:20]}...)")
     else:
         # Create new user
         users[username] = {
