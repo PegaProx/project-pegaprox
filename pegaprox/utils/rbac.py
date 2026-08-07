@@ -912,7 +912,10 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
     Returns:
         bool: True if user has access, False otherwise
     """
-    if user.get('role') == ROLE_ADMIN:
+    # NS Aug 2026 (pentest token-scope bypass) — effective_role (API-token scoped) wins
+    # over the stored role so an admin-owned restricted token doesn't get the admin VM
+    # bypass below. Mirrors user_can_access_vm:754 and has_permission:285.
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return True
     
     username = user.get('username', '')
