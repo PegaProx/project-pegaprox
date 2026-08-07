@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """vmware + v2p migration routes - split from monolith dec 2025, NS"""
 
+import json
 import logging
 import time
 import threading
@@ -96,11 +97,30 @@ def update_vmware_server(vmware_id):
     """Update a VMware server config"""
     data = request.json or {}
     
+    # NS Dec 2026 (pentest BOLA) — per-server tenant gate. Must check BEFORE
+    # save_vmware_server() to prevent cross-tenant takeover via linked_clusters.
+    # If the server is not in vmware_managers (disabled), load from DB to check access.
     if vmware_id not in vmware_managers:
         db = get_db()
         row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
         if not row:
             return jsonify({'error': 'VMware server not found'}), 404
+        # Temporarily load into vmware_managers for access check
+        row_dict = dict(row)
+        temp_config = {
+            'name': row_dict.get('name', 'vCenter'),
+            'host': row_dict.get('host', ''),
+            'port': row_dict.get('port', 443),
+            'username': row_dict.get('username', ''),
+            'password': '',  # Not needed for access check
+            'linked_clusters': json.loads(row_dict.get('linked_clusters', '[]')),
+        }
+        vmware_managers[vmware_id] = VMwareManager(vmware_id, temp_config)
+    
+    # Check tenant access before allowing update
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
     
     # MK May 2026 (#469 port) — cred-exfil guard. If host changes WHILE the
     # password is preserved (came in as ********), don't auto-connect — that
@@ -141,6 +161,31 @@ def update_vmware_server(vmware_id):
 @require_auth(perms=['vmware.config'])
 def delete_vmware_server(vmware_id):
     """Delete a VMware server"""
+    # NS Dec 2026 (pentest BOLA) — per-server tenant gate. Must check BEFORE
+    # deletion to prevent cross-tenant deletion.
+    # If the server is not in vmware_managers (disabled), load from DB to check access.
+    if vmware_id not in vmware_managers:
+        db = get_db()
+        row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+        if not row:
+            return jsonify({'error': 'VMware server not found'}), 404
+        # Temporarily load into vmware_managers for access check
+        row_dict = dict(row)
+        temp_config = {
+            'name': row_dict.get('name', 'vCenter'),
+            'host': row_dict.get('host', ''),
+            'port': row_dict.get('port', 443),
+            'username': row_dict.get('username', ''),
+            'password': '',  # Not needed for access check
+            'linked_clusters': json.loads(row_dict.get('linked_clusters', '[]')),
+        }
+        vmware_managers[vmware_id] = VMwareManager(vmware_id, temp_config)
+    
+    # Check tenant access before allowing deletion
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    
     name = vmware_managers[vmware_id].name if vmware_id in vmware_managers else vmware_id
     if vmware_id in vmware_managers:
         del vmware_managers[vmware_id]
