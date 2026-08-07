@@ -63,8 +63,38 @@ _ROLE_LEVEL = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
 def _role_at_or_below_caller(target_role):
     # MK: stop a delegate holding admin.users from minting/assigning a role above their own
     # tier. Unknown/custom roles map to the 'user' level.
-    caller_lvl = _ROLE_LEVEL.get(request.session.get('role'), 2)
-    return _ROLE_LEVEL.get(target_role, 2) <= caller_lvl
+    # SEC-FIX: When both caller and target are custom roles, compare actual permissions
+    # to prevent privilege escalation via custom role assignment.
+    caller_role = request.session.get('role')
+    caller_lvl = _ROLE_LEVEL.get(caller_role, 2)
+    target_lvl = _ROLE_LEVEL.get(target_role, 2)
+    
+    # If both are builtin roles, use tier comparison
+    if caller_role in BUILTIN_ROLES and target_role in BUILTIN_ROLES:
+        return target_lvl <= caller_lvl
+    
+    # If caller is builtin admin, allow any target (admin can delegate anything)
+    if caller_role == ROLE_ADMIN:
+        return True
+    
+    # If target is builtin, use tier comparison (custom roles default to level 2)
+    if target_role in BUILTIN_ROLES:
+        return target_lvl <= caller_lvl
+    
+    # Both are custom roles (or caller is custom): compare actual permissions
+    # A custom-role caller can only assign a target role whose permissions are a subset
+    # of the caller's own permissions.
+    caller_user = get_db().get_user(request.session.get('user', '')) or {}
+    caller_tenant = caller_user.get('tenant_id', DEFAULT_TENANT_ID)
+    
+    caller_perms = set(get_user_permissions(caller_user, caller_tenant))
+    
+    # Build a synthetic user dict with the target role to get its permissions
+    target_user = {'role': target_role, 'tenant_id': caller_tenant, 'permissions': [], 'denied_permissions': []}
+    target_perms = set(get_role_permissions_for_user(target_user, caller_tenant))
+    
+    # Target role is acceptable if all its permissions are present in caller's permissions
+    return target_perms.issubset(caller_perms)
 
 
 def _parse_avatar_data_url(value: str):
