@@ -15,7 +15,7 @@ from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, build_authz_user
-from pegaprox.utils.rbac import has_permission
+from pegaprox.utils.rbac import has_permission, user_can_access_vm
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import check_cluster_access, safe_error
 from pegaprox.api.nodes import cleanup_deleted_scripts, cleanup_orphaned_excluded_vms
@@ -35,6 +35,24 @@ def _require_action_perm(action):
     perm = _perm_for_action(action)
     if not has_permission(user, perm):
         return jsonify({'error': f'Permission denied: {perm} required to schedule a {action} action'}), 403
+    return None
+
+
+def _require_vm_access(cluster_id, vmid, vm_type, action):
+    """Validate that the caller has permission to schedule actions on the specific VM.
+    
+    Security fix: Prevent scheduling actions on unauthorized VMs.
+    Returns an error response if access is denied, else None.
+    """
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    perm = _perm_for_action(action)
+    
+    # Check VM-level authorization using the same logic as direct VM operations
+    if not user_can_access_vm(user, cluster_id, int(vmid), perm, vm_type):
+        return jsonify({
+            'error': f'Access denied: You do not have permission to schedule {action} actions on VM {vmid}'
+        }), 403
+    
     return None
 
 # ============================================
@@ -241,8 +259,9 @@ def execute_scheduled_action(action):
     vmid = action.get('vmid')
     vm_type = action.get('vm_type', 'qemu')
     action_type = action.get('action')
+    created_by = action.get('created_by', 'unknown')
     
-    logging.info(f"[SCHEDULER] Executing {action_type} on {vm_type}/{vmid} in {cluster_id}")
+    logging.info(f"[SCHEDULER] Executing {action_type} on {vm_type}/{vmid} in {cluster_id} (created by {created_by})")
     
     if cluster_id not in cluster_managers:
         logging.error(f"[SCHEDULER] Cluster {cluster_id} not found")
@@ -257,6 +276,31 @@ def execute_scheduled_action(action):
         # MK: Handle rolling_update action type separately
         if action_type == 'rolling_update':
             execute_scheduled_rolling_update(mgr, cluster_id, action)
+            return
+        
+        # Security fix: Revalidate VM access at execution time (defense-in-depth)
+        # This prevents execution of schedules that may have been created before the fix
+        # or if authorization state has changed since schedule creation
+        try:
+            users_db = load_users()
+            user_data = users_db.get(created_by, {})
+            if user_data:
+                user_data['username'] = created_by
+                perm = _perm_for_action(action_type)
+                if not user_can_access_vm(user_data, cluster_id, int(vmid), perm, vm_type):
+                    logging.warning(
+                        f"[SCHEDULER] Execution blocked: User {created_by} no longer has {perm} "
+                        f"permission on VM {vmid} in cluster {cluster_id}"
+                    )
+                    log_audit('scheduler', 'scheduled.blocked',
+                             f"Scheduled {action_type} blocked for VM {vmid}: user {created_by} lacks permission")
+                    return
+            else:
+                logging.warning(f"[SCHEDULER] User {created_by} not found, skipping execution of {action_type} on VM {vmid}")
+                return
+        except Exception as e:
+            logging.error(f"[SCHEDULER] Error validating VM access at execution time: {e}")
+            # Fail closed: if we can't validate access, don't execute
             return
         
         # Find the node where the VM is running
@@ -583,6 +627,12 @@ def create_schedule():
     if perm_err:
         return perm_err
 
+    # Security fix: Validate VM-level access before allowing schedule creation
+    vm_type = data.get('vm_type', 'qemu')
+    vm_access_err = _require_vm_access(data['cluster_id'], data['vmid'], vm_type, data['action'])
+    if vm_access_err:
+        return vm_access_err
+
     # Validate schedule type
     valid_types = ['once', 'daily', 'weekly', 'weekdays', 'weekends']
     if data['schedule_type'] not in valid_types:
@@ -656,9 +706,26 @@ def update_schedule(schedule_id):
 
     # need the perm for the effective action — the new one if it's changing, else the
     # one already stored (so a no-action edit still can't be made without the right perm)
-    perm_err = _require_action_perm(data.get('action', schedule.get('action', 'start')))
+    effective_action = data.get('action', schedule.get('action', 'start'))
+    perm_err = _require_action_perm(effective_action)
     if perm_err:
         return perm_err
+
+    # Security fix: Validate VM-level access if vmid, vm_type, or action is being changed
+    # Check access to the NEW vmid if it's being updated, otherwise check the existing one
+    effective_vmid = data.get('vmid', schedule.get('vmid'))
+    effective_vm_type = data.get('vm_type', schedule.get('vm_type', 'qemu'))
+    
+    # If vmid or action is changing, validate access to the target VM
+    if 'vmid' in data or 'action' in data or 'vm_type' in data:
+        vm_access_err = _require_vm_access(
+            schedule.get('cluster_id'),
+            effective_vmid,
+            effective_vm_type,
+            effective_action
+        )
+        if vm_access_err:
+            return vm_access_err
 
     # Validate time format if being updated
     if 'time' in data:
