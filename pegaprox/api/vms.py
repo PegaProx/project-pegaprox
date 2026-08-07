@@ -1588,6 +1588,15 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
     if not volid:
         return jsonify({'error': 'Backup volume ID required'}), 400
     
+    # Authorization check: verify user can restore to the target VMID if different from source
+    # NS: Security fix for authorization bypass (pentest finding) — when restoring to a
+    # different VMID, we must verify the user has vm.backup permission on the destination.
+    # Restoring into a VM is destructive (overwrites or creates), so we gate it the same
+    # way we gate backup creation.
+    if target_vmid != vmid:
+        if not user_can_access_vm(user, cluster_id, target_vmid, 'vm.backup', vm_type):
+            return jsonify({'error': f'Permission denied: cannot restore to VMID {target_vmid}'}), 403
+    
     try:
         host, port = manager.host, manager.api_port
         session = manager._create_session()

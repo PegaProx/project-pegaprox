@@ -10,8 +10,9 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
-from pegaprox.utils.auth import require_auth
+from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
@@ -2889,6 +2890,21 @@ def restore_backup(cluster_id):
     if mode not in ('new', 'overwrite', 'test'):
         return jsonify({'error': "mode must be 'new', 'overwrite', or 'test'"}), 400
 
+    # Determine vm_type from volid for proper ACL/pool permission check
+    is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid
+    vm_type = 'lxc' if is_lxc else 'qemu'
+    
+    # Authorization check: verify user can restore to the target VMID
+    # NS: Security fix for authorization bypass (pentest finding) — check_cluster_access
+    # alone is insufficient; we must verify the user has vm.backup permission on the
+    # destination VMID. Restoring into a VM is destructive (overwrites or creates),
+    # so we gate it the same way we gate backup creation.
+    users = load_users()
+    user = users.get(request.session.get('user', ''), {})
+    user['username'] = request.session.get('user', '')
+    if not user_can_access_vm(user, cluster_id, target_vmid, 'vm.backup', vm_type):
+        return jsonify({'error': f'Permission denied: cannot restore to VMID {target_vmid}'}), 403
+
     # Test-mode = verify pipeline without cleanup
     if mode == 'test':
         from pegaprox.core.backup_verify import start_verification
@@ -2904,9 +2920,8 @@ def restore_backup(cluster_id):
         except Exception as e:
             return jsonify({'error': safe_error(e)}), 500
 
-    # Choose vm_type from volid: pbs:backup/vm/100/... vs pbs:backup/ct/100/...
-    is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid
-    cmd_path = 'lxc' if is_lxc else 'qemu'
+    # Build restore URL using vm_type already determined above
+    cmd_path = vm_type  # 'lxc' or 'qemu'
     restore_url = f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{target_node}/{cmd_path}'
 
     params = {
