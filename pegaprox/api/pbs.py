@@ -2405,6 +2405,11 @@ def auto_attach_pbs_to_clusters(pbs_id):
         if cid not in cluster_managers:
             results.append({'cluster_id': cid, 'ok': False, 'error': 'cluster not found'})
             continue
+        # Authorization: verify the user has access to this cluster before modifying its storage
+        ok, err_response = check_cluster_access(cid)
+        if not ok:
+            results.append({'cluster_id': cid, 'ok': False, 'error': 'Access denied to this cluster'})
+            continue
         cm = cluster_managers[cid]
         if not cm.is_connected:
             results.append({'cluster_id': cid, 'ok': False, 'error': 'cluster offline'})
