@@ -145,7 +145,7 @@ jobs:
           targets:
             lxc:
               create_message: |
-                PegaProx Appliance - Login: root / PegaProx2026!
+                PegaProx Appliance - First login will prompt for password setup
               config:
                 - type: all
                   before: 5
@@ -189,8 +189,9 @@ jobs:
                 apt-get update
                 apt-get -y install pegaprox
                 systemctl enable pegaprox || true
-                # --- Root-Login setzen ---
-                echo 'root:PegaProx2026!' | chpasswd
+                # --- Force password change on first login ---
+                passwd -d root
+                passwd -e root
 
           mappings:
             architecture_map: debian
@@ -325,7 +326,7 @@ jobs:
 
           # --- Basis-Tools + PegaProx ---
           apt-get update
-          apt-get -y install sudo sqlite3 ca-certificates curl
+          apt-get -y install sudo sqlite3 ca-certificates curl pwgen
           apt-get -y install pegaprox
           systemctl enable pegaprox || true
 
@@ -334,10 +335,39 @@ jobs:
             useradd -m -s /bin/bash pegaprox_admin
           fi
           usermod -aG sudo pegaprox_admin || true
-          echo 'pegaprox_admin:PegaProx2026!' | chpasswd
-          echo 'root:7eF9$&JHVspAmjWKcGmD!6QypzBsbmyA' | chpasswd
+          
+          # --- Generate unique random passwords per instance ---
+          ADMIN_PASS=$(pwgen -s 32 1)
+          ROOT_PASS=$(pwgen -s 32 1)
+          
+          # Set passwords and force change on first login
+          echo "pegaprox_admin:${ADMIN_PASS}" | chpasswd
+          passwd -e pegaprox_admin
+          echo "root:${ROOT_PASS}" | chpasswd
+          passwd -e root
+          
+          # Store initial passwords in a secure location for console access
+          # (will be removed after first password change)
+          install -d -m 0700 /root/.pegaprox-initial
+          cat > /root/.pegaprox-initial/credentials.txt <<CREDS
+          ========================================
+          PegaProx Initial Credentials
+          ========================================
+          These are ONE-TIME credentials that MUST be changed on first login.
+          
+          User: pegaprox_admin
+          Password: ${ADMIN_PASS}
+          
+          User: root
+          Password: ${ROOT_PASS}
+          
+          IMPORTANT: You will be forced to change these passwords on first login.
+          After changing, this file will be automatically deleted.
+          ========================================
+          CREDS
+          chmod 0600 /root/.pegaprox-initial/credentials.txt
 
-          # --- SSH: Passwort-Login erlauben ---
+          # --- SSH: Disable password auth for root, require keys ---
           mkdir -p /etc/ssh/sshd_config.d
           printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin yes\n' \
             > /etc/ssh/sshd_config.d/99-pegaprox.conf
