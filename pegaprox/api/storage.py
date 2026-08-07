@@ -501,6 +501,8 @@ def create_storage_cluster(cluster_id):
         
         # Generate unique ID
         import uuid
+        # Security fix: Store the user who created/enabled auto-balance for per-VM authorization
+        user = request.session.get('user', 'unknown')
         new_cluster = {
             'id': str(uuid.uuid4())[:8],
             'name': name,
@@ -508,6 +510,7 @@ def create_storage_cluster(cluster_id):
             'threshold': threshold,
             'enabled': True,
             'auto_balance': data.get('auto_balance', False),
+            'auto_balance_user': user if data.get('auto_balance', False) else None,  # Track who enabled auto-balance
             'max_concurrent': data.get('max_concurrent', 1),
             'check_interval': data.get('check_interval', 3600),  # seconds
             'last_auto_run': None,
@@ -521,7 +524,6 @@ def create_storage_cluster(cluster_id):
     _storage_cache.invalidate(cluster_id)
     
     # NS: Fixed audit log call - was causing 500 error
-    user = request.session.get('user', 'unknown')
     manager = cluster_managers.get(cluster_id)
     cluster_name = manager.config.name if manager else cluster_id
     log_audit(user, 'storage_cluster.created', f"Created storage cluster '{name}' with storages: {', '.join(storages)}", cluster=cluster_name)
@@ -541,6 +543,7 @@ def update_storage_cluster(cluster_id, sc_id):
     
     manager = cluster_managers[cluster_id]
     data = request.json or {}
+    user = request.session.get('user', 'unknown')
     
     with _storage_config_lock:
         if cluster_id not in storage_clusters_config:
@@ -560,7 +563,14 @@ def update_storage_cluster(cluster_id, sc_id):
                 if 'enabled' in data:
                     sc['enabled'] = data['enabled']
                 if 'auto_balance' in data:
+                    # Security fix: Track who enabled auto-balance for per-VM authorization
                     sc['auto_balance'] = data['auto_balance']
+                    if data['auto_balance']:
+                        # When enabling auto-balance, record the user
+                        sc['auto_balance_user'] = user
+                    elif not data['auto_balance']:
+                        # When disabling, clear the user
+                        sc['auto_balance_user'] = None
                 if 'max_concurrent' in data:
                     sc['max_concurrent'] = data['max_concurrent']
                 if 'check_interval' in data:
@@ -572,7 +582,6 @@ def update_storage_cluster(cluster_id, sc_id):
                 # Invalidate cache
                 _storage_cache.invalidate(cluster_id)
                 
-                user = request.session.get('user', 'unknown')
                 log_audit(user, 'storage_cluster.updated', f"Updated storage cluster '{sc['name']}'", cluster=manager.config.name)
                 
                 return jsonify(sc)
@@ -1266,6 +1275,33 @@ def run_auto_storage_balance():
                             if not vm_config:
                                 continue
                             
+                            # Security fix: Check if the user who enabled auto-balance has permission
+                            # to modify this VM before moving its disks. This prevents privilege escalation
+                            # where a user with storage.config can move disks of VMs they don't have access to.
+                            auto_balance_user = sc.get('auto_balance_user')
+                            if auto_balance_user:
+                                # Build user object for authorization check
+                                from pegaprox.utils.auth import load_users
+                                users = load_users()
+                                user_data = users.get(auto_balance_user, {})
+                                if user_data:
+                                    user_obj = {
+                                        'username': auto_balance_user,
+                                        'role': user_data.get('role', ROLE_VIEWER)
+                                    }
+                                    # Check if user has vm.config permission for this VM
+                                    if not user_can_access_vm(user_obj, cluster_id, int(vmid), 'vm.config'):
+                                        logging.debug(f"Auto-balance: Skipping VM {vmid} - user {auto_balance_user} lacks vm.config permission")
+                                        continue
+                                else:
+                                    # User no longer exists, skip this VM
+                                    logging.warning(f"Auto-balance: Skipping VM {vmid} - auto_balance_user {auto_balance_user} not found")
+                                    continue
+                            else:
+                                # No user tracked (legacy config), skip for safety
+                                logging.warning(f"Auto-balance: Skipping VM {vmid} - no auto_balance_user tracked (legacy config)")
+                                continue
+                            
                             for key, value in vm_config.items():
                                 if not isinstance(value, str):
                                     continue
@@ -1287,8 +1323,8 @@ def run_auto_storage_balance():
                                     move_response = manager._create_session().post(move_url, data=move_data, timeout=10)
                                     
                                     if move_response.status_code == 200:
-                                        logging.info(f"Auto-balance: Migrated {key} of VM {vmid} from {source_storage} to {target_storage}")
-                                        log_audit('system', 'storage_balancing.auto_migrate',
+                                        logging.info(f"Auto-balance: Migrated {key} of VM {vmid} from {source_storage} to {target_storage} (authorized by {auto_balance_user})")
+                                        log_audit(auto_balance_user, 'storage_balancing.auto_migrate',
                                                  f"Auto-migrated {key} of VM {vmid} from {source_storage} to {target_storage}")
 
                                         # Track migration
