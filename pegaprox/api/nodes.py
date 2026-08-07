@@ -482,12 +482,21 @@ def set_bmc_endpoint_api(cluster_id, node):
     verify_ssl = bool(data.get('verify_ssl'))
     enabled = data.get('enabled', True)
     pw = data.get('password')
-    # keep the existing password when the UI submits the mask (never overwrite with ****)
+    # SECURITY: never pair the stored BMC secret with a caller-chosen host. A masked/empty
+    # password falls back to the stored plaintext, but if the caller also changed `host`,
+    # that credential would be sent (preemptive Basic-auth) to an arbitrary off-box host of
+    # their choosing during background polling = credential exfiltration. Only reuse the
+    # stored password when the host being saved IS the stored host; changing the host
+    # requires a full password.
     if pw in (None, '', '********'):
         existing = get_db().get_bmc_endpoint(cluster_id, node)
-        pw = (existing or {}).get('password', '')
-        if not pw:
-            return jsonify({'error': 'BMC password required'}), 400
+        stored_host = (existing or {}).get('host', '').strip()
+        if host == stored_host:
+            pw = (existing or {}).get('password', '')
+            if not pw:
+                return jsonify({'error': 'BMC password required'}), 400
+        else:
+            return jsonify({'error': 'a full password is required when changing the BMC host'}), 400
     if len(str(pw)) > 512:
         return jsonify({'error': 'BMC password too long'}), 400
     get_db().save_bmc_endpoint(cluster_id, node, host, user, str(pw),
