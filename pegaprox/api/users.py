@@ -1073,6 +1073,11 @@ def create_tenant():
     """
     global tenants_db
     
+    # MK Jun 2026 (sec-review) — creating tenants is a global admin operation only.
+    # Tenant-scoped admins with admin.tenants should not be able to create new tenants.
+    if request.session.get('role') != ROLE_ADMIN:
+        return jsonify({'error': 'Only global administrators can create tenants'}), 403
+    
     data = request.json
     name = data.get('name', '').strip()
     clusters = data.get('clusters', [])
@@ -1121,6 +1126,14 @@ def create_tenant():
 def update_tenant(tenant_id):
     """Update tenant"""
     global tenants_db
+    
+    # MK Jun 2026 (sec-review) — admin.tenants can be held by a tenant-scoped
+    # custom role, so scope to the caller's own tenant unless a real admin —
+    # otherwise one tenant could update another's configuration (cross-tenant authz bypass).
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
+            return jsonify({'error': 'Access denied to this tenant'}), 403
     
     tenants_db = load_tenants()
     
@@ -1171,6 +1184,14 @@ def get_tenant_quota(tenant_id):
 def delete_tenant(tenant_id):
     """Delete tenant"""
     global tenants_db
+    
+    # MK Jun 2026 (sec-review) — admin.tenants can be held by a tenant-scoped
+    # custom role, so scope to the caller's own tenant unless a real admin —
+    # otherwise one tenant could delete another tenant (cross-tenant authz bypass).
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
+            return jsonify({'error': 'Access denied to this tenant'}), 403
     
     if tenant_id == DEFAULT_TENANT_ID:
         return jsonify({'error': 'Cannot delete default tenant'}), 400
