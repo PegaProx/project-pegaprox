@@ -27,6 +27,38 @@ from pegaprox.api.helpers import check_cluster_access, safe_error, parse_pve_err
 bp = Blueprint('static_files', __name__)
 
 
+def _caller_can_delegate_permissions(requested_perms: list) -> tuple:
+    """Check if the caller has all permissions they're trying to delegate.
+    
+    Security fix: prevents privilege escalation where a user with admin.users
+    creates/updates accounts with permissions they don't possess themselves.
+    
+    Returns: (bool, error_message)
+    """
+    # Global admins can delegate any permission
+    if request.session.get('role') == ROLE_ADMIN:
+        return True, None
+    
+    # Get caller's effective permissions
+    caller_username = request.session.get('user', '')
+    try:
+        caller = get_db().get_user(caller_username)
+    except Exception:
+        caller = load_users().get(caller_username)
+    
+    if not caller:
+        return False, 'Caller user not found'
+    
+    caller_perms = get_user_permissions(caller)
+    
+    # Check each requested permission
+    for perm in requested_perms:
+        if perm not in caller_perms:
+            return False, f'Cannot delegate permission "{perm}" that you do not possess'
+    
+    return True, None
+
+
 # Pool Management API - NS Jan 2026
 # Create, edit, delete pools and manage pool members directly from PegaProx
 # ============================================================================
@@ -483,6 +515,11 @@ def set_user_perms(username):
             if p not in PERMISSIONS:
                 return jsonify({'error': f'Invalid permission: {p}'}), 400
         
+        # Security: verify caller can delegate the requested permissions
+        can_delegate, delegate_error = _caller_can_delegate_permissions(extra)
+        if not can_delegate:
+            return jsonify({'error': delegate_error}), 403
+        
         if 'tenant_permissions' not in users_db[username]:
             users_db[username]['tenant_permissions'] = {}
         
@@ -510,6 +547,11 @@ def set_user_perms(username):
         for p in extra + denied:
             if p not in PERMISSIONS:
                 return jsonify({'error': f'Invalid permission: {p}'}), 400
+        
+        # Security: verify caller can delegate the requested permissions (defense in depth)
+        can_delegate, delegate_error = _caller_can_delegate_permissions(extra)
+        if not can_delegate:
+            return jsonify({'error': delegate_error}), 403
         
         users_db[username]['permissions'] = extra
         users_db[username]['denied_permissions'] = denied

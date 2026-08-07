@@ -67,6 +67,38 @@ def _role_at_or_below_caller(target_role):
     return _ROLE_LEVEL.get(target_role, 2) <= caller_lvl
 
 
+def _caller_can_delegate_permissions(requested_perms: list) -> tuple:
+    """Check if the caller has all permissions they're trying to delegate.
+    
+    Security fix: prevents privilege escalation where a user with admin.users
+    creates/updates accounts with permissions they don't possess themselves.
+    
+    Returns: (bool, error_message)
+    """
+    # Global admins can delegate any permission
+    if request.session.get('role') == ROLE_ADMIN:
+        return True, None
+    
+    # Get caller's effective permissions
+    caller_username = request.session.get('user', '')
+    try:
+        caller = get_db().get_user(caller_username)
+    except Exception:
+        caller = load_users().get(caller_username)
+    
+    if not caller:
+        return False, 'Caller user not found'
+    
+    caller_perms = get_user_permissions(caller)
+    
+    # Check each requested permission
+    for perm in requested_perms:
+        if perm not in caller_perms:
+            return False, f'Cannot delegate permission "{perm}" that you do not possess'
+    
+    return True, None
+
+
 def _parse_avatar_data_url(value: str):
     """Validate avatar data URL and return (mime, base64-data)."""
     if not isinstance(value, str) or not value.startswith('data:'):
@@ -774,6 +806,11 @@ def create_user():
         if p not in PERMISSIONS:
             return jsonify({'error': f'Invalid permission: {p}'}), 400
     
+    # Security: verify caller can delegate the requested permissions
+    can_delegate, delegate_error = _caller_can_delegate_permissions(permissions)
+    if not can_delegate:
+        return jsonify({'error': delegate_error}), 403
+    
     users_db = load_users()
     
     if username in users_db:
@@ -899,6 +936,31 @@ def update_user(username):
 
     if 'user_folder' in data:
         user['user_folder'] = str(data['user_folder'] or '')
+
+    # Security: handle permissions and denied_permissions updates with delegation check
+    if 'permissions' in data:
+        new_perms = data['permissions']
+        if not isinstance(new_perms, list):
+            return jsonify({'error': 'permissions must be a list'}), 400
+        # Validate all permissions exist
+        for p in new_perms:
+            if p not in PERMISSIONS:
+                return jsonify({'error': f'Invalid permission: {p}'}), 400
+        # Verify caller can delegate these permissions
+        can_delegate, delegate_error = _caller_can_delegate_permissions(new_perms)
+        if not can_delegate:
+            return jsonify({'error': delegate_error}), 403
+        user['permissions'] = new_perms
+    
+    if 'denied_permissions' in data:
+        new_denied = data['denied_permissions']
+        if not isinstance(new_denied, list):
+            return jsonify({'error': 'denied_permissions must be a list'}), 400
+        # Validate all permissions exist
+        for p in new_denied:
+            if p not in PERMISSIONS:
+                return jsonify({'error': f'Invalid permission: {p}'}), 400
+        user['denied_permissions'] = new_denied
 
     # NS: Added tenant_id update support
     if 'tenant_id' in data:
