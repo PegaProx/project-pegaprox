@@ -8333,6 +8333,13 @@
             const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(localStorage.getItem('corp-sidebar-w')) || 224);
             // #189 - on phones the sidebar is an off-canvas drawer. Purely visual, CSS drives it.
             const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+            // Close the drawer whenever navigation actually lands somewhere. Watching the
+            // selection state covers every sidebar item at once - there are dozens of
+            // handlers and patching each one would rot the moment somebody adds another.
+            useEffect(() => { setMobileSidebarOpen(false); }, [
+                selectedGroup, selectedCluster, selectedPBS, selectedVMware,
+                selectedSidebarVm, selectedSidebarNode, selectedSidebarDatastore, activeTab,
+            ]);
             const sidebarResizing = useRef(false);
             const wsRef = useRef(null);
             const retryCount = useRef(0);  // unused but might need later
@@ -13810,7 +13817,7 @@
                                         {showGlobalSearch && globalSearchResults && (
                                             <>
                                                 <div className="fixed inset-0 z-40" onClick={() => setShowGlobalSearch(false)} />
-                                                <div className={`absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
+                                                <div className={`pp-search-results absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
                                                     {/* Header with count and prefix hints */}
                                                     <div className="p-3 border-b border-proxmox-border">
                                                         <div className="flex justify-between items-center">
@@ -14193,6 +14200,10 @@
                         <div className={`flex pp-main-row ${isCorporate ? 'gap-0' : 'gap-6'}`}>
                             {/* LW: Feb 2026 - sidebar, resizable in corporate */}
                             <div className={`pp-sidebar ${mobileSidebarOpen ? 'pp-sidebar-open' : ''} ${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}`} style={isCorporate ? {width: sidebarWidth + 'px'} : undefined}>
+                                {/* #189 - the drawer covers the header, so the header toggle cannot close it */}
+                                <button className="pp-drawer-close"
+                                    aria-label={t('close') || 'Close'}
+                                    onClick={() => setMobileSidebarOpen(false)}>&times;</button>
                                 <div className={`sticky top-6 ${isCorporate ? 'space-y-0.5 px-1 py-2' : 'space-y-3 pr-1'} pb-4`} style={{ maxHeight: 'calc(100vh - 3rem)', overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin', scrollbarColor: '#4a4a4a transparent' }}>
                                     {/* LW: view switcher (tree/pools/datastores) - horizontal icon toggle */}
                                     {isCorporate && (
