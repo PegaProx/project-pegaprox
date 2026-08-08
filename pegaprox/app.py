@@ -1194,6 +1194,12 @@ def main(debug_mode=False):
 
     # Start with Gevent if available
     use_gevent = os.environ.get('PEGAPROX_SERVER', 'auto').lower()
+    # Keep behaviour aligned with pegaprox_multi_cluster.py: PEGAPROX_NO_GEVENT
+    # should disable gevent entirely (monkey-patch + WSGI server selection).
+    no_gevent = os.environ.get('PEGAPROX_NO_GEVENT', '').lower() in ('1', 'true', 'yes')
+    if no_gevent and use_gevent in ('auto', 'gevent'):
+        print("PEGAPROX_NO_GEVENT is set - using Flask server path (gevent disabled)")
+        use_gevent = 'flask'
 
     if use_gevent == 'gevent' or (use_gevent == 'auto' and GEVENT_AVAILABLE):
         if GEVENT_AVAILABLE:
