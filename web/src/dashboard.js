@@ -163,7 +163,7 @@
             
             return (
                 <div 
-                    className={`fixed bottom-0 left-0 right-0 z-40 transition-all ${isResizing ? '' : 'duration-300'}`}
+                    className={`pp-taskbar fixed bottom-0 left-0 right-0 z-40 transition-all ${isResizing ? '' : 'duration-300'}`}
                     style={{ height: expanded ? `${height}px` : '40px' }}
                 >
                     {/* NS: Resize Handle - only visible when expanded */}
@@ -8331,6 +8331,15 @@
             const [warningBannerDismissed, setWarningBannerDismissed] = useState(false);
             // LW: Feb 2026 - corporate sidebar resize
             const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(localStorage.getItem('corp-sidebar-w')) || 224);
+            // #189 - on phones the sidebar is an off-canvas drawer. Purely visual, CSS drives it.
+            const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+            // Close the drawer whenever navigation actually lands somewhere. Watching the
+            // selection state covers every sidebar item at once - there are dozens of
+            // handlers and patching each one would rot the moment somebody adds another.
+            useEffect(() => { setMobileSidebarOpen(false); }, [
+                selectedGroup, selectedCluster, selectedPBS, selectedVMware,
+                selectedSidebarVm, selectedSidebarNode, selectedSidebarDatastore, activeTab,
+            ]);
             const sidebarResizing = useRef(false);
             const wsRef = useRef(null);
             const retryCount = useRef(0);  // unused but might need later
@@ -13695,9 +13704,17 @@
                     {/* LW: Mar 2026 - z-50 so search dropdown renders above content area (#corp-search-overlap) */}
                     <header className={`sticky top-0 z-50 border-b border-proxmox-border ${isCorporate ? 'bg-proxmox-darker' : 'bg-proxmox-dark/80 backdrop-blur-xl'}`}>
                         <div className={`${isCorporate ? 'max-w-full px-3 py-1' : 'max-w-[1600px] mx-auto px-6 py-4'}`}>
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between pp-header-row">
                                 {/* MK: Click logo to return to All Clusters Overview */}
                                 <div className="flex items-center gap-3">
+                                {/* #189 - drawer toggle. In the header so it is always reachable and
+                                    can never paint on top of the content. Hidden above 820px. */}
+                                <button className="pp-drawer-toggle"
+                                    aria-label={t('toggleNavigation') || 'Toggle navigation'}
+                                    aria-expanded={mobileSidebarOpen}
+                                    onClick={() => setMobileSidebarOpen(o => !o)}>
+                                    <span /><span /><span />
+                                </button>
                                 <button
                                     onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); }}
                                     className={`flex items-center ${isCorporate ? 'gap-2' : 'gap-4'} hover:opacity-80 transition-opacity`}
@@ -13754,9 +13771,9 @@
                                     </div>
                                 )}
                                 </div>
-                                <div className={`flex items-center ${isCorporate ? 'gap-2 justify-end' : 'gap-3'}`}>
+                                <div className={`flex items-center pp-header-actions ${isCorporate ? 'gap-2 justify-end' : 'gap-3'}`}>
                                     {/* NS: Global Search - now with tag search + ctrl+k, LW: fixed width in corporate */}
-                                    <div className="relative">
+                                    <div className="relative pp-header-search">
                                         <div className={`flex items-center ${isCorporate ? 'bg-[#17242b]' : 'bg-proxmox-dark'} border border-proxmox-border rounded-lg overflow-hidden focus-within:border-proxmox-orange/50 transition-colors`}>
                                             <Icons.Search className="w-4 h-4 ml-3 text-gray-500 flex-shrink-0" />
                                             <input
@@ -13800,7 +13817,7 @@
                                         {showGlobalSearch && globalSearchResults && (
                                             <>
                                                 <div className="fixed inset-0 z-40" onClick={() => setShowGlobalSearch(false)} />
-                                                <div className={`absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
+                                                <div className={`pp-search-results absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
                                                     {/* Header with count and prefix hints */}
                                                     <div className="p-3 border-b border-proxmox-border">
                                                         <div className="flex justify-between items-center">
@@ -14176,10 +14193,17 @@
                         );
                     })()}
 
-                    <div className={`relative ${isCorporate ? 'max-w-full mx-0 px-0 py-0' : 'max-w-[1600px] mx-auto px-6 py-6'}`}>
-                        <div className={`flex ${isCorporate ? 'gap-0' : 'gap-6'}`}>
+                    <div className={`relative pp-main-wrap ${isCorporate ? 'max-w-full mx-0 px-0 py-0' : 'max-w-[1600px] mx-auto px-6 py-6'}`}>
+                        {/* #189 - drawer backdrop. The toggle itself lives in the header. */}
+                        {/* ponytail: backdrop tap closes it. Auto-close on picking a VM needs a handler in the tree - add if it annoys. */}
+                        {mobileSidebarOpen && <div className="pp-drawer-backdrop" onClick={() => setMobileSidebarOpen(false)} />}
+                        <div className={`flex pp-main-row ${isCorporate ? 'gap-0' : 'gap-6'}`}>
                             {/* LW: Feb 2026 - sidebar, resizable in corporate */}
-                            <div className={`${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}`} style={isCorporate ? {width: sidebarWidth + 'px'} : undefined}>
+                            <div className={`pp-sidebar ${mobileSidebarOpen ? 'pp-sidebar-open' : ''} ${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}`} style={isCorporate ? {width: sidebarWidth + 'px'} : undefined}>
+                                {/* #189 - the drawer covers the header, so the header toggle cannot close it */}
+                                <button className="pp-drawer-close"
+                                    aria-label={t('close') || 'Close'}
+                                    onClick={() => setMobileSidebarOpen(false)}>&times;</button>
                                 <div className={`sticky top-6 ${isCorporate ? 'space-y-0.5 px-1 py-2' : 'space-y-3 pr-1'} pb-4`} style={{ maxHeight: 'calc(100vh - 3rem)', overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin', scrollbarColor: '#4a4a4a transparent' }}>
                                     {/* LW: view switcher (tree/pools/datastores) - horizontal icon toggle */}
                                     {isCorporate && (
