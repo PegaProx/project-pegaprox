@@ -115,14 +115,24 @@ jobs:
   build-lxc:
     needs: prepare
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Registers the kernel-level emulators used both by distrobuilder and by
+      # the arm64 LXC smoke-test container.
+      - name: QEMU einrichten
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Tools installieren
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            debootstrap rsync systemd-container curl xz-utils
+            debootstrap rsync systemd-container curl xz-utils qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-aarch64 || true
           sudo snap install distrobuilder --classic
           export PATH="$PATH:/snap/bin"
           distrobuilder --version
@@ -135,7 +145,7 @@ jobs:
             distribution: debian
             release: ${DEBIAN_RELEASE}
             description: PegaProx LXC Appliance
-            architecture: amd64
+            architecture: ${{ matrix.arch }}
 
           source:
             downloader: debootstrap
@@ -157,7 +167,7 @@ jobs:
                     lxc.include = LXC_TEMPLATE_CONFIG/userns.conf
                 - type: all
                   content: |-
-                    lxc.arch = x86_64
+                    lxc.arch = ${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }}
 
           packages:
             manager: apt
@@ -181,6 +191,12 @@ jobs:
               action: |-
                 #!/bin/sh
                 set -eu
+                apt-get update
+                apt-get -y install wget
+                wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
+                wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
+                dpkg -i python3-flask-sock_0.7.1_all.deb
+                dpkg -i python3-xenapi_26.8.1_all.deb
                 install -d -m 0755 /etc/apt/keyrings
                 curl -fsSL https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key \\
                   -o /etc/apt/keyrings/gyptazy.asc
@@ -201,20 +217,31 @@ jobs:
           export PATH="$PATH:/snap/bin"
           sudo --preserve-env=PATH "$(command -v distrobuilder)" \
             build-lxc packaging/lxc/pegaprox-lxc.yaml \
-            -o image.release=${DEBIAN_RELEASE}
+            -o image.release=${DEBIAN_RELEASE} \
+            -o image.architecture=${{ matrix.arch }}
           ls -lh *.tar.xz
 
       - name: Smoke-Test (Container starten + HTTP-Check)
         run: |
           set -e
-          mkdir -p /tmp/ct/rootfs
-          sudo tar -xpJf rootfs.tar.xz -C /tmp/ct/rootfs
-
-          sudo systemd-nspawn -D /tmp/ct/rootfs \
-            --machine pegaprox-test \
-            --boot \
-            --bind-ro=/etc/resolv.conf \
-            > /tmp/nspawn.log 2>&1 &
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            mkdir -p /tmp/ct/rootfs
+            sudo tar -xpJf rootfs.tar.xz -C /tmp/ct/rootfs
+            sudo systemd-nspawn -D /tmp/ct/rootfs \
+              --machine pegaprox-test \
+              --boot \
+              --bind-ro=/etc/resolv.conf \
+              > /tmp/nspawn.log 2>&1 &
+          else
+            sudo docker import --platform linux/arm64 rootfs.tar.xz pegaprox-lxc-smoke:arm64
+            sudo docker run -d \
+            --name pegaprox-test \
+            --platform linux/arm64 \
+            --privileged \
+            -p ${PVE_PORT}:${PVE_PORT} \
+            pegaprox-lxc-smoke:arm64 \
+            /usr/bin/pegaprox
+          fi
 
           echo "Warte auf PegaProx auf Port ${PVE_PORT}..."
           OK=0
@@ -226,14 +253,19 @@ jobs:
             sleep 5
           done
 
-          echo "----- Letzte Zeilen des Container-Logs -----"
-          tail -n 40 /tmp/nspawn.log || true
-          echo "----- Lauschende Ports auf dem Host -----"
-          sudo ss -tlnp || true
-
-          sudo machinectl poweroff pegaprox-test 2>/dev/null || true
-          sleep 3
-          sudo machinectl terminate pegaprox-test 2>/dev/null || true
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            echo "----- Letzte Zeilen des Container-Logs -----"
+            tail -n 40 /tmp/nspawn.log || true
+            echo "----- Lauschende Ports auf dem Host -----"
+            sudo ss -tlnp || true
+            sudo machinectl poweroff pegaprox-test 2>/dev/null || true
+            sleep 3
+            sudo machinectl terminate pegaprox-test 2>/dev/null || true
+          else
+            echo "----- Container-Logs -----"
+            sudo docker logs pegaprox-test || true
+            sudo docker rm -f pegaprox-test 2>/dev/null || true
+          fi
 
           [ "$OK" -eq 1 ] || { echo "::error::PegaProx kam im LXC nicht hoch"; exit 1; }
           echo "LXC Smoke-Test erfolgreich."
@@ -241,17 +273,17 @@ jobs:
       - name: Template umbenennen
         run: |
           mv rootfs.tar.xz \
-            "pegaprox-${{ needs.prepare.outputs.version }}-lxc-amd64.tar.xz"
+            "pegaprox-${{ needs.prepare.outputs.version }}-lxc-${{ matrix.arch }}.tar.xz"
           # NS 2026-06-05 — also ship a stable -latest- name so the GitHub
           # releases/latest/download/ URL always resolves to the newest LXC
           # template (same as Docker's :latest). Byte-identical copy.
-          cp "pegaprox-${{ needs.prepare.outputs.version }}-lxc-amd64.tar.xz" \
-             "pegaprox-latest-lxc-amd64.tar.xz"
+          cp "pegaprox-${{ needs.prepare.outputs.version }}-lxc-${{ matrix.arch }}.tar.xz" \
+             "pegaprox-latest-lxc-${{ matrix.arch }}.tar.xz"
 
       - name: Artefakt sichern
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: lxc-template
+          name: lxc-template-${{ matrix.arch }}
           path: pegaprox-*lxc*.tar.xz
           retention-days: 7
 
@@ -261,6 +293,10 @@ jobs:
   build-vm:
     needs: prepare
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -268,7 +304,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            qemu-utils qemu-system-x86 cloud-image-utils curl
+            qemu-utils qemu-system-x86 qemu-system-arm qemu-efi-aarch64 \
+            cloud-image-utils curl
 
       - name: Debian Cloud-Image laden + Checksum verifizieren
         run: |
@@ -281,7 +318,7 @@ jobs:
           # alongside the image and fail the build if the hash doesn't match.
           set -euo pipefail
           BASE_URL="https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/latest"
-          IMG_NAME="debian-13-genericcloud-amd64.qcow2"
+          IMG_NAME="debian-13-genericcloud-${{ matrix.arch }}.qcow2"
 
           wget -q -O pegaprox.qcow2 "${BASE_URL}/${IMG_NAME}"
           wget -q -O SHA512SUMS     "${BASE_URL}/SHA512SUMS"
@@ -325,6 +362,10 @@ jobs:
 
           # --- Basis-Tools + PegaProx ---
           apt-get update
+          wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
+          wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
+          dpkg -i python3-flask-sock_0.7.1_all.deb
+          dpkg -i python3-xenapi_26.8.1_all.deb
           apt-get -y install sudo sqlite3 ca-certificates curl
           apt-get -y install pegaprox
           systemctl enable pegaprox || true
@@ -717,22 +758,33 @@ jobs:
           echo "instance-id: iid-pegaprox" > meta-data
           cloud-localds seed.iso user-data meta-data
 
-          qemu-system-x86_64 \
-            -m 2048 -smp 2 \
-            -drive file=pegaprox.qcow2,format=qcow2,if=virtio \
-            -drive file=seed.iso,format=raw,if=virtio \
-            -netdev user,id=n0,hostfwd=tcp::${PVE_PORT}-:${PVE_PORT} \
-            -device virtio-net-pci,netdev=n0 \
-            -display none -daemonize -pidfile qemu.pid
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            qemu-system-x86_64 \
+              -m 2048 -smp 2 \
+              -drive file=pegaprox.qcow2,format=qcow2,if=virtio \
+              -drive file=seed.iso,format=raw,if=virtio \
+              -netdev user,id=n0,hostfwd=tcp::${PVE_PORT}-:${PVE_PORT} \
+              -device virtio-net-pci,netdev=n0 \
+              -display none -daemonize -pidfile qemu.pid
+          else
+            qemu-system-aarch64 \
+              -machine virt -cpu cortex-a72 -m 2048 -smp 2 \
+              -bios /usr/share/AAVMF/AAVMF_CODE.fd \
+              -drive file=pegaprox.qcow2,format=qcow2,if=virtio \
+              -drive file=seed.iso,format=raw,if=virtio \
+              -netdev user,id=n0,hostfwd=tcp::${PVE_PORT}-:${PVE_PORT} \
+              -device virtio-net-device,netdev=n0 \
+              -display none -daemonize -pidfile qemu.pid
+          fi
 
           echo "Warte auf PegaProx in der VM (First-Boot-Install, max. 8 min)..."
           OK=0
-          for i in $(seq 1 96); do
+          for i in $(seq 1 150); do
             if curl -kfs "https://localhost:${PVE_PORT}/" >/dev/null 2>&1 \
                || curl -fs "http://localhost:${PVE_PORT}/" >/dev/null 2>&1; then
               OK=1; break
             fi
-            sleep 5
+            sleep 10
           done
           sudo kill "$(cat qemu.pid)" 2>/dev/null || true
           [ "$OK" -eq 1 ] || { echo "::error::PegaProx kam in der VM nicht hoch"; exit 1; }
@@ -741,14 +793,14 @@ jobs:
       - name: Image komprimieren + umbenennen
         run: |
           qemu-img convert -O qcow2 -c pegaprox.qcow2 \
-            "pegaprox-${{ needs.prepare.outputs.version }}-vm-amd64.qcow2"
-          cp "pegaprox-${{ needs.prepare.outputs.version }}-vm-amd64.qcow2" \
-             "pegaprox-vm-amd64.qcow2"
+            "pegaprox-${{ needs.prepare.outputs.version }}-vm-${{ matrix.arch }}.qcow2"
+          cp "pegaprox-${{ needs.prepare.outputs.version }}-vm-${{ matrix.arch }}.qcow2" \
+             "pegaprox-vm-${{ matrix.arch }}.qcow2"
 
       - name: Artefakt sichern
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: vm-image
+          name: vm-image-${{ matrix.arch }}
           path: pegaprox-*vm*.qcow2
           retention-days: 7
 
