@@ -3476,6 +3476,122 @@
         .cloud-clearfilters { background:none; border:none; color:var(--cloud-accent); cursor:pointer; font-size:0.78rem; }
         .cloud-clearfilters:hover { text-decoration:underline; }
         .cloud-empty-action { margin-top:var(--space-sm); }
+
+        /* ============================================================
+           #189 - mobile layer. Desktop is untouched: the drawer parts are
+           hidden until the viewport drops to phone size.
+           ============================================================ */
+        .pp-drawer-toggle, .pp-drawer-backdrop, .pp-drawer-close { display: none; }
+
+        @media (max-width: 820px) {
+            /* The sidebar took 288px of a 412px screen. Make it slide over instead. */
+            .pp-sidebar {
+                position: fixed !important;
+                top: 0; left: 0; bottom: 0;
+                width: min(85vw, 300px) !important;
+                z-index: 1200;
+                transform: translateX(-100%);
+                transition: transform .2s ease;
+                overflow-y: auto;
+                padding-top: 48px;
+                background: var(--corp-surface-1, #16232b);
+                border-right: 1px solid var(--corp-border-medium, #344955);
+            }
+            .pp-sidebar.pp-sidebar-open { transform: translateX(0); }
+            .pp-sidebar { position: fixed; }  /* anchor for .pp-drawer-close */
+            /* inner pane has its own sticky+max-height for desktop - let the drawer scroll instead */
+            .pp-sidebar > div {
+                position: static !important;
+                max-height: none !important;
+                overflow: visible !important;
+            }
+
+            .pp-drawer-backdrop {
+                display: block;
+                position: fixed; inset: 0; z-index: 1100;
+                background: rgba(0,0,0,.5);
+            }
+            /* sits inside the sticky header as a normal flex child - no z-index games,
+               so it cannot paint over the header or the open drawer */
+            .pp-drawer-toggle {
+                display: flex;
+                flex-direction: column; justify-content: center; gap: 4px;
+                width: 40px; height: 36px; padding: 0 8px;
+                flex: 0 0 auto;
+                border: 1px solid var(--corp-border-medium, #344955);
+                border-radius: 4px;
+                background: var(--corp-surface-2, #1b2a32);
+                cursor: pointer;
+            }
+            .pp-drawer-toggle span { display: block; height: 2px; width: 100%; background: var(--color-text, #e9ecef); }
+
+            /* content gets the whole width back */
+            .pp-main-row { flex-direction: column !important; gap: 0 !important; }
+            .pp-main-wrap { padding-left: 8px !important; padding-right: 8px !important; }
+
+            /* The Tasks bar is fixed to the bottom, so it covered a strip of content at
+               every scroll position. On a phone it just lives at the end of the page. */
+            .pp-taskbar { position: static !important; height: auto !important; }
+
+            /* Belt and braces for the white strip on the right. `clip` instead of `hidden`
+               on purpose - `hidden` makes this a scroll box and kills the sticky header. */
+            html, body { overflow-x: clip; }
+
+            /* Header was one non-wrapping row, so the search box landed on top of the
+               title and pushed the page wider than the screen. Give it its own line.
+               No overflow-x:hidden anywhere - it turns the ancestor into a scroll box
+               and kills the sticky header. */
+            .pp-header-row { flex-wrap: wrap; row-gap: 8px; }
+            .pp-header-row > * { min-width: 0; max-width: 100%; }
+            .pp-header-actions { width: 100%; flex-wrap: wrap; row-gap: 8px; }
+            /* z-index so the results dropdown stacks above the flag/user row, which now
+               sits underneath it because the header wraps */
+            .pp-header-search { flex: 1 1 100%; position: relative; z-index: 60; }
+            .pp-header-search input { width: 100% !important; }
+
+            /* Wide tables scroll sideways instead of being crushed. `display: block` is
+               what gives a table its own scroll box - without it `overflow-x` is ignored.
+               Deliberately no `white-space: nowrap`: that would stop cells wrapping in the
+               property-grid tables (VM details and friends), which is worse than the
+               crushing it fixes. Wrapping first, scroll only when a row really is too wide. */
+            table { display: block; max-width: 100%; overflow-x: auto; }
+
+            /* Popups fit the phone. Cap the size, do not force a width - a modal can have
+               more than one direct child and forcing 100% would stretch all of them. */
+            .modal-backdrop, .corp-vm-modal-overlay { padding: 8px !important; }
+            .modal-backdrop > *, .corp-vm-modal-overlay > * {
+                max-width: 100% !important;
+                max-height: 88vh !important; overflow-y: auto;
+            }
+
+            /* The global-search dropdown is a fixed w-[28rem] = 448px, wider than a 412px
+               phone. With overflow-x: clip on the page that overflow is unreachable.
+               Sized off the search field, not the viewport - it is absolutely positioned
+               inside .pp-header-search, so viewport math ignores the header padding. */
+            .pp-search-results {
+                width: 100% !important;
+                max-width: 100% !important;
+                left: 0 !important; right: auto !important;
+            }
+
+            /* Close control inside the drawer. The drawer sits above the header, so the
+               header toggle is covered while it is open - this is how you shut it. */
+            .pp-drawer-close {
+                display: flex; align-items: center; justify-content: center;
+                position: absolute; top: 8px; right: 8px;
+                width: 32px; height: 32px;
+                font-size: 20px; line-height: 1;
+                border: 1px solid var(--corp-border-medium, #344955);
+                border-radius: 4px;
+                background: var(--corp-surface-2, #1b2a32);
+                color: var(--color-text, #e9ecef);
+                cursor: pointer;
+            }
+
+            /* tab labels scroll instead of truncating to "All Clus..." */
+            .corp-tab-strip { overflow-x: auto; flex-wrap: nowrap; }
+            .corp-tab-strip button { flex: 0 0 auto; white-space: nowrap; }
+        }
     </style>
 </head>
 <body class="dark notranslate">
