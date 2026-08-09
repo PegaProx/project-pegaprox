@@ -363,6 +363,7 @@ Password: admin
 - Per-IP rate limiting on login + every authenticated endpoint.
 - Input sanitization, CSRF Origin matching, RBAC enforced server-side on every route.
 - Auto-encryption on first boot — operators can opt out with `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` if they want to take their own pre-encryption backup first.
+- **Configuration Vault** → Versioned, AES-256-GCM-encrypted off-site configuration backups to WebDAV or S3-compatible storage. See [`docs/CONFIG_VAULT.md`](docs/CONFIG_VAULT.md).
 
 ## 📖 Documentation
 

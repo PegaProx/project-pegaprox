@@ -1378,6 +1378,361 @@
             );
         }
 
+        // Configuration Vault: versioned, encrypted one-way sync to WebDAV/S3.
+        // Restores intentionally remain manual and dry-run-first below.
+        function ConfigVaultPanel({ addToast }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const [status, setStatus] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [tab, setTab] = useState('providers');
+            const [busy, setBusy] = useState('');
+            const [keyModal, setKeyModal] = useState(false);
+            const [providerModal, setProviderModal] = useState(null);
+            const [keyForm, setKeyForm] = useState({ user_password: '', recovery_key: '', recovery_key_confirmation: '' });
+            const [providerForm, setProviderForm] = useState({});
+
+            const loadStatus = async (showLoader = false) => {
+                if (showLoader) setLoading(true);
+                try {
+                    const response = await fetch(`${API_URL}/config/vault`, {
+                        credentials: 'include', headers: getAuthHeaders()
+                    });
+                    const body = await response.json();
+                    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+                    setStatus(body);
+                } catch (error) {
+                    if (showLoader) addToast(error.message, 'error');
+                } finally {
+                    if (showLoader) setLoading(false);
+                }
+            };
+
+            useEffect(() => {
+                loadStatus(true);
+                const timer = setInterval(() => loadStatus(false), 10000);
+                return () => clearInterval(timer);
+            }, []);
+
+            const requestJson = async (url, options = {}) => {
+                const response = await fetch(url, {
+                    credentials: 'include',
+                    ...options,
+                    headers: {
+                        ...getAuthHeaders(),
+                        'Content-Type': 'application/json',
+                        ...(options.headers || {})
+                    }
+                });
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+                return body;
+            };
+
+            const saveKey = async () => {
+                if (keyForm.recovery_key.length < 12) {
+                    addToast(t('vaultKeyMin12') || 'Recovery key must be at least 12 characters', 'error');
+                    return;
+                }
+                if (keyForm.recovery_key !== keyForm.recovery_key_confirmation) {
+                    addToast(t('passwordsNoMatch') || 'Passwords do not match', 'error');
+                    return;
+                }
+                setBusy('key');
+                try {
+                    await requestJson(`${API_URL}/config/vault/key`, {
+                        method: 'PUT', body: JSON.stringify(keyForm)
+                    });
+                    addToast(t('vaultKeySaved') || 'Vault recovery key saved', 'success');
+                    setKeyModal(false);
+                    setKeyForm({ user_password: '', recovery_key: '', recovery_key_confirmation: '' });
+                    await loadStatus();
+                } catch (error) {
+                    addToast(error.message, 'error');
+                } finally {
+                    setBusy('');
+                }
+            };
+
+            const blankProvider = (type) => ({
+                name: type === 'webdav' ? 'WebDAV' : 'S3 Compatible Storage',
+                enabled: true,
+                schedule_enabled: false,
+                interval_hours: 24,
+                retention_count: 10,
+                include_secrets: false,
+                include_users: true,
+                include_audit: false,
+                user_password: '',
+                settings: type === 'webdav' ? {
+                    url: '', username: '', password: '', verify_tls: true,
+                    allow_private_network: false, allow_insecure_http: false
+                } : {
+                    endpoint_url: '', bucket: '', region: 'us-east-1', prefix: 'pegaprox',
+                    access_key_id: '', secret_access_key: '', session_token: '',
+                    path_style: false, verify_tls: true,
+                    allow_private_network: false, allow_insecure_http: false
+                }
+            });
+
+            const openProvider = (type, provider) => {
+                const base = blankProvider(type);
+                setProviderForm(provider ? {
+                    ...base,
+                    ...provider,
+                    user_password: '',
+                    settings: { ...base.settings, ...(provider.settings || {}) }
+                } : base);
+                setProviderModal(type);
+            };
+
+            const updateProviderSetting = (key, value) => {
+                setProviderForm(current => ({
+                    ...current, settings: { ...(current.settings || {}), [key]: value }
+                }));
+            };
+
+            const saveProvider = async () => {
+                const type = providerModal;
+                setBusy(`save-${type}`);
+                try {
+                    await requestJson(`${API_URL}/config/vault/providers/${type}`, {
+                        method: 'PUT', body: JSON.stringify(providerForm)
+                    });
+                    addToast(t('vaultProviderSaved') || 'Cloud provider saved', 'success');
+                    setProviderModal(null);
+                    await loadStatus();
+                } catch (error) {
+                    addToast(error.message, 'error');
+                } finally {
+                    setBusy('');
+                }
+            };
+
+            const testProvider = async (type) => {
+                setBusy(`test-${type}`);
+                try {
+                    await requestJson(`${API_URL}/config/vault/providers/${type}/test`, {
+                        method: 'POST', body: '{}'
+                    });
+                    addToast(t('vaultConnectionOk') || 'Connection successful', 'success');
+                } catch (error) {
+                    addToast(error.message, 'error');
+                } finally {
+                    setBusy('');
+                }
+            };
+
+            const syncProvider = async (type) => {
+                if (!status?.vault_ready) {
+                    setKeyModal(true);
+                    return;
+                }
+                setBusy(`sync-${type}`);
+                try {
+                    await requestJson(`${API_URL}/config/vault/providers/${type}/sync`, {
+                        method: 'POST', body: '{}'
+                    });
+                    addToast(t('vaultSyncQueued') || 'Encrypted backup sync started', 'info');
+                    setTimeout(() => loadStatus(false), 800);
+                } catch (error) {
+                    addToast(error.message, 'error');
+                } finally {
+                    setBusy('');
+                }
+            };
+
+            const removeProvider = async () => {
+                const type = providerModal;
+                if (!window.confirm(t('vaultDisconnectConfirm') || 'Disconnect this provider? Cloud backups will not be deleted.')) return;
+                setBusy(`remove-${type}`);
+                try {
+                    await requestJson(`${API_URL}/config/vault/providers/${type}`, {
+                        method: 'DELETE', body: JSON.stringify({ user_password: providerForm.user_password })
+                    });
+                    addToast(t('vaultProviderRemoved') || 'Provider disconnected', 'success');
+                    setProviderModal(null);
+                    await loadStatus();
+                } catch (error) {
+                    addToast(error.message, 'error');
+                } finally {
+                    setBusy('');
+                }
+            };
+
+            const providerDefs = [
+                { type: 'webdav', name: 'WebDAV', icon: Icons.Server, color: 'blue' },
+                { type: 's3', name: t('vaultS3Compatible') || 'S3 Compatible Storage', icon: Icons.Database, color: 'purple' }
+            ];
+            const providers = status?.providers || [];
+            const formatBytes = (bytes) => {
+                if (!bytes) return '—';
+                if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+                return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+            };
+
+            if (loading) {
+                return <div className="py-8 text-center text-gray-400"><span className="inline-flex animate-spin"><Icons.Loader /></span></div>;
+            }
+
+            return (
+                <div className="space-y-4 mb-6">
+                    <div className={`p-4 rounded-xl border flex flex-col md:flex-row md:items-center justify-between gap-4 ${status?.vault_ready ? 'bg-green-500/10 border-green-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}>
+                        <div className="flex items-center gap-3">
+                            <div className={`w-11 h-11 rounded-full flex items-center justify-center ${status?.vault_ready ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                                <Icons.Shield className="w-6 h-6" />
+                            </div>
+                            <div>
+                                <div className="font-semibold text-white">
+                                    {status?.vault_ready ? (t('vaultReady') || 'Configuration vault ready') : (t('vaultNeedsKey') || 'Set a recovery key to enable cloud sync')}
+                                    <span className={`inline-block ml-2 w-2 h-2 rounded-full ${status?.vault_ready ? 'bg-green-400' : 'bg-yellow-400'}`} />
+                                </div>
+                                <div className="text-sm text-gray-400">
+                                    {(t('vaultProvidersConnected') || '{count} provider(s) connected').replace('{count}', status?.connected_count || 0)}
+                                    {status?.key_id && <span className="ml-2 font-mono text-xs">Key {status.key_id}</span>}
+                                </div>
+                            </div>
+                        </div>
+                        <button onClick={() => setKeyModal(true)} className="flex items-center justify-center gap-2 px-4 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-sm text-gray-200 hover:text-white">
+                            <Icons.Key className="w-4 h-4" /> {status?.vault_ready ? (t('vaultChangeKey') || 'Change recovery key') : (t('vaultSetKey') || 'Set recovery key')}
+                        </button>
+                    </div>
+
+                    <div className="flex p-1 bg-proxmox-darker rounded-lg">
+                        <button onClick={() => setTab('providers')} className={`flex-1 px-3 py-2 rounded-md text-sm ${tab === 'providers' ? 'bg-proxmox-card text-white shadow' : 'text-gray-400'}`}>
+                            {t('vaultCloudProviders') || 'Cloud providers'}
+                        </button>
+                        <button onClick={() => setTab('history')} className={`flex-1 px-3 py-2 rounded-md text-sm ${tab === 'history' ? 'bg-proxmox-card text-white shadow' : 'text-gray-400'}`}>
+                            {t('vaultSyncHistory') || 'Sync history'}
+                        </button>
+                    </div>
+
+                    {tab === 'providers' ? (
+                        <div className="space-y-3">
+                            {providerDefs.map(def => {
+                                const provider = providers.find(item => item.type === def.type);
+                                const ProviderIcon = def.icon;
+                                const syncing = provider?.syncing || busy === `sync-${def.type}`;
+                                return (
+                                    <div key={def.type} className="p-4 bg-proxmox-darker border border-proxmox-border rounded-xl flex flex-col md:flex-row md:items-center gap-4">
+                                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${def.type === 's3' ? 'bg-purple-500/15 text-purple-400' : 'bg-blue-500/15 text-blue-400'}`}>
+                                            <ProviderIcon className="w-6 h-6" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="font-medium text-white flex items-center gap-2">
+                                                {provider?.name || def.name}
+                                                <span className={`w-2 h-2 rounded-full ${provider ? (provider.last_status === 'error' ? 'bg-red-400' : 'bg-green-400') : 'bg-gray-500'}`} />
+                                            </div>
+                                            <div className="text-sm text-gray-400 truncate">
+                                                {!provider ? (t('notConnected') || 'Not connected') : provider.last_sync ? `${t('lastSync') || 'Last sync'}: ${new Date(provider.last_sync).toLocaleString()}` : (t('vaultNeverSynced') || 'Connected · never synced')}
+                                            </div>
+                                            {provider?.last_error && <div className="text-xs text-red-400 truncate" title={provider.last_error}>{provider.last_error}</div>}
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {provider ? <>
+                                                <button disabled={!!busy || syncing} onClick={() => testProvider(def.type)} className="px-3 py-2 rounded-lg text-sm border border-proxmox-border text-gray-300 hover:text-white disabled:opacity-50">
+                                                    {busy === `test-${def.type}` ? '…' : (t('test') || 'Test')}
+                                                </button>
+                                                <button disabled={!!busy || syncing} onClick={() => syncProvider(def.type)} className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-green-500/20 text-green-400 hover:bg-green-500/30 disabled:opacity-50">
+                                                    <span className={`inline-flex ${syncing ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span> {t('sync') || 'Sync'}
+                                                </button>
+                                                <button onClick={() => openProvider(def.type, provider)} className="px-3 py-2 rounded-lg text-sm bg-proxmox-card text-gray-300 hover:text-white">
+                                                    {t('edit') || 'Edit'}
+                                                </button>
+                                            </> :
+                                                <button onClick={() => openProvider(def.type, null)} className="flex items-center gap-2 px-5 py-2 rounded-lg text-sm bg-purple-500/20 text-purple-300 hover:bg-purple-500/30">
+                                                    <Icons.Cloud className="w-4 h-4" /> {t('connect') || 'Connect'}
+                                                </button>
+                                            }
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                            <p className="text-xs text-gray-500 px-1">{t('vaultOneWayNote') || 'One-way encrypted backups only. Restores are always manual and dry-run-first.'}</p>
+                        </div>
+                    ) : (
+                        <div className="overflow-x-auto border border-proxmox-border rounded-xl">
+                            <table className="w-full text-sm">
+                                <thead className="bg-proxmox-darker text-gray-400"><tr>
+                                    <th className="text-left px-4 py-3">{t('provider') || 'Provider'}</th>
+                                    <th className="text-left px-4 py-3">{t('status') || 'Status'}</th>
+                                    <th className="text-left px-4 py-3">{t('date') || 'Date'}</th>
+                                    <th className="text-left px-4 py-3">{t('size') || 'Size'}</th>
+                                    <th className="text-left px-4 py-3">{t('details') || 'Details'}</th>
+                                </tr></thead>
+                                <tbody className="divide-y divide-proxmox-border">
+                                    {(status?.history || []).map(item => <tr key={item.id}>
+                                        <td className="px-4 py-3 text-white">{item.provider_name || item.provider_type || item.provider_id}</td>
+                                        <td className={`px-4 py-3 ${item.status === 'ok' ? 'text-green-400' : item.status === 'running' ? 'text-blue-400' : 'text-red-400'}`}>{item.status}</td>
+                                        <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{new Date(item.started_at).toLocaleString()}</td>
+                                        <td className="px-4 py-3 text-gray-400">{formatBytes(item.size_bytes)}</td>
+                                        <td className="px-4 py-3 text-gray-400 max-w-xs truncate" title={item.error || item.object_key}>{item.error || item.object_key || '—'}</td>
+                                    </tr>)}
+                                    {(status?.history || []).length === 0 && <tr><td colSpan="5" className="px-4 py-8 text-center text-gray-500">{t('vaultNoHistory') || 'No sync history yet'}</td></tr>}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+
+                    {keyModal && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                            <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 max-w-md w-full mx-4 space-y-4">
+                                <div className="flex justify-between"><h3 className="font-semibold text-white">{t('vaultRecoveryKey') || 'Vault recovery key'}</h3><button onClick={() => setKeyModal(false)} className="text-gray-400">×</button></div>
+                                <p className="text-sm text-gray-400">{t('vaultKeyWarning') || 'Store this key outside PegaProx. Changing it affects future backups only; old versions keep their original key.'}</p>
+                                <input type="password" value={keyForm.user_password} onChange={e => setKeyForm({...keyForm, user_password: e.target.value})} placeholder={t('enterYourPassword') || 'Account password'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                <input type="password" value={keyForm.recovery_key} onChange={e => setKeyForm({...keyForm, recovery_key: e.target.value})} placeholder={t('vaultRecoveryKey') || 'Recovery key (min. 12 characters)'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                <input type="password" value={keyForm.recovery_key_confirmation} onChange={e => setKeyForm({...keyForm, recovery_key_confirmation: e.target.value})} placeholder={t('vaultConfirmKey') || 'Confirm recovery key'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                <div className="flex gap-3"><button onClick={() => setKeyModal(false)} className="flex-1 px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button><button disabled={busy === 'key'} onClick={saveKey} className="flex-1 px-4 py-2 bg-green-600 rounded-lg text-white disabled:opacity-50">{busy === 'key' ? (t('saving') || 'Saving...') : (t('save') || 'Save')}</button></div>
+                            </div>
+                        </div>
+                    )}
+
+                    {providerModal && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 overflow-y-auto py-6">
+                            <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 max-w-2xl w-full mx-4 space-y-4">
+                                <div className="flex justify-between"><h3 className="font-semibold text-white">{providerModal === 'webdav' ? 'WebDAV' : (t('vaultS3Compatible') || 'S3 Compatible Storage')}</h3><button onClick={() => setProviderModal(null)} className="text-gray-400">×</button></div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <input value={providerForm.name || ''} onChange={e => setProviderForm({...providerForm, name: e.target.value})} placeholder={t('name') || 'Name'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                    {providerModal === 'webdav' ? <>
+                                        <input value={providerForm.settings?.url || ''} onChange={e => updateProviderSetting('url', e.target.value)} placeholder="https://dav.example/backups" className="md:col-span-2 px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input value={providerForm.settings?.username || ''} onChange={e => updateProviderSetting('username', e.target.value)} placeholder={t('username') || 'Username'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input type="password" value={providerForm.settings?.password || ''} onChange={e => updateProviderSetting('password', e.target.value)} placeholder={providerForm.settings?.has_password ? (t('leaveBlankKeep') || 'Leave blank to keep current password') : (t('password') || 'Password')} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                    </> : <>
+                                        <input value={providerForm.settings?.endpoint_url || ''} onChange={e => updateProviderSetting('endpoint_url', e.target.value)} placeholder="https://s3.example.com" className="md:col-span-2 px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input value={providerForm.settings?.bucket || ''} onChange={e => updateProviderSetting('bucket', e.target.value)} placeholder={t('vaultBucket') || 'Bucket'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input value={providerForm.settings?.region || ''} onChange={e => updateProviderSetting('region', e.target.value)} placeholder="us-east-1" className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input value={providerForm.settings?.prefix || ''} onChange={e => updateProviderSetting('prefix', e.target.value)} placeholder={t('vaultPrefix') || 'Object prefix'} className="md:col-span-2 px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input value={providerForm.settings?.access_key_id || ''} onChange={e => updateProviderSetting('access_key_id', e.target.value)} placeholder={providerForm.settings?.has_access_key_id ? (t('leaveBlankKeep') || 'Leave blank to keep current credential') : 'Access Key ID'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input type="password" value={providerForm.settings?.secret_access_key || ''} onChange={e => updateProviderSetting('secret_access_key', e.target.value)} placeholder={providerForm.settings?.has_secret_access_key ? (t('leaveBlankKeep') || 'Leave blank to keep current credential') : 'Secret Access Key'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                        <input type="password" value={providerForm.settings?.session_token || ''} onChange={e => updateProviderSetting('session_token', e.target.value)} placeholder={providerForm.settings?.has_session_token ? (t('leaveBlankKeep') || 'Leave blank to keep current credential') : 'Session Token (optional)'} className="md:col-span-2 px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                    </>}
+                                    <label className="text-sm text-gray-300">{t('vaultIntervalHours') || 'Sync interval (hours)'}<input type="number" min="1" max="720" value={providerForm.interval_hours || 24} onChange={e => setProviderForm({...providerForm, interval_hours: Number(e.target.value)})} className="mt-1 w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" /></label>
+                                    <label className="text-sm text-gray-300">{t('vaultRetention') || 'Versions to keep'}<input type="number" min="1" max="100" value={providerForm.retention_count || 10} onChange={e => setProviderForm({...providerForm, retention_count: Number(e.target.value)})} className="mt-1 w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" /></label>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-gray-300">
+                                    <label className="flex gap-2"><input type="checkbox" checked={!!providerForm.schedule_enabled} onChange={e => setProviderForm({...providerForm, schedule_enabled: e.target.checked})} /> {t('vaultAutomaticSync') || 'Enable automatic sync'}</label>
+                                    <label className="flex gap-2"><input type="checkbox" checked={!!providerForm.include_users} onChange={e => setProviderForm({...providerForm, include_users: e.target.checked})} /> {t('includeUsers') || 'Include users'}</label>
+                                    <label className="flex gap-2"><input type="checkbox" checked={!!providerForm.include_secrets} onChange={e => setProviderForm({...providerForm, include_secrets: e.target.checked})} /> {t('includeSecrets') || 'Include secrets'}</label>
+                                    <label className="flex gap-2"><input type="checkbox" checked={!!providerForm.include_audit} onChange={e => setProviderForm({...providerForm, include_audit: e.target.checked})} /> {t('includeAuditLog') || 'Include audit log'}</label>
+                                    <label className="flex gap-2"><input type="checkbox" checked={providerForm.settings?.verify_tls !== false} onChange={e => updateProviderSetting('verify_tls', e.target.checked)} /> {t('verifySSL') || 'Verify TLS certificate'}</label>
+                                    <label className="flex gap-2"><input type="checkbox" checked={!!providerForm.settings?.allow_private_network} onChange={e => updateProviderSetting('allow_private_network', e.target.checked)} /> {t('vaultAllowPrivate') || 'Allow private-network endpoint'}</label>
+                                    {providerModal === 's3' && <label className="flex gap-2"><input type="checkbox" checked={!!providerForm.settings?.path_style} onChange={e => updateProviderSetting('path_style', e.target.checked)} /> {t('vaultPathStyle') || 'Use path-style S3 URLs'}</label>}
+                                    <label className="flex gap-2 text-yellow-400"><input type="checkbox" checked={!!providerForm.settings?.allow_insecure_http} onChange={e => updateProviderSetting('allow_insecure_http', e.target.checked)} /> {t('vaultAllowHttp') || 'Allow insecure HTTP'}</label>
+                                </div>
+                                <input type="password" value={providerForm.user_password || ''} onChange={e => setProviderForm({...providerForm, user_password: e.target.value})} placeholder={t('enterYourPassword') || 'Enter account password to save'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                <div className="flex flex-wrap gap-3">
+                                    {providers.some(item => item.type === providerModal) && <button disabled={!!busy} onClick={removeProvider} className="px-4 py-2 bg-red-500/20 text-red-400 rounded-lg disabled:opacity-50">{t('disconnect') || 'Disconnect'}</button>}
+                                    <span className="flex-1" />
+                                    <button onClick={() => setProviderModal(null)} className="px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button>
+                                    <button disabled={!!busy || !providerForm.user_password} onClick={saveProvider} className="px-5 py-2 bg-green-600 rounded-lg text-white disabled:opacity-50">{busy.startsWith('save-') ? (t('saving') || 'Saving...') : (t('save') || 'Save')}</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         // Config Backup/Restore Component
         // NS: Jan 2026 - encrypted backups with AES-256-GCM
         // NS: Double password (user + backup) for security
@@ -1535,6 +1890,8 @@
 
             return (
                 <div className="space-y-6">
+                    <ConfigVaultPanel addToast={addToast} />
+
                     {/* Security Notice */}
                     <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-sm text-gray-300">
                         <strong className="text-green-400">🔒 {t('secureBackup') || 'Secure Backup'}:</strong> {t('secureBackupDesc') || 'Backups are encrypted with AES-256-GCM. You must provide your password and a backup encryption password.'}

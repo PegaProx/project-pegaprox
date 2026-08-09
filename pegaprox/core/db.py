@@ -1895,6 +1895,67 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating multi_cluster_vnets table: {e}")
 
+        # Configuration vault / off-site encrypted backup providers.
+        # Provider credentials and the recovery key are encrypted with the
+        # installation AES key before they reach these tables.  The backup
+        # object itself is encrypted again with the user-controlled vault key,
+        # so a storage-provider compromise does not expose PegaProx secrets.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS config_vault_metadata (
+                    key TEXT PRIMARY KEY,
+                    value_encrypted TEXT NOT NULL,
+                    updated_at TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS config_vault_providers (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1,
+                    schedule_enabled INTEGER DEFAULT 0,
+                    interval_hours INTEGER DEFAULT 24,
+                    retention_count INTEGER DEFAULT 10,
+                    include_secrets INTEGER DEFAULT 0,
+                    include_users INTEGER DEFAULT 1,
+                    include_audit INTEGER DEFAULT 0,
+                    settings_encrypted TEXT NOT NULL,
+                    last_sync TEXT,
+                    next_sync TEXT,
+                    last_status TEXT DEFAULT '',
+                    last_error TEXT DEFAULT '',
+                    last_object_key TEXT DEFAULT '',
+                    created_at TEXT,
+                    updated_at TEXT,
+                    created_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS config_vault_history (
+                    id TEXT PRIMARY KEY,
+                    provider_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    object_key TEXT DEFAULT '',
+                    size_bytes INTEGER DEFAULT 0,
+                    sha256 TEXT DEFAULT '',
+                    backup_id TEXT DEFAULT '',
+                    triggered_by TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    FOREIGN KEY (provider_id) REFERENCES config_vault_providers(id)
+                        ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_config_vault_history_started
+                ON config_vault_history(started_at DESC)
+            ''')
+            logging.info("Ensured configuration vault tables exist")
+        except Exception as e:
+            logging.error(f"Error creating configuration vault tables: {e}")
+
         conn.commit()
         logging.info("DB schema initialized")
     

@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import logging
+import uuid
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
 import threading
 import re
@@ -18,6 +19,14 @@ from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db, ENCRYPTION_AVAILABLE
+from pegaprox.core.config_vault import (
+    build_backup_data, encrypt_backup, decrypt_backup,
+    get_status as get_config_vault_status,
+    set_vault_key, save_provider as save_vault_provider,
+    delete_provider as delete_vault_provider,
+    test_provider as test_vault_provider,
+    start_sync as start_vault_sync,
+)
 
 import requests
 from pegaprox.utils.auth import require_auth, load_users, save_users, validate_session, TOTP_AVAILABLE, ARGON2_AVAILABLE, _check_default_password_in_use, verify_password, needs_password_rehash
@@ -2018,6 +2027,46 @@ def complete_acme_dns_challenge():
 # MK: AES-256-GCM with PBKDF2 key derivation
 # ============================================
 
+def _verify_sensitive_config_action(user_password: str, audit_action: str):
+    """Re-authenticate an admin before changing export/sync destinations.
+
+    Returns ``(username, error_response)``.  The explicit password gate prevents
+    a stolen browser session from silently pointing scheduled backups at an
+    attacker-controlled WebDAV/S3 endpoint.
+    """
+    if not user_password:
+        return None, (jsonify({'error': 'User password required for security verification'}), 400)
+    username = getattr(request, 'session', {}).get('user')
+    if not username:
+        return None, (jsonify({'error': 'Not authenticated'}), 401)
+    users = load_users()
+    user = users.get(username) if isinstance(users, dict) else None
+    if not isinstance(user, dict):
+        return None, (jsonify({'error': 'User not found'}), 404)
+
+    auth_source = user.get('auth_source') or 'local'
+    password_ok = False
+    if auth_source == 'ldap':
+        try:
+            from pegaprox.utils.ldap import ldap_authenticate
+            result = ldap_authenticate(username, user_password)
+            password_ok = bool(result and result.get('success'))
+        except Exception as exc:
+            logging.warning("Vault LDAP re-authentication failed for %s: %s", username, exc)
+    elif auth_source == 'oidc':
+        return None, (jsonify({
+            'error': 'OIDC accounts cannot confirm a local password for this sensitive action'
+        }), 400)
+    else:
+        password_ok = verify_password(
+            user_password, user.get('password_salt', ''), user.get('password_hash', '')
+        )
+
+    if not password_ok:
+        log_audit(username, f'{audit_action}_failed', 'Password verification failed')
+        return None, (jsonify({'error': 'Incorrect password'}), 401)
+    return username, None
+
 @bp.route('/api/config/backup', methods=['POST'])
 
 @require_auth(roles=[ROLE_ADMIN])
@@ -2110,89 +2159,17 @@ def backup_config():
         include_users = data.get('include_users', True)
         include_audit = data.get('include_audit', False)
         
-        database = get_db()
-        
-        backup_data = {
-            'version': PEGAPROX_VERSION,
-            'build': PEGAPROX_BUILD,
-            'export_date': datetime.now().isoformat(),
-            'exported_by': username,
-            'encrypted': True,  # Mark as encrypted backup
-        }
-        
-        # Server settings
-        backup_data['server_settings'] = load_server_settings()
-        # Remove sensitive data if not requested
-        if not include_secrets:
-            if 'smtp_password' in backup_data['server_settings']:
-                backup_data['server_settings']['smtp_password'] = ''
-            if 'acme_dns_rfc2136_secret' in backup_data['server_settings']:
-                backup_data['server_settings']['acme_dns_rfc2136_secret'] = ''
-        
-        # Clusters
-        clusters = database.get_all_clusters()
-        if not include_secrets:
-            # Remove passwords and keys - clusters is a dict: {'id': {data}}
-            for cluster_id, cluster_data in clusters.items():
-                if isinstance(cluster_data, dict):
-                    cluster_data.pop('password_encrypted', None)
-                    cluster_data.pop('password', None)
-                    cluster_data.pop('pass', None)
-                    cluster_data.pop('ssh_key_encrypted', None)
-                    cluster_data.pop('ssh_key', None)
-                    cluster_data.pop('api_token_encrypted', None)
-                    cluster_data.pop('api_token', None)
-        backup_data['clusters'] = clusters
-        
-        # Users (optional)
-        if include_users:
-            users_data = database.get_all_users()
-            if not include_secrets:
-                # users_data is a dict: {'username': {data}}
-                for username, user_data in users_data.items():
-                    if isinstance(user_data, dict):
-                        user_data.pop('password_hash', None)
-                        user_data.pop('password_salt', None)
-                        user_data.pop('totp_secret', None)
-                        user_data.pop('totp_secret_encrypted', None)
-            backup_data['users'] = users_data
-        
-        # Tenants
-        backup_data['tenants'] = database.get_all_tenants()
-        
-        # VM ACLs
-        backup_data['vm_acls'] = database.get_all_vm_acls()
-        
-        # Affinity Rules
-        backup_data['affinity_rules'] = database.get_affinity_rules()
-        
-        # Cluster Groups
-        try:
-            cursor = database.conn.cursor()
-            cursor.execute('SELECT * FROM cluster_groups')
-            backup_data['cluster_groups'] = [dict(row) for row in cursor.fetchall()]
-        except:
-            backup_data['cluster_groups'] = []
-        
-        # Custom Scripts
-        try:
-            cursor = database.conn.cursor()
-            cursor.execute('SELECT * FROM custom_scripts WHERE deleted_at IS NULL')
-            scripts = [dict(row) for row in cursor.fetchall()]
-            # Don't include output in backup
-            for script in scripts:
-                script.pop('last_output', None)
-            backup_data['custom_scripts'] = scripts
-        except:
-            backup_data['custom_scripts'] = []
-        
-        # Audit Log (optional, can be large)
-        if include_audit:
-            backup_data['audit_log'] = database.get_audit_log(limit=10000)
-        
-        logging.debug(f"[Backup] Encrypting backup data...")
-        # 3. Encrypt the backup with AES-256-GCM
-        encrypted_backup = _encrypt_backup(json.dumps(backup_data, default=str), backup_password)
+        # Build through the same portable service used by scheduled cloud sync.
+        # Schema v2 keeps the legacy top-level sections for restore compatibility
+        # and adds a manifest with backup ID, instance ID, counts and a content hash.
+        backup_data = build_backup_data(
+            exported_by=username,
+            include_secrets=include_secrets,
+            include_users=include_users,
+            include_audit=include_audit,
+        )
+        logging.debug("[Backup] Encrypting backup data...")
+        encrypted_backup = encrypt_backup(backup_data, backup_password)
         logging.debug(f"[Backup] Encryption complete, size: {len(encrypted_backup)} bytes")
         
         # Log the backup action
@@ -2211,87 +2188,12 @@ def backup_config():
         return jsonify({'error': safe_error(e, 'Backup creation failed')}), 500
 
 def _encrypt_backup(data: str, password: str) -> bytes:
-    """Encrypt backup data with password using AES-256-GCM
-    
-    Uses PBKDF2 to derive key from password.
-    Format: salt (16 bytes) + nonce (12 bytes) + ciphertext
-    
-    MK: Same format as our cluster password encryption
-    """
-    import hashlib
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.backends import default_backend
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    
-    # Generate random salt
-    salt = os.urandom(16)
-    
-    # Derive key from password using PBKDF2
-    # MK: 100k iterations is OWASP minimum, good enough for backups
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,  # 256 bits
-        salt=salt,
-        iterations=100000,  # OWASP recommended minimum
-        backend=default_backend()
-    )
-    key = kdf.derive(password.encode('utf-8'))
-    
-    # Encrypt with AES-256-GCM
-    aesgcm = AESGCM(key)
-    nonce = os.urandom(12)  # NS: 12 bytes is standard for GCM
-    ciphertext = aesgcm.encrypt(nonce, data.encode('utf-8'), None)
-    
-    # Combine: salt + nonce + ciphertext
-    return salt + nonce + ciphertext
+    """Backward-compatible alias for callers that import this route helper."""
+    return encrypt_backup(data, password)
 
 def _decrypt_backup(encrypted_data: bytes, password: str) -> str:
-    """Decrypt backup data with password
-    
-    Returns decrypted JSON string or raises exception on failure.
-    NS: Wrong password will throw InvalidTag exception
-    """
-    import hashlib
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.backends import default_backend
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    
-    logging.debug(f"[Decrypt] Input data size: {len(encrypted_data)} bytes")
-    
-    if len(encrypted_data) < 28:  # salt (16) + nonce (12)
-        logging.error(f"[Decrypt] Data too short: {len(encrypted_data)} bytes (need at least 28)")
-        raise ValueError("Invalid backup file format - file too short")
-    
-    # Extract components - format is: salt + nonce + ciphertext
-    # MK: same format as our cluster password encryption
-    salt = encrypted_data[:16]
-    nonce = encrypted_data[16:28]
-    ciphertext = encrypted_data[28:]
-    
-    logging.debug(f"[Decrypt] Salt: {len(salt)} bytes, Nonce: {len(nonce)} bytes, Ciphertext: {len(ciphertext)} bytes")
-    
-    # Derive key from password using PBKDF2
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100000,
-        backend=default_backend()
-    )
-    key = kdf.derive(password.encode('utf-8'))
-    
-    # Decrypt with AES-256-GCM
-    aesgcm = AESGCM(key)
-    try:
-        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-        logging.debug(f"[Decrypt] Decryption successful, plaintext size: {len(plaintext)} bytes")
-        return plaintext.decode('utf-8')
-    except Exception as e:
-        # NS: InvalidTag means wrong password, dont log the actual error (security)
-        logging.error(f"[Decrypt] Decryption failed")
-        raise ValueError("Incorrect backup password or corrupted file")
+    """Backward-compatible alias for schema-v1 and schema-v2 backups."""
+    return decrypt_backup(encrypted_data, password)
 
 @bp.route('/api/config/restore', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -2444,6 +2346,17 @@ def restore_config():
                     _PROTECTED_CONSENT = ('hardware_monitoring', 'hardware_monitoring_redfish')
                     incoming_ss = {k: v for k, v in (data['server_settings'] or {}).items()
                                    if k not in _PROTECTED_CONSENT}
+                    # Schema-v2 backups make selected secrets portable by placing
+                    # plaintext only inside the outer AES-GCM backup envelope.
+                    # Re-encrypt them with this installation's key before saving.
+                    if int(data.get('schema_version', 1) or 1) >= 2:
+                        for _secret_key in (
+                            'smtp_password', 'ldap_bind_password', 'oidc_client_secret',
+                            'acme_dns_rfc2136_secret',
+                        ):
+                            _secret_value = incoming_ss.get(_secret_key)
+                            if _secret_value:
+                                incoming_ss[_secret_key] = database._encrypt(str(_secret_value))
                     if mode == 'merge':
                         # Only update non-empty values
                         for key, value in incoming_ss.items():
@@ -2495,11 +2408,21 @@ def restore_config():
                     existing = database.get_cluster(cluster_id)
                     
                     if existing and mode == 'merge':
-                        # Keep existing passwords if not in backup
-                        if not cluster.get('password_encrypted') and existing.get('password_encrypted'):
-                            cluster['password_encrypted'] = existing['password_encrypted']
-                        if not cluster.get('ssh_key_encrypted') and existing.get('ssh_key_encrypted'):
-                            cluster['ssh_key_encrypted'] = existing['ssh_key_encrypted']
+                        # get_cluster()/save_cluster() use portable plaintext field
+                        # names and encrypt at the DB boundary.  Preserve live
+                        # credentials when a secrets-excluded backup is merged.
+                        for _credential_key in ('pass', 'ssh_key', 'api_token_secret'):
+                            if not cluster.get(_credential_key) and existing.get(_credential_key):
+                                cluster[_credential_key] = existing[_credential_key]
+                        # Redacted nested HA credentials are represented as empty
+                        # strings; merge those with live values instead of wiping
+                        # fencing credentials during a safe restore.
+                        if isinstance(existing.get('ha_settings'), dict) and isinstance(cluster.get('ha_settings'), dict):
+                            _merged_ha = dict(existing['ha_settings'])
+                            for _ha_key, _ha_value in cluster['ha_settings'].items():
+                                if _ha_value not in (None, ''):
+                                    _merged_ha[_ha_key] = _ha_value
+                            cluster['ha_settings'] = _merged_ha
                     
                     if not dry_run:
                         database.save_cluster(cluster_id, cluster)
@@ -2531,6 +2454,16 @@ def restore_config():
                     uname = u.get('username')
                     if not uname or uname == 'admin' or uname == 'pegaprox':  # Never overwrite admin
                         continue
+
+                    if mode == 'merge':
+                        _existing_user = database.get_user(uname)
+                        if _existing_user:
+                            for _user_secret in (
+                                'password_salt', 'password_hash', 'totp_secret',
+                                'totp_pending_secret',
+                            ):
+                                if not u.get(_user_secret) and _existing_user.get(_user_secret):
+                                    u[_user_secret] = _existing_user[_user_secret]
                     
                     if not dry_run:
                         database.save_user(uname, u)
@@ -2590,7 +2523,9 @@ def restore_config():
                 for rule in rules:
                     try:
                         if not dry_run:
-                            database.save_affinity_rule(cluster_id, rule)
+                            database.save_affinity_rule(
+                                rule.get('id') or uuid.uuid4().hex[:12], cluster_id, rule
+                            )
                         rule_count += 1
                     except Exception as e:
                         results['errors'].append(f"Affinity rule: {str(e)}")
@@ -2614,6 +2549,37 @@ def restore_config():
             if not dry_run:
                 database.conn.commit()
             results['restored']['cluster_groups'] = group_count
+
+        # Custom scripts (last_output is deliberately excluded from backups).
+        if 'custom_scripts' in data:
+            script_count = 0
+            cursor = database.conn.cursor()
+            cursor.execute('PRAGMA table_info(custom_scripts)')
+            _script_columns = {row['name'] for row in cursor.fetchall()}
+            _script_whitelist = (
+                'id', 'cluster_id', 'name', 'description', 'type', 'content',
+                'target_nodes', 'enabled', 'last_run', 'last_status',
+                'created_at', 'updated_at',
+            )
+            for script in data['custom_scripts'] if isinstance(data['custom_scripts'], list) else []:
+                try:
+                    if not isinstance(script, dict) or not script.get('id'):
+                        continue
+                    _columns = [key for key in _script_whitelist if key in _script_columns and key in script]
+                    if not _columns:
+                        continue
+                    if not dry_run:
+                        _marks = ','.join('?' for _ in _columns)
+                        cursor.execute(
+                            f"INSERT OR REPLACE INTO custom_scripts ({','.join(_columns)}) VALUES ({_marks})",
+                            tuple(script.get(key) for key in _columns),
+                        )
+                    script_count += 1
+                except Exception as e:
+                    results['errors'].append(f"Custom script: {str(e)}")
+            if not dry_run:
+                database.conn.commit()
+            results['restored']['custom_scripts'] = script_count
         
         # Log the restore action
         if not dry_run:
@@ -2626,6 +2592,129 @@ def restore_config():
     except Exception as e:
         logging.exception(f"Config restore failed: {e}")
         return jsonify({'error': safe_error(e, 'Config restore failed')}), 500
+
+
+# ============================================
+# Configuration Vault / Off-site Sync
+# ============================================
+
+@bp.route('/api/config/vault', methods=['GET'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_status():
+    """Return redacted provider state and recent upload history."""
+    try:
+        return jsonify(get_config_vault_status())
+    except Exception as e:
+        logging.exception("Configuration vault status failed")
+        return jsonify({'error': safe_error(e, 'Vault status could not be loaded')}), 500
+
+
+@bp.route('/api/config/vault/key', methods=['PUT'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_change_key():
+    """Set/change the recovery key used for future off-site backups."""
+    data = request.get_json(silent=True) or {}
+    username, error = _verify_sensitive_config_action(
+        data.get('user_password', ''), 'config.vault_key_change'
+    )
+    if error:
+        return error
+    try:
+        recovery_key = data.get('recovery_key', '')
+        confirmation = data.get('recovery_key_confirmation', '')
+        if recovery_key != confirmation:
+            return jsonify({'error': 'Recovery keys do not match'}), 400
+        set_vault_key(recovery_key)
+        log_audit(
+            username, 'config.vault_key_change',
+            'Configuration vault recovery key changed; applies to future backups only',
+        )
+        return jsonify({
+            'success': True,
+            'message': 'Recovery key saved. Existing backups still require their original key.',
+            **get_config_vault_status(history_limit=5),
+        })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logging.exception("Configuration vault key change failed")
+        return jsonify({'error': safe_error(e, 'Recovery key could not be saved')}), 500
+
+
+@bp.route('/api/config/vault/providers/<provider_type>', methods=['PUT'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_save_provider(provider_type):
+    """Connect or update a redacted WebDAV/S3 provider configuration."""
+    data = request.get_json(silent=True) or {}
+    username, error = _verify_sensitive_config_action(
+        data.get('user_password', ''), 'config.vault_provider_change'
+    )
+    if error:
+        return error
+    try:
+        provider = save_vault_provider(provider_type, data, username)
+        log_audit(
+            username, 'config.vault_provider_change',
+            f'Configuration vault provider saved: {provider_type}',
+        )
+        return jsonify({'success': True, 'provider': provider})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logging.exception("Configuration vault provider save failed")
+        return jsonify({'error': safe_error(e, 'Provider could not be saved')}), 500
+
+
+@bp.route('/api/config/vault/providers/<provider_type>', methods=['DELETE'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_remove_provider(provider_type):
+    data = request.get_json(silent=True) or {}
+    username, error = _verify_sensitive_config_action(
+        data.get('user_password', ''), 'config.vault_provider_remove'
+    )
+    if error:
+        return error
+    try:
+        if not delete_vault_provider(provider_type):
+            return jsonify({'error': 'Provider is not configured'}), 404
+        log_audit(
+            username, 'config.vault_provider_remove',
+            f'Configuration vault provider removed: {provider_type}',
+        )
+        return jsonify({'success': True})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 409
+    except Exception as e:
+        logging.exception("Configuration vault provider remove failed")
+        return jsonify({'error': safe_error(e, 'Provider could not be removed')}), 500
+
+
+@bp.route('/api/config/vault/providers/<provider_type>/test', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_test_provider(provider_type):
+    try:
+        test_vault_provider(provider_type)
+        return jsonify({'success': True, 'message': 'Connection successful'})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logging.warning("Configuration vault provider test failed: %s", e)
+        return jsonify({'error': safe_error(e, 'Connection test failed')}), 502
+
+
+@bp.route('/api/config/vault/providers/<provider_type>/sync', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_sync_provider(provider_type):
+    try:
+        username = getattr(request, 'session', {}).get('user', 'admin')
+        if not start_vault_sync(provider_type, username):
+            return jsonify({'error': 'A sync is already running for this provider'}), 409
+        return jsonify({'success': True, 'status': 'queued'}), 202
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logging.exception("Configuration vault manual sync failed")
+        return jsonify({'error': safe_error(e, 'Sync could not be started')}), 500
 
 # ============================================
 # IP Whitelisting API Routes

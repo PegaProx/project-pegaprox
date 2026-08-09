@@ -87,8 +87,13 @@ PLUGINS_DIR = 'plugins'
 # main() creates what it needs before generating a cert.
 def _config_owned_by_us():
     try:
-        return os.stat(CONFIG_DIR).st_uid == os.geteuid()
-    except OSError:
+        geteuid = getattr(os, 'geteuid', None)
+        # Windows has no POSIX effective uid; its ACL model is handled by the
+        # platform and the development/test path should remain usable.
+        if geteuid is None:
+            return True
+        return os.stat(CONFIG_DIR).st_uid == geteuid()
+    except (OSError, AttributeError):
         return True      # not there yet, we are the one creating it
 
 

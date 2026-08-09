@@ -43,6 +43,7 @@ def register_blueprints(app):
     from pegaprox.api.power import bp as power_bp
     from pegaprox.api.dr_drill import bp as dr_drill_bp
     from pegaprox.api.multi_sdn import bp as multi_sdn_bp, start_scanner as start_multi_sdn_scanner
+    from pegaprox.core.config_vault import start_scheduler as start_config_vault_scheduler
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -115,3 +116,10 @@ def register_blueprints(app):
         start_snap_scheduler()
     except Exception as e:
         logging.warning(f"snapshot scheduler start failed: {e}")
+
+    # Encrypted off-site configuration vault.  The scheduler only performs
+    # uploads for providers explicitly enabled by an administrator.
+    try:
+        start_config_vault_scheduler()
+    except Exception as e:
+        logging.warning(f"configuration vault scheduler start failed: {e}")
