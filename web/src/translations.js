@@ -6996,6 +6996,8 @@
 
                 // Security Settings
                 securitySettings: 'Security Settings',
+                syncAndCloud: 'Sync & Cloud',
+                syncAndCloudDesc: 'Manage encrypted configuration backups, cloud synchronization, exports and restores.',
                 securityDashboard: 'Security Dashboard',
                 issuesFound: 'issues found',
                 allSecure: 'All systems secure',
@@ -11142,6 +11144,8 @@
                 rollbackFailed: '回滚失败',
                 startFailed: '启动失败',
                 securitySettings: '安全设置',
+                syncAndCloud: '同步与云',
+                syncAndCloudDesc: '管理加密配置备份、云端同步、导出与恢复。',
                 securityDashboard: '安全仪表板',
                 issuesFound: '发现问题',
                 allSecure: '所有系统安全',

@@ -2486,6 +2486,17 @@
                                 <span className="sm:hidden">{t('security') || 'Security'}</span>
                             </button>
                             <button
+                                onClick={() => setActiveTab('sync-cloud')}
+                                className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
+                                    activeTab === 'sync-cloud'
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
+                                }`}
+                            >
+                                <Icons.Cloud className="w-4 h-4" />
+                                <span>{t('syncAndCloud') || 'Sync & Cloud'}</span>
+                            </button>
+                            <button
                                 onClick={() => setActiveTab('ldap')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'ldap'
@@ -5048,6 +5059,24 @@
                             {/* Security Settings Tab */}
                             {activeTab === 'security' && (
                                 <SecuritySettingsSection addToast={addToast} />
+                            )}
+
+                            {/* Configuration backup, restore and off-site cloud sync */}
+                            {activeTab === 'sync-cloud' && (
+                                <div className="space-y-6">
+                                    <div>
+                                        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                                            <Icons.Cloud className="w-5 h-5 text-blue-400" />
+                                            {t('syncAndCloud') || 'Sync & Cloud'}
+                                        </h3>
+                                        <p className="text-sm text-gray-400 mt-1">
+                                            {t('syncAndCloudDesc') || 'Manage encrypted configuration backups, cloud synchronization, exports and restores.'}
+                                        </p>
+                                    </div>
+                                    <div className="bg-proxmox-dark rounded-xl p-6 border border-proxmox-border">
+                                        <ConfigBackupSection addToast={addToast} />
+                                    </div>
+                                </div>
                             )}
                             
                             {/* Compliance Tab (HIPAA/ISO 27001) */}

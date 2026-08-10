@@ -26,7 +26,7 @@ are lost.
 
 ## Configure a provider
 
-Open **Settings → Security → Configuration Backup & Restore**:
+Open **Settings → Sync & Cloud**:
 
 1. Set a recovery key of at least 12 characters.
 2. Connect WebDAV or S3 Compatible Storage.

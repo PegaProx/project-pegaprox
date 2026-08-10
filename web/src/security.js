@@ -765,14 +765,6 @@
                         <IPWhitelistSection addToast={addToast} />
                     </div>
 
-                    {/* Config Backup/Restore */}
-                    <div className="bg-proxmox-dark rounded-xl p-6 border border-proxmox-border">
-                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                            <Icons.Database className="w-5 h-5 text-green-400" />
-                            {t('configBackupRestore') || 'Configuration Backup & Restore'}
-                        </h3>
-                        <ConfigBackupSection addToast={addToast} />
-                    </div>
                 </div>
             );
         }
