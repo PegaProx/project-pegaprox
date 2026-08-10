@@ -724,6 +724,7 @@ class WebDAVProvider:
 
     def _request(self, method: str, url: str, **kwargs):
         """Issue a bounded WebDAV request without following redirects."""
+        _validate_endpoint(self.settings, url)
         response = requests.request(
             method, url, auth=self.auth, verify=self.verify, timeout=(10, 60),
             allow_redirects=False, **kwargs
