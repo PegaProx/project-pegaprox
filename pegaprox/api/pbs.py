@@ -117,6 +117,9 @@ def add_pbs_server():
 @require_auth(perms=['pbs.config'])
 def update_pbs_server(pbs_id):
     """Update a PBS server config"""
+    ok, err = check_pbs_access(pbs_id)  # NS Aug 2026 (Aikido) — object-level authz on write
+    if not ok:
+        return err
     data = request.json or {}
     
     if pbs_id not in pbs_managers:
@@ -176,6 +179,9 @@ def update_pbs_server(pbs_id):
 @require_auth(perms=['pbs.config'])
 def delete_pbs_server(pbs_id):
     """Delete a PBS server"""
+    ok, err = check_pbs_access(pbs_id)  # NS Aug 2026 (Aikido) — object-level authz on delete
+    if not ok:
+        return err
     if pbs_id in pbs_managers:
         name = pbs_managers[pbs_id].name
         del pbs_managers[pbs_id]
@@ -2369,6 +2375,11 @@ def auto_attach_pbs_to_clusters(pbs_id):
     Body: {"clusters": ["cluster_id1", ...], "storage_name": "pbs-wui",
            "content": "backup"}  — storage_name defaults to pbs-<pbs_name>.
     """
+    # NS Aug 2026 (Aikido) — this pushes the PBS's stored credentials into a PVE storage
+    # config, so authz the PBS object AND every target cluster before touching anything.
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS not found'}), 404
     pbs_mgr = pbs_managers[pbs_id]
@@ -2376,6 +2387,10 @@ def auto_attach_pbs_to_clusters(pbs_id):
     cluster_ids = body.get('clusters') or pbs_mgr.linked_clusters or []
     if not cluster_ids:
         return jsonify({'error': 'no clusters specified or linked'}), 400
+    for _cid in cluster_ids:
+        _ok, _err = check_cluster_access(_cid)
+        if not _ok:
+            return _err
 
     storage_name = (body.get('storage_name') or f"pbs-{pbs_mgr.name}").lower()
     storage_name = ''.join(c if c.isalnum() or c in ('-', '_', '.') else '-' for c in storage_name)

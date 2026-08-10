@@ -632,8 +632,22 @@ def get_cluster_tags(cluster_id):
     except Exception as e:
         logging.debug(f"[tags] could not merge live PVE tags for {cluster_id}: {e}")
 
+    # NS Aug 2026 (Aikido #469089237) — only count tags of VMs the caller may access, so a
+    # pool-scoped user (who reaches the cluster via the pool fallback) can't enumerate tag
+    # names/usage of VMs outside their scope. Admins pass user_can_access_vm unchanged.
+    from pegaprox.utils.auth import build_authz_user
+    _tag_user = build_authz_user(request.session.get('user', ''), request.session)
+
+    def _tag_vm_visible(vmid_str):
+        try:
+            return user_can_access_vm(_tag_user, cluster_id, int(str(vmid_str).split(':')[0]), 'vm.view')
+        except (ValueError, TypeError):
+            return False
+
     tag_counts = {}
-    for bucket in per_vm.values():
+    for _vmid_str, bucket in per_vm.items():
+        if not _tag_vm_visible(_vmid_str):
+            continue
         for name in bucket:
             entry = tag_counts.setdefault(name, {
                 'name': name,

@@ -1800,6 +1800,16 @@ def cancel_task(cluster_id, node, upid):
     
     mgr = cluster_managers[cluster_id]
     
+    # NS Aug 2026 (Aikido #469089252) — the UPID encodes the task's VM; gate per-VM so a
+    # pool-scoped user can't cancel another pool/tenant's VM task on a shared cluster.
+    _p = str(upid).split(':')
+    _tvmid = _p[6] if len(_p) > 6 and _p[6].isdigit() else None
+    if _tvmid is not None:
+        from pegaprox.utils.auth import build_authz_user
+        _u = build_authz_user(request.session.get('user', ''), request.session)
+        if not user_can_access_vm(_u, cluster_id, int(_tvmid), 'vm.stop'):
+            return jsonify({'error': 'Access denied to this VM task'}), 403
+
     try:
         result = mgr.stop_task(node, upid)
         if result:

@@ -36,6 +36,8 @@ jobs:
       # human-readable tag we resolved from at pin time; dependabot/renovate can
       # bump these via PR.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0

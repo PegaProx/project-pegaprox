@@ -70,6 +70,48 @@ def test_pbs_list_filtered_by_tenant(api, seed):
         ppglobals.pbs_managers.clear()
 
 
+def test_pbs_update_cross_tenant_denied(api, seed):
+    # NS Aug 2026 (Aikido #469089284) — PUT /api/pbs/<id> must enforce the object gate too.
+    ppglobals.pbs_managers.clear()
+    seed.tenant('tenant_a', clusters=['cluster_1'])
+    seed.tenant('tenant_b', clusters=['cluster_2'])
+    alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['pbs.config'])
+    _inject_pbs('pbs_b', ['cluster_2'])
+    try:
+        r = api.as_user(alice).put('/api/pbs/pbs_b', json={'name': 'x'})
+        assert r.status_code == 403, r.get_data(as_text=True)
+    finally:
+        ppglobals.pbs_managers.clear()
+
+
+def test_pbs_delete_cross_tenant_denied(api, seed):
+    # NS Aug 2026 (Aikido #469089244)
+    ppglobals.pbs_managers.clear()
+    seed.tenant('tenant_a', clusters=['cluster_1'])
+    seed.tenant('tenant_b', clusters=['cluster_2'])
+    alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['pbs.config'])
+    _inject_pbs('pbs_b', ['cluster_2'])
+    try:
+        r = api.as_user(alice).delete('/api/pbs/pbs_b')
+        assert r.status_code == 403, r.get_data(as_text=True)
+    finally:
+        ppglobals.pbs_managers.clear()
+
+
+def test_pbs_auto_storage_cross_tenant_denied(api, seed):
+    # NS Aug 2026 (Aikido #469089213) — must not push another tenant's PBS creds onto a cluster.
+    ppglobals.pbs_managers.clear()
+    seed.tenant('tenant_a', clusters=['cluster_1'])
+    seed.tenant('tenant_b', clusters=['cluster_2'])
+    alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['pbs.config'])
+    _inject_pbs('pbs_b', ['cluster_2'])
+    try:
+        r = api.as_user(alice).post('/api/pbs/pbs_b/auto-storage', json={'clusters': ['cluster_2']})
+        assert r.status_code == 403, r.get_data(as_text=True)
+    finally:
+        ppglobals.pbs_managers.clear()
+
+
 def test_pbs_admin_sees_everything(api, seed):
     ppglobals.pbs_managers.clear()
     root = seed.user('root', role='admin', tenant_id='default')

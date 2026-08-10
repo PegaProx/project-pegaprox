@@ -36,14 +36,25 @@ def _guard_url(url):
     `alert_webhook_allow_private` server setting (some shops run an internal
     ntfy/Gotify on the LAN). Mirrors the siem.py / site_recovery.py pattern.
     Imports are deferred so this utils-layer module doesn't pull api.* at load.
-    Returns (ok, reason)."""
+    Returns (ok, reason, url_to_use). url_to_use is IP-pinned so a re-resolve between this
+    check and the POST can't be rebound to an internal address (Aikido #469089218)."""
     try:
-        from pegaprox.utils.url_security import is_safe_outbound_url
+        from pegaprox.utils.url_security import is_safe_outbound_url, resolve_and_pin_url, SsrfError
         from pegaprox.api.helpers import load_server_settings
     except Exception:
-        return True, ''  # guard module unavailable → don't silently break sends
+        return True, '', url  # guard module unavailable → don't silently break sends
     allow_priv = bool((load_server_settings() or {}).get('alert_webhook_allow_private', False))
-    return is_safe_outbound_url(url, allowed_schemes=('https', 'http'), allow_private=allow_priv)
+    ok, reason = is_safe_outbound_url(url, allowed_schemes=('https', 'http'), allow_private=allow_priv)
+    if not ok:
+        return False, reason, url
+    if allow_priv:
+        return True, '', url  # operator opted into internal targets — don't pin
+    try:
+        return True, '', resolve_and_pin_url(url, allowed_schemes=('https', 'http'))
+    except SsrfError as e:
+        return False, str(e), url
+    except Exception:
+        return True, '', url  # pinning unavailable — the preflight guard already passed
 
 
 def _severity_color(sev):
@@ -169,7 +180,7 @@ def _post_ntfy(channel, alert):
     if token:
         headers['Authorization'] = f'Bearer {token}'
     body = alert.get('message', '')
-    ok_url, _why = _guard_url(url)
+    ok_url, _why, url = _guard_url(url)
     if not ok_url:
         return False, 'blocked: unsafe url'
     try:
@@ -190,7 +201,7 @@ def send_to_channel(channel, alert):
         return False, 'no url'
     # M-7/M-8: gate the admin-supplied URL before any send (covers all 5 types —
     # ntfy only appends a path to this same host).
-    ok_url, _why = _guard_url(url)
+    ok_url, _why, url = _guard_url(url)
     if not ok_url:
         return False, 'blocked: unsafe url'
     ctype = (channel.get('type') or 'generic').lower()
