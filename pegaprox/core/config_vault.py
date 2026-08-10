@@ -24,7 +24,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, Optional
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 import requests
 from defusedxml import ElementTree
@@ -37,6 +37,7 @@ from pegaprox.utils.url_security import sanitize_outbound_url
 
 
 PROVIDER_TYPES = frozenset({'webdav', 's3'})
+MAX_REMOTE_BACKUP_BYTES = 100 * 1024 * 1024
 _PROVIDER_SECRET_FIELDS = {
     'webdav': frozenset({'password'}),
     's3': frozenset({'access_key_id', 'secret_access_key', 'session_token'}),
@@ -637,11 +638,26 @@ class WebDAVProvider:
         result = []
         for item in root.findall('.//{DAV:}response'):
             href = item.findtext('{DAV:}href') or ''
-            name = href.rstrip('/').rsplit('/', 1)[-1]
+            name = unquote(href.rstrip('/').rsplit('/', 1)[-1])
             if not name.endswith('.pegabackup'):
                 continue
-            result.append({'key': name, 'modified': item.findtext('.//{DAV:}getlastmodified') or ''})
+            try:
+                size = int(item.findtext('.//{DAV:}getcontentlength') or 0)
+            except (TypeError, ValueError):
+                size = 0
+            result.append({
+                'key': name,
+                'modified': item.findtext('.//{DAV:}getlastmodified') or '',
+                'size': max(0, size),
+            })
         return sorted(result, key=lambda item: item['key'], reverse=True)
+
+    def get(self, key: str) -> bytes:
+        response = self._request('GET', self._url(key), stream=True)
+        if response.status_code != 200:
+            response.close()
+            raise RuntimeError(f'WebDAV download failed (HTTP {response.status_code})')
+        return _read_bounded_response(response)
 
     def delete(self, key: str):
         response = self._request('DELETE', self._url(key))
@@ -694,7 +710,8 @@ class S3Provider:
         _validate_endpoint(self.settings, url)
         return url, path or '/'
 
-    def _request(self, method: str, key: str = '', params=None, body: bytes = b''):
+    def _request(self, method: str, key: str = '', params=None, body: bytes = b'',
+                 stream: bool = False):
         params = params or {}
         url, canonical_uri = self._target(key)
         canonical_query = '&'.join(
@@ -743,6 +760,7 @@ class S3Provider:
         response = requests.request(
             method, full_url, data=body, headers=request_headers,
             verify=self.verify, timeout=(10, 90), allow_redirects=False,
+            stream=stream,
         )
         if 300 <= response.status_code < 400:
             raise RuntimeError('S3 redirects are not followed; check region and endpoint')
@@ -774,8 +792,18 @@ class S3Provider:
             result.append({
                 'key': key,
                 'modified': contents.findtext('{*}LastModified') or '',
+                'size': _bounded_int(
+                    contents.findtext('{*}Size'), 0, 0, MAX_REMOTE_BACKUP_BYTES + 1
+                ),
             })
         return sorted(result, key=lambda item: (item['modified'], item['key']), reverse=True)
+
+    def get(self, key: str) -> bytes:
+        response = self._request('GET', key=key, stream=True)
+        if response.status_code != 200:
+            response.close()
+            raise RuntimeError(f'S3 download failed (HTTP {response.status_code})')
+        return _read_bounded_response(response)
 
     def delete(self, key: str):
         response = self._request('DELETE', key=key)
@@ -797,6 +825,129 @@ def test_provider(provider_id: str):
         raise ValueError('Provider is not configured')
     _adapter(provider).test()
     return True
+
+
+def _read_bounded_response(response) -> bytes:
+    """Read a streamed provider response without accepting unbounded data."""
+    try:
+        declared_size = int(response.headers.get('Content-Length') or 0)
+    except (TypeError, ValueError):
+        declared_size = 0
+    if declared_size > MAX_REMOTE_BACKUP_BYTES:
+        response.close()
+        raise ValueError('Remote backup exceeds the 100 MB safety limit')
+    chunks = []
+    total = 0
+    try:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > MAX_REMOTE_BACKUP_BYTES:
+                raise ValueError('Remote backup exceeds the 100 MB safety limit')
+            chunks.append(chunk)
+        return b''.join(chunks)
+    finally:
+        response.close()
+
+
+_BACKUP_FILENAME_RE = re.compile(
+    r'^pegaprox-(?P<key_id>[A-Za-z0-9]+)-(?P<timestamp>\d{8}-\d{6})-'
+    r'(?P<backup_id>[A-Za-z0-9]+)\.pegabackup$'
+)
+
+
+def _remote_prefix(provider: dict) -> str:
+    if provider['type'] != 's3':
+        return ''
+    prefix = str(provider['settings'].get('prefix') or 'pegaprox').strip('/')
+    return f'{prefix}/' if prefix else ''
+
+
+def _remote_backup_item(provider: dict, item: dict) -> Optional[dict]:
+    object_key = str(item.get('key') or '')
+    filename = object_key.rsplit('/', 1)[-1]
+    if not object_key or not filename.endswith('.pegabackup'):
+        return None
+    match = _BACKUP_FILENAME_RE.fullmatch(filename)
+    created_at = ''
+    key_id = ''
+    backup_id = ''
+    if match:
+        key_id = match.group('key_id')
+        backup_id = match.group('backup_id')
+        try:
+            created_at = datetime.strptime(
+                match.group('timestamp'), '%Y%m%d-%H%M%S'
+            ).isoformat(timespec='seconds')
+        except ValueError:
+            created_at = ''
+
+    source_instance = ''
+    if provider['type'] == 's3':
+        prefix = _remote_prefix(provider)
+        relative_key = object_key[len(prefix):] if object_key.startswith(prefix) else object_key
+        parts = relative_key.split('/')
+        if len(parts) > 1:
+            source_instance = parts[0]
+
+    return {
+        'provider_id': provider['id'],
+        'provider_type': provider['type'],
+        'provider_name': provider['name'],
+        'object_key': object_key,
+        'filename': filename,
+        'modified': str(item.get('modified') or ''),
+        'created_at': created_at,
+        'size_bytes': _bounded_int(
+            item.get('size'), 0, 0, MAX_REMOTE_BACKUP_BYTES + 1
+        ),
+        'key_id': key_id,
+        'backup_id': backup_id,
+        'source_instance': source_instance,
+    }
+
+
+def list_remote_backups(provider_id: str) -> list:
+    """List encrypted backup versions visible through a configured provider."""
+    provider = get_provider(provider_id, include_credentials=True)
+    if not provider:
+        raise ValueError('Provider is not configured')
+    objects = _adapter(provider).list(_remote_prefix(provider))
+    backups = []
+    for item in objects:
+        if not isinstance(item, dict):
+            continue
+        backup = _remote_backup_item(provider, item)
+        if backup:
+            backups.append(backup)
+    return sorted(
+        backups,
+        key=lambda item: (item['created_at'] or item['modified'], item['object_key']),
+        reverse=True,
+    )[:1000]
+
+
+def download_remote_backup(provider_id: str, object_key: str) -> bytes:
+    """Download a listed backup object, rejecting arbitrary provider paths."""
+    object_key = str(object_key or '')
+    if not object_key or len(object_key) > 1500:
+        raise ValueError('Backup object key is required')
+    provider = get_provider(provider_id, include_credentials=True)
+    if not provider:
+        raise ValueError('Provider is not configured')
+    adapter = _adapter(provider)
+    listed = adapter.list(_remote_prefix(provider))
+    allowed_keys = {
+        str(item.get('key') or '') for item in listed
+        if isinstance(item, dict) and str(item.get('key') or '').endswith('.pegabackup')
+    }
+    if object_key not in allowed_keys:
+        raise ValueError('Remote backup was not found')
+    body = adapter.get(object_key)
+    if len(body) > MAX_REMOTE_BACKUP_BYTES:
+        raise ValueError('Remote backup exceeds the 100 MB safety limit')
+    return body
 
 
 def _history_insert(history_id: str, provider_id: str, triggered_by: str):

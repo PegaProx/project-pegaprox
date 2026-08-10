@@ -67,11 +67,19 @@ restore re-encrypts it with the destination installation key.
 
 Restores are intentionally not automatic:
 
-1. Download the required `.pegabackup` object from WebDAV/S3.
-2. Open the same PegaProx settings page and select **Restore Backup**.
-3. Enter the recovery key used by that version.
-4. Keep **Dry run** enabled and review the result.
-5. Apply the restore only after the validation succeeds.
+1. On the destination machine, connect the same WebDAV directory or S3 bucket.
+2. Open **Settings → Sync & Cloud → Backup versions**.
+3. Refresh the remote list and select the required version. S3 listings include
+   backups from other PegaProx instance directories under the configured prefix.
+4. Enter the destination administrator password and the recovery key used by
+   that backup version.
+5. Keep **Dry run** enabled and review the validation result.
+6. Disable dry run and apply the restore only after validation succeeds.
+
+The encrypted object is downloaded through PegaProx and passed to the existing
+restore pipeline. Arbitrary object paths are rejected, downloads are limited to
+100 MB, and restore still requires administrator re-authentication. Manual file
+download/import remains available as a fallback.
 
 Merge mode preserves live cluster/user credentials when the backup excluded
 secrets. Hardware-monitoring consent settings remain protected and cannot be
@@ -79,8 +87,9 @@ changed by a generic configuration restore.
 
 ## Deliberate limitation
 
-The vault performs one-way uploads. It does not watch cloud files, merge
-concurrent edits, or coordinate jobs between PegaProx instances. Running two
-instances against one live configuration would require leases, task ownership,
-tombstones, conflict resolution, and migration coordination; those semantics
-are outside this disaster-recovery feature.
+Backup creation remains one-way, but connected machines can browse and manually
+restore remote versions. The vault does not continuously watch cloud files,
+merge concurrent edits, or coordinate jobs between PegaProx instances. Running
+two instances against one live configuration would require leases, task
+ownership, tombstones, conflict resolution, and migration coordination; those
+semantics are outside this disaster-recovery feature.

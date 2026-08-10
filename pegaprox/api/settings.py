@@ -26,6 +26,8 @@ from pegaprox.core.config_vault import (
     delete_provider as delete_vault_provider,
     test_provider as test_vault_provider,
     start_sync as start_vault_sync,
+    list_remote_backups as list_vault_remote_backups,
+    download_remote_backup as download_vault_remote_backup,
 )
 
 import requests
@@ -2715,6 +2717,47 @@ def config_vault_sync_provider(provider_type):
     except Exception as e:
         logging.exception("Configuration vault manual sync failed")
         return jsonify({'error': safe_error(e, 'Sync could not be started')}), 500
+
+
+@bp.route('/api/config/vault/providers/<provider_type>/backups', methods=['GET'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_remote_backups(provider_type):
+    """List encrypted backup versions visible on a connected provider."""
+    try:
+        return jsonify({'backups': list_vault_remote_backups(provider_type)})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logging.warning("Configuration vault remote list failed: %s", e)
+        return jsonify({'error': safe_error(e, 'Remote backups could not be listed')}), 502
+
+
+@bp.route('/api/config/vault/providers/<provider_type>/backups/download', methods=['GET'])
+@require_auth(roles=[ROLE_ADMIN])
+def config_vault_remote_backup_download(provider_type):
+    """Proxy one allow-listed encrypted backup for the existing restore flow."""
+    object_key = request.args.get('object_key', '')
+    try:
+        body = download_vault_remote_backup(provider_type, object_key)
+        filename = str(object_key).rsplit('/', 1)[-1]
+        if not re.fullmatch(r'[A-Za-z0-9._-]+\.pegabackup', filename):
+            filename = 'pegaprox-remote-backup.pegabackup'
+        username = getattr(request, 'session', {}).get('user', 'admin')
+        log_audit(
+            username, 'config.vault_remote_download',
+            f'Encrypted remote backup selected from {provider_type}',
+        )
+        response = make_response(body)
+        response.headers['Content-Type'] = 'application/octet-stream'
+        response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logging.warning("Configuration vault remote download failed: %s", e)
+        return jsonify({'error': safe_error(e, 'Remote backup could not be downloaded')}), 502
 
 # ============================================
 # IP Whitelisting API Routes

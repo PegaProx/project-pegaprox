@@ -146,6 +146,56 @@ def test_successful_sync_uploads_encrypted_payload_and_records_history(db, monke
     assert config_vault.get_provider('webdav')['last_status'] == 'ok'
 
 
+def test_remote_backup_versions_can_be_listed_and_downloaded(db, monkeypatch):
+    downloaded = b'encrypted-remote-backup'
+    seen = {'prefixes': [], 'downloads': []}
+
+    class FakeAdapter:
+        def list(self, prefix):
+            seen['prefixes'].append(prefix)
+            return [
+                {
+                    'key': 'pegaprox/instance-old/pegaprox-a1b2c3d4e5f6-20260810-123456-deadbeef.pegabackup',
+                    'modified': '2026-08-10T12:35:00Z',
+                    'size': len(downloaded),
+                },
+                {'key': 'pegaprox/instance-old/readme.txt', 'modified': 'now'},
+            ]
+
+        def get(self, key):
+            seen['downloads'].append(key)
+            return downloaded
+
+    config_vault.save_provider('s3', {
+        'name': 'Recovery bucket',
+        'settings': {
+            'endpoint_url': 'https://s3.example',
+            'bucket': 'pegaprox-backups',
+            'prefix': 'pegaprox',
+            'access_key_id': 'AKIATEST',
+            'secret_access_key': 'secret',
+        },
+    }, 'alice')
+    monkeypatch.setattr(config_vault, '_adapter', lambda provider: FakeAdapter())
+
+    backups = config_vault.list_remote_backups('s3')
+
+    assert len(backups) == 1
+    assert backups[0]['provider_name'] == 'Recovery bucket'
+    assert backups[0]['source_instance'] == 'instance-old'
+    assert backups[0]['key_id'] == 'a1b2c3d4e5f6'
+    assert backups[0]['backup_id'] == 'deadbeef'
+    assert backups[0]['created_at'] == '2026-08-10T12:34:56'
+    assert seen['prefixes'] == ['pegaprox/']
+
+    body = config_vault.download_remote_backup('s3', backups[0]['object_key'])
+    assert body == downloaded
+    assert seen['downloads'] == [backups[0]['object_key']]
+
+    with pytest.raises(ValueError, match='not found'):
+        config_vault.download_remote_backup('s3', 'pegaprox/other/secret.pegabackup')
+
+
 def test_s3_sigv4_upload_has_authorization_without_leaking_secret(monkeypatch):
     captured = {}
 
@@ -225,3 +275,34 @@ def test_vault_api_requires_admin_reauth_and_redacts_credentials(api, seed, db):
     assert public['has_password'] is True
     assert 'password' not in public
     assert 'webdav-secret' not in saved_provider.get_data(as_text=True)
+
+
+def test_remote_backup_api_lists_and_proxies_encrypted_file(api, seed, monkeypatch):
+    from pegaprox.api import settings
+
+    admin = seed.user('root', role='admin')
+    client = api.as_user(admin)
+    object_key = 'pegaprox-oldkey-20260810-123456-deadbeef.pegabackup'
+    monkeypatch.setattr(settings, 'list_vault_remote_backups', lambda provider: [{
+        'provider_id': provider,
+        'object_key': object_key,
+        'filename': object_key,
+    }])
+    monkeypatch.setattr(
+        settings, 'download_vault_remote_backup',
+        lambda provider, key: b'encrypted-body' if key == object_key else b'',
+    )
+
+    assert api.anon().get('/api/config/vault/providers/webdav/backups').status_code == 401
+    listed = client.get('/api/config/vault/providers/webdav/backups')
+    assert listed.status_code == 200
+    assert listed.get_json()['backups'][0]['object_key'] == object_key
+
+    downloaded = client.get(
+        '/api/config/vault/providers/webdav/backups/download',
+        query_string={'object_key': object_key},
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.data == b'encrypted-body'
+    assert downloaded.headers['Cache-Control'] == 'no-store'
+    assert object_key in downloaded.headers['Content-Disposition']

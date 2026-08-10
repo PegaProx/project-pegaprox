@@ -1383,6 +1383,15 @@
             const [providerModal, setProviderModal] = useState(null);
             const [keyForm, setKeyForm] = useState({ user_password: '', recovery_key: '', recovery_key_confirmation: '' });
             const [providerForm, setProviderForm] = useState({});
+            const [remoteBackups, setRemoteBackups] = useState([]);
+            const [remoteLoading, setRemoteLoading] = useState(false);
+            const [remoteErrors, setRemoteErrors] = useState({});
+            const [restoreBackup, setRestoreBackup] = useState(null);
+            const [remoteRestoreResult, setRemoteRestoreResult] = useState(null);
+            const [remoteRestoreForm, setRemoteRestoreForm] = useState({
+                user_password: '', backup_password: '', mode: 'merge',
+                restore_users: false, dry_run: true
+            });
 
             const loadStatus = async (showLoader = false) => {
                 if (showLoader) setLoading(true);
@@ -1552,6 +1561,97 @@
                 }
             };
 
+            const loadRemoteBackups = async () => {
+                const connectedProviders = status?.providers || [];
+                setRemoteLoading(true);
+                setRemoteErrors({});
+                try {
+                    const results = await Promise.all(connectedProviders.map(async provider => {
+                        try {
+                            const response = await fetch(`${API_URL}/config/vault/providers/${provider.type}/backups`, {
+                                credentials: 'include', headers: getAuthHeaders()
+                            });
+                            const body = await response.json().catch(() => ({}));
+                            if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+                            return { provider, backups: body.backups || [] };
+                        } catch (error) {
+                            return { provider, error: error.message };
+                        }
+                    }));
+                    const backups = [];
+                    const errors = {};
+                    results.forEach(result => {
+                        if (result.error) errors[result.provider.type] = result.error;
+                        else backups.push(...result.backups);
+                    });
+                    backups.sort((a, b) => String(b.created_at || b.modified || '').localeCompare(String(a.created_at || a.modified || '')));
+                    setRemoteBackups(backups);
+                    setRemoteErrors(errors);
+                } finally {
+                    setRemoteLoading(false);
+                }
+            };
+
+            useEffect(() => {
+                if (tab === 'backups') loadRemoteBackups();
+            }, [tab, status?.connected_count]);
+
+            const openRemoteRestore = (backup) => {
+                setRestoreBackup(backup);
+                setRemoteRestoreResult(null);
+                setRemoteRestoreForm({
+                    user_password: '', backup_password: '', mode: 'merge',
+                    restore_users: false, dry_run: true
+                });
+            };
+
+            const restoreRemoteVersion = async () => {
+                if (!remoteRestoreForm.user_password || !remoteRestoreForm.backup_password) {
+                    addToast(t('vaultRestorePasswordsRequired') || 'Account password and recovery key are required', 'error');
+                    return;
+                }
+                if (!remoteRestoreForm.dry_run && !window.confirm(t('vaultApplyRestoreConfirm') || 'Apply this backup to the current machine? Review a dry run first.')) return;
+                setBusy('remote-restore');
+                try {
+                    const downloadUrl = `${API_URL}/config/vault/providers/${restoreBackup.provider_type}/backups/download?object_key=${encodeURIComponent(restoreBackup.object_key)}`;
+                    const download = await fetch(downloadUrl, {
+                        credentials: 'include', headers: getAuthHeaders()
+                    });
+                    if (!download.ok) {
+                        const errorBody = await download.json().catch(() => ({}));
+                        throw new Error(errorBody.error || `HTTP ${download.status}`);
+                    }
+                    const encryptedBlob = await download.blob();
+                    const formData = new FormData();
+                    formData.append('user_password', remoteRestoreForm.user_password);
+                    formData.append('backup_password', remoteRestoreForm.backup_password);
+                    formData.append('mode', remoteRestoreForm.mode);
+                    formData.append('restore_users', String(remoteRestoreForm.restore_users));
+                    formData.append('dry_run', String(remoteRestoreForm.dry_run));
+                    formData.append('backup_file', new File(
+                        [encryptedBlob], restoreBackup.filename || 'remote-backup.pegabackup',
+                        { type: 'application/octet-stream' }
+                    ));
+                    const response = await fetch(`${API_URL}/config/restore`, {
+                        method: 'POST', credentials: 'include', headers: getAuthHeaders(), body: formData
+                    });
+                    const body = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+                    setRemoteRestoreResult(body);
+                    addToast(
+                        remoteRestoreForm.dry_run
+                            ? (t('vaultDryRunComplete') || 'Backup validation completed; review the result before applying')
+                            : (t('vaultRestoreComplete') || 'Remote backup restored'),
+                        'success'
+                    );
+                    if (!remoteRestoreForm.dry_run) await loadStatus(false);
+                } catch (error) {
+                    addToast(error.message, 'error');
+                } finally {
+                    setBusy('');
+                }
+            };
+
             const providerDefs = [
                 { type: 'webdav', name: 'WebDAV', icon: Icons.Server, color: 'blue' },
                 { type: 's3', name: t('vaultS3Compatible') || 'S3 Compatible Storage', icon: Icons.Database, color: 'purple' }
@@ -1596,6 +1696,9 @@
                         </button>
                         <button onClick={() => setTab('history')} className={`flex-1 px-3 py-2 rounded-md text-sm ${tab === 'history' ? 'bg-proxmox-card text-white shadow' : 'text-gray-400'}`}>
                             {t('vaultSyncHistory') || 'Sync history'}
+                        </button>
+                        <button onClick={() => setTab('backups')} className={`flex-1 px-3 py-2 rounded-md text-sm ${tab === 'backups' ? 'bg-proxmox-card text-white shadow' : 'text-gray-400'}`}>
+                            {t('vaultRemoteBackups') || 'Backup versions'}
                         </button>
                     </div>
 
@@ -1642,7 +1745,7 @@
                             })}
                             <p className="text-xs text-gray-500 px-1">{t('vaultOneWayNote') || 'One-way encrypted backups only. Restores are always manual and dry-run-first.'}</p>
                         </div>
-                    ) : (
+                    ) : tab === 'history' ? (
                         <div className="overflow-x-auto border border-proxmox-border rounded-xl">
                             <table className="w-full text-sm">
                                 <thead className="bg-proxmox-darker text-gray-400"><tr>
@@ -1663,6 +1766,97 @@
                                     {(status?.history || []).length === 0 && <tr><td colSpan="5" className="px-4 py-8 text-center text-gray-500">{t('vaultNoHistory') || 'No sync history yet'}</td></tr>}
                                 </tbody>
                             </table>
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <p className="text-sm text-gray-400">{t('vaultRemoteBackupsDesc') || 'Versions stored by connected providers, including backups created by another PegaProx machine.'}</p>
+                                <button disabled={remoteLoading || providers.length === 0} onClick={loadRemoteBackups} className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm border border-proxmox-border text-gray-300 hover:text-white disabled:opacity-50">
+                                    <span className={`inline-flex ${remoteLoading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                                    {t('refresh') || 'Refresh'}
+                                </button>
+                            </div>
+                            {Object.entries(remoteErrors).map(([provider, message]) => (
+                                <div key={provider} className="px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300">
+                                    {provider}: {message}
+                                </div>
+                            ))}
+                            <div className="overflow-x-auto border border-proxmox-border rounded-xl">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-proxmox-darker text-gray-400"><tr>
+                                        <th className="text-left px-4 py-3">{t('provider') || 'Provider'}</th>
+                                        <th className="text-left px-4 py-3">{t('vaultBackupVersion') || 'Backup version'}</th>
+                                        <th className="text-left px-4 py-3">{t('date') || 'Date'}</th>
+                                        <th className="text-left px-4 py-3">{t('size') || 'Size'}</th>
+                                        <th className="text-left px-4 py-3">{t('vaultSourceMachine') || 'Source machine'}</th>
+                                        <th className="text-right px-4 py-3">{t('action') || 'Action'}</th>
+                                    </tr></thead>
+                                    <tbody className="divide-y divide-proxmox-border">
+                                        {remoteBackups.map(item => <tr key={`${item.provider_id}:${item.object_key}`}>
+                                            <td className="px-4 py-3 text-white">{item.provider_name || item.provider_type}</td>
+                                            <td className="px-4 py-3">
+                                                <div className="text-white font-mono text-xs">{item.backup_id || item.filename}</div>
+                                                {item.key_id && <div className="text-xs text-gray-500">Key {item.key_id}</div>}
+                                            </td>
+                                            <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{item.created_at || item.modified ? new Date(item.created_at || item.modified).toLocaleString() : 'â€”'}</td>
+                                            <td className="px-4 py-3 text-gray-400">{formatBytes(item.size_bytes)}</td>
+                                            <td className="px-4 py-3 text-gray-400 font-mono text-xs max-w-48 truncate" title={item.source_instance || item.object_key}>{item.source_instance || (item.provider_type === 'webdav' ? 'WebDAV' : 'â€”')}</td>
+                                            <td className="px-4 py-3 text-right">
+                                                <button onClick={() => openRemoteRestore(item)} className="px-3 py-2 rounded-lg text-sm bg-blue-500/20 text-blue-300 hover:bg-blue-500/30">
+                                                    {t('vaultSelectRestore') || 'Select and restore'}
+                                                </button>
+                                            </td>
+                                        </tr>)}
+                                        {!remoteLoading && remoteBackups.length === 0 && <tr><td colSpan="6" className="px-4 py-8 text-center text-gray-500">{providers.length === 0 ? (t('vaultConnectToBrowse') || 'Connect WebDAV or S3 to browse backup versions') : (t('vaultNoRemoteBackups') || 'No remote backup versions found')}</td></tr>}
+                                        {remoteLoading && <tr><td colSpan="6" className="px-4 py-8 text-center text-gray-400"><span className="inline-flex animate-spin mr-2"><Icons.Loader /></span>{t('loading') || 'Loading...'}</td></tr>}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+
+                    {restoreBackup && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 overflow-y-auto py-6">
+                            <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 max-w-2xl w-full mx-4 space-y-4">
+                                <div className="flex justify-between gap-4">
+                                    <div><h3 className="font-semibold text-white">{t('vaultRestoreRemoteVersion') || 'Restore remote backup version'}</h3><p className="text-xs text-gray-500 mt-1 break-all">{restoreBackup.filename}</p></div>
+                                    <button onClick={() => setRestoreBackup(null)} className="text-gray-400">Ã—</button>
+                                </div>
+                                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-sm text-blue-200">
+                                    {t('vaultDryRunAdvice') || 'Run validation first. Applying a restore changes configuration on this machine.'}
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <input type="password" value={remoteRestoreForm.user_password} onChange={e => setRemoteRestoreForm({...remoteRestoreForm, user_password: e.target.value})} placeholder={t('enterYourPassword') || 'Account password'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                    <input type="password" value={remoteRestoreForm.backup_password} onChange={e => setRemoteRestoreForm({...remoteRestoreForm, backup_password: e.target.value})} placeholder={t('vaultBackupRecoveryKey') || 'Recovery key used by this backup'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
+                                    <label className="text-sm text-gray-300">{t('restoreMode') || 'Restore mode'}
+                                        <select value={remoteRestoreForm.mode} onChange={e => setRemoteRestoreForm({...remoteRestoreForm, mode: e.target.value})} className="mt-1 w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white">
+                                            <option value="merge">{t('merge') || 'Merge'}</option>
+                                            <option value="overwrite">{t('overwrite') || 'Overwrite'}</option>
+                                        </select>
+                                    </label>
+                                    <div className="space-y-2 text-sm text-gray-300 md:pt-6">
+                                        <label className="flex gap-2"><input type="checkbox" checked={!!remoteRestoreForm.restore_users} onChange={e => setRemoteRestoreForm({...remoteRestoreForm, restore_users: e.target.checked})} /> {t('restoreUsers') || 'Restore users'}</label>
+                                        <label className="flex gap-2 text-green-300"><input type="checkbox" checked={!!remoteRestoreForm.dry_run} onChange={e => setRemoteRestoreForm({...remoteRestoreForm, dry_run: e.target.checked})} /> {t('dryRun') || 'Dry run (validate only)'}</label>
+                                    </div>
+                                </div>
+                                {remoteRestoreResult && <div className="p-3 rounded-lg bg-proxmox-darker border border-proxmox-border text-sm">
+                                    <div className="font-medium text-green-400 mb-2">{remoteRestoreResult.dry_run ? (t('vaultValidationResult') || 'Validation result') : (t('vaultRestoreResult') || 'Restore result')}</div>
+                                    <div className="grid grid-cols-2 gap-2 text-gray-300">
+                                        <span>{t('mode') || 'Mode'}: {remoteRestoreResult.mode}</span>
+                                        <span>{t('date') || 'Date'}: {remoteRestoreResult.backup_date || 'â€”'}</span>
+                                        <span>{t('restored') || 'Restored'}: {Object.keys(remoteRestoreResult.restored || {}).length}</span>
+                                        <span>{t('errors') || 'Errors'}: {(remoteRestoreResult.errors || []).length}</span>
+                                    </div>
+                                    {(remoteRestoreResult.errors || []).length > 0 && <div className="mt-2 text-red-300">{remoteRestoreResult.errors.join('; ')}</div>}
+                                </div>}
+                                <div className="flex flex-wrap gap-3">
+                                    <button onClick={() => setRestoreBackup(null)} className="px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button>
+                                    <span className="flex-1" />
+                                    <button disabled={busy === 'remote-restore'} onClick={restoreRemoteVersion} className={`px-5 py-2 rounded-lg text-white disabled:opacity-50 ${remoteRestoreForm.dry_run ? 'bg-blue-600' : 'bg-red-600'}`}>
+                                        {busy === 'remote-restore' ? (t('processing') || 'Processing...') : remoteRestoreForm.dry_run ? (t('vaultValidateBackup') || 'Validate backup') : (t('vaultApplyRestore') || 'Apply restore')}
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     )}
 
