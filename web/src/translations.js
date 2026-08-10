@@ -5,7 +5,7 @@
         const translations = {
             de: {
                 languageSimplifiedChinese: 'Vereinfachtes Chinesisch',
-                vaultKeyIdLabel: 'Schlüssel',
+                vaultKeyIdLabel: 'Schlüssel-ID',
                 setupFailedHttp: 'Einrichtung fehlgeschlagen (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster zum Span hinzugefügt',
@@ -4256,7 +4256,7 @@
             },
             en: {
                 languageSimplifiedChinese: 'Simplified Chinese',
-                vaultKeyIdLabel: 'Key',
+                vaultKeyIdLabel: 'Key ID',
                 setupFailedHttp: 'Setup failed (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster added to the span',
@@ -8674,7 +8674,7 @@
             },
             zh: {
                 languageSimplifiedChinese: '简体中文',
-                vaultKeyIdLabel: '密钥',
+                vaultKeyIdLabel: '密钥 ID',
                 setupFailedHttp: '初始化失败（HTTP {status}）',
                 mcevpnMemberAdded: '已将集群加入跨域',
                 mcevpnMemberRemoved: '已从跨域中移除集群',
@@ -12629,7 +12629,7 @@
                 timeAgoSec: 'il y a {n}s',
                 timeAgoMin: 'il y a {n}m',
                 languageSimplifiedChinese: 'Chinois simplifié',
-                vaultKeyIdLabel: 'Clé',
+                vaultKeyIdLabel: 'ID de clé',
                 setupFailedHttp: 'Échec de la configuration (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster ajouté au span',
@@ -16552,7 +16552,7 @@
             },
             es: {
                 languageSimplifiedChinese: 'Chino simplificado',
-                vaultKeyIdLabel: 'Clave',
+                vaultKeyIdLabel: 'ID de clave',
                 setupFailedHttp: 'Error de configuración (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Clúster añadido al span',
@@ -20620,7 +20620,7 @@
             },
             pt: {
                 languageSimplifiedChinese: 'Chinês simplificado',
-                vaultKeyIdLabel: 'Chave',
+                vaultKeyIdLabel: 'ID da chave',
                 setupFailedHttp: 'Falha na configuração (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster adicionado ao span',
@@ -24488,7 +24488,7 @@
             },
             ko: {
                 languageSimplifiedChinese: '중국어 간체',
-                vaultKeyIdLabel: '키',
+                vaultKeyIdLabel: '키 ID',
                 setupFailedHttp: '설정 실패(HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: '클러스터가 스팬에 추가됨',
@@ -28483,7 +28483,7 @@
             },
             it: {
                 languageSimplifiedChinese: 'Cinese semplificato',
-                vaultKeyIdLabel: 'Chiave',
+                vaultKeyIdLabel: 'ID chiave',
                 setupFailedHttp: 'Configurazione non riuscita (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster aggiunto allo span',

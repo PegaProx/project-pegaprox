@@ -1,5 +1,6 @@
 """Configuration-vault encryption, redaction and provider regression tests."""
 
+import hashlib
 import io
 import json
 import os
@@ -615,6 +616,15 @@ def test_overwrite_restore_preserves_credentials_omitted_from_backup(api, seed, 
     payload = config_vault.build_backup_data(
         exported_by='root', include_secrets=False, include_users=True
     )
+    payload['users']['carol'] = {
+        'role': 'user', 'enabled': True, 'auth_source': 'local'
+    }
+    payload['manifest']['section_counts']['users'] = len(payload['users'])
+    _manifest = payload.pop('manifest')
+    _manifest['content_sha256'] = hashlib.sha256(
+        config_vault._json_bytes(payload)
+    ).hexdigest()
+    payload['manifest'] = _manifest
     encrypted = config_vault.encrypt_backup(payload, 'backup recovery password')
 
     response = api.as_user(admin).post('/api/config/restore', data={
@@ -636,6 +646,8 @@ def test_overwrite_restore_preserves_credentials_omitted_from_backup(api, seed, 
     assert bob['password_salt'] == bob_salt
     assert bob['password_hash'] == bob_hash
     assert bob['totp_secret'] == 'BOB-TOTP'
+    assert db.get_user('carol') is None
+    assert response.get_json()['skipped']['users_without_credentials'] == ['carol']
 
 
 def test_restore_treats_malformed_schema_version_as_legacy(api, seed, db):
@@ -666,3 +678,36 @@ def test_restore_treats_malformed_schema_version_as_legacy(api, seed, db):
 
     assert response.status_code == 200, response.get_data(as_text=True)
     assert response.get_json()['backup_version'] == 'legacy'
+
+
+def test_restore_does_not_double_encrypt_server_setting_ciphertext(api, seed, db):
+    from pegaprox.utils.auth import hash_password
+
+    admin = seed.user('root', role='admin')
+    salt, password_hash = hash_password('local-admin-password')
+    db.save_user('root', {
+        **admin,
+        'password_salt': salt,
+        'password_hash': password_hash,
+        'role': 'admin',
+        'enabled': True,
+    })
+    ciphertext = db._encrypt('smtp-secret')
+    encrypted = config_vault.encrypt_backup({
+        'schema_version': 2,
+        'version': '2',
+        'export_date': '2026-08-10T12:00:00',
+        'server_settings': {'smtp_password': ciphertext},
+    }, 'backup recovery password')
+
+    response = api.as_user(admin).post('/api/config/restore', data={
+        'user_password': 'local-admin-password',
+        'backup_password': 'backup recovery password',
+        'mode': 'merge',
+        'dry_run': 'false',
+        'backup_file': (io.BytesIO(encrypted), 'ciphertext.pegabackup'),
+    }, content_type='multipart/form-data')
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert db.get_server_setting('smtp_password') == ciphertext
+    assert db._decrypt(db.get_server_setting('smtp_password')) == 'smtp-secret'

@@ -1701,7 +1701,7 @@
                                 </div>
                                 <div className="text-sm text-gray-400">
                                     {(t('vaultProvidersConnected') || '{count} provider(s) connected').replace('{count}', status?.connected_count || 0)}
-                                    {status?.key_id && <span className="ml-2 font-mono text-xs">{t('vaultKeyIdLabel') || 'Key'} {status.key_id}</span>}
+                                    {status?.key_id && <span className="ml-2 font-mono text-xs">{t('vaultKeyIdLabel') || 'Key ID'} {status.key_id}</span>}
                                 </div>
                                 {status?.vault_error && <div className="text-xs text-red-400 mt-1">{status.vault_error}</div>}
                             </div>
@@ -1792,7 +1792,7 @@
                                             <td className="px-4 py-3 text-white">{item.provider_name || item.provider_type}</td>
                                             <td className="px-4 py-3">
                                                 <div className="text-white font-mono text-xs">{item.backup_id || item.filename}</div>
-                                                {item.key_id && <div className="text-xs text-gray-500">{t('vaultKeyIdLabel') || 'Key'} {item.key_id}</div>}
+                                                {item.key_id && <div className="text-xs text-gray-500">{t('vaultKeyIdLabel') || 'Key ID'} {item.key_id}</div>}
                                             </td>
                                             <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{item.created_at || item.modified ? new Date(item.created_at || item.modified).toLocaleString() : '\u2014'}</td>
                                             <td className="px-4 py-3 text-gray-400">{formatBytes(item.size_bytes)}</td>

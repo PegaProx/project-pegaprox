@@ -2372,7 +2372,10 @@ def restore_config():
                         'acme_dns_rfc2136_secret',
                     ):
                         _secret_value = incoming_ss.get(_secret_key)
-                        if schema_version >= 2 and _secret_value:
+                        if (
+                            schema_version >= 2 and _secret_value
+                            and not str(_secret_value).startswith(('aes256:', 'gAAAA'))
+                        ):
                             incoming_ss[_secret_key] = database._encrypt(str(_secret_value))
                         elif (
                             (_secret_key not in incoming_ss or secrets_omitted)
@@ -2502,7 +2505,17 @@ def restore_config():
                                 and _existing_user.get(_user_secret)
                             ):
                                 u[_user_secret] = _existing_user[_user_secret]
-                    
+
+                    _auth_source = str(u.get('auth_source') or 'local').lower()
+                    if (
+                        _auth_source == 'local'
+                        and (not u.get('password_salt') or not u.get('password_hash'))
+                    ):
+                        results['skipped'].setdefault(
+                            'users_without_credentials', []
+                        ).append(uname)
+                        continue
+
                     if not dry_run:
                         database.save_user(uname, u)
                     user_count += 1
