@@ -1943,11 +1943,47 @@ class PegaProxDB:
                     sha256 TEXT DEFAULT '',
                     backup_id TEXT DEFAULT '',
                     triggered_by TEXT DEFAULT '',
-                    error TEXT DEFAULT '',
-                    FOREIGN KEY (provider_id) REFERENCES config_vault_providers(id)
-                        ON DELETE CASCADE
+                    error TEXT DEFAULT ''
                 )
             ''')
+            # Early config-vault builds cascaded history deletion when a cloud
+            # provider was disconnected. History is an audit record and its
+            # provider_id remains useful even after the provider row is gone,
+            # so rebuild those databases without the foreign-key cascade.
+            _vault_history_fks = cursor.execute(
+                'PRAGMA foreign_key_list(config_vault_history)'
+            ).fetchall()
+            if _vault_history_fks:
+                cursor.execute('DROP TABLE IF EXISTS config_vault_history_migrated')
+                cursor.execute('''
+                    CREATE TABLE config_vault_history_migrated (
+                        id TEXT PRIMARY KEY,
+                        provider_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        object_key TEXT DEFAULT '',
+                        size_bytes INTEGER DEFAULT 0,
+                        sha256 TEXT DEFAULT '',
+                        backup_id TEXT DEFAULT '',
+                        triggered_by TEXT DEFAULT '',
+                        error TEXT DEFAULT ''
+                    )
+                ''')
+                cursor.execute('''
+                    INSERT INTO config_vault_history_migrated
+                    (id, provider_id, status, started_at, completed_at,
+                     object_key, size_bytes, sha256, backup_id, triggered_by, error)
+                    SELECT id, provider_id, status, started_at, completed_at,
+                           object_key, size_bytes, sha256, backup_id, triggered_by, error
+                    FROM config_vault_history
+                ''')
+                cursor.execute('DROP TABLE config_vault_history')
+                cursor.execute(
+                    'ALTER TABLE config_vault_history_migrated '
+                    'RENAME TO config_vault_history'
+                )
+                logging.info('Migrated configuration vault history retention schema')
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_config_vault_history_started
                 ON config_vault_history(started_at DESC)

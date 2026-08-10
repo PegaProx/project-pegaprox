@@ -5,6 +5,7 @@
         const translations = {
             de: {
                 languageSimplifiedChinese: 'Vereinfachtes Chinesisch',
+                vaultKeyIdLabel: 'Schlüssel',
                 setupFailedHttp: 'Einrichtung fehlgeschlagen (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster zum Span hinzugefügt',
@@ -4255,6 +4256,7 @@
             },
             en: {
                 languageSimplifiedChinese: 'Simplified Chinese',
+                vaultKeyIdLabel: 'Key',
                 setupFailedHttp: 'Setup failed (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster added to the span',
@@ -7197,8 +7199,6 @@
                 vaultLocalFileTools: 'Local file export/import (advanced)',
                 provider: 'Provider',
                 restoreMode: 'Restore mode',
-                vaultSyncHistory: 'Sync history',
-                vaultRemoteBackups: 'Backup versions',
                 vaultRemoteBackupsDesc: 'Versions stored by connected providers, including backups created by another PegaProx machine.',
                 vaultBackupVersion: 'Backup version',
                 vaultSourceMachine: 'Source machine',
@@ -7219,7 +7219,6 @@
                 vaultS3Compatible: 'S3 Compatible Storage',
                 vaultNeverSynced: 'Connected · never synced',
                 vaultOneWayNote: 'One-way encrypted backups only. Restores are always manual and dry-run-first.',
-                vaultNoHistory: 'No sync history yet',
                 vaultProviderSaved: 'Cloud provider saved',
                 vaultProviderRemoved: 'Provider disconnected',
                 vaultConnectionOk: 'Connection successful',
@@ -8675,6 +8674,7 @@
             },
             zh: {
                 languageSimplifiedChinese: '简体中文',
+                vaultKeyIdLabel: '密钥',
                 setupFailedHttp: '初始化失败（HTTP {status}）',
                 mcevpnMemberAdded: '已将集群加入跨域',
                 mcevpnMemberRemoved: '已从跨域中移除集群',
@@ -11339,8 +11339,6 @@
                 vaultLocalFileTools: '本地文件导出/导入（高级）',
                 provider: '云服务',
                 restoreMode: '恢复方式',
-                vaultSyncHistory: '同步记录',
-                vaultRemoteBackups: '备份版本',
                 vaultRemoteBackupsDesc: '显示已连接云服务中的版本，包括其他 PegaProx 机器创建的备份。',
                 vaultBackupVersion: '备份版本',
                 vaultSourceMachine: '来源机器',
@@ -11361,7 +11359,6 @@
                 vaultS3Compatible: 'S3 兼容存储',
                 vaultNeverSynced: '已连接 · 尚未同步',
                 vaultOneWayNote: '仅执行单向加密备份；恢复始终由管理员手动执行，并默认先进行试运行。',
-                vaultNoHistory: '暂无同步记录',
                 vaultProviderSaved: '云服务配置已保存',
                 vaultProviderRemoved: '云服务已断开',
                 vaultConnectionOk: '连接成功',
@@ -12632,6 +12629,7 @@
                 timeAgoSec: 'il y a {n}s',
                 timeAgoMin: 'il y a {n}m',
                 languageSimplifiedChinese: 'Chinois simplifié',
+                vaultKeyIdLabel: 'Clé',
                 setupFailedHttp: 'Échec de la configuration (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster ajouté au span',
@@ -16554,6 +16552,7 @@
             },
             es: {
                 languageSimplifiedChinese: 'Chino simplificado',
+                vaultKeyIdLabel: 'Clave',
                 setupFailedHttp: 'Error de configuración (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Clúster añadido al span',
@@ -20621,6 +20620,7 @@
             },
             pt: {
                 languageSimplifiedChinese: 'Chinês simplificado',
+                vaultKeyIdLabel: 'Chave',
                 setupFailedHttp: 'Falha na configuração (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster adicionado ao span',
@@ -24488,6 +24488,7 @@
             },
             ko: {
                 languageSimplifiedChinese: '중국어 간체',
+                vaultKeyIdLabel: '키',
                 setupFailedHttp: '설정 실패(HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: '클러스터가 스팬에 추가됨',
@@ -28482,6 +28483,7 @@
             },
             it: {
                 languageSimplifiedChinese: 'Cinese semplificato',
+                vaultKeyIdLabel: 'Chiave',
                 setupFailedHttp: 'Configurazione non riuscita (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Cluster aggiunto allo span',

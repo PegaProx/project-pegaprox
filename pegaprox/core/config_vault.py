@@ -19,10 +19,12 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Dict, Iterable, Optional
 from urllib.parse import quote, unquote, urlparse, urlunparse
 
@@ -38,6 +40,17 @@ from pegaprox.utils.url_security import sanitize_outbound_url
 
 PROVIDER_TYPES = frozenset({'webdav', 's3'})
 MAX_REMOTE_BACKUP_BYTES = 100 * 1024 * 1024
+MAX_PROVIDER_LIST_PAGES = 100
+MAX_HISTORY_ROWS_PER_PROVIDER = 1000
+_BACKUP_MAGIC = b'PGPXVLT'
+_BACKUP_VERSION = 2
+_BACKUP_HEADER_V2 = _BACKUP_MAGIC + bytes([_BACKUP_VERSION])
+_PBKDF2_ITERATIONS_LEGACY = 100_000
+_PBKDF2_ITERATIONS_V2 = 600_000
+_INSTANCE_ID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
 _PROVIDER_SECRET_FIELDS = {
     'webdav': frozenset({'password'}),
     's3': frozenset({'access_key_id', 'secret_access_key', 'session_token'}),
@@ -59,21 +72,29 @@ _CLUSTER_SECRET_FIELDS = frozenset({
 
 _sync_guard = threading.Lock()
 _active_syncs = set()
+_metadata_guard = threading.Lock()
 _scheduler_guard = threading.Lock()
 _scheduler_running = False
 
 
+class VaultMetadataError(RuntimeError):
+    """Raised when stored vault metadata exists but cannot be decrypted."""
+
+
 def _now() -> str:
+    """Return a local ISO timestamp with second precision."""
     return datetime.now().isoformat(timespec='seconds')
 
 
 def _json_bytes(data: dict) -> bytes:
+    """Encode a deterministic canonical JSON representation."""
     return json.dumps(
         data, ensure_ascii=False, sort_keys=True, separators=(',', ':'), default=str
     ).encode('utf-8')
 
 
 def _count_section(value) -> int:
+    """Return a manifest-friendly section item count."""
     if isinstance(value, (dict, list, tuple)):
         return len(value)
     return 1 if value is not None else 0
@@ -97,6 +118,7 @@ def _redact_nested(value):
 
 
 def _portable_server_settings(settings: dict, include_secrets: bool) -> dict:
+    """Make server settings portable and optionally redact credentials."""
     settings = copy.deepcopy(settings or {})
     db = get_db()
     for key in _SERVER_SECRET_FIELDS:
@@ -186,9 +208,15 @@ def build_backup_data(
         else:
             cursor.execute('SELECT * FROM custom_scripts')
         scripts = [dict(row) for row in cursor.fetchall()]
-        for script in scripts:
-            script.pop('last_output', None)
-        payload['custom_scripts'] = scripts
+        if include_secrets:
+            for script in scripts:
+                script.pop('last_output', None)
+            payload['custom_scripts'] = scripts
+        else:
+            # Script bodies and descriptions are arbitrary administrator input
+            # and commonly contain inline passwords, tokens or private keys.
+            # Omitting the whole section is the only reliable redaction.
+            payload['custom_scripts'] = []
     except Exception:
         payload['custom_scripts'] = []
 
@@ -225,7 +253,7 @@ def build_backup_data(
 
 
 def encrypt_backup(data, password: str) -> bytes:
-    """Encrypt JSON-compatible data with the legacy-compatible AES-GCM format."""
+    """Encrypt JSON-compatible data using the versioned AES-GCM envelope."""
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -238,14 +266,17 @@ def encrypt_backup(data, password: str) -> bytes:
     nonce = os.urandom(12)
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(), length=32, salt=salt,
-        iterations=100000, backend=default_backend(),
+        iterations=_PBKDF2_ITERATIONS_V2, backend=default_backend(),
     )
     key = kdf.derive(password.encode('utf-8'))
-    return salt + nonce + AESGCM(key).encrypt(nonce, plaintext.encode('utf-8'), None)
+    ciphertext = AESGCM(key).encrypt(
+        nonce, plaintext.encode('utf-8'), _BACKUP_HEADER_V2
+    )
+    return _BACKUP_HEADER_V2 + salt + nonce + ciphertext
 
 
 def decrypt_backup(encrypted_data: bytes, password: str) -> str:
-    """Decrypt the PegaProx backup format used by schema v1 and v2 payloads."""
+    """Decrypt versioned backups and the legacy headerless envelope."""
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -253,27 +284,64 @@ def decrypt_backup(encrypted_data: bytes, password: str) -> str:
 
     if not isinstance(encrypted_data, (bytes, bytearray)) or len(encrypted_data) < 29:
         raise ValueError('Invalid backup file format - file too short')
-    salt = bytes(encrypted_data[:16])
-    nonce = bytes(encrypted_data[16:28])
-    ciphertext = bytes(encrypted_data[28:])
+    raw = bytes(encrypted_data)
+    if raw.startswith(_BACKUP_MAGIC):
+        if len(raw) <= len(_BACKUP_MAGIC):
+            raise ValueError('Invalid backup file format - missing version')
+        version = raw[len(_BACKUP_MAGIC)]
+        if version != _BACKUP_VERSION:
+            raise ValueError(f'Unsupported backup encryption version: {version}')
+        offset = len(_BACKUP_HEADER_V2)
+        iterations = _PBKDF2_ITERATIONS_V2
+        associated_data = _BACKUP_HEADER_V2
+    else:
+        offset = 0
+        iterations = _PBKDF2_ITERATIONS_LEGACY
+        associated_data = None
+    if len(raw) < offset + 29:
+        raise ValueError('Invalid backup file format - file too short')
+    salt = raw[offset:offset + 16]
+    nonce = raw[offset + 16:offset + 28]
+    ciphertext = raw[offset + 28:]
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(), length=32, salt=salt,
-        iterations=100000, backend=default_backend(),
+        iterations=iterations, backend=default_backend(),
     )
     key = kdf.derive(password.encode('utf-8'))
     try:
-        return AESGCM(key).decrypt(nonce, ciphertext, None).decode('utf-8')
+        return AESGCM(key).decrypt(
+            nonce, ciphertext, associated_data
+        ).decode('utf-8')
     except Exception as exc:
         raise ValueError('Incorrect backup password or corrupted file') from exc
 
 
+def validate_backup_manifest(data: dict) -> None:
+    """Verify a schema-v2 manifest hash before any restore is applied."""
+    if not isinstance(data, dict):
+        raise ValueError('Invalid backup format - expected a JSON object')
+    manifest = data.get('manifest')
+    if not isinstance(manifest, dict):
+        return
+    expected = str(manifest.get('content_sha256') or '').lower()
+    if not re.fullmatch(r'[0-9a-f]{64}', expected):
+        raise ValueError('Invalid backup manifest hash')
+    unhashed = copy.deepcopy(data)
+    unhashed.pop('manifest', None)
+    actual = hashlib.sha256(_json_bytes(unhashed)).hexdigest()
+    if not hmac.compare_digest(actual, expected):
+        raise ValueError('Backup manifest integrity check failed')
+
+
 def create_encrypted_backup(*, password: str, exported_by: str, **options):
+    """Build and encrypt a portable configuration backup."""
     payload = build_backup_data(exported_by=exported_by, **options)
     encrypted = encrypt_backup(payload, password)
     return encrypted, payload
 
 
 def _meta_get(key: str) -> str:
+    """Read encrypted vault metadata, distinguishing missing from corrupt."""
     cursor = get_db().conn.cursor()
     cursor.execute('SELECT value_encrypted FROM config_vault_metadata WHERE key = ?', (key,))
     row = cursor.fetchone()
@@ -281,12 +349,13 @@ def _meta_get(key: str) -> str:
         return ''
     try:
         return get_db()._decrypt(row['value_encrypted'])
-    except Exception:
+    except Exception as exc:
         logging.exception("[config-vault] metadata decrypt failed for %s", key)
-        return ''
+        raise VaultMetadataError(f'Vault metadata could not be decrypted: {key}') from exc
 
 
 def _meta_set(key: str, value: str):
+    """Encrypt and persist one vault metadata value."""
     db = get_db()
     cursor = db.conn.cursor()
     cursor.execute('''
@@ -297,15 +366,18 @@ def _meta_set(key: str, value: str):
 
 
 def get_instance_id() -> str:
-    instance_id = _meta_get('instance_id')
-    if instance_id:
+    """Return the stable installation ID, creating it exactly once."""
+    with _metadata_guard:
+        instance_id = _meta_get('instance_id')
+        if instance_id:
+            return instance_id
+        instance_id = str(uuid.uuid4())
+        _meta_set('instance_id', instance_id)
         return instance_id
-    instance_id = str(uuid.uuid4())
-    _meta_set('instance_id', instance_id)
-    return instance_id
 
 
 def set_vault_key(password: str):
+    """Store the user-controlled recovery key and a random public key ID."""
     if not isinstance(password, str) or len(password) < 12:
         raise ValueError('Vault recovery key must be at least 12 characters')
     # Public, random identifier for support/history.  Do not expose a password
@@ -325,10 +397,12 @@ def set_vault_key(password: str):
 
 
 def get_vault_key() -> str:
+    """Return the configured recovery key, or an empty string if absent."""
     return _meta_get('vault_key')
 
 
 def vault_key_id() -> str:
+    """Return the public recovery-key identifier when the vault is ready."""
     return _meta_get('vault_key_id') if get_vault_key() else ''
 
 
@@ -343,18 +417,23 @@ def _vault_key_bundle():
     for row in cursor.fetchall():
         try:
             values[row['key']] = get_db()._decrypt(row['value_encrypted'])
-        except Exception:
-            values[row['key']] = ''
+        except Exception as exc:
+            logging.exception("[config-vault] metadata decrypt failed for %s", row['key'])
+            raise VaultMetadataError(
+                f'Vault metadata could not be decrypted: {row["key"]}'
+            ) from exc
     return values.get('vault_key', ''), values.get('vault_key_id', '')
 
 
 def _provider_row(provider_id: str):
+    """Read one raw provider row by stable provider type ID."""
     cursor = get_db().conn.cursor()
     cursor.execute('SELECT * FROM config_vault_providers WHERE id = ?', (provider_id,))
     return cursor.fetchone()
 
 
 def _decode_settings(row) -> dict:
+    """Decrypt the provider settings stored in a database row."""
     if not row:
         return {}
     try:
@@ -367,6 +446,7 @@ def _decode_settings(row) -> dict:
 
 
 def _public_settings(provider_type: str, settings: dict) -> dict:
+    """Replace provider credentials with boolean presence markers."""
     public = copy.deepcopy(settings or {})
     for key in _PROVIDER_SECRET_FIELDS.get(provider_type, ()):
         value = public.pop(key, None)
@@ -375,6 +455,7 @@ def _public_settings(provider_type: str, settings: dict) -> dict:
 
 
 def _row_to_provider(row) -> dict:
+    """Convert a provider database row into its redacted API shape."""
     settings = _decode_settings(row)
     return {
         'id': row['id'],
@@ -400,12 +481,14 @@ def _row_to_provider(row) -> dict:
 
 
 def list_providers() -> list:
+    """List all configured providers without returning credentials."""
     cursor = get_db().conn.cursor()
     cursor.execute('SELECT * FROM config_vault_providers ORDER BY type')
     return [_row_to_provider(row) for row in cursor.fetchall()]
 
 
 def get_provider(provider_id: str, *, include_credentials: bool = False) -> Optional[dict]:
+    """Return one provider, optionally for internal credentialed operations."""
     row = _provider_row(provider_id)
     if not row:
         return None
@@ -416,10 +499,24 @@ def get_provider(provider_id: str, *, include_credentials: bool = False) -> Opti
 
 
 def _bool(value, default=False) -> bool:
-    return default if value is None else bool(value)
+    """Parse a JSON-style boolean without treating ``"false"`` as true."""
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ('true', '1'):
+            return True
+        if lowered in ('false', '0'):
+            return False
+    raise ValueError('Boolean settings must be true or false')
 
 
 def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+    """Parse and clamp an integer to a closed interval."""
     try:
         return max(minimum, min(maximum, int(value)))
     except (TypeError, ValueError):
@@ -427,6 +524,7 @@ def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
 
 
 def _normalise_provider_settings(provider_type: str, incoming: dict, existing: dict) -> dict:
+    """Validate provider settings and preserve masked stored credentials."""
     incoming = incoming if isinstance(incoming, dict) else {}
     existing = existing if isinstance(existing, dict) else {}
 
@@ -480,6 +578,7 @@ def _normalise_provider_settings(provider_type: str, incoming: dict, existing: d
 
 
 def save_provider(provider_type: str, data: dict, created_by: str) -> dict:
+    """Create or update one encrypted WebDAV/S3 provider configuration."""
     if provider_type not in PROVIDER_TYPES:
         raise ValueError('Unsupported provider type')
     row = _provider_row(provider_type)
@@ -544,24 +643,37 @@ def save_provider(provider_type: str, data: dict, created_by: str) -> dict:
 
 
 def delete_provider(provider_id: str) -> bool:
+    """Delete a provider atomically with respect to sync registration."""
     with _sync_guard:
         if provider_id in _active_syncs:
             raise ValueError('Wait for the active sync to finish before disconnecting')
-    db = get_db()
-    cursor = db.conn.cursor()
-    cursor.execute('DELETE FROM config_vault_providers WHERE id = ?', (provider_id,))
-    changed = cursor.rowcount > 0
-    db.conn.commit()
-    return changed
+        db = get_db()
+        cursor = db.conn.cursor()
+        cursor.execute('DELETE FROM config_vault_providers WHERE id = ?', (provider_id,))
+        changed = cursor.rowcount > 0
+        db.conn.commit()
+        return changed
 
 
 def get_status(history_limit: int = 20) -> dict:
+    """Return provider status while surfacing corrupt vault metadata."""
     providers = list_providers()
-    vault_key, key_id = _vault_key_bundle()
+    vault_error = ''
+    try:
+        vault_key, key_id = _vault_key_bundle()
+    except VaultMetadataError as exc:
+        vault_key, key_id = '', ''
+        vault_error = str(exc)
+    try:
+        instance_id = get_instance_id()
+    except VaultMetadataError as exc:
+        instance_id = ''
+        vault_error = vault_error or str(exc)
     return {
         'vault_ready': bool(vault_key),
+        'vault_error': vault_error,
         'key_id': key_id if vault_key else '',
-        'instance_id': get_instance_id(),
+        'instance_id': instance_id,
         'connected_count': len(providers),
         'providers': providers,
         'history': list_history(limit=history_limit),
@@ -569,6 +681,7 @@ def get_status(history_limit: int = 20) -> dict:
 
 
 def _validate_endpoint(settings: dict, url: str) -> str:
+    """Enforce URL, transport and SSRF policy for an outbound endpoint."""
     parsed = urlparse(url)
     if parsed.username or parsed.password:
         raise ValueError('Credentials must not be embedded in the endpoint URL')
@@ -586,7 +699,10 @@ def _validate_endpoint(settings: dict, url: str) -> str:
 
 
 class WebDAVProvider:
+    """WebDAV adapter with installation-scoped collections and legacy reads."""
+
     def __init__(self, settings: dict):
+        """Initialise a validated WebDAV endpoint and credentials."""
         self.settings = settings
         self.base_url = str(settings.get('url') or '').rstrip('/')
         _validate_endpoint(settings, self.base_url)
@@ -598,6 +714,7 @@ class WebDAVProvider:
             logging.warning('[config-vault] WebDAV TLS certificate verification is disabled')
 
     def _url(self, key: str = '') -> str:
+        """Build and revalidate the URL for one relative object key."""
         if not key:
             return self.base_url
         safe_key = '/'.join(quote(part, safe='-_.~') for part in key.strip('/').split('/'))
@@ -606,6 +723,7 @@ class WebDAVProvider:
         return url
 
     def _request(self, method: str, url: str, **kwargs):
+        """Issue a bounded WebDAV request without following redirects."""
         response = requests.request(
             method, url, auth=self.auth, verify=self.verify, timeout=(10, 60),
             allow_redirects=False, **kwargs
@@ -615,11 +733,16 @@ class WebDAVProvider:
         return response
 
     def test(self):
+        """Verify that the configured base collection is accessible."""
         response = self._request('PROPFIND', self._url(), headers={'Depth': '0'})
         if response.status_code not in (200, 207):
             raise RuntimeError(f'WebDAV connection failed (HTTP {response.status_code})')
 
     def put(self, key: str, body: bytes):
+        """Upload one encrypted backup, creating its collection first."""
+        parent = key.rsplit('/', 1)[0] if '/' in key else ''
+        if parent:
+            self._ensure_collections(parent)
         response = self._request(
             'PUT', self._url(key), data=body,
             headers={'Content-Type': 'application/octet-stream'},
@@ -627,8 +750,23 @@ class WebDAVProvider:
         if response.status_code not in (200, 201, 204):
             raise RuntimeError(f'WebDAV upload failed (HTTP {response.status_code})')
 
-    def list(self, prefix: str) -> list:
-        response = self._request('PROPFIND', self._url(), headers={'Depth': '1'})
+    def _ensure_collections(self, prefix: str):
+        """Create missing collection segments before uploading an object."""
+        current = []
+        for segment in prefix.strip('/').split('/'):
+            if not segment:
+                continue
+            current.append(segment)
+            response = self._request('MKCOL', self._url('/'.join(current)))
+            if response.status_code not in (200, 201, 204, 405):
+                raise RuntimeError(
+                    f'WebDAV collection creation failed (HTTP {response.status_code})'
+                )
+
+    def _list_collection(self, prefix: str) -> tuple[list, list]:
+        """Return backup objects and child collections for one collection."""
+        target_url = self._url(prefix)
+        response = self._request('PROPFIND', target_url, headers={'Depth': '1'})
         if response.status_code not in (200, 207):
             raise RuntimeError(f'WebDAV list failed (HTTP {response.status_code})')
         try:
@@ -636,9 +774,21 @@ class WebDAVProvider:
         except Exception as exc:
             raise RuntimeError('WebDAV returned invalid XML') from exc
         result = []
+        collections = []
+        target_path = unquote(urlparse(target_url).path).rstrip('/')
         for item in root.findall('.//{DAV:}response'):
             href = item.findtext('{DAV:}href') or ''
-            name = unquote(href.rstrip('/').rsplit('/', 1)[-1])
+            href_path = unquote(urlparse(href).path).rstrip('/')
+            if href_path == target_path:
+                continue
+            name = href_path.rsplit('/', 1)[-1]
+            is_collection = item.find(
+                './/{DAV:}resourcetype/{DAV:}collection'
+            ) is not None
+            if is_collection:
+                if name:
+                    collections.append(name)
+                continue
             if not name.endswith('.pegabackup'):
                 continue
             try:
@@ -646,13 +796,28 @@ class WebDAVProvider:
             except (TypeError, ValueError):
                 size = 0
             result.append({
-                'key': name,
+                'key': f'{prefix.strip("/")}/{name}'.strip('/'),
                 'modified': item.findtext('.//{DAV:}getlastmodified') or '',
                 'size': max(0, size),
             })
-        return sorted(result, key=lambda item: item['key'], reverse=True)
+        return result, collections
+
+    def list(self, prefix: str) -> list:
+        """List a scoped collection, or discover all instance collections."""
+        prefix = str(prefix or '').strip('/')
+        result, collections = self._list_collection(prefix)
+        # Empty-prefix browsing is used for disaster recovery on a new machine.
+        # Include legacy flat objects plus each installation collection.
+        if not prefix:
+            for collection in collections[:1000]:
+                if not _INSTANCE_ID_RE.fullmatch(collection):
+                    continue
+                child_items, _ = self._list_collection(collection)
+                result.extend(child_items)
+        return sorted(result, key=_remote_object_sort_key, reverse=True)
 
     def get(self, key: str) -> bytes:
+        """Download one encrypted backup within the configured size limit."""
         response = self._request('GET', self._url(key), stream=True)
         if response.status_code != 200:
             response.close()
@@ -660,12 +825,14 @@ class WebDAVProvider:
         return _read_bounded_response(response)
 
     def delete(self, key: str):
+        """Delete one installation-scoped backup object."""
         response = self._request('DELETE', self._url(key))
         if response.status_code not in (200, 204, 404):
             raise RuntimeError(f'WebDAV delete failed (HTTP {response.status_code})')
 
 
 def _aws_quote(value: str, safe: str = '-_.~') -> str:
+    """Percent-encode one AWS SigV4 path or query component."""
     return quote(str(value), safe=safe)
 
 
@@ -673,6 +840,7 @@ class S3Provider:
     """Small AWS Signature V4 client for PUT/LIST/DELETE operations."""
 
     def __init__(self, settings: dict):
+        """Initialise and validate an S3-compatible SigV4 client."""
         self.settings = settings
         self.endpoint = str(settings.get('endpoint_url') or '').rstrip('/')
         _validate_endpoint(settings, self.endpoint)
@@ -687,11 +855,15 @@ class S3Provider:
             logging.warning('[config-vault] S3 TLS certificate verification is disabled')
         if not self.bucket or not self.access_key or not self.secret_key:
             raise ValueError('S3 bucket and access credentials are required')
-        bucket_pattern = r'[A-Za-z0-9][A-Za-z0-9._-]{0,61}[A-Za-z0-9]'
+        bucket_pattern = (
+            r'[A-Za-z0-9][A-Za-z0-9._-]{1,61}[A-Za-z0-9]'
+            if self.path_style else r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+        )
         if not re.fullmatch(bucket_pattern, self.bucket):
             raise ValueError('S3 bucket contains unsupported characters')
 
     def _target(self, key: str = ''):
+        """Build the virtual-hosted or path-style object URL."""
         parsed = urlparse(self.endpoint)
         endpoint_path = parsed.path.rstrip('/')
         encoded_key = '/'.join(_aws_quote(part) for part in key.strip('/').split('/')) if key else ''
@@ -712,6 +884,7 @@ class S3Provider:
 
     def _request(self, method: str, key: str = '', params=None, body: bytes = b'',
                  stream: bool = False):
+        """Sign and issue one AWS Signature V4 request."""
         params = params or {}
         url, canonical_uri = self._target(key)
         canonical_query = '&'.join(
@@ -767,38 +940,58 @@ class S3Provider:
         return response
 
     def test(self):
+        """Verify list access to the configured bucket."""
         response = self._request('GET', params={'list-type': '2', 'max-keys': '1'})
         if response.status_code != 200:
             raise RuntimeError(f'S3 connection failed (HTTP {response.status_code})')
 
     def put(self, key: str, body: bytes):
+        """Upload one encrypted object."""
         response = self._request('PUT', key=key, body=body)
         if response.status_code not in (200, 201, 204):
             raise RuntimeError(f'S3 upload failed (HTTP {response.status_code})')
 
     def list(self, prefix: str) -> list:
-        response = self._request('GET', params={
-            'list-type': '2', 'prefix': prefix, 'max-keys': '1000',
-        })
-        if response.status_code != 200:
-            raise RuntimeError(f'S3 list failed (HTTP {response.status_code})')
-        try:
-            root = ElementTree.fromstring(response.content)
-        except Exception as exc:
-            raise RuntimeError('S3 returned invalid XML') from exc
+        """List all objects below a prefix using bounded ListObjectsV2 paging."""
         result = []
-        for contents in root.findall('.//{*}Contents'):
-            key = contents.findtext('{*}Key') or ''
-            result.append({
-                'key': key,
-                'modified': contents.findtext('{*}LastModified') or '',
-                'size': _bounded_int(
-                    contents.findtext('{*}Size'), 0, 0, MAX_REMOTE_BACKUP_BYTES + 1
-                ),
-            })
+        continuation_token = ''
+        for _page in range(MAX_PROVIDER_LIST_PAGES):
+            params = {'list-type': '2', 'prefix': prefix, 'max-keys': '1000'}
+            if continuation_token:
+                params['continuation-token'] = continuation_token
+            response = self._request('GET', params=params)
+            if response.status_code != 200:
+                raise RuntimeError(f'S3 list failed (HTTP {response.status_code})')
+            try:
+                root = ElementTree.fromstring(response.content)
+            except Exception as exc:
+                raise RuntimeError('S3 returned invalid XML') from exc
+            for contents in root.findall('.//{*}Contents'):
+                key = contents.findtext('{*}Key') or ''
+                result.append({
+                    'key': key,
+                    'modified': contents.findtext('{*}LastModified') or '',
+                    'size': _bounded_int(
+                        contents.findtext('{*}Size'), 0, 0,
+                        MAX_REMOTE_BACKUP_BYTES + 1,
+                    ),
+                })
+            truncated = (root.findtext('.//{*}IsTruncated') or '').lower() == 'true'
+            if not truncated:
+                break
+            continuation_token = root.findtext('.//{*}NextContinuationToken') or ''
+            if not continuation_token:
+                logging.warning('[config-vault] truncated S3 list omitted continuation token')
+                break
+        else:
+            logging.warning(
+                '[config-vault] S3 listing stopped after %d pages',
+                MAX_PROVIDER_LIST_PAGES,
+            )
         return sorted(result, key=lambda item: (item['modified'], item['key']), reverse=True)
 
     def get(self, key: str) -> bytes:
+        """Download one encrypted object within the configured size limit."""
         response = self._request('GET', key=key, stream=True)
         if response.status_code != 200:
             response.close()
@@ -806,12 +999,14 @@ class S3Provider:
         return _read_bounded_response(response)
 
     def delete(self, key: str):
+        """Delete one object, treating absence as success."""
         response = self._request('DELETE', key=key)
         if response.status_code not in (200, 204, 404):
             raise RuntimeError(f'S3 delete failed (HTTP {response.status_code})')
 
 
 def _adapter(provider: dict):
+    """Construct the storage adapter for an internal provider record."""
     if provider['type'] == 'webdav':
         return WebDAVProvider(provider['settings'])
     if provider['type'] == 's3':
@@ -820,6 +1015,7 @@ def _adapter(provider: dict):
 
 
 def test_provider(provider_id: str):
+    """Perform a non-mutating connectivity test for one stored provider."""
     provider = get_provider(provider_id, include_credentials=True)
     if not provider:
         raise ValueError('Provider is not configured')
@@ -836,7 +1032,7 @@ def _read_bounded_response(response) -> bytes:
     if declared_size > MAX_REMOTE_BACKUP_BYTES:
         response.close()
         raise ValueError('Remote backup exceeds the 100 MB safety limit')
-    chunks = []
+    data = bytearray()
     total = 0
     try:
         for chunk in response.iter_content(chunk_size=64 * 1024):
@@ -845,8 +1041,8 @@ def _read_bounded_response(response) -> bytes:
             total += len(chunk)
             if total > MAX_REMOTE_BACKUP_BYTES:
                 raise ValueError('Remote backup exceeds the 100 MB safety limit')
-            chunks.append(chunk)
-        return b''.join(chunks)
+            data.extend(chunk)
+        return bytes(data)
     finally:
         response.close()
 
@@ -857,7 +1053,36 @@ _BACKUP_FILENAME_RE = re.compile(
 )
 
 
+def _remote_object_sort_key(item: dict) -> tuple:
+    """Sort remote backups newest-first independent of recovery-key ID."""
+    modified_value = str(item.get('modified') or '')
+    modified_ts = 0.0
+    if modified_value:
+        try:
+            parsed = parsedate_to_datetime(modified_value)
+            modified_ts = parsed.timestamp()
+        except (TypeError, ValueError, OverflowError):
+            try:
+                modified_ts = datetime.fromisoformat(
+                    modified_value.replace('Z', '+00:00')
+                ).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                modified_ts = 0.0
+    filename = str(item.get('key') or '').rsplit('/', 1)[-1]
+    match = _BACKUP_FILENAME_RE.fullmatch(filename)
+    embedded_ts = 0.0
+    if match:
+        try:
+            embedded_ts = datetime.strptime(
+                match.group('timestamp'), '%Y%m%d-%H%M%S'
+            ).timestamp()
+        except ValueError:
+            pass
+    return modified_ts, embedded_ts, str(item.get('key') or '')
+
+
 def _remote_prefix(provider: dict) -> str:
+    """Return the configured shared browse prefix for a provider."""
     if provider['type'] != 's3':
         return ''
     prefix = str(provider['settings'].get('prefix') or 'pegaprox').strip('/')
@@ -865,6 +1090,7 @@ def _remote_prefix(provider: dict) -> str:
 
 
 def _remote_backup_item(provider: dict, item: dict) -> Optional[dict]:
+    """Convert a recognised object listing into remote-backup metadata."""
     object_key = str(item.get('key') or '')
     filename = object_key.rsplit('/', 1)[-1]
     if not object_key or not filename.endswith('.pegabackup'):
@@ -890,6 +1116,8 @@ def _remote_backup_item(provider: dict, item: dict) -> Optional[dict]:
         parts = relative_key.split('/')
         if len(parts) > 1:
             source_instance = parts[0]
+    elif '/' in object_key:
+        source_instance = object_key.split('/', 1)[0]
 
     return {
         'provider_id': provider['id'],
@@ -951,50 +1179,109 @@ def download_remote_backup(provider_id: str, object_key: str) -> bytes:
 
 
 def _history_insert(history_id: str, provider_id: str, triggered_by: str):
-    db = get_db()
-    db.conn.cursor().execute('''
-        INSERT INTO config_vault_history
-        (id, provider_id, status, started_at, triggered_by)
-        VALUES (?, ?, 'running', ?, ?)
-    ''', (history_id, provider_id, _now(), triggered_by))
-    db.conn.commit()
+    """Insert a running history row with bounded SQLite lock retries."""
+    def write(db):
+        db.conn.cursor().execute('''
+            INSERT INTO config_vault_history
+            (id, provider_id, status, started_at, triggered_by)
+            VALUES (?, ?, 'running', ?, ?)
+        ''', (history_id, provider_id, _now(), triggered_by))
+    _db_write_with_retry(write)
 
 
 def _history_finish(history_id: str, *, status: str, object_key: str = '',
                     size_bytes: int = 0, digest: str = '', backup_id: str = '', error: str = ''):
-    db = get_db()
-    db.conn.cursor().execute('''
-        UPDATE config_vault_history
-        SET status = ?, completed_at = ?, object_key = ?, size_bytes = ?,
-            sha256 = ?, backup_id = ?, error = ?
-        WHERE id = ?
-    ''', (status, _now(), object_key, size_bytes, digest, backup_id, error[:500], history_id))
-    db.conn.commit()
+    """Finish a history row and prune older completed rows."""
+    def write(db):
+        cursor = db.conn.cursor()
+        cursor.execute('''
+            UPDATE config_vault_history
+            SET status = ?, completed_at = ?, object_key = ?, size_bytes = ?,
+                sha256 = ?, backup_id = ?, error = ?
+            WHERE id = ?
+        ''', (
+            status, _now(), object_key, size_bytes, digest, backup_id,
+            error[:500], history_id,
+        ))
+        row = cursor.execute(
+            'SELECT provider_id FROM config_vault_history WHERE id = ?',
+            (history_id,),
+        ).fetchone()
+        if row:
+            cursor.execute('''
+                DELETE FROM config_vault_history
+                WHERE provider_id = ? AND status != 'running' AND id NOT IN (
+                    SELECT id FROM config_vault_history
+                    WHERE provider_id = ? AND status != 'running'
+                    ORDER BY started_at DESC LIMIT ?
+                )
+            ''', (
+                row['provider_id'], row['provider_id'],
+                MAX_HISTORY_ROWS_PER_PROVIDER,
+            ))
+    _db_write_with_retry(write)
 
 
 def _provider_result(provider_id: str, *, ok: bool, object_key: str = '', error: str = ''):
-    db = get_db()
-    row = _provider_row(provider_id)
-    interval = int(row['interval_hours'] or 24) if row else 24
-    now = datetime.now()
-    next_sync = (now + timedelta(hours=interval)).isoformat(timespec='seconds')
-    db.conn.cursor().execute('''
-        UPDATE config_vault_providers
-        SET last_sync = ?, next_sync = ?, last_status = ?, last_error = ?,
-            last_object_key = CASE WHEN ? != '' THEN ? ELSE last_object_key END,
-            updated_at = ?
-        WHERE id = ?
-    ''', (
-        now.isoformat(timespec='seconds'), next_sync, 'ok' if ok else 'error',
-        error[:500], object_key, object_key, _now(), provider_id,
-    ))
-    db.conn.commit()
+    """Persist provider outcome with bounded SQLite lock retries."""
+    def write(db):
+        row = db.conn.cursor().execute(
+            'SELECT interval_hours FROM config_vault_providers WHERE id = ?',
+            (provider_id,),
+        ).fetchone()
+        interval = int(row['interval_hours'] or 24) if row else 24
+        now = datetime.now()
+        next_sync = (now + timedelta(hours=interval)).isoformat(timespec='seconds')
+        db.conn.cursor().execute('''
+            UPDATE config_vault_providers
+            SET last_sync = ?, next_sync = ?, last_status = ?, last_error = ?,
+                last_object_key = CASE WHEN ? != '' THEN ? ELSE last_object_key END,
+                updated_at = ?
+            WHERE id = ?
+        ''', (
+            now.isoformat(timespec='seconds'), next_sync,
+            'ok' if ok else 'error', error[:500], object_key, object_key,
+            _now(), provider_id,
+        ))
+    _db_write_with_retry(write)
+
+
+def _db_write_with_retry(operation, attempts: int = 4):
+    """Run one SQLite write transaction with short busy/locked retries."""
+    for attempt in range(attempts):
+        db = get_db()
+        try:
+            operation(db)
+            db.conn.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+            locked = 'locked' in str(exc).lower() or 'busy' in str(exc).lower()
+            if not locked or attempt + 1 >= attempts:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
+        except Exception:
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
+            raise
 
 
 def _retention_cleanup(adapter, prefix: str, keep: int, current_key: str):
+    """Delete only recognised old backups within the installation scope."""
     try:
-        objects = adapter.list(prefix)
-        keys = [item['key'] for item in objects if item.get('key') != current_key]
+        objects = sorted(adapter.list(prefix), key=_remote_object_sort_key, reverse=True)
+        keys = [
+            str(item.get('key') or '') for item in objects
+            if item.get('key') != current_key
+            and _BACKUP_FILENAME_RE.fullmatch(
+                str(item.get('key') or '').rsplit('/', 1)[-1]
+            )
+        ]
         for key in keys[max(0, keep - 1):]:
             adapter.delete(key)
     except Exception as exc:
@@ -1004,6 +1291,7 @@ def _retention_cleanup(adapter, prefix: str, keep: int, current_key: str):
 
 
 def _run_sync(provider_id: str, triggered_by: str):
+    """Create, upload and retain one encrypted provider backup."""
     history_id = uuid.uuid4().hex
     object_key = ''
     history_started = False
@@ -1033,17 +1321,23 @@ def _run_sync(provider_id: str, triggered_by: str):
             object_key = f'{base_prefix}/{instance_id}/{filename}'
             retention_prefix = f'{base_prefix}/{instance_id}/'
         else:
-            object_key = filename
-            retention_prefix = ''
+            object_key = f'{instance_id}/{filename}'
+            retention_prefix = f'{instance_id}/'
         adapter = _adapter(provider)
         adapter.put(object_key, encrypted)
         digest = hashlib.sha256(encrypted).hexdigest()
-        _history_finish(
-            history_id, status='ok', object_key=object_key,
-            size_bytes=len(encrypted), digest=digest,
-            backup_id=manifest['backup_id'],
-        )
-        _provider_result(provider_id, ok=True, object_key=object_key)
+        try:
+            _history_finish(
+                history_id, status='ok', object_key=object_key,
+                size_bytes=len(encrypted), digest=digest,
+                backup_id=manifest['backup_id'],
+            )
+        except Exception:
+            logging.exception('[config-vault] could not finish successful history row')
+        try:
+            _provider_result(provider_id, ok=True, object_key=object_key)
+        except Exception:
+            logging.exception('[config-vault] could not persist successful provider status')
         _retention_cleanup(
             adapter, retention_prefix, provider['retention_count'], object_key
         )
@@ -1055,8 +1349,17 @@ def _run_sync(provider_id: str, triggered_by: str):
         safe_message = str(exc)[:500]
         logging.exception("[config-vault] sync failed for %s", provider_id)
         if history_started:
-            _history_finish(history_id, status='error', object_key=object_key, error=safe_message)
-        _provider_result(provider_id, ok=False, error=safe_message)
+            try:
+                _history_finish(
+                    history_id, status='error', object_key=object_key,
+                    error=safe_message,
+                )
+            except Exception:
+                logging.exception('[config-vault] could not finish failed history row')
+        try:
+            _provider_result(provider_id, ok=False, error=safe_message)
+        except Exception:
+            logging.exception('[config-vault] could not persist failed provider status')
         log_audit(
             triggered_by or 'scheduler', 'config.vault_sync_failed',
             f'Configuration vault sync to {provider_id} failed: {safe_message[:200]}',
@@ -1067,9 +1370,10 @@ def _run_sync(provider_id: str, triggered_by: str):
 
 
 def start_sync(provider_id: str, triggered_by: str = 'scheduler') -> bool:
-    if not _provider_row(provider_id):
-        raise ValueError('Provider is not configured')
+    """Register and launch one provider sync without delete races."""
     with _sync_guard:
+        if not _provider_row(provider_id):
+            raise ValueError('Provider is not configured')
         if provider_id in _active_syncs:
             return False
         _active_syncs.add(provider_id)
@@ -1082,6 +1386,7 @@ def start_sync(provider_id: str, triggered_by: str = 'scheduler') -> bool:
 
 
 def list_history(limit: int = 50) -> list:
+    """Return recent local sync history, including disconnected providers."""
     limit = _bounded_int(limit, 50, 1, 200)
     cursor = get_db().conn.cursor()
     cursor.execute('''
@@ -1094,6 +1399,7 @@ def list_history(limit: int = 50) -> list:
 
 
 def _due_provider_ids() -> Iterable[str]:
+    """Yield enabled providers whose scheduled sync time has arrived."""
     cursor = get_db().conn.cursor()
     cursor.execute('''
         SELECT id, next_sync FROM config_vault_providers
@@ -1110,6 +1416,7 @@ def _due_provider_ids() -> Iterable[str]:
 
 
 def _scheduler_loop():
+    """Run due scheduled backups and surface metadata failures distinctly."""
     while _scheduler_running:
         try:
             if get_vault_key():
@@ -1118,12 +1425,15 @@ def _scheduler_loop():
                         start_sync(provider_id, 'scheduler')
                     except Exception as exc:
                         logging.warning("[config-vault] could not schedule %s: %s", provider_id, exc)
+        except VaultMetadataError as exc:
+            logging.error("[config-vault] scheduler paused: %s", exc)
         except Exception as exc:
-            logging.debug("[config-vault] scheduler tick failed: %s", exc)
+            logging.warning("[config-vault] scheduler tick failed: %s", exc)
         time.sleep(60)
 
 
 def start_scheduler():
+    """Start the singleton daemon thread for scheduled vault backups."""
     global _scheduler_running
     with _scheduler_guard:
         if _scheduler_running:

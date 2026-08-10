@@ -1,6 +1,8 @@
 """Configuration-vault encryption, redaction and provider regression tests."""
 
+import io
 import json
+import os
 
 import pytest
 
@@ -20,6 +22,40 @@ def test_backup_crypto_round_trip_and_wrong_key():
         config_vault.decrypt_backup(encrypted, 'wrong password')
 
 
+def test_backup_crypto_reads_legacy_headerless_envelope():
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    password = 'legacy recovery password'
+    plaintext = json.dumps({'version': 'legacy'})
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = PBKDF2HMAC(
+        algorithm=hashes.SHA256(), length=32, salt=salt,
+        iterations=100_000, backend=default_backend(),
+    ).derive(password.encode())
+    legacy = salt + nonce + AESGCM(key).encrypt(nonce, plaintext.encode(), None)
+
+    assert not legacy.startswith(config_vault._BACKUP_MAGIC)
+    assert json.loads(config_vault.decrypt_backup(legacy, password)) == {
+        'version': 'legacy'
+    }
+
+
+def test_versioned_envelope_and_manifest_integrity(db):
+    payload = config_vault.build_backup_data(exported_by='alice')
+    encrypted = config_vault.encrypt_backup(payload, 'versioned recovery password')
+
+    assert encrypted.startswith(config_vault._BACKUP_HEADER_V2)
+    config_vault.validate_backup_manifest(payload)
+
+    payload['version'] = 'tampered'
+    with pytest.raises(ValueError, match='integrity check failed'):
+        config_vault.validate_backup_manifest(payload)
+
+
 def _seed_portable_secrets(db):
     db.save_server_setting('smtp_password', db._encrypt('smtp-secret'))
     db.save_cluster('cluster-1', {
@@ -37,6 +73,13 @@ def _seed_portable_secrets(db):
 
 def test_schema_v2_redacts_every_plaintext_secret_by_default(db):
     _seed_portable_secrets(db)
+    db.conn.cursor().execute('''
+        INSERT INTO custom_scripts
+        (id, cluster_id, name, description, content, created_at, updated_at)
+        VALUES ('script-1', 'cluster-1', 'deploy', 'token=description-secret',
+                'export API_TOKEN=script-secret', 'now', 'now')
+    ''')
+    db.conn.commit()
 
     payload = config_vault.build_backup_data(exported_by='alice')
     cluster = payload['clusters']['cluster-1']
@@ -55,10 +98,12 @@ def test_schema_v2_redacts_every_plaintext_secret_by_default(db):
     assert 'password_salt' not in user
     assert 'totp_secret' not in user
     assert 'totp_pending_secret' not in user
+    assert payload['custom_scripts'] == []
 
     serialised = json.dumps(payload)
     for secret in ('smtp-secret', 'cluster-secret', 'PRIVATE-KEY', 'token-secret',
-                   'fence-secret', 'TOTP-SECRET', 'PENDING-SECRET'):
+                   'fence-secret', 'TOTP-SECRET', 'PENDING-SECRET',
+                   'description-secret', 'script-secret'):
         assert secret not in serialised
 
 
@@ -109,6 +154,24 @@ def test_provider_credentials_are_encrypted_and_never_returned(db):
     assert private['settings']['password'] == 'provider-secret'
 
 
+def test_string_boolean_provider_options_are_parsed_explicitly(db):
+    config_vault.save_provider('webdav', {
+        'schedule_enabled': 'false',
+        'include_secrets': '0',
+        'settings': {
+            'url': 'https://93.184.216.34/backups',
+            'verify_tls': 'false',
+            'allow_private_network': '0',
+        },
+    }, 'alice')
+
+    provider = config_vault.get_provider('webdav', include_credentials=True)
+    assert provider['schedule_enabled'] is False
+    assert provider['include_secrets'] is False
+    assert provider['settings']['verify_tls'] is False
+    assert provider['settings']['allow_private_network'] is False
+
+
 def test_successful_sync_uploads_encrypted_payload_and_records_history(db, monkeypatch):
     uploaded = {}
 
@@ -137,6 +200,7 @@ def test_successful_sync_uploads_encrypted_payload_and_records_history(db, monke
     assert history[0]['size_bytes'] == len(uploaded['body'])
     assert history[0]['sha256']
     assert uploaded['key'].endswith('.pegabackup')
+    assert uploaded['key'].count('/') == 1
     assert config_vault.get_status()['key_id'] in uploaded['key']
     decrypted = json.loads(config_vault.decrypt_backup(
         uploaded['body'], 'offsite recovery password'
@@ -144,6 +208,220 @@ def test_successful_sync_uploads_encrypted_payload_and_records_history(db, monke
     assert decrypted['schema_version'] == 2
     assert decrypted['manifest']['backup_id'] == history[0]['backup_id']
     assert config_vault.get_provider('webdav')['last_status'] == 'ok'
+
+
+def test_retention_keeps_newest_backups_and_ignores_unrelated_objects():
+    deleted = []
+    current = 'instance/pegaprox-key-20260810-120000-current.pegabackup'
+
+    class FakeAdapter:
+        def list(self, prefix):
+            assert prefix == 'instance/'
+            return [
+                {'key': 'instance/readme.txt', 'modified': '2026-08-10T13:00:00Z'},
+                {'key': 'instance/pegaprox-key-20260807-120000-oldest.pegabackup', 'modified': '2026-08-07T12:00:00Z'},
+                {'key': current, 'modified': '2026-08-10T12:00:00Z'},
+                {'key': 'instance/pegaprox-key-20260809-120000-middle.pegabackup', 'modified': '2026-08-09T12:00:00Z'},
+                {'key': 'instance/pegaprox-key-20260808-120000-older.pegabackup', 'modified': '2026-08-08T12:00:00Z'},
+            ]
+
+        def delete(self, key):
+            deleted.append(key)
+
+    config_vault._retention_cleanup(FakeAdapter(), 'instance/', 3, current)
+
+    assert deleted == [
+        'instance/pegaprox-key-20260807-120000-oldest.pegabackup'
+    ]
+
+
+@pytest.mark.parametrize('provider_type', ['webdav', 's3'])
+@pytest.mark.parametrize(('url', 'message'), [
+    ('https://user:pass@93.184.216.34/backups', 'Credentials must not be embedded'),
+    ('https://93.184.216.34/backups?token=x', 'query string or fragment'),
+    ('http://93.184.216.34/backups', 'Plain HTTP requires explicit'),
+    ('https://127.0.0.1/backups', 'private / loopback'),
+])
+def test_provider_endpoint_security_rejects_unsafe_urls(provider_type, url, message):
+    if provider_type == 'webdav':
+        settings = {'url': url}
+        factory = config_vault.WebDAVProvider
+    else:
+        settings = {
+            'endpoint_url': url,
+            'bucket': 'pegaprox-backups',
+            'access_key_id': 'AKIATEST',
+            'secret_access_key': 'secret',
+            'path_style': True,
+        }
+        factory = config_vault.S3Provider
+
+    with pytest.raises(ValueError, match=message):
+        factory(settings)
+
+
+def test_webdav_lists_legacy_and_scoped_backups_in_chronological_order(monkeypatch):
+    instance_id = '11111111-2222-3333-4444-555555555555'
+    base_xml = b'''<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">
+      <d:response><d:href>/backups/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+      <d:response><d:href>/backups/11111111-2222-3333-4444-555555555555/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+      <d:response><d:href>/backups/pegaprox-oldkey-20260806-120000-legacy.pegabackup</d:href><d:propstat><d:prop><d:getlastmodified>Thu, 06 Aug 2026 12:00:00 GMT</d:getlastmodified><d:getcontentlength>10</d:getcontentlength></d:prop></d:propstat></d:response>
+    </d:multistatus>'''
+    child_xml = b'''<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">
+      <d:response><d:href>/backups/11111111-2222-3333-4444-555555555555/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+      <d:response><d:href>/backups/11111111-2222-3333-4444-555555555555/pegaprox-zzzz-20260808-120000-newer.pegabackup</d:href><d:propstat><d:prop><d:getlastmodified>Sat, 08 Aug 2026 12:00:00 GMT</d:getlastmodified><d:getcontentlength>12</d:getcontentlength></d:prop></d:propstat></d:response>
+      <d:response><d:href>/backups/11111111-2222-3333-4444-555555555555/pegaprox-aaaa-20260807-120000-older.pegabackup</d:href><d:propstat><d:prop><d:getlastmodified>Fri, 07 Aug 2026 12:00:00 GMT</d:getlastmodified><d:getcontentlength>11</d:getcontentlength></d:prop></d:propstat></d:response>
+    </d:multistatus>'''
+
+    class Response:
+        status_code = 207
+
+        def __init__(self, content):
+            self.content = content
+
+    provider = config_vault.WebDAVProvider({
+        'url': 'https://93.184.216.34/backups'
+    })
+    seen_urls = []
+
+    def fake_request(method, url, **kwargs):
+        seen_urls.append(url)
+        return Response(child_xml if url.endswith(instance_id) else base_xml)
+
+    monkeypatch.setattr(provider, '_request', fake_request)
+    objects = provider.list('')
+
+    assert [item['key'] for item in objects] == [
+        f'{instance_id}/pegaprox-zzzz-20260808-120000-newer.pegabackup',
+        f'{instance_id}/pegaprox-aaaa-20260807-120000-older.pegabackup',
+        'pegaprox-oldkey-20260806-120000-legacy.pegabackup',
+    ]
+    assert seen_urls == [
+        'https://93.184.216.34/backups',
+        f'https://93.184.216.34/backups/{instance_id}',
+    ]
+
+
+def test_s3_list_paginates(monkeypatch):
+    pages = [
+        b'''<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next-token</NextContinuationToken><Contents><Key>prefix/one.pegabackup</Key><LastModified>2026-08-09T00:00:00Z</LastModified><Size>1</Size></Contents></ListBucketResult>''',
+        b'''<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/two.pegabackup</Key><LastModified>2026-08-10T00:00:00Z</LastModified><Size>2</Size></Contents></ListBucketResult>''',
+    ]
+    params_seen = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, content):
+            self.content = content
+
+    provider = config_vault.S3Provider({
+        'endpoint_url': 'https://93.184.216.34',
+        'bucket': 'pegaprox-backups',
+        'access_key_id': 'AKIATEST',
+        'secret_access_key': 'secret',
+        'path_style': True,
+    })
+
+    def fake_request(method, key='', params=None, **kwargs):
+        params_seen.append(dict(params or {}))
+        return Response(pages[len(params_seen) - 1])
+
+    monkeypatch.setattr(provider, '_request', fake_request)
+    objects = provider.list('prefix/')
+
+    assert [item['key'] for item in objects] == [
+        'prefix/two.pegabackup', 'prefix/one.pegabackup'
+    ]
+    assert params_seen[1]['continuation-token'] == 'next-token'
+
+
+def test_provider_delete_preserves_history(db):
+    config_vault.save_provider('webdav', {
+        'settings': {'url': 'https://93.184.216.34/backups'},
+    }, 'alice')
+    config_vault._history_insert('history-1', 'webdav', 'alice')
+
+    assert config_vault.delete_provider('webdav') is True
+    history = config_vault.list_history()
+    assert history[0]['id'] == 'history-1'
+    assert history[0]['provider_id'] == 'webdav'
+    assert history[0]['provider_name'] is None
+
+
+def test_legacy_cascade_history_schema_is_migrated_without_data_loss(db):
+    config_vault.save_provider('webdav', {
+        'settings': {'url': 'https://93.184.216.34/backups'},
+    }, 'alice')
+    cursor = db.conn.cursor()
+    cursor.execute('DROP TABLE config_vault_history')
+    cursor.execute('''
+        CREATE TABLE config_vault_history (
+            id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            object_key TEXT DEFAULT '',
+            size_bytes INTEGER DEFAULT 0,
+            sha256 TEXT DEFAULT '',
+            backup_id TEXT DEFAULT '',
+            triggered_by TEXT DEFAULT '',
+            error TEXT DEFAULT '',
+            FOREIGN KEY (provider_id) REFERENCES config_vault_providers(id)
+                ON DELETE CASCADE
+        )
+    ''')
+    cursor.execute('''
+        INSERT INTO config_vault_history
+        (id, provider_id, status, started_at, triggered_by)
+        VALUES ('legacy-history', 'webdav', 'ok', '2026-08-10T12:00:00', 'alice')
+    ''')
+    db.conn.commit()
+
+    db._init_db()
+
+    assert db.conn.cursor().execute(
+        'PRAGMA foreign_key_list(config_vault_history)'
+    ).fetchall() == []
+    row = db.conn.cursor().execute(
+        'SELECT provider_id FROM config_vault_history WHERE id = ?',
+        ('legacy-history',),
+    ).fetchone()
+    assert row['provider_id'] == 'webdav'
+
+
+def test_completed_history_is_pruned_per_provider(db, monkeypatch):
+    monkeypatch.setattr(config_vault, 'MAX_HISTORY_ROWS_PER_PROVIDER', 3)
+    config_vault.save_provider('webdav', {
+        'settings': {'url': 'https://93.184.216.34/backups'},
+    }, 'alice')
+    for index in range(4):
+        history_id = f'history-{index}'
+        config_vault._history_insert(history_id, 'webdav', 'alice')
+        db.conn.cursor().execute(
+            'UPDATE config_vault_history SET started_at = ? WHERE id = ?',
+            (f'2026-08-10T12:00:0{index}', history_id),
+        )
+        db.conn.commit()
+        config_vault._history_finish(history_id, status='ok')
+
+    history = config_vault.list_history(limit=20)
+    assert [item['id'] for item in history] == [
+        'history-3', 'history-2', 'history-1'
+    ]
+
+
+def test_status_distinguishes_corrupt_vault_metadata(db):
+    db.conn.cursor().execute('''
+        INSERT INTO config_vault_metadata (key, value_encrypted, updated_at)
+        VALUES ('vault_key', 'aes256:not-valid-base64', 'now')
+    ''')
+    db.conn.commit()
+
+    status = config_vault.get_status()
+    assert status['vault_ready'] is False
+    assert 'vault_key' in status['vault_error']
 
 
 def test_remote_backup_versions_can_be_listed_and_downloaded(db, monkeypatch):
@@ -306,3 +584,85 @@ def test_remote_backup_api_lists_and_proxies_encrypted_file(api, seed, monkeypat
     assert downloaded.data == b'encrypted-body'
     assert downloaded.headers['Cache-Control'] == 'no-store'
     assert object_key in downloaded.headers['Content-Disposition']
+
+
+def test_overwrite_restore_preserves_credentials_omitted_from_backup(api, seed, db):
+    from pegaprox.utils.auth import hash_password
+
+    admin = seed.user('root', role='admin')
+    root_salt, root_hash = hash_password('local-admin-password')
+    db.save_user('root', {
+        **admin,
+        'password_salt': root_salt,
+        'password_hash': root_hash,
+        'role': 'admin',
+        'enabled': True,
+    })
+    bob_salt, bob_hash = hash_password('bob-password')
+    db.save_user('bob', {
+        'password_salt': bob_salt,
+        'password_hash': bob_hash,
+        'totp_secret': 'BOB-TOTP',
+        'role': 'user',
+        'enabled': True,
+    })
+    db.save_cluster('cluster-1', {
+        'name': 'Lab', 'host': 'pve.example', 'user': 'root@pam',
+        'pass': 'cluster-password', 'ssh_key': 'PRIVATE-KEY',
+        'api_token_secret': 'TOKEN-SECRET',
+        'ha_settings': {'fence_password': 'FENCE-SECRET', 'mode': 'watch'},
+    })
+    payload = config_vault.build_backup_data(
+        exported_by='root', include_secrets=False, include_users=True
+    )
+    encrypted = config_vault.encrypt_backup(payload, 'backup recovery password')
+
+    response = api.as_user(admin).post('/api/config/restore', data={
+        'user_password': 'local-admin-password',
+        'backup_password': 'backup recovery password',
+        'mode': 'overwrite',
+        'restore_users': 'true',
+        'dry_run': 'false',
+        'backup_file': (io.BytesIO(encrypted), 'backup.pegabackup'),
+    }, content_type='multipart/form-data')
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    cluster = db.get_cluster('cluster-1')
+    assert cluster['pass'] == 'cluster-password'
+    assert cluster['ssh_key'] == 'PRIVATE-KEY'
+    assert cluster['api_token_secret'] == 'TOKEN-SECRET'
+    assert cluster['ha_settings']['fence_password'] == 'FENCE-SECRET'
+    bob = db.get_user('bob')
+    assert bob['password_salt'] == bob_salt
+    assert bob['password_hash'] == bob_hash
+    assert bob['totp_secret'] == 'BOB-TOTP'
+
+
+def test_restore_treats_malformed_schema_version_as_legacy(api, seed, db):
+    from pegaprox.utils.auth import hash_password
+
+    admin = seed.user('root', role='admin')
+    salt, password_hash = hash_password('local-admin-password')
+    db.save_user('root', {
+        **admin,
+        'password_salt': salt,
+        'password_hash': password_hash,
+        'role': 'admin',
+        'enabled': True,
+    })
+    encrypted = config_vault.encrypt_backup({
+        'schema_version': '2.0',
+        'version': 'legacy',
+        'export_date': '2026-08-10T12:00:00',
+    }, 'backup recovery password')
+
+    response = api.as_user(admin).post('/api/config/restore', data={
+        'user_password': 'local-admin-password',
+        'backup_password': 'backup recovery password',
+        'mode': 'merge',
+        'dry_run': 'true',
+        'backup_file': (io.BytesIO(encrypted), 'legacy.pegabackup'),
+    }, content_type='multipart/form-data')
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.get_json()['backup_version'] == 'legacy'

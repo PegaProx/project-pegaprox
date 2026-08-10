@@ -7,6 +7,9 @@ not multi-instance database replication.
 ## Security model
 
 - Backup payloads are encrypted with AES-256-GCM before leaving PegaProx.
+- New backup envelopes carry a format-version header and derive their AES key
+  with PBKDF2-HMAC-SHA256 at 600,000 iterations. Headerless backups created by
+  earlier builds remain readable through the legacy 100,000-iteration path.
 - The administrator supplies a recovery key. PegaProx stores it encrypted with
   the installation key so scheduled backups can run unattended.
 - WebDAV/S3 credentials are also encrypted in the local database and are never
@@ -36,9 +39,12 @@ Open **Settings → Sync & Cloud**:
 5. Optionally enable automatic sync, choose an interval (1–720 hours), and set
    how many versions to retain (1–100).
 
-For WebDAV, the configured collection/directory must already exist and permit
-`PROPFIND`, `PUT`, and `DELETE`. For S3-compatible services, enable path-style
-URLs when required by MinIO, Ceph RGW, or the storage vendor.
+For WebDAV, the configured base collection/directory must already exist and
+permit `PROPFIND`, `MKCOL`, `PUT`, and `DELETE`. PegaProx creates a child
+collection for its installation ID so one machine's retention policy cannot
+delete another machine's backups. Legacy flat backup objects remain visible.
+For S3-compatible services, enable path-style URLs when required by MinIO,
+Ceph RGW, or the storage vendor.
 
 Enabling an automatic schedule makes the provider due immediately; later runs
 use the configured interval. Retention cleanup happens only after a successful
@@ -55,7 +61,8 @@ section counts, options, and content hash. The portable sections currently are:
 - optional users, password hashes, and TOTP secrets;
 - tenants and VM ACLs;
 - affinity rules and cluster groups;
-- custom scripts;
+- custom scripts when secrets are explicitly included (script bodies and
+  descriptions can contain inline credentials and cannot be reliably redacted);
 - optional audit log (up to 10,000 entries).
 
 Sessions, runtime metrics, temporary jobs, task output, and other transient
@@ -69,8 +76,8 @@ Restores are intentionally not automatic:
 
 1. On the destination machine, connect the same WebDAV directory or S3 bucket.
 2. Open **Settings → Sync & Cloud → Backup & Restore**.
-3. Refresh the remote list and select the required version. S3 listings include
-   backups from other PegaProx instance directories under the configured prefix.
+3. Refresh the remote list and select the required version. WebDAV and S3
+   listings include backups from other PegaProx instance directories.
 4. Enter the destination administrator password and the recovery key used by
    that backup version.
 5. Keep **Dry run** enabled and review the validation result.
@@ -81,9 +88,9 @@ restore pipeline. Arbitrary object paths are rejected, downloads are limited to
 100 MB, and restore still requires administrator re-authentication. Manual file
 download/import remains available as a fallback.
 
-Merge mode preserves live cluster/user credentials when the backup excluded
-secrets. Hardware-monitoring consent settings remain protected and cannot be
-changed by a generic configuration restore.
+Merge and overwrite modes preserve live server, cluster, and user credentials
+when the backup excluded them. Hardware-monitoring consent settings remain
+protected and cannot be changed by a generic configuration restore.
 
 ## Deliberate limitation
 

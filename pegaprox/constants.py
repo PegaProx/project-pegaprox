@@ -93,8 +93,12 @@ def _config_owned_by_us():
         if geteuid is None:
             return True
         return os.stat(CONFIG_DIR).st_uid == geteuid()
-    except (OSError, AttributeError):
+    except FileNotFoundError:
         return True      # not there yet, we are the one creating it
+    except (OSError, AttributeError):
+        # An existing but inaccessible directory is not evidence of ownership.
+        # Avoid import-time mkdir/chmod attempts that would then abort startup.
+        return False
 
 
 CONFIG_OWNED_BY_US = _config_owned_by_us()

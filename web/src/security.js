@@ -1429,6 +1429,31 @@
                 return body;
             };
 
+            const emptyKeyForm = () => ({
+                user_password: '', recovery_key: '', recovery_key_confirmation: ''
+            });
+            const emptyRemoteRestoreForm = () => ({
+                user_password: '', backup_password: '', mode: 'merge',
+                restore_users: false, dry_run: true
+            });
+            const openKeyModal = () => {
+                setKeyForm(emptyKeyForm());
+                setKeyModal(true);
+            };
+            const closeKeyModal = () => {
+                setKeyForm(emptyKeyForm());
+                setKeyModal(false);
+            };
+            const closeProviderModal = () => {
+                setProviderForm({});
+                setProviderModal(null);
+            };
+            const closeRemoteRestore = () => {
+                setRemoteRestoreForm(emptyRemoteRestoreForm());
+                setRemoteRestoreResult(null);
+                setRestoreBackup(null);
+            };
+
             const saveKey = async () => {
                 if (keyForm.recovery_key.length < 12) {
                     addToast(t('vaultKeyMin12') || 'Recovery key must be at least 12 characters', 'error');
@@ -1444,8 +1469,7 @@
                         method: 'PUT', body: JSON.stringify(keyForm)
                     });
                     addToast(t('vaultKeySaved') || 'Vault recovery key saved', 'success');
-                    setKeyModal(false);
-                    setKeyForm({ user_password: '', recovery_key: '', recovery_key_confirmation: '' });
+                    closeKeyModal();
                     await loadStatus();
                 } catch (error) {
                     addToast(error.message, 'error');
@@ -1500,7 +1524,7 @@
                         method: 'PUT', body: JSON.stringify(providerForm)
                     });
                     addToast(t('vaultProviderSaved') || 'Cloud provider saved', 'success');
-                    setProviderModal(null);
+                    closeProviderModal();
                     await loadStatus();
                 } catch (error) {
                     addToast(error.message, 'error');
@@ -1525,7 +1549,7 @@
 
             const syncProvider = async (type) => {
                 if (!status?.vault_ready) {
-                    setKeyModal(true);
+                    openKeyModal();
                     return;
                 }
                 setBusy(`sync-${type}`);
@@ -1551,7 +1575,7 @@
                         method: 'DELETE', body: JSON.stringify({ user_password: providerForm.user_password })
                     });
                     addToast(t('vaultProviderRemoved') || 'Provider disconnected', 'success');
-                    setProviderModal(null);
+                    closeProviderModal();
                     await loadStatus();
                 } catch (error) {
                     addToast(error.message, 'error');
@@ -1598,10 +1622,7 @@
             const openRemoteRestore = (backup) => {
                 setRestoreBackup(backup);
                 setRemoteRestoreResult(null);
-                setRemoteRestoreForm({
-                    user_password: '', backup_password: '', mode: 'merge',
-                    restore_users: false, dry_run: true
-                });
+                setRemoteRestoreForm(emptyRemoteRestoreForm());
             };
 
             const restoreRemoteVersion = async () => {
@@ -1680,11 +1701,12 @@
                                 </div>
                                 <div className="text-sm text-gray-400">
                                     {(t('vaultProvidersConnected') || '{count} provider(s) connected').replace('{count}', status?.connected_count || 0)}
-                                    {status?.key_id && <span className="ml-2 font-mono text-xs">Key {status.key_id}</span>}
+                                    {status?.key_id && <span className="ml-2 font-mono text-xs">{t('vaultKeyIdLabel') || 'Key'} {status.key_id}</span>}
                                 </div>
+                                {status?.vault_error && <div className="text-xs text-red-400 mt-1">{status.vault_error}</div>}
                             </div>
                         </div>
-                        <button onClick={() => setKeyModal(true)} className="flex items-center justify-center gap-2 px-4 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-sm text-gray-200 hover:text-white">
+                        <button onClick={openKeyModal} className="flex items-center justify-center gap-2 px-4 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-sm text-gray-200 hover:text-white">
                             <Icons.Key className="w-4 h-4" /> {status?.vault_ready ? (t('vaultChangeKey') || 'Change recovery key') : (t('vaultSetKey') || 'Set recovery key')}
                         </button>
                     </div>
@@ -1770,7 +1792,7 @@
                                             <td className="px-4 py-3 text-white">{item.provider_name || item.provider_type}</td>
                                             <td className="px-4 py-3">
                                                 <div className="text-white font-mono text-xs">{item.backup_id || item.filename}</div>
-                                                {item.key_id && <div className="text-xs text-gray-500">Key {item.key_id}</div>}
+                                                {item.key_id && <div className="text-xs text-gray-500">{t('vaultKeyIdLabel') || 'Key'} {item.key_id}</div>}
                                             </td>
                                             <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{item.created_at || item.modified ? new Date(item.created_at || item.modified).toLocaleString() : '\u2014'}</td>
                                             <td className="px-4 py-3 text-gray-400">{formatBytes(item.size_bytes)}</td>
@@ -1794,7 +1816,7 @@
                             <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 max-w-2xl w-full mx-4 space-y-4">
                                 <div className="flex justify-between gap-4">
                                     <div><h3 className="font-semibold text-white">{t('vaultRestoreRemoteVersion') || 'Restore remote backup version'}</h3><p className="text-xs text-gray-500 mt-1 break-all">{restoreBackup.filename}</p></div>
-                                    <button onClick={() => setRestoreBackup(null)} className="text-gray-400">&times;</button>
+                                    <button onClick={closeRemoteRestore} className="text-gray-400">&times;</button>
                                 </div>
                                 <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-sm text-blue-200">
                                     {t('vaultDryRunAdvice') || 'Run validation first. Applying a restore changes configuration on this machine.'}
@@ -1824,7 +1846,7 @@
                                     {(remoteRestoreResult.errors || []).length > 0 && <div className="mt-2 text-red-300">{remoteRestoreResult.errors.join('; ')}</div>}
                                 </div>}
                                 <div className="flex flex-wrap gap-3">
-                                    <button onClick={() => setRestoreBackup(null)} className="px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button>
+                                    <button onClick={closeRemoteRestore} className="px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button>
                                     <span className="flex-1" />
                                     <button disabled={busy === 'remote-restore'} onClick={restoreRemoteVersion} className={`px-5 py-2 rounded-lg text-white disabled:opacity-50 ${remoteRestoreForm.dry_run ? 'bg-blue-600' : 'bg-red-600'}`}>
                                         {busy === 'remote-restore' ? (t('processing') || 'Processing...') : remoteRestoreForm.dry_run ? (t('vaultValidateBackup') || 'Validate backup') : (t('vaultApplyRestore') || 'Apply restore')}
@@ -1837,12 +1859,12 @@
                     {keyModal && (
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                             <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 max-w-md w-full mx-4 space-y-4">
-                                <div className="flex justify-between"><h3 className="font-semibold text-white">{t('vaultRecoveryKey') || 'Vault recovery key'}</h3><button onClick={() => setKeyModal(false)} className="text-gray-400">×</button></div>
+                                <div className="flex justify-between"><h3 className="font-semibold text-white">{t('vaultRecoveryKey') || 'Vault recovery key'}</h3><button onClick={closeKeyModal} className="text-gray-400">×</button></div>
                                 <p className="text-sm text-gray-400">{t('vaultKeyWarning') || 'Store this key outside PegaProx. Changing it affects future backups only; old versions keep their original key.'}</p>
                                 <input type="password" value={keyForm.user_password} onChange={e => setKeyForm({...keyForm, user_password: e.target.value})} placeholder={t('enterYourPassword') || 'Account password'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
                                 <input type="password" value={keyForm.recovery_key} onChange={e => setKeyForm({...keyForm, recovery_key: e.target.value})} placeholder={t('vaultRecoveryKey') || 'Recovery key (min. 12 characters)'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
                                 <input type="password" value={keyForm.recovery_key_confirmation} onChange={e => setKeyForm({...keyForm, recovery_key_confirmation: e.target.value})} placeholder={t('vaultConfirmKey') || 'Confirm recovery key'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
-                                <div className="flex gap-3"><button onClick={() => setKeyModal(false)} className="flex-1 px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button><button disabled={busy === 'key'} onClick={saveKey} className="flex-1 px-4 py-2 bg-green-600 rounded-lg text-white disabled:opacity-50">{busy === 'key' ? (t('saving') || 'Saving...') : (t('save') || 'Save')}</button></div>
+                                <div className="flex gap-3"><button onClick={closeKeyModal} className="flex-1 px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button><button disabled={busy === 'key'} onClick={saveKey} className="flex-1 px-4 py-2 bg-green-600 rounded-lg text-white disabled:opacity-50">{busy === 'key' ? (t('saving') || 'Saving...') : (t('save') || 'Save')}</button></div>
                             </div>
                         </div>
                     )}
@@ -1850,7 +1872,7 @@
                     {providerModal && (
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 overflow-y-auto py-6">
                             <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 max-w-2xl w-full mx-4 space-y-4">
-                                <div className="flex justify-between"><h3 className="font-semibold text-white">{providerModal === 'webdav' ? 'WebDAV' : (t('vaultS3Compatible') || 'S3 Compatible Storage')}</h3><button onClick={() => setProviderModal(null)} className="text-gray-400">×</button></div>
+                                <div className="flex justify-between"><h3 className="font-semibold text-white">{providerModal === 'webdav' ? 'WebDAV' : (t('vaultS3Compatible') || 'S3 Compatible Storage')}</h3><button onClick={closeProviderModal} className="text-gray-400">×</button></div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                     <input value={providerForm.name || ''} onChange={e => setProviderForm({...providerForm, name: e.target.value})} placeholder={t('name') || 'Name'} className="px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
                                     {providerModal === 'webdav' ? <>
@@ -1881,9 +1903,9 @@
                                 </div>
                                 <input type="password" value={providerForm.user_password || ''} onChange={e => setProviderForm({...providerForm, user_password: e.target.value})} placeholder={t('enterYourPassword') || 'Enter account password to save'} className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white" />
                                 <div className="flex flex-wrap gap-3">
-                                    {providers.some(item => item.type === providerModal) && <button disabled={!!busy} onClick={removeProvider} className="px-4 py-2 bg-red-500/20 text-red-400 rounded-lg disabled:opacity-50">{t('disconnect') || 'Disconnect'}</button>}
+                                    {providers.some(item => item.type === providerModal) && <button disabled={!!busy || !providerForm.user_password} onClick={removeProvider} className="px-4 py-2 bg-red-500/20 text-red-400 rounded-lg disabled:opacity-50">{t('disconnect') || 'Disconnect'}</button>}
                                     <span className="flex-1" />
-                                    <button onClick={() => setProviderModal(null)} className="px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button>
+                                    <button onClick={closeProviderModal} className="px-4 py-2 bg-gray-600 rounded-lg text-white">{t('cancel') || 'Cancel'}</button>
                                     <button disabled={!!busy || !providerForm.user_password} onClick={saveProvider} className="px-5 py-2 bg-green-600 rounded-lg text-white disabled:opacity-50">{busy.startsWith('save-') ? (t('saving') || 'Saving...') : (t('save') || 'Save')}</button>
                                 </div>
                             </div>

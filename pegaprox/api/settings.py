@@ -20,7 +20,7 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db, ENCRYPTION_AVAILABLE
 from pegaprox.core.config_vault import (
-    build_backup_data, encrypt_backup, decrypt_backup,
+    build_backup_data, encrypt_backup, decrypt_backup, validate_backup_manifest,
     get_status as get_config_vault_status,
     set_vault_key, save_provider as save_vault_provider,
     delete_provider as delete_vault_provider,
@@ -2230,6 +2230,8 @@ def restore_config():
         # LW: form data comes as strings, need to convert
         restore_users = str(restore_users_str).lower() in ('true', '1', 'yes')
         dry_run = str(dry_run_str).lower() in ('true', '1', 'yes')
+        if mode not in ('merge', 'overwrite'):
+            return jsonify({'error': 'Restore mode must be merge or overwrite'}), 400
         
         logging.info(f"[Restore] Mode: {mode}, dry_run: {dry_run}, restore_users: {restore_users}")
         
@@ -2312,6 +2314,7 @@ def restore_config():
         try:
             decrypted_json = _decrypt_backup(encrypted_data, backup_password)
             data = json.loads(decrypted_json)
+            validate_backup_manifest(data)
         except ValueError as e:
             log_audit(username, 'config.restore_failed', f'Decryption failed: {str(e)}')
             return jsonify({'error': safe_error(e, 'Backup decryption failed')}), 400
@@ -2321,6 +2324,19 @@ def restore_config():
         # Validate backup format
         if 'version' not in data or 'export_date' not in data:
             return jsonify({'error': 'Invalid backup format - missing required fields'}), 400
+
+        try:
+            schema_version = int(data.get('schema_version', 1) or 1)
+        except (TypeError, ValueError):
+            schema_version = 1
+        _manifest_options = (
+            data.get('manifest', {}).get('options', {})
+            if isinstance(data.get('manifest'), dict) else {}
+        )
+        secrets_omitted = (
+            schema_version >= 2
+            and not bool(_manifest_options.get('include_secrets', False))
+        )
         
         database = get_db()
         results = {
@@ -2351,14 +2367,18 @@ def restore_config():
                     # Schema-v2 backups make selected secrets portable by placing
                     # plaintext only inside the outer AES-GCM backup envelope.
                     # Re-encrypt them with this installation's key before saving.
-                    if int(data.get('schema_version', 1) or 1) >= 2:
-                        for _secret_key in (
-                            'smtp_password', 'ldap_bind_password', 'oidc_client_secret',
-                            'acme_dns_rfc2136_secret',
+                    for _secret_key in (
+                        'smtp_password', 'ldap_bind_password', 'oidc_client_secret',
+                        'acme_dns_rfc2136_secret',
+                    ):
+                        _secret_value = incoming_ss.get(_secret_key)
+                        if schema_version >= 2 and _secret_value:
+                            incoming_ss[_secret_key] = database._encrypt(str(_secret_value))
+                        elif (
+                            (_secret_key not in incoming_ss or secrets_omitted)
+                            and (current or {}).get(_secret_key)
                         ):
-                            _secret_value = incoming_ss.get(_secret_key)
-                            if _secret_value:
-                                incoming_ss[_secret_key] = database._encrypt(str(_secret_value))
+                            incoming_ss[_secret_key] = current[_secret_key]
                     if mode == 'merge':
                         # Only update non-empty values
                         for key, value in incoming_ss.items():
@@ -2409,22 +2429,35 @@ def restore_config():
                     
                     existing = database.get_cluster(cluster_id)
                     
-                    if existing and mode == 'merge':
+                    if existing:
                         # get_cluster()/save_cluster() use portable plaintext field
-                        # names and encrypt at the DB boundary.  Preserve live
-                        # credentials when a secrets-excluded backup is merged.
+                        # names and encrypt at the DB boundary. Preserve live
+                        # credentials whenever a backup omitted/redacted them,
+                        # including overwrite mode.
                         for _credential_key in ('pass', 'ssh_key', 'api_token_secret'):
-                            if not cluster.get(_credential_key) and existing.get(_credential_key):
+                            if (
+                                (_credential_key not in cluster
+                                 or (secrets_omitted and not cluster.get(_credential_key)))
+                                and existing.get(_credential_key)
+                            ):
                                 cluster[_credential_key] = existing[_credential_key]
-                        # Redacted nested HA credentials are represented as empty
-                        # strings; merge those with live values instead of wiping
-                        # fencing credentials during a safe restore.
-                        if isinstance(existing.get('ha_settings'), dict) and isinstance(cluster.get('ha_settings'), dict):
-                            _merged_ha = dict(existing['ha_settings'])
-                            for _ha_key, _ha_value in cluster['ha_settings'].items():
-                                if _ha_value not in (None, ''):
-                                    _merged_ha[_ha_key] = _ha_value
-                            cluster['ha_settings'] = _merged_ha
+                        if isinstance(existing.get('ha_settings'), dict):
+                            _incoming_ha = cluster.get('ha_settings')
+                            if not isinstance(_incoming_ha, dict):
+                                if mode == 'merge' or 'ha_settings' not in cluster:
+                                    cluster['ha_settings'] = dict(existing['ha_settings'])
+                            elif mode == 'merge':
+                                _merged_ha = dict(existing['ha_settings'])
+                                for _ha_key, _ha_value in _incoming_ha.items():
+                                    if _ha_value not in (None, ''):
+                                        _merged_ha[_ha_key] = _ha_value
+                                cluster['ha_settings'] = _merged_ha
+                            elif secrets_omitted:
+                                _merged_ha = dict(_incoming_ha)
+                                for _ha_key, _ha_value in existing['ha_settings'].items():
+                                    if _merged_ha.get(_ha_key) in (None, ''):
+                                        _merged_ha[_ha_key] = _ha_value
+                                cluster['ha_settings'] = _merged_ha
                     
                     if not dry_run:
                         database.save_cluster(cluster_id, cluster)
@@ -2457,15 +2490,18 @@ def restore_config():
                     if not uname or uname == 'admin' or uname == 'pegaprox':  # Never overwrite admin
                         continue
 
-                    if mode == 'merge':
-                        _existing_user = database.get_user(uname)
-                        if _existing_user:
-                            for _user_secret in (
-                                'password_salt', 'password_hash', 'totp_secret',
-                                'totp_pending_secret',
+                    _existing_user = database.get_user(uname)
+                    if _existing_user:
+                        for _user_secret in (
+                            'password_salt', 'password_hash', 'totp_secret',
+                            'totp_pending_secret',
+                        ):
+                            if (
+                                (_user_secret not in u
+                                 or (secrets_omitted and not u.get(_user_secret)))
+                                and _existing_user.get(_user_secret)
                             ):
-                                if not u.get(_user_secret) and _existing_user.get(_user_secret):
-                                    u[_user_secret] = _existing_user[_user_secret]
+                                u[_user_secret] = _existing_user[_user_secret]
                     
                     if not dry_run:
                         database.save_user(uname, u)
@@ -2572,8 +2608,16 @@ def restore_config():
                         continue
                     if not dry_run:
                         _marks = ','.join('?' for _ in _columns)
+                        _updates = ','.join(
+                            f'{key}=excluded.{key}' for key in _columns if key != 'id'
+                        )
+                        _upsert = (
+                            f" ON CONFLICT(id) DO UPDATE SET {_updates}"
+                            if _updates else ' ON CONFLICT(id) DO NOTHING'
+                        )
                         cursor.execute(
-                            f"INSERT OR REPLACE INTO custom_scripts ({','.join(_columns)}) VALUES ({_marks})",
+                            f"INSERT INTO custom_scripts ({','.join(_columns)}) "
+                            f"VALUES ({_marks}){_upsert}",
                             tuple(script.get(key) for key in _columns),
                         )
                     script_count += 1
@@ -2694,13 +2738,31 @@ def config_vault_remove_provider(provider_type):
 @bp.route('/api/config/vault/providers/<provider_type>/test', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
 def config_vault_test_provider(provider_type):
+    """Test one stored provider and audit the actor, source IP and outcome."""
+    username = getattr(request, 'session', {}).get('user', 'admin')
+    client_ip = get_client_ip()
     try:
         test_vault_provider(provider_type)
+        log_audit(
+            username, 'config.vault_provider_test',
+            f'Configuration vault provider test succeeded: {provider_type}',
+            ip_address=client_ip,
+        )
         return jsonify({'success': True, 'message': 'Connection successful'})
     except ValueError as e:
+        log_audit(
+            username, 'config.vault_provider_test_failed',
+            f'Configuration vault provider test failed: {provider_type}',
+            ip_address=client_ip,
+        )
         return jsonify({'error': str(e)}), 400
     except Exception as e:
         logging.warning("Configuration vault provider test failed: %s", e)
+        log_audit(
+            username, 'config.vault_provider_test_failed',
+            f'Configuration vault provider test failed: {provider_type}',
+            ip_address=client_ip,
+        )
         return jsonify({'error': safe_error(e, 'Connection test failed')}), 502
 
 
