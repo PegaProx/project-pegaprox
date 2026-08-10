@@ -1798,9 +1798,9 @@
                                                 <div className="text-white font-mono text-xs">{item.backup_id || item.filename}</div>
                                                 {item.key_id && <div className="text-xs text-gray-500">Key {item.key_id}</div>}
                                             </td>
-                                            <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{item.created_at || item.modified ? new Date(item.created_at || item.modified).toLocaleString() : 'â€”'}</td>
+                                            <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{item.created_at || item.modified ? new Date(item.created_at || item.modified).toLocaleString() : '\u2014'}</td>
                                             <td className="px-4 py-3 text-gray-400">{formatBytes(item.size_bytes)}</td>
-                                            <td className="px-4 py-3 text-gray-400 font-mono text-xs max-w-48 truncate" title={item.source_instance || item.object_key}>{item.source_instance || (item.provider_type === 'webdav' ? 'WebDAV' : 'â€”')}</td>
+                                            <td className="px-4 py-3 text-gray-400 font-mono text-xs max-w-48 truncate" title={item.source_instance || item.object_key}>{item.source_instance || (item.provider_type === 'webdav' ? 'WebDAV' : '\u2014')}</td>
                                             <td className="px-4 py-3 text-right">
                                                 <button onClick={() => openRemoteRestore(item)} className="px-3 py-2 rounded-lg text-sm bg-blue-500/20 text-blue-300 hover:bg-blue-500/30">
                                                     {t('vaultSelectRestore') || 'Select and restore'}
@@ -1820,7 +1820,7 @@
                             <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 max-w-2xl w-full mx-4 space-y-4">
                                 <div className="flex justify-between gap-4">
                                     <div><h3 className="font-semibold text-white">{t('vaultRestoreRemoteVersion') || 'Restore remote backup version'}</h3><p className="text-xs text-gray-500 mt-1 break-all">{restoreBackup.filename}</p></div>
-                                    <button onClick={() => setRestoreBackup(null)} className="text-gray-400">Ã—</button>
+                                    <button onClick={() => setRestoreBackup(null)} className="text-gray-400">&times;</button>
                                 </div>
                                 <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-sm text-blue-200">
                                     {t('vaultDryRunAdvice') || 'Run validation first. Applying a restore changes configuration on this machine.'}
@@ -1843,7 +1843,7 @@
                                     <div className="font-medium text-green-400 mb-2">{remoteRestoreResult.dry_run ? (t('vaultValidationResult') || 'Validation result') : (t('vaultRestoreResult') || 'Restore result')}</div>
                                     <div className="grid grid-cols-2 gap-2 text-gray-300">
                                         <span>{t('mode') || 'Mode'}: {remoteRestoreResult.mode}</span>
-                                        <span>{t('date') || 'Date'}: {remoteRestoreResult.backup_date || 'â€”'}</span>
+                                        <span>{t('date') || 'Date'}: {remoteRestoreResult.backup_date || '\u2014'}</span>
                                         <span>{t('restored') || 'Restored'}: {Object.keys(remoteRestoreResult.restored || {}).length}</span>
                                         <span>{t('errors') || 'Errors'}: {(remoteRestoreResult.errors || []).length}</span>
                                     </div>
