@@ -68,7 +68,7 @@ restore re-encrypts it with the destination installation key.
 Restores are intentionally not automatic:
 
 1. On the destination machine, connect the same WebDAV directory or S3 bucket.
-2. Open **Settings → Sync & Cloud → Backup versions**.
+2. Open **Settings → Sync & Cloud → Backup & Restore**.
 3. Refresh the remote list and select the required version. S3 listings include
    backups from other PegaProx instance directories under the configured prefix.
 4. Enter the destination administrator password and the recovery key used by

@@ -1372,12 +1372,11 @@
 
         // Configuration Vault: versioned, encrypted one-way sync to WebDAV/S3.
         // Restores intentionally remain manual and dry-run-first below.
-        function ConfigVaultPanel({ addToast }) {
+        function ConfigVaultPanel({ addToast, tab, setTab }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
             const [status, setStatus] = useState(null);
             const [loading, setLoading] = useState(true);
-            const [tab, setTab] = useState('providers');
             const [busy, setBusy] = useState('');
             const [keyModal, setKeyModal] = useState(false);
             const [providerModal, setProviderModal] = useState(null);
@@ -1694,11 +1693,8 @@
                         <button onClick={() => setTab('providers')} className={`flex-1 px-3 py-2 rounded-md text-sm ${tab === 'providers' ? 'bg-proxmox-card text-white shadow' : 'text-gray-400'}`}>
                             {t('vaultCloudProviders') || 'Cloud providers'}
                         </button>
-                        <button onClick={() => setTab('history')} className={`flex-1 px-3 py-2 rounded-md text-sm ${tab === 'history' ? 'bg-proxmox-card text-white shadow' : 'text-gray-400'}`}>
-                            {t('vaultSyncHistory') || 'Sync history'}
-                        </button>
                         <button onClick={() => setTab('backups')} className={`flex-1 px-3 py-2 rounded-md text-sm ${tab === 'backups' ? 'bg-proxmox-card text-white shadow' : 'text-gray-400'}`}>
-                            {t('vaultRemoteBackups') || 'Backup versions'}
+                            {t('vaultBackupRestoreTab') || 'Backup & Restore'}
                         </button>
                     </div>
 
@@ -1744,28 +1740,6 @@
                                 );
                             })}
                             <p className="text-xs text-gray-500 px-1">{t('vaultOneWayNote') || 'One-way encrypted backups only. Restores are always manual and dry-run-first.'}</p>
-                        </div>
-                    ) : tab === 'history' ? (
-                        <div className="overflow-x-auto border border-proxmox-border rounded-xl">
-                            <table className="w-full text-sm">
-                                <thead className="bg-proxmox-darker text-gray-400"><tr>
-                                    <th className="text-left px-4 py-3">{t('provider') || 'Provider'}</th>
-                                    <th className="text-left px-4 py-3">{t('status') || 'Status'}</th>
-                                    <th className="text-left px-4 py-3">{t('date') || 'Date'}</th>
-                                    <th className="text-left px-4 py-3">{t('size') || 'Size'}</th>
-                                    <th className="text-left px-4 py-3">{t('details') || 'Details'}</th>
-                                </tr></thead>
-                                <tbody className="divide-y divide-proxmox-border">
-                                    {(status?.history || []).map(item => <tr key={item.id}>
-                                        <td className="px-4 py-3 text-white">{item.provider_name || item.provider_type || item.provider_id}</td>
-                                        <td className={`px-4 py-3 ${item.status === 'ok' ? 'text-green-400' : item.status === 'running' ? 'text-blue-400' : 'text-red-400'}`}>{item.status}</td>
-                                        <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{new Date(item.started_at).toLocaleString()}</td>
-                                        <td className="px-4 py-3 text-gray-400">{formatBytes(item.size_bytes)}</td>
-                                        <td className="px-4 py-3 text-gray-400 max-w-xs truncate" title={item.error || item.object_key}>{item.error || item.object_key || '—'}</td>
-                                    </tr>)}
-                                    {(status?.history || []).length === 0 && <tr><td colSpan="5" className="px-4 py-8 text-center text-gray-500">{t('vaultNoHistory') || 'No sync history yet'}</td></tr>}
-                                </tbody>
-                            </table>
                         </div>
                     ) : (
                         <div className="space-y-3">
@@ -1925,6 +1899,7 @@
         function ConfigBackupSection({ addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
+            const [vaultTab, setVaultTab] = useState('providers');
             const [exporting, setExporting] = useState(false);
             const [importing, setImporting] = useState(false);
             const [includeSecrets, setIncludeSecrets] = useState(false);  // LW: off by default for safety
@@ -2076,7 +2051,13 @@
 
             return (
                 <div className="space-y-6">
-                    <ConfigVaultPanel addToast={addToast} />
+                    <ConfigVaultPanel addToast={addToast} tab={vaultTab} setTab={setVaultTab} />
+
+                    <details className={`${vaultTab === 'backups' ? '' : 'hidden'} bg-proxmox-darker border border-proxmox-border rounded-xl overflow-hidden`}>
+                        <summary className="px-4 py-3 cursor-pointer text-sm font-medium text-gray-300 hover:text-white">
+                            {t('vaultLocalFileTools') || 'Local file export/import (advanced)'}
+                        </summary>
+                        <div className="p-4 border-t border-proxmox-border space-y-6">
 
                     {/* Security Notice */}
                     <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-sm text-gray-300">
@@ -2370,6 +2351,8 @@
                             </div>
                         </div>
                     )}
+                        </div>
+                    </details>
                 </div>
             );
         }
