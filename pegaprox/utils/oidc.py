@@ -625,9 +625,19 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     def _role_rank(role):
         return _role_prio.get(role, _CUSTOM_ROLE_PRIO)
 
+    # KG Aug 2026 — custom roles all share one rank, so when several of them match the
+    # first one in the list wins and the rest tie out. That is deterministic and mirrors
+    # how the mapping list reads top-down, but it IS order-dependent, so say so out loud
+    # instead of quietly picking one: defining a real precedence between custom roles
+    # would mean comparing their permission sets, which is a product decision, not
+    # something to smuggle into a bug fix.
+    matched_custom_roles = []
+
     for mapping in config.get('group_mappings', []):
         map_group = (mapping.get('group_id') or mapping.get('group_dn') or '').strip().lower()
         if map_group and (map_group in group_ids or map_group in group_names):
+            if mapping.get('role') and mapping['role'] not in _role_prio:
+                matched_custom_roles.append(mapping['role'])
             # The configured default stands for "no group matched" (that is how the setting
             # is labelled in the UI), so a group that DID match may replace it — except when
             # the default is admin: silently demoting a configured admin on a lower-privilege
@@ -647,7 +657,15 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
                     'extra': mapping.get('permissions', [])  # MK: Must be 'extra' to match get_user_permissions()
                 }
             logging.info(f"[OIDC] Custom group mapping matched: {map_group} → role={mapping.get('role')}")
-    
+
+    if len(matched_custom_roles) > 1:
+        logging.warning(
+            f"[OIDC] user matched {len(matched_custom_roles)} custom-role group mappings "
+            f"({', '.join(matched_custom_roles)}); applied '{result['role']}' — custom roles "
+            "share one precedence level, so the first match in the mapping list wins. "
+            "Reorder the mappings if a different role should take precedence."
+        )
+
     return result
 
 

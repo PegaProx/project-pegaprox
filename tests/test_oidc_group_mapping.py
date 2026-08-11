@@ -96,6 +96,29 @@ def test_builtin_ladder_is_unchanged():
     assert oidc_map_groups_to_role(cfg, _groups(STAFF, LAB))['role'] == ROLE_USER
 
 
+def test_first_matching_custom_role_wins_and_the_ambiguity_is_logged(caplog):
+    """Custom roles share one precedence level, so the mapping list order decides.
+
+    That is deterministic, but silently picking one of several matches is the kind of
+    thing an admin should hear about, so it is logged as a warning.
+    """
+    cfg = _cfg(group_mappings=[
+        {'group_id': LAB, 'role': CUSTOM_ROLE},
+        {'group_id': STAFF, 'role': 'tenant-viewer-lab'},
+    ])
+    with caplog.at_level('WARNING'):
+        out = oidc_map_groups_to_role(cfg, _groups(LAB, STAFF))
+    assert out['role'] == CUSTOM_ROLE
+    assert 'custom-role group mappings' in caplog.text
+
+
+def test_a_single_custom_role_match_is_not_flagged_as_ambiguous(caplog):
+    cfg = _cfg(group_mappings=[{'group_id': LAB, 'role': CUSTOM_ROLE}])
+    with caplog.at_level('WARNING'):
+        oidc_map_groups_to_role(cfg, _groups(LAB))
+    assert 'custom-role group mappings' not in caplog.text
+
+
 def test_no_matching_group_keeps_the_default_role():
     cfg = _cfg(default_role=CUSTOM_ROLE,
                group_mappings=[{'group_id': LAB, 'role': ROLE_ADMIN}])
