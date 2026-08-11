@@ -628,8 +628,13 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     for mapping in config.get('group_mappings', []):
         map_group = (mapping.get('group_id') or mapping.get('group_dn') or '').strip().lower()
         if map_group and (map_group in group_ids or map_group in group_names):
-            if mapping.get('role') and (role_from_default
-                                        or _role_rank(mapping['role']) > _role_rank(result['role'])):
+            # The configured default stands for "no group matched" (that is how the setting
+            # is labelled in the UI), so a group that DID match may replace it — except when
+            # the default is admin: silently demoting a configured admin on a lower-privilege
+            # match would lock installs out of admin-only workflows.
+            if mapping.get('role') and (
+                    (role_from_default and result['role'] != ROLE_ADMIN)
+                    or _role_rank(mapping['role']) > _role_rank(result['role'])):
                 result['role'] = mapping['role']
                 role_from_default = False
             if mapping.get('tenant'):

@@ -68,6 +68,18 @@ def test_custom_default_role_does_not_swallow_a_matching_mapping():
     assert oidc_map_groups_to_role(cfg, _groups(STAFF))['role'] == ROLE_VIEWER
 
 
+def test_admin_default_role_is_not_downgraded_by_a_matching_mapping():
+    """An install with default_role='admin' must not lose admin on a lower-privilege match.
+
+    The default otherwise loses to any group that matched, but demoting a configured
+    admin would lock the install out of admin-only workflows, so admin is exempt.
+    """
+    for mapped in (ROLE_VIEWER, ROLE_USER, CUSTOM_ROLE):
+        cfg = _cfg(default_role=ROLE_ADMIN,
+                   group_mappings=[{'group_id': LAB, 'role': mapped}])
+        assert oidc_map_groups_to_role(cfg, _groups(LAB))['role'] == ROLE_ADMIN
+
+
 def test_custom_role_outranks_a_plain_user_mapping():
     cfg = _cfg(group_mappings=[
         {'group_id': STAFF, 'role': ROLE_USER},
