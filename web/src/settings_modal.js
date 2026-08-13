@@ -717,6 +717,10 @@
                 acme_dns_rfc2136_algorithm: 'hmac-sha512',
                 acme_dns_rfc2136_ttl: 60,
                 acme_dns_propagation_seconds: 30,
+                acme_dns_cloudflare_token: '',
+                acme_dns_cloudflare_zone: '',
+                acme_dns_cloudflare_zone_id: '',
+                acme_dns_cloudflare_account_id: '',
                 acme_directory_url: '',
                 acme_allow_private_ca: false,
                 cert_info: null,
@@ -1538,6 +1542,10 @@
                             acme_dns_rfc2136_algorithm: acmeDnsConfig.algorithm || data.acme_dns_rfc2136_algorithm || 'hmac-sha512',
                             acme_dns_rfc2136_ttl: acmeDnsConfig.ttl || data.acme_dns_rfc2136_ttl || 60,
                             acme_dns_propagation_seconds: acmeDnsConfig.propagation_seconds || data.acme_dns_propagation_seconds || 30,
+                            acme_dns_cloudflare_token: data.acme_dns_cloudflare_token || '',
+                            acme_dns_cloudflare_zone: acmeDnsConfig.cloudflare_zone || data.acme_dns_cloudflare_zone || '',
+                            acme_dns_cloudflare_zone_id: acmeDnsConfig.zone_id || data.acme_dns_cloudflare_zone_id || '',
+                            acme_dns_cloudflare_account_id: acmeDnsConfig.account_id || data.acme_dns_cloudflare_account_id || '',
                             cert_info: data.cert_info || null,
                             http_redirect_port: data.http_redirect_port || 0,
                             reverse_proxy_enabled: data.reverse_proxy_enabled || false,
@@ -1772,6 +1780,10 @@
                     formData.append('acme_dns_rfc2136_algorithm', serverSettings.acme_dns_rfc2136_algorithm || 'hmac-sha512');
                     formData.append('acme_dns_rfc2136_ttl', serverSettings.acme_dns_rfc2136_ttl || 60);
                     formData.append('acme_dns_propagation_seconds', serverSettings.acme_dns_propagation_seconds || 30);
+                    formData.append('acme_dns_cloudflare_token', serverSettings.acme_dns_cloudflare_token || '');
+                    formData.append('acme_dns_cloudflare_zone', serverSettings.acme_dns_cloudflare_zone || '');
+                    formData.append('acme_dns_cloudflare_zone_id', serverSettings.acme_dns_cloudflare_zone_id || '');
+                    formData.append('acme_dns_cloudflare_account_id', serverSettings.acme_dns_cloudflare_account_id || '');
                     formData.append('acme_directory_url', serverSettings.acme_provider === 'custom' ? (serverSettings.acme_directory_url || '') : '');
                     formData.append('acme_allow_private_ca', serverSettings.acme_allow_private_ca ? 'true' : 'false');
                     formData.append('reverse_proxy_enabled', serverSettings.reverse_proxy_enabled);
@@ -1871,6 +1883,10 @@
                             acme_dns_rfc2136_algorithm: serverSettings.acme_dns_rfc2136_algorithm || 'hmac-sha512',
                             acme_dns_rfc2136_ttl: serverSettings.acme_dns_rfc2136_ttl || 60,
                             acme_dns_propagation_seconds: serverSettings.acme_dns_propagation_seconds || 30,
+                            acme_dns_cloudflare_token: serverSettings.acme_dns_cloudflare_token || '',
+                            acme_dns_cloudflare_zone: serverSettings.acme_dns_cloudflare_zone || '',
+                            acme_dns_cloudflare_zone_id: serverSettings.acme_dns_cloudflare_zone_id || '',
+                            acme_dns_cloudflare_account_id: serverSettings.acme_dns_cloudflare_account_id || '',
                             directory_url: serverSettings.acme_provider === 'custom' ? serverSettings.acme_directory_url : '',
                         })
                     });
@@ -6074,6 +6090,7 @@
                                                             >
                                                                 <option value="manual">{t('acmeDnsProviderManual') || 'Manual TXT Record'}</option>
                                                                 <option value="rfc2136">{t('acmeDnsProviderRfc2136') || 'RFC 2136 Dynamic DNS'}</option>
+                                                                <option value="cloudflare">{t('acmeDnsProviderCloudflare') || 'Cloudflare'}</option>
                                                             </select>
                                                         </div>
 
@@ -6169,6 +6186,64 @@
                                                                 </div>
                                                             </div>
                                                         )}
+
+                                                        {(serverSettings.acme_dns_provider || 'manual') === 'cloudflare' && (
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                                <div className="md:col-span-2">
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsCloudflareToken') || 'API Token'}</label>
+                                                                    <input
+                                                                        type="password"
+                                                                        value={serverSettings.acme_dns_cloudflare_token || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_cloudflare_token: e.target.value})}
+                                                                        placeholder="Cloudflare API token"
+                                                                        autoComplete="off"
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                    <p className="text-xs text-gray-500 mt-1">{t('acmeDnsCloudflareTokenHint') || 'Scoped token: Zone → DNS → Edit on the target zone. Zone → Zone → Read is needed for auto-detect; otherwise set the Zone ID.'}</p>
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsCloudflareZone') || 'Zone (optional)'}</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={serverSettings.acme_dns_cloudflare_zone || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_cloudflare_zone: e.target.value})}
+                                                                        placeholder={t('acmeDnsCloudflareZonePlaceholder') || 'Auto-detect from domain'}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsCloudflareZoneId') || 'Zone ID (optional)'}</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={serverSettings.acme_dns_cloudflare_zone_id || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_cloudflare_zone_id: e.target.value})}
+                                                                        placeholder="32-character zone id"
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsCloudflareAccountId') || 'Account ID (optional)'}</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={serverSettings.acme_dns_cloudflare_account_id || ''}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_cloudflare_account_id: e.target.value})}
+                                                                        placeholder="If auto-detect is ambiguous"
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('acmeDnsPropagation') || 'Propagation Wait (seconds)'}</label>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        max="600"
+                                                                        value={serverSettings.acme_dns_propagation_seconds || 30}
+                                                                        onChange={e => setServerSettings({...serverSettings, acme_dns_propagation_seconds: parseInt(e.target.value) || 0})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        )}
                                                     </>
                                                 )}
 
@@ -6177,7 +6252,9 @@
                                                         {(serverSettings.acme_challenge_type || 'http-01') === 'dns-01'
                                                             ? ((serverSettings.acme_dns_provider || 'manual') === 'rfc2136'
                                                                 ? (t('acmeDnsRfc2136Hint') || 'RFC 2136 will create and remove the _acme-challenge TXT record automatically using TSIG.')
-                                                                : (t('acmeDnsHint') || 'DNS-01 requires a TXT record at _acme-challenge for this request. The record value is shown after preparing the challenge.'))
+                                                                : ((serverSettings.acme_dns_provider || 'manual') === 'cloudflare'
+                                                                    ? (t('acmeDnsCloudflareHint') || 'Cloudflare will create and remove the _acme-challenge TXT record automatically via the DNS API.')
+                                                                    : (t('acmeDnsHint') || 'DNS-01 requires a TXT record at _acme-challenge for this request. The record value is shown after preparing the challenge.')))
                                                             : t('acmePort80')}
                                                     </p>
                                                 </div>
@@ -6220,7 +6297,7 @@
 
                                                 <button
                                                     onClick={handleAcmeRequest}
-                                                    disabled={acmeLoading || !serverSettings.domain || (serverSettings.acme_provider === 'letsencrypt' && !serverSettings.acme_email) || (serverSettings.acme_provider === 'custom' && !serverSettings.acme_directory_url) || ((serverSettings.acme_challenge_type || 'http-01') === 'dns-01' && (serverSettings.acme_dns_provider || 'manual') === 'rfc2136' && (!serverSettings.acme_dns_rfc2136_nameserver || !serverSettings.acme_dns_rfc2136_zone || !serverSettings.acme_dns_rfc2136_key_name || !serverSettings.acme_dns_rfc2136_secret))}
+                                                    disabled={acmeLoading || !serverSettings.domain || (serverSettings.acme_provider === 'letsencrypt' && !serverSettings.acme_email) || (serverSettings.acme_provider === 'custom' && !serverSettings.acme_directory_url) || ((serverSettings.acme_challenge_type || 'http-01') === 'dns-01' && (serverSettings.acme_dns_provider || 'manual') === 'rfc2136' && (!serverSettings.acme_dns_rfc2136_nameserver || !serverSettings.acme_dns_rfc2136_zone || !serverSettings.acme_dns_rfc2136_key_name || !serverSettings.acme_dns_rfc2136_secret)) || ((serverSettings.acme_challenge_type || 'http-01') === 'dns-01' && (serverSettings.acme_dns_provider || 'manual') === 'cloudflare' && !serverSettings.acme_dns_cloudflare_token)}
                                                     className="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
                                                 >
                                                     {acmeLoading ? t('acmeRequesting') : ((serverSettings.acme_challenge_type || 'http-01') === 'dns-01' && (serverSettings.acme_dns_provider || 'manual') === 'manual' ? (t('acmeDnsPrepare') || 'Prepare DNS Challenge') : t('acmeRequest'))}

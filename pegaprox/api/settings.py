@@ -38,16 +38,29 @@ bp = Blueprint('settings', __name__)
 
 def _sanitize_acme_dns_settings(settings, data):
     dns_provider = str(data.get('acme_dns_provider', settings.get('acme_dns_provider', 'manual')) or 'manual').strip()
-    settings['acme_dns_provider'] = dns_provider if dns_provider in ('manual', 'rfc2136') else 'manual'
+    settings['acme_dns_provider'] = dns_provider if dns_provider in ('manual', 'rfc2136', 'cloudflare') else 'manual'
     settings['acme_dns_rfc2136_nameserver'] = str(data.get('acme_dns_rfc2136_nameserver', settings.get('acme_dns_rfc2136_nameserver', '')) or '').strip()
     settings['acme_dns_rfc2136_zone'] = str(data.get('acme_dns_rfc2136_zone', settings.get('acme_dns_rfc2136_zone', '')) or '').strip()
     settings['acme_dns_rfc2136_key_name'] = str(data.get('acme_dns_rfc2136_key_name', settings.get('acme_dns_rfc2136_key_name', '')) or '').strip()
     settings['acme_dns_rfc2136_algorithm'] = str(data.get('acme_dns_rfc2136_algorithm', settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512')) or 'hmac-sha512').strip().lower()
+    settings['acme_dns_cloudflare_zone'] = str(data.get('acme_dns_cloudflare_zone', settings.get('acme_dns_cloudflare_zone', '')) or '').strip().rstrip('.').lower()
+
+    def _cf_id(key):
+        value = str(data.get(key, settings.get(key, '')) or '').strip()
+        return value if value and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', value) else ''
+
+    settings['acme_dns_cloudflare_zone_id'] = _cf_id('acme_dns_cloudflare_zone_id')
+    settings['acme_dns_cloudflare_account_id'] = _cf_id('acme_dns_cloudflare_account_id')
 
     if 'acme_dns_rfc2136_secret' in data:
         secret = str(data.get('acme_dns_rfc2136_secret', '') or '').strip()
         if secret != '********':
             settings['acme_dns_rfc2136_secret'] = get_db()._encrypt(secret) if secret else ''
+
+    if 'acme_dns_cloudflare_token' in data:
+        token = str(data.get('acme_dns_cloudflare_token', '') or '').strip()
+        if token != '********':
+            settings['acme_dns_cloudflare_token'] = get_db()._encrypt(token) if token else ''
 
     try:
         settings['acme_dns_rfc2136_port'] = max(1, min(65535, int(data.get('acme_dns_rfc2136_port', settings.get('acme_dns_rfc2136_port', 53)) or 53)))
@@ -1310,6 +1323,8 @@ def get_server_settings():
         settings['oidc_client_secret'] = '********'
     if settings.get('acme_dns_rfc2136_secret'):
         settings['acme_dns_rfc2136_secret'] = '********'
+    if settings.get('acme_dns_cloudflare_token'):
+        settings['acme_dns_cloudflare_token'] = '********'
     return jsonify(settings)
 
 
@@ -2000,6 +2015,10 @@ def get_acme_status():
             'acme_dns_rfc2136_algorithm': settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512'),
             'acme_dns_rfc2136_ttl': settings.get('acme_dns_rfc2136_ttl', 60),
             'acme_dns_propagation_seconds': settings.get('acme_dns_propagation_seconds', 30),
+            'acme_dns_cloudflare_token': '********' if settings.get('acme_dns_cloudflare_token') else '',
+            'acme_dns_cloudflare_zone': settings.get('acme_dns_cloudflare_zone', ''),
+            'acme_dns_cloudflare_zone_id': settings.get('acme_dns_cloudflare_zone_id', ''),
+            'acme_dns_cloudflare_account_id': settings.get('acme_dns_cloudflare_account_id', ''),
             'acme_provider': settings.get('acme_provider', 'letsencrypt'),
             'acme_directory_url': settings.get('acme_directory_url', ''),
             'domain': settings.get('domain', ''),
@@ -2042,7 +2061,7 @@ def request_acme_certificate():
             return jsonify({'error': 'Invalid ACME provider'}), 400
         if challenge_type not in ('http-01', 'dns-01'):
             return jsonify({'error': 'Invalid ACME challenge type'}), 400
-        if dns_provider not in ('manual', 'rfc2136'):
+        if dns_provider not in ('manual', 'rfc2136', 'cloudflare'):
             return jsonify({'error': 'Invalid DNS-01 provider'}), 400
         if challenge_type == 'dns-01' and dns_provider == 'rfc2136':
             missing = [
@@ -2055,6 +2074,9 @@ def request_acme_certificate():
             ]
             if missing:
                 return jsonify({'error': ', '.join(missing) + ' required'}), 400
+        if challenge_type == 'dns-01' and dns_provider == 'cloudflare':
+            if not settings.get('acme_dns_cloudflare_token'):
+                return jsonify({'error': 'Cloudflare API token required'}), 400
         if acme_provider == 'custom':
             if not directory_url:
                 return jsonify({'error': 'Custom ACME directory URL is required'}), 400
@@ -2247,6 +2269,8 @@ def backup_config():
                 backup_data['server_settings']['smtp_password'] = ''
             if 'acme_dns_rfc2136_secret' in backup_data['server_settings']:
                 backup_data['server_settings']['acme_dns_rfc2136_secret'] = ''
+            if 'acme_dns_cloudflare_token' in backup_data['server_settings']:
+                backup_data['server_settings']['acme_dns_cloudflare_token'] = ''
         
         # Clusters
         clusters = database.get_all_clusters()

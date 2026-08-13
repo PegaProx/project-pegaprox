@@ -57,6 +57,10 @@ def load_server_settings():
         'acme_dns_rfc2136_algorithm': 'hmac-sha512',
         'acme_dns_rfc2136_ttl': 60,
         'acme_dns_propagation_seconds': 30,
+        'acme_dns_cloudflare_token': '',
+        'acme_dns_cloudflare_zone': '',
+        'acme_dns_cloudflare_zone_id': '',
+        'acme_dns_cloudflare_account_id': '',
         'logo_url': '',
         'app_name': 'PegaProx',
         # HTTP redirect port - NS Jan 2026
@@ -214,7 +218,7 @@ def decrypt_secret_setting(value, *, label='secret'):
 
 
 def acme_dns_config_from_settings(settings):
-    """Build an RFC 2136 DNS config, decrypting the TSIG secret only for use."""
+    """Build DNS-01 provider config, decrypting secrets only for use."""
     settings = settings or {}
     return {
         'nameserver': settings.get('acme_dns_rfc2136_nameserver', ''),
@@ -228,6 +232,13 @@ def acme_dns_config_from_settings(settings):
         'algorithm': settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512'),
         'ttl': settings.get('acme_dns_rfc2136_ttl', 60),
         'propagation_seconds': settings.get('acme_dns_propagation_seconds', 30),
+        'token': decrypt_secret_setting(
+            settings.get('acme_dns_cloudflare_token', ''),
+            label='ACME Cloudflare token'
+        ),
+        'cloudflare_zone': settings.get('acme_dns_cloudflare_zone', ''),
+        'zone_id': settings.get('acme_dns_cloudflare_zone_id', ''),
+        'account_id': settings.get('acme_dns_cloudflare_account_id', ''),
     }
 
 
