@@ -5375,7 +5375,14 @@
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
-                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {t('running')?.toLowerCase()}, <b style={{color: 'var(--corp-text-muted)'}}>{totals.totalVms - totals.runningVms}</b> {t('stopped')?.toLowerCase()}</span>
+                            {(() => {
+                                const stoppedVms = totals.totalVms - totals.runningVms;
+                                const runningWord = (t('running') || 'running').toLowerCase();
+                                const stoppedWord = (t('stopped') || 'stopped').toLowerCase();
+                                const runningLabel = totals.runningVms === 1 ? runningWord : (runningWord === 'uruchomiona' ? 'uruchomione' : runningWord);
+                                const stoppedLabel = stoppedVms === 1 ? stoppedWord : (stoppedWord === 'zatrzymana' ? 'zatrzymane' : stoppedWord);
+                                return <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {runningLabel}, <b style={{color: 'var(--corp-text-muted)'}}>{stoppedVms}</b> {stoppedLabel}</span>;
+                            })()}
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
                             <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
