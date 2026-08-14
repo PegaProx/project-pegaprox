@@ -1766,12 +1766,12 @@
                             </h3>
                             {isCorporate && isMultiCluster && (
                                 <span className="text-[11px] ml-1" style={{color:'var(--corp-text-muted, #728b9a)'}}>
-                                    · {frozenMultiCluster.length} clusters
+                                    · {frozenMultiCluster.length} {frozenMultiCluster.length === 1 ? (t('clusterSingular') || 'cluster') : (t('clusterPlural') || 'clusters')}
                                 </span>
                             )}
                             {isCorporate && !isMultiCluster && allNodes.length > 0 && (
                                 <span className="text-[11px] ml-1" style={{color:'var(--corp-text-muted, #728b9a)'}}>
-                                    · {allNodes.length} {allNodes.length === 1 ? 'node' : 'nodes'}, {totalGuests} {totalGuests === 1 ? 'guest' : 'guests'}
+                                    · {allNodes.length} {allNodes.length === 1 ? (t('nodeSingular') || 'node') : (t('nodePlural') || 'nodes')}, {totalGuests} {totalGuests === 1 ? (t('guestSingular') || 'guest') : (t('guestPlural') || 'guests')}
                                 </span>
                             )}
                         </div>
@@ -1998,7 +1998,7 @@
                                                 <text x={mcLayout.mcW / 2} y={MC_TIER.brand - 4} textAnchor="middle"
                                                     fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="0.5">PegaProx</text>
                                                 <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 12} textAnchor="middle"
-                                                    fill={topoColor.muted} fontSize="9" letterSpacing="1">MULTI-CLUSTER TOPOLOGY</text>
+                                                    fill={topoColor.muted} fontSize="9" letterSpacing="1">{t('multiClusterTopology') || 'MULTI-CLUSTER TOPOLOGY'}</text>
                                             </React.Fragment>
                                         ) : (
                                             <React.Fragment>
@@ -2111,7 +2111,7 @@
                                                                     <rect x={-52} y={38} width={Math.max(1, 104 * node.ramPct / 100)} height={5} rx={2} fill={barColor(node.ramPct)} />
                                                                     <text x={74} y={44} fill={barColor(node.ramPct)} fontSize="9" textAnchor="end">{node.ramPct.toFixed(0)}%</text>
                                                                     <text y={54} textAnchor="middle" fill={topoColor.muted} fontSize="9">
-                                                                        {node.totalVms} {node.totalVms === 1 ? 'guest' : 'guests'}
+                                                                        {node.totalVms} {node.totalVms === 1 ? (t('guestSingular') || 'guest') : (t('guestPlural') || 'guests')}
                                                                     </text>
                                                                 </React.Fragment>
                                                             )}
@@ -2321,7 +2321,7 @@
                                                 <rect x={-52} y={38} width={Math.max(1, 104 * node.ramPct / 100)} height={5} rx={2} fill={barColor(node.ramPct)} />
                                                 <text x={74} y={44} fill={barColor(node.ramPct)} fontSize="9" textAnchor="end">{node.ramPct.toFixed(0)}%</text>
                                                 <text y={54} textAnchor="middle" fill={topoColor.muted} fontSize="9">
-                                                    {node.totalVms} {node.totalVms === 1 ? 'guest' : 'guests'}
+                                                    {node.totalVms} {node.totalVms === 1 ? (t('guestSingular') || 'guest') : (t('guestPlural') || 'guests')}
                                                 </text>
                                             </React.Fragment>
                                         )}
@@ -2820,7 +2820,7 @@
                                                     <div className="flex gap-2 text-[11px]">
                                                         {running > 0 && <span className="px-1.5 py-0.5 rounded" style={{background: 'rgba(96,181,21,0.1)', color: '#60b515'}}>{running} running</span>}
                                                         {stopped > 0 && <span className="px-1.5 py-0.5 rounded" style={{background: 'rgba(255,255,255,0.04)', color: '#728b9a'}}>{stopped} stopped</span>}
-                                                        {vms.length === 0 && <span className="text-gray-600">no guests</span>}
+                                                        {vms.length === 0 && <span className="text-gray-600">{t('noGuests') || 'no guests'}</span>}
                                                     </div>
                                                 </div>
                                             </div>
