@@ -1727,7 +1727,7 @@
 
         // NS May 2026 — single-number cluster health pill. Polls /health every 60s.
         // Hover for factor breakdown, click for full modal.
-        function ClusterHealthBadge({ clusterId, authFetch, apiUrl }) {
+        function ClusterHealthBadge({ clusterId, authFetch, apiUrl, t }) {
             const [data, setData] = React.useState(null);
             const [loading, setLoading] = React.useState(false);
             const [showDetails, setShowDetails] = React.useState(false);
@@ -1783,7 +1783,7 @@
                         title="Cluster health — click for breakdown"
                     >
                         <span style={{ fontWeight: 700, letterSpacing: '0.02em' }}>{data.score}</span>
-                        <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>health</span>
+                        <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>{(typeof t === 'function' && t('health')) || 'health'}</span>
                         {hovering && Array.isArray(data.factors) && data.factors.length > 0 && (
                             <div style={{
                                 position: 'absolute', top: '100%', right: 0, marginTop: '4px',
@@ -2178,7 +2178,7 @@
         // ============================================================
 
         // PBS Health Badge — mirrors ClusterHealthBadge but for /api/pbs/<id>/health
-        function PbsHealthBadge({ pbsId, authFetch, apiUrl }) {
+        function PbsHealthBadge({ pbsId, authFetch, apiUrl, t }) {
             const [data, setData] = React.useState(null);
             const [showDetails, setShowDetails] = React.useState(false);
             const [hovering, setHovering] = React.useState(false);
@@ -2215,7 +2215,7 @@
                         title="PBS health — click for breakdown"
                     >
                         <span style={{ fontWeight: 700 }}>{data.score}</span>
-                        <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>health</span>
+                        <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>{(typeof t === 'function' && t('health')) || 'health'}</span>
                         {hovering && Array.isArray(data.factors) && data.factors.length > 0 && (
                             <div style={{
                                 position: 'absolute', top: '100%', right: 0, marginTop: '4px',

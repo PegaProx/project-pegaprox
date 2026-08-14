@@ -14580,7 +14580,7 @@
                                 {pbsServers.length > 0 && (
                                     <div className="mt-4 pt-4 border-t border-proxmox-border">
                                         <div className="flex items-center justify-between px-1 mb-2">
-                                            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Backup Servers</h2>
+                                            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('backupServers') || 'Backup Servers'}</h2>
                                             {isAdmin && (
                                                 <button onClick={() => setShowAddPBS(true)} className="p-1 text-gray-500 hover:text-proxmox-orange rounded transition-colors" title="Add PBS">
                                                     <Icons.Plus className="w-4 h-4" />
@@ -14989,7 +14989,7 @@
                                                                 {selectedCluster.connected ? t('online') : t('offline')}
                                                             </span>
                                                             {selectedCluster.connected && (
-                                                                <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} />
+                                                                <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} t={t} />
                                                             )}
                                                         </div>
                                                         <button onClick={() => loadTabData('overview')} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
@@ -18478,7 +18478,7 @@
                                                         {pbsStatus?.version && <span>v{pbsStatus.version.version}</span>}
                                                         {/* NS May 2026 — PBS health pill */}
                                                         {selectedPBS.connected && (
-                                                            <PbsHealthBadge pbsId={selectedPBS.id} authFetch={authFetch} apiUrl={API_URL} />
+                                                            <PbsHealthBadge pbsId={selectedPBS.id} authFetch={authFetch} apiUrl={API_URL} t={t} />
                                                         )}
                                                     </div>
                                                 </div>
