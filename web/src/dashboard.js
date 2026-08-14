@@ -18473,7 +18473,7 @@
                                                         <span>{selectedPBS.host}:{selectedPBS.port}</span>
                                                         <span className="flex items-center gap-1" style={{color: selectedPBS.connected ? '#60b515' : '#f54f47'}}>
                                                             <span className="w-2 h-2 rounded-full" style={{background: selectedPBS.connected ? '#60b515' : '#f54f47'}}></span>
-                                                            {selectedPBS.connected ? 'Connected' : 'Disconnected'}
+                                                            {selectedPBS.connected ? (t('connected') || 'Connected') : (t('disconnected') || 'Disconnected')}
                                                         </span>
                                                         {pbsStatus?.version && <span>v{pbsStatus.version.version}</span>}
                                                         {/* NS May 2026 — PBS health pill */}
@@ -18487,10 +18487,10 @@
                                                 {isAdmin && (
                                                     <>
                                                         <button onClick={() => { setEditingPBS(selectedPBS); setPbsForm({ name: selectedPBS.name, host: selectedPBS.host, port: selectedPBS.port, user: selectedPBS.user, password: '********', api_token_id: selectedPBS.api_token_id || '', api_token_secret: selectedPBS.using_api_token ? '********' : '', fingerprint: selectedPBS.fingerprint || '', ssl_verify: selectedPBS.ssl_verify || false, linked_clusters: selectedPBS.linked_clusters || [], notes: selectedPBS.notes || '', ssh_user: selectedPBS.ssh_user || '', ssh_port: selectedPBS.ssh_port || 22, ssh_key: selectedPBS.has_ssh_key ? '********' : '', _showSsh: !!selectedPBS.ssh_user }); setShowAddPBS(true); }} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white hover:border-blue-500/30 transition-all text-sm flex items-center gap-2'}>
-                                                            <Icons.Edit className="w-4 h-4" /> Edit
+                                                            <Icons.Edit className="w-4 h-4" /> {t('edit') || 'Edit'}
                                                         </button>
                                                         <button onClick={() => handleDeletePBS(selectedPBS.id)} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-red-400 hover:border-red-500/30 transition-all text-sm flex items-center gap-2'}>
-                                                            <Icons.Trash className="w-4 h-4" /> Delete
+                                                            <Icons.Trash className="w-4 h-4" /> {t('delete') || 'Delete'}
                                                         </button>
                                                     </>
                                                 )}
@@ -18511,7 +18511,7 @@
                                                     </button>
                                                 )}
                                                 <button onClick={() => { fetchPBSStatus(selectedPBS.id); fetchPBSDatastores(selectedPBS.id); fetchPBSTasks(selectedPBS.id); fetchPBSJobs(selectedPBS.id); }} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white hover:border-proxmox-orange/30 transition-all text-sm flex items-center gap-2'}>
-                                                    <Icons.RefreshCw className={`w-4 h-4 ${pbsLoading ? 'animate-spin' : ''}`} /> Refresh
+                                                    <Icons.RefreshCw className={`w-4 h-4 ${pbsLoading ? 'animate-spin' : ''}`} /> {t('refresh') || 'Refresh'}
                                                 </button>
                                             </div>
                                         </div>
@@ -18522,10 +18522,10 @@
                                             : 'flex items-center gap-1 p-1 bg-proxmox-card border border-proxmox-border rounded-xl w-fit'
                                         }>
                                             {[
-                                                { id: 'dashboard', label: 'Dashboard', icon: Icons.Activity },
-                                                { id: 'datastores', label: 'Datastores', icon: Icons.Database },
-                                                { id: 'tasks', label: 'Tasks', icon: Icons.ClipboardList },
-                                                { id: 'jobs', label: 'Jobs', icon: Icons.Clock },
+                                                { id: 'dashboard', label: t('dashboard') || 'Dashboard', icon: Icons.Activity },
+                                                { id: 'datastores', label: t('datastores') || 'Datastores', icon: Icons.Database },
+                                                { id: 'tasks', label: t('tasks') || 'Tasks', icon: Icons.ClipboardList },
+                                                { id: 'jobs', label: t('jobs') || 'Jobs', icon: Icons.Clock },
                                                 { id: 'reports', label: t('reports') || 'Reports', icon: Icons.FileText },  // MK Apr 2026: #273
                                             ].map(tab => (
                                                 <button key={tab.id} onClick={() => setPbsActiveTab(tab.id)}
@@ -18590,7 +18590,7 @@
                                                                 </div>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>Memory</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('memory') || 'Memory'}</span>
                                                                         <span className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{memPct}%</span>
                                                                     </div>
                                                                     <div className={`w-full ${barH} bg-proxmox-dark ${barRound} overflow-hidden`} style={barBg ? {background: barBg, borderRadius: barRadius} : {}}>
@@ -18600,7 +18600,7 @@
                                                                 </div>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>Root Disk</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('rootDisk') || 'Root Disk'}</span>
                                                                         <span className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{rootPct}%</span>
                                                                     </div>
                                                                     <div className={`w-full ${barH} bg-proxmox-dark ${barRound} overflow-hidden`} style={barBg ? {background: barBg, borderRadius: barRadius} : {}}>
@@ -18610,11 +18610,11 @@
                                                                 </div>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>Uptime</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('uptime') || 'Uptime'}</span>
                                                                         <Icons.Clock className="w-4 h-4" style={{color: 'var(--corp-text-muted)'}} />
                                                                     </div>
                                                                     <div className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{days}d {hours}h {mins}m</div>
-                                                                    <div className="text-xs mt-2" style={{color: 'var(--corp-text-muted)'}}>Load: {(srv.loadavg || [0,0,0]).map(v => v.toFixed(2)).join(', ')}</div>
+                                                                    <div className="text-xs mt-2" style={{color: 'var(--corp-text-muted)'}}>{t('load') || 'Load'}: {(srv.loadavg || [0,0,0]).map(v => v.toFixed(2)).join(', ')}</div>
                                                                 </div>
                                                             </>
                                                         );
@@ -18623,7 +18623,7 @@
 
                                                 {/* LW: Feb 2026 - datastore cards */}
                                                 <div>
-                                                    <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Datastores ({pbsDatastores.length})</h2>
+                                                    <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('datastores') || 'Datastores'} ({pbsDatastores.length})</h2>
                                                     <div className={isCorporate ? 'space-y-0' : 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4'}>
                                                         {pbsDatastores.map(ds => {
                                                             const used = ds.used || 0;
@@ -18695,11 +18695,11 @@
                                                 {/* LW: disk info */}
                                                 {pbsDisks.length > 0 && (
                                                     <div>
-                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Disks ({pbsDisks.length})</h2>
+                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('disks') || 'Disks'} ({pbsDisks.length})</h2>
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>Device</th><th className={isCorporate ? '' : 'text-left p-3'}>Type</th><th className={isCorporate ? '' : 'text-left p-3'}>Size</th><th className={isCorporate ? '' : 'text-left p-3'}>Model</th><th className={isCorporate ? '' : 'text-left p-3'}>Status</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('device') || 'Device'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('type') || 'Type'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('size') || 'Size'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('model') || 'Model'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('status') || 'Status'}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsDisks.map((disk, i) => (
@@ -18724,11 +18724,11 @@
                                                 {/* recent tasks */}
                                                 {pbsTasks.length > 0 && (
                                                     <div>
-                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Recent Tasks</h2>
+                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('recentTasks') || 'Recent Tasks'}</h2>
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>Type</th><th className={isCorporate ? '' : 'text-left p-3'}>Status</th><th className={isCorporate ? '' : 'text-left p-3'}>Started</th><th className={isCorporate ? '' : 'text-left p-3'}>Duration</th><th className={isCorporate ? '' : 'text-left p-3'}>Worker</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('type') || 'Type'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('status') || 'Status'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('started') || 'Started'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('duration') || 'Duration'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('worker') || 'Worker'}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsTasks.slice(0, 10).map((task, i) => (
@@ -18802,27 +18802,27 @@
                                                 {/* Notification Targets */}
                                                 {pbsNotifications && (pbsNotifications.targets?.length > 0 || pbsNotifications.matchers?.length > 0) && (
                                                     <div>
-                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Notifications</h2>
+                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('notifications') || 'Notifications'}</h2>
                                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                                             {pbsNotifications.targets?.length > 0 && (
                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <h3 className="text-sm font-medium text-gray-300 mb-3 flex items-center gap-2">
-                                                                        <Icons.Bell className="w-4 h-4 text-blue-400" />Targets ({pbsNotifications.targets.length})
+                                                                        <Icons.Bell className="w-4 h-4 text-blue-400" />{t('targets') || 'Targets'} ({pbsNotifications.targets.length})
                                                                     </h3>
                                                                     <div className="space-y-2">
-                                                                        {pbsNotifications.targets.map((t, i) => (
+                                                                        {pbsNotifications.targets.map((target, i) => (
                                                                             <div key={i} className="flex items-center justify-between p-2 rounded bg-proxmox-dark/50">
                                                                                 <div className="flex items-center gap-2">
                                                                                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                                                                        t.type === 'sendmail' ? 'bg-green-500/20 text-green-400' :
-                                                                                        t.type === 'smtp' ? 'bg-blue-500/20 text-blue-400' :
-                                                                                        t.type === 'gotify' ? 'bg-purple-500/20 text-purple-400' :
-                                                                                        t.type === 'webhook' ? 'bg-orange-500/20 text-orange-400' :
+                                                                                        target.type === 'sendmail' ? 'bg-green-500/20 text-green-400' :
+                                                                                        target.type === 'smtp' ? 'bg-blue-500/20 text-blue-400' :
+                                                                                        target.type === 'gotify' ? 'bg-purple-500/20 text-purple-400' :
+                                                                                        target.type === 'webhook' ? 'bg-orange-500/20 text-orange-400' :
                                                                                         'bg-gray-500/20 text-gray-400'
-                                                                                    }`}>{t.type || 'unknown'}</span>
-                                                                                    <span className="text-white text-sm">{t.name || t.endpoint || '-'}</span>
+                                                                                    }`}>{target.type || (t('unknown') || 'unknown')}</span>
+                                                                                    <span className="text-white text-sm">{target.name || target.endpoint || '-'}</span>
                                                                                 </div>
-                                                                                {t.disable && <span className="text-xs text-red-400">disabled</span>}
+                                                                                {target.disable && <span className="text-xs text-red-400">{t('disabled') || 'disabled'}</span>}
                                                                             </div>
                                                                         ))}
                                                                     </div>
@@ -18831,16 +18831,16 @@
                                                             {pbsNotifications.matchers?.length > 0 && (
                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <h3 className="text-sm font-medium text-gray-300 mb-3 flex items-center gap-2">
-                                                                        <Icons.Filter className="w-4 h-4 text-yellow-400" />Matchers ({pbsNotifications.matchers.length})
+                                                                        <Icons.Filter className="w-4 h-4 text-yellow-400" />{t('matchers') || 'Matchers'} ({pbsNotifications.matchers.length})
                                                                     </h3>
                                                                     <div className="space-y-2">
                                                                         {pbsNotifications.matchers.map((m, i) => (
                                                                             <div key={i} className="flex items-center justify-between p-2 rounded bg-proxmox-dark/50">
                                                                                 <div>
                                                                                     <span className="text-white text-sm">{m.name || '-'}</span>
-                                                                                    {m.target && <span className="text-xs text-gray-500 ml-2">to: {Array.isArray(m.target) ? m.target.join(', ') : m.target}</span>}
+                                                                                    {m.target && <span className="text-xs text-gray-500 ml-2">{t('to') || 'to'}: {Array.isArray(m.target) ? m.target.join(', ') : m.target}</span>}
                                                                                 </div>
-                                                                                {m.disable && <span className="text-xs text-red-400">disabled</span>}
+                                                                                {m.disable && <span className="text-xs text-red-400">{t('disabled') || 'disabled'}</span>}
                                                                             </div>
                                                                         ))}
                                                                     </div>
@@ -18853,9 +18853,9 @@
                                                 {/* Syslog (latest entries) */}
                                                 <div>
                                                     <div className="flex items-center justify-between mb-4">
-                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">System Log</h2>
+                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('systemLog') || 'System Log'}</h2>
                                                         <button onClick={() => fetchPBSSyslog(selectedPBS.id, 200)} className="text-xs text-gray-500 hover:text-white transition-colors flex items-center gap-1">
-                                                            <Icons.RefreshCw className="w-3 h-3" />Load More
+                                                            <Icons.RefreshCw className="w-3 h-3" />{t('loadMore') || 'Load More'}
                                                         </button>
                                                     </div>
                                                     {pbsSyslog.length > 0 ? (
@@ -18871,7 +18871,7 @@
                                                     ) : (
                                                         <button onClick={() => fetchPBSSyslog(selectedPBS.id)} className="w-full text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl hover:border-blue-500/30 transition-all cursor-pointer">
                                                             <Icons.Terminal className="w-6 h-6 mx-auto mb-2 opacity-30" />
-                                                            <span className="text-sm">Click to load syslog</span>
+                                                            <span className="text-sm">{t('clickToLoadSyslog') || 'Click to load syslog'}</span>
                                                         </button>
                                                     )}
                                                 </div>
@@ -18883,7 +18883,7 @@
                                             <div className="flex gap-6">
                                                 {/* Datastore List */}
                                                 <div className="w-64 shrink-0 space-y-2">
-                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">Datastores</h3>
+                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">{t('datastores') || 'Datastores'}</h3>
                                                     {/* NS May 2026 — Capacity forecast tile */}
                                                     <PbsCapacityForecast pbsId={selectedPBS.id} authFetch={authFetch} apiUrl={API_URL} />
                                                     {pbsDatastores.map(ds => {
