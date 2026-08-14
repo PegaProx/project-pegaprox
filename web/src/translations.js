@@ -9045,7 +9045,7 @@
                 timeConfig: 'Konfiguracja czasu',
                 timezoneSaved: 'Timezone updated',
                 hostsFile: 'Plik hosts',
-                vmsOnNode: 'VMs on this Node',
+                vmsOnNode: 'Maszyny VM na tym węźle',
                 nodeShell: 'Shell węzła',
                 subscriptionInfo: 'Subskrypcja',
                 pveVersion: 'Wersja PVE',
