@@ -9651,7 +9651,7 @@
 
                 // Nodes
                 nodes: 'Węzły',
-                node: 'Node',
+                node: 'Węzeł',
                 loadingMetrics: 'Ładowanie metryk...',
                 connectionError: 'Błąd połączenia',
                 retry: 'Spróbuj ponownie',
@@ -9869,7 +9869,7 @@
                 network: 'Network',
 
                 // VM Creation Wizard
-                node: 'Node',
+                node: 'Węzeł',
                 next: 'Next',
                 back: 'Back',
                 required: 'Required',
@@ -10555,9 +10555,9 @@
 
                 // Datacenter
                 summary: 'Summary',
-                cluster: 'Cluster',
+                cluster: 'Klaster',
                 options: 'Options',
-                storage: 'Storage',
+                storage: 'Magazyn',
                 backup: 'Kopia zapasowa',
                 replication: 'Replication',
                 balancing: 'Balancing',
@@ -11973,7 +11973,7 @@
                 value: 'Value',
                 framework: 'Framework',
                 region: 'Region',
-                cluster: 'Cluster',
+                cluster: 'Klaster',
                 profile: 'Profile',
                 overallCoverage: 'Overall coverage',
                 controlsEvaluated: 'Controls evaluated',
@@ -11987,7 +11987,7 @@
                 disclaimerLine3: 'Formal compliance requires documented evidence per control, third-party audit, and (where applicable) certified cryptographic modules.',
                 disclaimerLine4: 'Use as gap-analysis input. Re-verify mappings against the current framework revision before submitting any audit deliverable.',
                 execSummaryPerNode: 'Executive Summary — Per-Node Coverage',
-                node: 'Node',
+                node: 'Węzeł',
                 passed: 'Passed',
                 failed: 'Failed',
                 total: 'Total',
@@ -12807,7 +12807,7 @@
                 channelDeleted: 'Channel deleted',
                 topic: 'Topic',
                 token: 'Token',
-                name: 'Name',
+                name: 'Nazwa',
                 type: 'Type',
                 disabled: 'disabled',
                 accountLocked: 'Too many failed attempts. Try again in ~{mins} min.',
