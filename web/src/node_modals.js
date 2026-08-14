@@ -45,8 +45,8 @@
                     setShowLogin(false);
                     setStatus('connecting');
                     if (termRef.current) {
-                        const method = authData.privateKey ? '(SSH Key)' : '';
-                        termRef.current.write(`\r\nVerbinde als ${authData.username}@${authData.host} ${method}...\r\n`);
+                        const method = authData.privateKey ? `(${t('sshKey') || 'SSH Key'})` : '';
+                        termRef.current.write(`\r\n${t('connectingAs') || 'Connecting as'} ${authData.username}@${authData.host} ${method}...\r\n`);
                     }
                     return true;
                 }
@@ -170,12 +170,12 @@
                         setTimeout(() => fitAddon && fitAddon.fit(), 50);  // idk why 50ms but it works
 
                         setStatus('connecting');
-                        term.write('Verbinde zum Server...\r\n');
+                        term.write(`${t('connectingToServer') || 'Connecting to server...'}\r\n`);
                         
                         // First, try to get the node IP via API
                         let nodeIp = '';
                         try {
-                            term.write('Ermittle Node-IP...\r\n');
+                            term.write(`${t('detectingNodeIp') || 'Detecting Node IP...'}\r\n`);
                             const ipResponse = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ip`, { credentials: 'include', headers: { 'X-Session-ID': sessionId }
                             });
                             if (ipResponse.ok) {
@@ -344,7 +344,7 @@
                             console.log('WebSocket closed:', event.code, event.reason);
                             if (!cleanup) {
                                 // Different messages based on close code
-                                let msg = 'Verbindung beendet';
+                                let msg = t('connectionClosed') || 'Connection closed';
                                 if (event.code === 1006) {
                                     msg = 'Verbindung unerwartet getrennt';
                                 } else if (event.code === 1011) {
@@ -404,7 +404,7 @@
                         <div className="absolute inset-0 flex items-center justify-center bg-black/80">
                             <div className="text-center">
                                 <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full mx-auto mb-2"></div>
-                                <span className="text-gray-400">Lade Terminal...</span>
+                                <span className="text-gray-400">{t('loadingTerminal') || 'Loading terminal...'}</span>
                             </div>
                         </div>
                     )}
@@ -415,13 +415,13 @@
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md shadow-2xl max-h-[85vh] overflow-y-auto">
                                 <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
                                     <Icons.Terminal />
-                                    SSH Login - {nodeInfo.node}
+                                    {t('sshLogin') || 'SSH Login'} - {nodeInfo.node}
                                 </h3>
                                 
                                 {/* Host/IP - editable */}
                                 <div className="mb-4">
                                     <label className="block text-gray-400 text-sm mb-1">
-                                        Host / IP
+                                        {t('hostIp') || 'Host / IP'}
                                         {nodeInfo.allowManualIp && (
                                             <span className="text-yellow-500 ml-2 text-xs">({t('autoDetectionFailed')})</span>
                                         )}
@@ -446,7 +446,7 @@
                                         }`}
                                     >
                                         <Icons.Key className="inline w-4 h-4 mr-1" />
-                                        Password
+                                        {t('passwordLabel') || 'Password'}
                                     </button>
                                     <button
                                         onClick={() => setCredentials({...credentials, authMethod: 'key'})}
@@ -457,13 +457,13 @@
                                         }`}
                                     >
                                         <Icons.FileKey className="inline w-4 h-4 mr-1" />
-                                        SSH Key
+                                        {t('sshKey') || 'SSH Key'}
                                     </button>
                                 </div>
                                 
                                 <div className="space-y-3">
                                     <div>
-                                        <label className="block text-gray-400 text-sm mb-1">Username</label>
+                                        <label className="block text-gray-400 text-sm mb-1">{t('usernameLabel') || 'Username'}</label>
                                         <input
                                             type="text"
                                             value={credentials.username}
@@ -475,7 +475,7 @@
                                     
                                     {credentials.authMethod === 'password' ? (
                                         <div>
-                                            <label className="block text-gray-400 text-sm mb-1">Password</label>
+                                            <label className="block text-gray-400 text-sm mb-1">{t('passwordLabel') || 'Password'}</label>
                                             <input
                                                 type="password"
                                                 value={credentials.password}
@@ -568,7 +568,7 @@
                                                 setShowLogin(false);
                                                 setStatus('disconnected');
                                                 if (wsRef.current) wsRef.current.close();
-                                                if (termRef.current) termRef.current.write('\r\n\x1b[33mCancelled\x1b[0m\r\n');
+                                                if (termRef.current) termRef.current.write(`\r\n\x1b[33m${t('cancelled') || 'Cancelled'}\x1b[0m\r\n`);
                                             }}
                                             className="flex-1 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-500 transition-colors"
                                         >
