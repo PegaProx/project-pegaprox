@@ -4636,7 +4636,7 @@
                                             <td>
                                                 <span className="inline-flex items-center gap-1.5">
                                                     <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? '#60b515' : '#f54f47'}} />
-                                                    <span style={{color: cluster.connected ? '#60b515' : '#f54f47', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
+                                                    <span style={{color: cluster.connected ? '#60b515' : '#f54f47', fontSize: '12px'}}>{cluster.connected ? (t('online') || 'online') : (t('offline') || 'offline')}</span>
                                                 </span>
                                             </td>
                                             <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
@@ -5433,7 +5433,7 @@
                                             <td>
                                                 <span className="inline-flex items-center gap-1.5">
                                                     <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? 'var(--color-success)' : 'var(--color-error)'}} />
-                                                    <span style={{color: cluster.connected ? 'var(--color-success)' : 'var(--color-error)', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
+                                                    <span style={{color: cluster.connected ? 'var(--color-success)' : 'var(--color-error)', fontSize: '12px'}}>{cluster.connected ? (t('online') || 'online') : (t('offline') || 'offline')}</span>
                                                 </span>
                                             </td>
                                             <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>

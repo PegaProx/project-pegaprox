@@ -12619,7 +12619,7 @@
                 exportAsPdf: 'Export as PDF',
                 noGuests: 'no guests',
                 backupServers: 'Serwery kopii',
-                breadcrumbAll: 'All',
+                breadcrumbAll: 'Wszystkie',
                 // TaskBar Settings - NS Feb 2026
                 taskbarAutoExpand: 'TaskBar Auto-Expand',
                 showVmidSidebar: 'Show VM IDs in sidebar',
