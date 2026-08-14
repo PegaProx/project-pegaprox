@@ -1761,7 +1761,7 @@
                                             {/* Timeframe Selector */}
                                             <div className="flex items-center justify-between">
                                                 <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-                                                    <Icons.BarChart /> Performance Metrics
+                                                    <Icons.BarChart /> {t('performanceMetrics') || 'Performance Metrics'}
                                                 </h3>
                                                 <div className="flex gap-2">
                                                     {['hour', 'day', 'week', 'month', 'year'].map(tf => (
@@ -1772,7 +1772,7 @@
                                                                 ? 'bg-proxmox-orange text-white' 
                                                                 : 'bg-proxmox-dark text-gray-400 hover:text-white'}`}
                                                         >
-                                                            {tf.charAt(0).toUpperCase() + tf.slice(1)}
+                                                            {t(tf) || (tf.charAt(0).toUpperCase() + tf.slice(1))}
                                                         </button>
                                                     ))}
                                                 </div>
@@ -1793,7 +1793,7 @@
                                                         <LineChart
                                                             data={data.performance.metrics.memory}
                                                             timestamps={data.performance.timestamps}
-                                                            label="Memory Usage"
+                                                            label={t('memoryUsage') || 'Memory Usage'}
                                                             color="#3b82f6"
                                                             unit="%"
                                                             yMin={0}
@@ -1802,25 +1802,25 @@
                                                         <LineChart
                                                             data={data.performance.metrics.iowait}
                                                             timestamps={data.performance.timestamps}
-                                                            label="IO Wait"
+                                                            label={t('ioWait') || 'IO Wait'}
                                                             color="#eab308"
                                                             unit="%"
                                                         />
                                                         <LineChart
                                                             data={data.performance.metrics.loadavg}
                                                             timestamps={data.performance.timestamps}
-                                                            label="Load Average"
+                                                            label={t('loadAverage') || 'Load Average'}
                                                             color="#22c55e"
                                                             unit=""
                                                         />
                                                     </div>
                                                     <LineChart
                                                         datasets={[
-                                                            { label: 'Net In', data: data.performance.metrics.net_in, color: '#06b6d4' },
-                                                            { label: 'Net Out', data: data.performance.metrics.net_out, color: '#8b5cf6' }
+                                                            { label: t('netIn') || 'Net In', data: data.performance.metrics.net_in, color: '#06b6d4' },
+                                                            { label: t('netOut') || 'Net Out', data: data.performance.metrics.net_out, color: '#8b5cf6' }
                                                         ]}
                                                         timestamps={data.performance.timestamps}
-                                                        label="Network I/O"
+                                                        label={t('networkIo') || 'Network I/O'}
                                                         unit=" KB/s"
                                                     />
                                                     <div className="grid grid-cols-2 gap-4">
@@ -1836,7 +1836,7 @@
                                                         <LineChart
                                                             data={data.performance.metrics.rootfs}
                                                             timestamps={data.performance.timestamps}
-                                                            label="Root FS Usage"
+                                                            label={t('rootFsUsage') || 'Root FS Usage'}
                                                             color="#a855f7"
                                                             unit="%"
                                                             yMin={0}
@@ -1893,7 +1893,7 @@
                                             ) : (
                                                 <div className="text-center text-gray-500 py-12">
                                                     <Icons.BarChart className="mx-auto mb-3 w-12 h-12 opacity-50" />
-                                                    <p>No performance data available</p>
+                                                    <p>{t('noPerformanceData') || 'No performance data available'}</p>
                                                     <p className="text-sm mt-1">Try refreshing or selecting a different timeframe</p>
                                                 </div>
                                             )}
@@ -5085,7 +5085,7 @@
                                                         <button key={tf} onClick={() => handlePerfTimeframeChange(tf)}
                                                             className="px-2 py-1 text-[11px]"
                                                             style={perfTimeframe === tf ? {background: '#324f61', color: '#e9ecef', border: '1px solid #49afd9'} : {color: '#adbbc4', border: '1px solid #485764'}}
-                                                        >{tf.charAt(0).toUpperCase() + tf.slice(1)}</button>
+                                                        >{t(tf) || (tf.charAt(0).toUpperCase() + tf.slice(1))}</button>
                                                     ))}
                                                 </div>
                                             </div>
@@ -5095,18 +5095,18 @@
                                                 <div className="space-y-3">
                                                     <div className="grid grid-cols-2 gap-3">
                                                         <LineChart data={data.performance.metrics.cpu} timestamps={data.performance.timestamps} label="CPU" color="#49afd9" unit="%" yMin={0} yMax={100} />
-                                                        <LineChart data={data.performance.metrics.memory} timestamps={data.performance.timestamps} label="Memory" color="#9b59b6" unit="%" yMin={0} yMax={100} />
-                                                        <LineChart data={data.performance.metrics.iowait} timestamps={data.performance.timestamps} label="IO Wait" color="#eab308" unit="%" />
-                                                        <LineChart data={data.performance.metrics.loadavg} timestamps={data.performance.timestamps} label="Load Average" color="#22c55e" unit="" />
+                                                        <LineChart data={data.performance.metrics.memory} timestamps={data.performance.timestamps} label={t('memory') || 'Memory'} color="#9b59b6" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart data={data.performance.metrics.iowait} timestamps={data.performance.timestamps} label={t('ioWait') || 'IO Wait'} color="#eab308" unit="%" />
+                                                        <LineChart data={data.performance.metrics.loadavg} timestamps={data.performance.timestamps} label={t('loadAverage') || 'Load Average'} color="#22c55e" unit="" />
                                                     </div>
-                                                    <LineChart datasets={[{label: 'Net In', data: data.performance.metrics.net_in, color: '#06b6d4'}, {label: 'Net Out', data: data.performance.metrics.net_out, color: '#8b5cf6'}]} timestamps={data.performance.timestamps} label="Network I/O" unit=" KB/s" />
+                                                    <LineChart datasets={[{label: t('netIn') || 'Net In', data: data.performance.metrics.net_in, color: '#06b6d4'}, {label: t('netOut') || 'Net Out', data: data.performance.metrics.net_out, color: '#8b5cf6'}]} timestamps={data.performance.timestamps} label={t('networkIo') || 'Network I/O'} unit=" KB/s" />
                                                     <div className="grid grid-cols-2 gap-3">
                                                         <LineChart data={data.performance.metrics.swap} timestamps={data.performance.timestamps} label="Swap" color="#ec4899" unit="%" yMin={0} yMax={100} />
-                                                        <LineChart data={data.performance.metrics.rootfs} timestamps={data.performance.timestamps} label="Root FS" color="#a855f7" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart data={data.performance.metrics.rootfs} timestamps={data.performance.timestamps} label={t('rootFs') || 'Root FS'} color="#a855f7" unit="%" yMin={0} yMax={100} />
                                                     </div>
                                                 </div>
                                             ) : (
-                                                <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.BarChart className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">No performance data available</p></div>
+                                                <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.BarChart className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">{t('noPerformanceData') || 'No performance data available'}</p></div>
                                             )}
                                         </div>
                                     )}
