@@ -4891,7 +4891,7 @@
                                             <p className="text-xs text-gray-500">{t('highestCpuUsage') || 'Highest CPU and RAM usage across all clusters'}</p>
                                         </div>
                                     </div>
-                                    <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">Top 10</span>
+                                    <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">{t('top10') || 'Top 10'}</span>
                                 </div>
                                 <div className="overflow-x-auto">
                                     <table className="w-full">
@@ -5478,7 +5478,7 @@
                                 <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
                                     <Icons.Activity className="w-3.5 h-3.5" style={{color: '#49afd9'}} />
                                     <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources') || 'Top Resources'}</span>
-                                    <span className="text-[11px]" style={{color: '#728b9a'}}>Top 10</span>
+                                    <span className="text-[11px]" style={{color: '#728b9a'}}>{t('top10') || 'Top 10'}</span>
                                 </div>
                                 <table className="corp-datagrid corp-datagrid-striped">
                                     <thead>
@@ -5868,7 +5868,7 @@
                                         <p className="text-xs text-gray-500">{t('highestCpuUsage') || 'Highest CPU and RAM usage across all clusters'}</p>
                                     </div>
                                 </div>
-                                <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">Top 10</span>
+                                <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">{t('top10') || 'Top 10'}</span>
                             </div>
                             <div className="overflow-x-auto">
                                 <table className="w-full">
