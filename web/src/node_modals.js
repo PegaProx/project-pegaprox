@@ -1969,7 +1969,7 @@
                                                         if (!confirm(t('discardUnappliedChanges'))) return;
                                                         try {
                                                             const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE', credentials: 'include', headers: authHeaders });
-                                                            if (res.ok) { addToast(t('changesReverted') || 'Changes reverted'); loadTabData('network'); }
+                                                            if (res.ok) { addToast(t('changesReverted') || 'Cofnięto zmiany'); loadTabData('network'); }
                                                             else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
                                                         } catch (e) { addToast(t('error') || 'Error', 'error'); }
                                                     }}
@@ -2087,7 +2087,7 @@
                                                 <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80">
                                                     <div className="w-full max-w-xl bg-proxmox-card border border-proxmox-border rounded-xl p-6">
                                                         <h3 className="text-lg font-semibold text-white mb-4">
-                                                            {data.editIface.isNew ? `Create: Linux ${data.editIface.type}` : `Edit: ${data.editIface.iface}`}
+                                                            {data.editIface.isNew ? `${t('create') || 'Create'}: Linux ${data.editIface.type}` : `${t('edit') || 'Edit'}: ${data.editIface.iface}`}
                                                         </h3>
                                                         <div className="space-y-4">
                                                             <div className="grid grid-cols-2 gap-4">
@@ -2107,7 +2107,7 @@
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                                 </div>
                                                                 <div>
-                                                                    <label className="block text-xs text-gray-400 mb-1">Gateway (IPv4)</label>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('gateway') || 'Gateway'} (IPv4)</label>
                                                                     <input type="text" value={data.editIface.gateway || ''} 
                                                                         onChange={(e) => setData({...data, editIface: {...data.editIface, gateway: e.target.value}})}
                                                                         placeholder="192.168.1.1"
@@ -2120,7 +2120,7 @@
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                                 </div>
                                                                 <div>
-                                                                    <label className="block text-xs text-gray-400 mb-1">Gateway (IPv6)</label>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('gateway') || 'Gateway'} (IPv6)</label>
                                                                     <input type="text" value={data.editIface.gateway6 || ''} 
                                                                         onChange={(e) => setData({...data, editIface: {...data.editIface, gateway6: e.target.value}})}
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
@@ -5154,7 +5154,7 @@
                                     <button className={`corp-subnav-item ${configSubTab === 'lvm' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvm'); if (!data.disks) loadTabData('disks'); }}>{t('lvmStorage')}</button>
                                     <button className={`corp-subnav-item ${configSubTab === 'lvmthin' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvmthin'); if (!data.disks) loadTabData('disks'); }}>{t('lvmThinStorage')}</button>
                                     <button className={`corp-subnav-item ${configSubTab === 'zfs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('zfs'); if (!data.disks) loadTabData('disks'); }}>{t('zfsStorage')}</button>
-                                    <div className="corp-subnav-header">Extras</div>
+                                    <div className="corp-subnav-header">{t('extras') || 'Extras'}</div>
                                     <button className={`corp-subnav-item ${configSubTab === 'repos' ? 'active' : ''}`} onClick={() => { setConfigSubTab('repos'); if (!data.repos) loadTabData('repos'); }}>{t('repositories')}</button>
                                     <button className={`corp-subnav-item ${configSubTab === 'ceph' ? 'active' : ''}`} onClick={() => { setConfigSubTab('ceph'); if (!data.ceph) loadTabData('ceph'); }}>Ceph</button>
                                 </div>
@@ -5172,7 +5172,7 @@
                                                             <div className="relative">
                                                                 <button onClick={() => setData(prev => ({...prev, showCreateMenu: !prev.showCreateMenu}))}
                                                                     className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
-                                                                    <Icons.Plus className="w-3 h-3" /> Create
+                                                                    <Icons.Plus className="w-3 h-3" /> {t('create') || 'Create'}
                                                                 </button>
                                                                 {data.showCreateMenu && (
                                                                     <div className="absolute top-full right-0 mt-1 z-10 min-w-[160px]" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
@@ -5185,14 +5185,14 @@
                                                                     </div>
                                                                 )}
                                                             </div>
-                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT' }); addToast(res && res.ok ? 'Network config applied' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
-                                                                className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>Apply</button>
-                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE' }); addToast(res && res.ok ? 'Changes reverted' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
-                                                                className="px-2 py-1 text-[11px]" style={{color: '#efc006', border: '1px solid rgba(239,192,6,0.3)'}}>Revert</button>
+                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT' }); addToast(res && res.ok ? 'Konfiguracja sieci została zastosowana' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
+                                                                className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>{t('apply') || 'Apply'}</button>
+                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE' }); addToast(res && res.ok ? 'Cofnięto zmiany' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
+                                                                className="px-2 py-1 text-[11px]" style={{color: '#efc006', border: '1px solid rgba(239,192,6,0.3)'}}>{t('revert') || 'Revert'}</button>
                                                         </div>
                                                     </div>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>Gateway</th><th>{t('active') || 'Active'}</th><th style={{width: '60px'}}></th></tr></thead>
+                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>{t('gateway') || 'Gateway'}</th><th>{t('active') || 'Active'}</th><th style={{width: '60px'}}></th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.network) ? data.network : []).map((iface, i) => (
                                                                 <tr key={i}>
@@ -5219,7 +5219,7 @@
                                                                     </td>
                                                                 </tr>
                                                             ))}
-                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={6} className="text-center py-4" style={{color: '#728b9a'}}>No network interfaces</td></tr>}
+                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={6} className="text-center py-4" style={{color: '#728b9a'}}>{t('noNetworkInterfaces') || 'No network interfaces'}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                     {/* LW: Feb 2026 - edit/create interface modal */}
@@ -5228,7 +5228,7 @@
                                                             <div className="w-full max-w-xl" style={{background: 'var(--corp-bar-track)', border: '1px solid var(--corp-border-medium)'}}>
                                                                 <div className="px-4 py-3 flex items-center justify-between" style={{borderBottom: '1px solid var(--corp-border-medium)', background: 'var(--corp-header-bg)'}}>
                                                                     <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>
-                                                                        {data.editIface.isNew ? `Create: Linux ${data.editIface.type}` : `Edit: ${data.editIface.iface}`}
+                                                                        {data.editIface.isNew ? `${t('create') || 'Create'}: Linux ${data.editIface.type}` : `${t('edit') || 'Edit'}: ${data.editIface.iface}`}
                                                                     </span>
                                                                     <button onClick={() => setData(prev => ({...prev, editIface: null}))} style={{color: '#728b9a'}}><Icons.X className="w-4 h-4" /></button>
                                                                 </div>
@@ -5249,7 +5249,7 @@
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Gateway (IPv4)</label>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('gateway') || 'Gateway'} (IPv4)</label>
                                                                             <input type="text" value={data.editIface.gateway || ''}
                                                                                 onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, gateway: e.target.value}}))}
                                                                                 placeholder="192.168.1.1"
@@ -5262,7 +5262,7 @@
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Gateway (IPv6)</label>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('gateway') || 'Gateway'} (IPv6)</label>
                                                                             <input type="text" value={data.editIface.gateway6 || ''}
                                                                                 onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, gateway6: e.target.value}}))}
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
@@ -5386,7 +5386,7 @@
                                                                             loadTabData('network');
                                                                         } else { addToast('Error', 'error'); }
                                                                     }} className="px-3 py-1.5 text-[12px]" style={{color: '#fff', background: '#49afd9', border: 'none'}}>
-                                                                        {data.editIface.isNew ? 'Create' : t('save')}
+                                                                        {data.editIface.isNew ? (t('create') || 'Create') : t('save')}
                                                                     </button>
                                                                 </div>
                                                             </div>
