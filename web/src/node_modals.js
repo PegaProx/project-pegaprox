@@ -1098,7 +1098,7 @@
                 { id: 'disks', label: 'Disks', icon: Icons.HardDrive },
                 { id: 'repos', label: 'Repositories', icon: Icons.Package },
                 { id: 'tasks', label: 'Tasks', icon: Icons.Play },
-                { id: 'subscription', label: 'Subscription', icon: Icons.Shield },
+                { id: 'subscription', label: t('subscription') || 'Subscription', icon: Icons.Shield },
                 { id: 'ceph', label: 'Ceph', icon: Icons.Database },
             ];
 
@@ -1720,7 +1720,7 @@
                                                 {[
                                                     { label: 'Memory', used: data.summary.memory?.used, total: data.summary.memory?.total, color: 'bg-proxmox-orange', ksm: data.summary.ksm?.shared },
                                                     { label: 'Swap', used: data.summary.swap?.used, total: data.summary.swap?.total, color: 'bg-blue-500' },
-                                                    { label: 'Root FS', used: data.summary.rootfs?.used, total: data.summary.rootfs?.total, color: 'bg-green-500' },
+                                                    { label: t('rootFs') || 'Root FS', used: data.summary.rootfs?.used, total: data.summary.rootfs?.total, color: 'bg-green-500' },
                                                 ].map((item, i) => (
                                                     <div key={i} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                         <div className="text-sm font-medium text-white mb-3">{item.label}</div>
