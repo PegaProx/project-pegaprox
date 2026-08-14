@@ -3194,7 +3194,7 @@
                                                             <span className="text-white font-mono">{data.subscription?.key || 'N/A'}</span>
                                                         </div>
                                                         <div className="flex justify-between py-2 border-b border-proxmox-border">
-                                                            <span className="text-gray-400">Server ID</span>
+                                                            <span className="text-gray-400">{t('serverId') || 'Server ID'}</span>
                                                             <span className="text-white font-mono">{data.subscription?.serverid || 'N/A'}</span>
                                                         </div>
                                                         <div className="flex justify-between py-2 border-b border-proxmox-border">
@@ -3222,7 +3222,7 @@
                                                         
                                                         {data.subscription?.serverid && (
                                                             <div className="text-sm">
-                                                                <span className="text-gray-400">Server ID: </span>
+                                                                <span className="text-gray-400">{t('serverId') || 'Server ID'}: </span>
                                                                 <span className="text-white font-mono">{data.subscription.serverid}</span>
                                                             </div>
                                                         )}
@@ -5776,11 +5776,11 @@
                                 ) : (
                                     <table className="corp-property-grid">
                                         <tbody>
-                                            <tr><td>{t('status')}</td><td style={{color: data.subscription?.status === 'Active' ? '#60b515' : data.subscription?.status === 'notfound' ? '#728b9a' : '#efc006'}}>{data.subscription?.status || 'No subscription'}</td></tr>
-                                            <tr><td>Server ID</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.subscription?.serverid || '-'}</td></tr>
-                                            <tr><td>Product</td><td>{data.subscription?.productname || '-'}</td></tr>
-                                            <tr><td>Key</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.subscription?.key || '-'}</td></tr>
-                                            <tr><td>Next Due</td><td>{data.subscription?.nextduedate || '-'}</td></tr>
+                                            <tr><td>{t('status')}</td><td style={{color: data.subscription?.status === 'Active' ? '#60b515' : data.subscription?.status === 'notfound' ? '#728b9a' : '#efc006'}}>{data.subscription?.status === 'notfound' ? (t('subscriptionNotFound') || 'Not found') : (data.subscription?.status || (t('noSubscription') || 'No subscription'))}</td></tr>
+                                            <tr><td>{t('serverId') || 'Server ID'}</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.subscription?.serverid || '-'}</td></tr>
+                                            <tr><td>{t('product') || 'Product'}</td><td>{data.subscription?.productname || '-'}</td></tr>
+                                            <tr><td>{t('licenseKey') || 'Key'}</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.subscription?.key || '-'}</td></tr>
+                                            <tr><td>{t('nextDue') || 'Next Due'}</td><td>{data.subscription?.nextduedate || '-'}</td></tr>
                                         </tbody>
                                     </table>
                                 )}
