@@ -9,7 +9,7 @@
         // NS May 2026 (#389): supported language allowlist — reused for input validation
         // both at init (localStorage) and at switch time. Keep in sync with the
         // backend allowlist in pegaprox/api/users.py and the LanguageSwitcher list.
-        const SUPPORTED_LANGS = ['de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh'];
+        const SUPPORTED_LANGS = ['de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl'];
 
         // map navigator.language ("en-US", "de-AT", ...) onto a supported code, or null
         function _detectBrowserLang() {
@@ -113,6 +113,7 @@
                 { code: 'pt', flag: '🇧🇷', label: 'PT', title: 'Português' },
                 { code: 'ko', flag: '🇰🇷', label: 'KO', title: '한국어' },
                 { code: 'zh', flag: '🇨🇳', label: 'ZH', title: t('languageSimplifiedChinese') },
+                { code: 'pl', flag: '🇵🇱', label: 'PL', title: 'Polski' },
             ];
             const activeLanguage = langs.find(l => l.code === language) || langs[0];
 
@@ -237,7 +238,7 @@
                                 setRequires2FASetup(false);
                             }
                             // NS: Mar 2026 - apply user's saved language (server overrides local)
-                            if (d.user?.language && translations[d.user.language]) {
+                            if (d.user?.language && SUPPORTED_LANGS.includes(d.user.language)) {
                                 applyLanguage(d.user.language);
                             }
                             // NS: Apply user's theme or default
@@ -339,7 +340,7 @@
                             setRequires2FASetup(true);
                         }
                         // NS: Mar 2026 - apply user's saved language on login
-                        if (data.user?.language && translations[data.user.language]) {
+                        if (data.user?.language && SUPPORTED_LANGS.includes(data.user.language)) {
                             applyLanguage(data.user.language);
                         }
                         // NS: Apply user's theme (with fallback to default)
