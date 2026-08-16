@@ -8913,117 +8913,193 @@ echo "AGENT_INSTALLED_OK"
             task.add_output(f"[OK] apt dist-upgrade successful / erfolgreich ({task.packages_upgraded} packages / Pakete)")
             
             # Phase 3: Cleanup
-            task.add_output("Cleaning up / Aufräumen...")
+            task.add_output("Cleaning up...")
             self._ssh_execute(ssh, f'{sudo_prefix}apt-get autoremove -y', task)
             self._ssh_execute(ssh, f'{sudo_prefix}apt-get autoclean', task)
             
-            # Close SSH before reboot
-            ssh.close()
-            ssh = None
-            
             # Phase 4: Reboot if requested
             if task.reboot:
+                reboot_required = False
                 task.phase = 'reboot'
                 task.status = 'rebooting'
-                task.add_output("[SYNC] Initiating reboot / Starte Neustart...")
-                
-                # Reconnect for reboot command
-                ssh = self._ssh_connect(node_ip)
-                if ssh:
-                    try:
-                        # Check if root
-                        stdin, stdout, stderr = ssh.exec_command('id -u')
-                        uid = stdout.read().decode().strip()
-                        is_root = (uid == '0')
-                        
-                        self.logger.info(f"Sending reboot command to {node_name} (root={is_root})")
-                        task.add_output(f"Running as {'root' if is_root else 'non-root user'}")
-                        
-                        # Get transport and open channel with PTY for sudo support
-                        transport = ssh.get_transport()
-                        channel = transport.open_session()
-                        channel.get_pty()
-                        channel.settimeout(10)
-                        
-                        # Execute reboot command
-                        if is_root:
-                            channel.exec_command('shutdown -r now')
-                        else:
-                            channel.exec_command('sudo shutdown -r now')
-                        
-                        # Wait briefly for command to be sent
-                        time.sleep(3)
-                        
-                        # Try to read any output (will fail when connection drops, that's ok)
-                        try:
-                            output = channel.recv(1024).decode()
-                            if output:
-                                task.add_output(f"Reboot output: {output.strip()}")
-                        except:
-                            pass
-                        
-                        channel.close()
-                        task.add_output("Reboot command sent / Reboot-Befehl gesendet")
-                        
-                    except Exception as e:
-                        self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
-                        task.add_output("Reboot command sent / Reboot-Befehl gesendet")
-                    finally:
-                        try:
-                            ssh.close()
-                        except:
-                            pass
-                        ssh = None
-                else:
-                    task.add_output("[WARN] Could not reconnect for reboot / Konnte nicht für Reboot verbinden")
-                    task.add_output("Trying alternative reboot method / Versuche alternative Methode...")
-                    
-                    # Try via Proxmox API as fallback
-                    try:
-                        # MK May 2026 — was `self.session.post(..., verify=False)` which
-                        # hardcoded the SSL bypass even when the operator configured
-                        # `_ssl_verify=True` on this cluster. Use _create_session()
-                        # so the per-cluster TLS preference is honoured (proper CA
-                        # verification when the user pinned a custom CA bundle).
-                        url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node_name}/status"
-                        response = self._create_session().post(url, data={'command': 'reboot'})
-                        if response.status_code == 200:
-                            task.add_output("Reboot initiated via Proxmox API")
-                        else:
-                            task.add_output(f"API reboot failed: {response.status_code}")
-                    except Exception as api_e:
-                        task.add_output(f"API reboot also failed: {api_e}")
-                
-                task.add_output("Waiting for node to reboot / Warte auf Neustart...")
-                
-                # Wait for node to come back online
-                task.phase = 'wait_online'
-                task.status = 'waiting_online'
-                
-                if self._wait_for_node_online(node_name):
-                    task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
-                else:
-                    task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
-                    task.error = "Node did not come back online in time"
-                    task.status = 'failed'
-                    task.phase = 'wait_timeout'
-                    task.completed_at = datetime.now()
-                    return
+                task.add_output("[EVAL] Evaluating for required reboot...")
+                exit_code, output, stderr = self._ssh_execute(ssh, f'{sudo_prefix}command -v needrestart', task)
+                needrestart_available = exit_code == 0
 
-            # Done!
+                # if needrestart_available:
+                #     task.add_output("[OK] needrestart is installed")
+                #     exit_code, output, stderr = self._ssh_execute(ssh, f'{sudo_prefix}needrestart -b -r l', task)
+
+                #     if exit_code == 0:
+                #         task.add_output("[OK] needrestart check completed")
+
+                #         for line in output.splitlines():
+                #             if line.strip():
+                #                 task.add_output(f"[needrestart] {line}")
+
+                #         kernel_status = None
+
+                #         for line in output.splitlines():
+                #             if line.startswith("NEEDRESTART-KSTA:"):
+                #                 try:
+                #                     kernel_status = int(
+                #                         line.split(":", 1)[1].strip()
+                #                     )
+                #                 except (ValueError, IndexError):
+                #                     kernel_status = None
+                #                 break
+
+                #         if kernel_status in (2, 3):
+                #             reboot_required = True
+                #             task.add_output(f"[REBOOT] needrestart reports kernel status: {kernel_status} - Reboot required")
+                #         elif kernel_status == 1:
+                #             task.add_output("[OK] needrestart reports no kernel reboot required")
+                #         elif kernel_status == 0:
+                #             task.add_output("[WARN] needrestart could not determine kernel status")
+                #         else:
+                #             task.add_output("[WARN] needrestart did not provide a kernel status")
+
+                if needrestart_available:
+                    task.add_output("[OK] needrestart is installed")
+                    exit_code, output, stderr = self._ssh_execute(ssh, f"{sudo_prefix}needrestart -p", task)
+
+                    if exit_code == 0:
+                        task.add_output("[OK] needrestart check completed")
+
+                        for line in output.splitlines():
+                            if line.strip():
+                                task.add_output(f"[needrestart] {line}")
+
+                        if output.startswith("OK"):
+                            task.add_output("[OK] No reboot required")
+                        elif output.startswith("CRIT"):
+                            reboot_required = True
+                            task.add_output("[REBOOT] needrestart reports a reboot is required")
+                        else:
+                            task.add_output("[WARN] Could not determine reboot status from needrestart")
+
+                    else:
+                        task.add_output(f"[WARN] needrestart check failed with exit code {exit_code}: {stderr}")
+                        exit_code, _, _ = self._ssh_execute(ssh, f'{sudo_prefix}test -f /var/run/reboot-required', task)
+                        reboot_required = exit_code == 0
+
+                        if reboot_required:
+                            task.add_output("[REBOOT] /var/run/reboot-required exists - reboot required")
+                        else:
+                            task.add_output("[OK] No reboot required according to fallback check")
+
+                else:
+                    task.add_output("[WARN] needrestart is not installed")
+                    exit_code, _, _ = self._ssh_execute(ssh, f'{sudo_prefix}test -f /var/run/reboot-required', task)
+                    reboot_required = exit_code == 0
+
+                    if reboot_required:
+                        task.add_output("[REBOOT] /var/run/reboot-required exists - reboot required")
+                    else:
+                        task.add_output("[OK] /var/run/reboot-required does not exist. No reboot required!")
+
+                if reboot_required:
+                    task.phase = 'reboot'
+                    task.status = 'rebooting'
+                    task.add_output("[SYNC] Initiating reboot...")
+
+                    # Reconnect for reboot command
+                    ssh = self._ssh_connect(node_ip)
+                    if ssh:
+                        try:
+                            # Check if root
+                            stdin, stdout, stderr = ssh.exec_command('id -u')
+                            uid = stdout.read().decode().strip()
+                            is_root = (uid == '0')
+
+                            self.logger.info(f"Sending reboot command to {node_name} (root={is_root})")
+                            task.add_output(f"Running as {'root' if is_root else 'non-root user'}")
+
+                            # Get transport and open channel with PTY for sudo support
+                            transport = ssh.get_transport()
+                            channel = transport.open_session()
+                            channel.get_pty()
+                            channel.settimeout(10)
+
+                            # Execute reboot command
+                            if is_root:
+                                channel.exec_command('shutdown -r now')
+                            else:
+                                channel.exec_command('sudo shutdown -r now')
+
+                            # Wait briefly for command to be sent
+                            time.sleep(3)
+
+                            # Try to read any output (will fail when connection drops, that's ok)
+                            try:
+                                output = channel.recv(1024).decode()
+                                if output:
+                                    task.add_output(f"Reboot output: {output.strip()}")
+                            except:
+                                pass
+
+                            channel.close()
+                            task.add_output("Reboot command sent")
+
+                        except Exception as e:
+                            self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
+                            task.add_output("Reboot command sent")
+                        finally:
+                            try:
+                                ssh.close()
+                            except:
+                                pass
+                            ssh = None
+                    else:
+                        task.add_output("[WARN] Could not reconnect for reboot")
+                        task.add_output("Trying alternative reboot method...")
+
+                        # Try via Proxmox API as fallback
+                        try:
+                            # MK May 2026 — was `self.session.post(..., verify=False)` which
+                            # hardcoded the SSL bypass even when the operator configured
+                            # `_ssl_verify=True` on this cluster. Use _create_session()
+                            # so the per-cluster TLS preference is honoured (proper CA
+                            # verification when the user pinned a custom CA bundle).
+                            url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node_name}/status"
+                            response = self._create_session().post(url, data={'command': 'reboot'})
+                            if response.status_code == 200:
+                                task.add_output("Reboot initiated via Proxmox API")
+                            else:
+                                task.add_output(f"API reboot failed: {response.status_code}")
+                        except Exception as api_e:
+                            task.add_output(f"API reboot also failed: {api_e}")
+
+                    task.add_output("Waiting for node to reboot...")
+                    task.phase = 'wait_online'
+                    task.status = 'waiting_online'
+
+                    if self._wait_for_node_online(node_name):
+                        task.add_output(f"[OK] {node_name} is back online!")
+                    else:
+                        task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
+                        task.error = "Node did not come back online in time"
+                        task.status = 'failed'
+                        task.phase = 'wait_timeout'
+                        task.completed_at = datetime.now()
+                        return
+            else:
+                ssh.close()
+                ssh = None
+
             task.status = 'completed'
             task.phase = 'done'
             task.completed_at = datetime.now()
-            task.add_output(f"[OK] Update completed / abgeschlossen!")
+            task.add_output(f"[OK] Update completed!")
             
             # Auto-exit maintenance mode after successful update
             if node_name in self.nodes_in_maintenance:
-                task.add_output(f"Exiting maintenance mode / Beende Wartungsmodus...")
+                task.add_output(f"Exiting maintenance mode")
                 try:
                     self.exit_maintenance_mode(node_name)
-                    task.add_output(f"[OK] Maintenance mode exited / Wartungsmodus beendet")
+                    task.add_output(f"[OK] Maintenance mode exited")
                 except Exception as e:
-                    task.add_output(f"[WARN] Could not exit maintenance mode / Konnte Wartungsmodus nicht beenden: {e}")
+                    task.add_output(f"[WARN] Could not exit maintenance mode: {e}")
             
             self.logger.info(f"[OK] Node update completed for {node_name}")
             
@@ -9031,7 +9107,7 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"[ERROR] Node update failed for {node_name}: {e}")
             task.status = 'failed'
             task.error = str(e)
-            task.add_output(f"[ERROR] Error / Fehler: {e}")
+            task.add_output(f"[ERROR] Error: {e}")
         
         finally:
             if ssh:
