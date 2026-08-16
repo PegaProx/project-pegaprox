@@ -346,7 +346,8 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
             'evacuation_timeout': evacuation_timeout, 'update_timeout': 900, 'reboot_timeout': reboot_timeout,
             'nodes': nodes_to_update, 'current_index': 0, 'current_node': nodes_to_update[0],
             'current_step': 'starting', 'completed_nodes': [], 'skipped_nodes': [],
-            'failed_nodes': [], 'rebooting_nodes': [], 'paused_reason': None, 'paused_details': None,
+            'failed_nodes': [], 'rebooting_nodes': [], 'reboot_required_nodes': [],
+            'paused_reason': None, 'paused_details': None,
             'logs': [f"[{time.strftime('%H:%M:%S')}] Scheduled rolling update started"], 'scheduled': True
         }
         
@@ -393,7 +394,9 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                             mgr._rolling_update['failed_nodes'].append({'node': node_name, 'error': 'Evacuation failed'})
                             mgr.exit_maintenance_mode(node_name); continue
                     mgr._rolling_update['current_step'] = 'updating'
-                    update_task = mgr.start_node_update(node_name, reboot=include_reboot, force=True)
+                    update_task = mgr.start_node_update(
+                        node_name, reboot=include_reboot, force=True, check_reboot_required=True
+                    )
                     if update_task:
                         waited = 0
                         while waited < (1800 if include_reboot else 900):
@@ -402,7 +405,12 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                         if update_task.status == 'completed':
                             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ {node_name} updated")
                             mgr._rolling_update['completed_nodes'].append(node_name)
-                            if include_reboot:
+                            if getattr(update_task, 'reboot_required', False):
+                                mgr._rolling_update['reboot_required_nodes'].append(node_name)
+                                mgr._rolling_update['logs'].append(
+                                    f"[{time.strftime('%H:%M:%S')}] ⚠ {node_name} requires a restart (needrestart)"
+                                )
+                            if include_reboot and getattr(update_task, 'reboot_performed', False):
                                 mgr._rolling_update['current_step'] = 'rebooting'
                                 mgr._rolling_update['rebooting_nodes'].append(node_name)
                                 if wait_for_reboot:
@@ -436,6 +444,10 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                                         mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ {node_name} did not come back online within 600s")
                                 else:
                                     mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] {node_name} rebooting (wait_for_reboot=False)")
+                            elif include_reboot:
+                                mgr._rolling_update['logs'].append(
+                                    f"[{time.strftime('%H:%M:%S')}] ✓ {node_name} does not require a reboot"
+                                )
                         else:
                             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✗ {node_name} update failed")
                             mgr._rolling_update['failed_nodes'].append({'node': node_name, 'error': 'Update failed'})
@@ -1099,6 +1111,4 @@ def check_scheduled_updates():
                 
     except Exception as e:
         logging.error(f"Error checking scheduled updates: {e}")
-
-
 

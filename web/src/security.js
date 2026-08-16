@@ -2987,6 +2987,15 @@
                                             {rollingUpdate.skipped_nodes?.length > 0 && `, ${rollingUpdate.skipped_nodes.length} skipped`}
                                         </p>
                                     )}
+                                    {rollingUpdate.reboot_required_nodes?.length > 0 && (
+                                        <div className="flex flex-wrap gap-2 mt-3">
+                                            {rollingUpdate.reboot_required_nodes.map(nodeName => (
+                                                <span key={nodeName} className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded">
+                                                    {nodeName}: {t('rebootRequired') || 'reboot required'}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
@@ -3099,6 +3108,7 @@
                                             const isFailed = (rollingUpdate.failed_nodes || []).some(f => f.node === nodeName);
                                             const isCurrent = rollingUpdate.current_node === nodeName;
                                             const isPending = !isCompleted && !isFailed && !isCurrent;
+                                            const rebootRequired = (rollingUpdate.reboot_required_nodes || []).includes(nodeName);
                                             
                                             return (
                                                 <div 
@@ -3115,6 +3125,11 @@
                                                     {isCurrent && <div className="w-2 h-2 bg-blue-400 rounded-full animate-ping"></div>}
                                                     {isPending && <Icons.Clock className="w-3 h-3" />}
                                                     {nodeName}
+                                                    {rebootRequired && (
+                                                        <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded">
+                                                            {t('rebootRequired') || 'reboot required'}
+                                                        </span>
+                                                    )}
                                                 </div>
                                             );
                                         })}
@@ -4043,4 +4058,3 @@
                 </>
             );
         }
-

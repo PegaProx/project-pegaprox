@@ -3958,6 +3958,7 @@ def start_rolling_update(cluster_id):
     
     Parameters (via JSON body):
     - include_reboot: bool - Whether to reboot nodes after update (default: False)
+      When enabled, installed needrestart packages can suppress an unnecessary reboot.
     - node_order: list - Custom order of nodes to update
     - skip_up_to_date: bool - Skip nodes that have no updates available (default: True)
     - force_all: bool - Force update all nodes even if up-to-date (default: False)
@@ -4054,6 +4055,7 @@ def start_rolling_update(cluster_id):
         'skipped_nodes': [],  # MK: Track skipped nodes
         'failed_nodes': [],
         'rebooting_nodes': [],
+        'reboot_required_nodes': [],
         'paused_reason': None,
         'paused_details': None,
         'logs': []
@@ -4274,7 +4276,9 @@ def start_rolling_update(cluster_id):
                     mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Installing updates on {node_name}")
                     logging.info(f"[RollingUpdate] Installing updates on {node_name}")
                     
-                    update_task = mgr.start_node_update(node_name, reboot=include_reboot)
+                    update_task = mgr.start_node_update(
+                        node_name, reboot=include_reboot, check_reboot_required=True
+                    )
                     
                     if not update_task:
                         logging.error(f"[RollingUpdate] start_node_update returned None for {node_name}")
@@ -4301,9 +4305,18 @@ def start_rolling_update(cluster_id):
                         raise Exception(f"Update timed out after {update_timeout}s (status: {update_task.status})")
                     
                     mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ Updates installed")
+
+                    # Keep needrestart's result in the rolling-update status so
+                    # the frontend can show the normal reboot-required badge.
+                    # This is also evaluated when automatic reboot is disabled.
+                    if getattr(update_task, 'reboot_required', False):
+                        mgr._rolling_update['reboot_required_nodes'].append(node_name)
+                        mgr._rolling_update['logs'].append(
+                            f"[{time.strftime('%H:%M:%S')}] ⚠ {node_name} requires a restart (needrestart)"
+                        )
                     
                     # Step 4: If reboot was included, wait for node to come back
-                    if include_reboot:
+                    if include_reboot and getattr(update_task, 'reboot_performed', False):
                         mgr._rolling_update['current_step'] = 'rebooting'
                         mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Node {node_name} rebooting (timeout: {reboot_timeout}s)...")
                         if 'rebooting_nodes' not in mgr._rolling_update:
@@ -4374,6 +4387,10 @@ def start_rolling_update(cluster_id):
                                         mgr._rolling_update['rebooting_nodes'].remove(node_name)
                         else:
                             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Not waiting for {node_name} (wait_for_reboot=False)")
+                    elif include_reboot:
+                        mgr._rolling_update['logs'].append(
+                            f"[{time.strftime('%H:%M:%S')}] ✓ {node_name} does not require a reboot"
+                        )
                     
                     if mgr._rolling_update.get('status') == 'cancelled':
                         break

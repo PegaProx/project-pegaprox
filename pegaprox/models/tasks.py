@@ -48,6 +48,8 @@ class UpdateTask:
     def __init__(self, node: str, reboot: bool = True):
         self.node = node
         self.reboot = reboot
+        self.reboot_required = None
+        self.reboot_performed = False
         self.started_at = datetime.now()
         self.status = 'starting'
         self.phase = 'init'
@@ -69,6 +71,8 @@ class UpdateTask:
         return {
             'node': self.node,
             'reboot': self.reboot,
+            'reboot_required': self.reboot_required,
+            'reboot_performed': self.reboot_performed,
             'started_at': self.started_at.isoformat(),
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'status': self.status,

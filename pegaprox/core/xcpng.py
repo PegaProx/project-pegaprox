@@ -3506,7 +3506,8 @@ class XcpngManager:
     # NS/MK Mar 2026
     # ──────────────────────────────────────────
 
-    def start_node_update(self, node_name, reboot=True, force=False):
+    def start_node_update(self, node_name, reboot=True, force=False,
+                          check_reboot_required=False):
         """Start async yum update on XCP-ng node."""
         from pegaprox.models.tasks import UpdateTask
 
@@ -3569,6 +3570,7 @@ class XcpngManager:
 
             # phase 2: reboot if requested
             if task.reboot:
+                task.reboot_performed = True
                 task.phase = 'reboot'
                 task.status = 'rebooting'
                 task.add_output(f"Rebooting {node_name}...")

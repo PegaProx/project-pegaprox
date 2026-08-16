@@ -17514,7 +17514,7 @@
                                                                                     {node.pve_version && (
                                                                                         <span className="text-xs text-gray-500 font-mono">{node.pve_version}</span>
                                                                                     )}
-                                                                                    {node.reboot_required && (
+                                                                                    {(node.reboot_required || node.needrestart_required) && (
                                                                                         <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded">{t('rebootRequired') || 'reboot required'}</span>
                                                                                     )}
                                                                                 </div>

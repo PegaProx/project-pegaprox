@@ -134,6 +134,10 @@ class UpdateTask:
     def __init__(self, node: str, reboot: bool = True):
         self.node = node
         self.reboot = reboot
+        # ``reboot`` is the requested behaviour.  Rolling updates may refine
+        # that decision with needrestart after packages have been installed.
+        self.reboot_required = None
+        self.reboot_performed = False
         self.started_at = datetime.now()
         self.status = 'starting'  # starting, updating, rebooting, waiting_online, completed, failed
         self.phase = 'init'  # init, apt_update, apt_dist_upgrade, reboot, wait_online
@@ -155,6 +159,8 @@ class UpdateTask:
         return {
             'node': self.node,
             'reboot': self.reboot,
+            'reboot_required': self.reboot_required,
+            'reboot_performed': self.reboot_performed,
             'started_at': self.started_at.isoformat(),
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'status': self.status,
@@ -8777,7 +8783,8 @@ echo "AGENT_INSTALLED_OK"
         self.logger.error(f"Timeout waiting for {node_name} to come online")
         return False
     
-    def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False) -> Optional[UpdateTask]:
+    def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False,
+                          check_reboot_required: bool = False) -> Optional[UpdateTask]:
         
         # check node is in maintenance mode (unless force)
         if not force:
@@ -8803,33 +8810,37 @@ echo "AGENT_INSTALLED_OK"
             task = UpdateTask(node_name, reboot)
             self.nodes_updating[node_name] = task
         
-        self.logger.info(f"[SYNC] Starting update for node: {node_name} (reboot: {reboot}, force: {force})")
+        self.logger.info(
+            f"[SYNC] Starting update for node: {node_name} "
+            f"(reboot: {reboot}, force: {force}, needrestart check: {check_reboot_required})"
+        )
         
         # Start update in background - use gevent if available for paramiko compatibility
         if GEVENT_PATCHED:
             try:
                 import gevent
-                gevent.spawn(self._perform_node_update, node_name, task)
+                gevent.spawn(self._perform_node_update, node_name, task, check_reboot_required)
                 self.logger.info(f"[SYNC] Update spawned with gevent greenlet")
             except Exception as e:
                 self.logger.warning(f"Gevent spawn failed, falling back to thread: {e}")
                 update_thread = threading.Thread(
                     target=self._perform_node_update,
-                    args=(node_name, task)
+                    args=(node_name, task, check_reboot_required)
                 )
                 update_thread.daemon = True
                 update_thread.start()
         else:
             update_thread = threading.Thread(
                 target=self._perform_node_update,
-                args=(node_name, task)
+                args=(node_name, task, check_reboot_required)
             )
             update_thread.daemon = True
             update_thread.start()
         
         return task
     
-    def _perform_node_update(self, node_name: str, task: UpdateTask):
+    def _perform_node_update(self, node_name: str, task: UpdateTask,
+                             check_reboot_required: bool = False):
         
         ssh = None
         
@@ -8916,13 +8927,43 @@ echo "AGENT_INSTALLED_OK"
             task.add_output("Cleaning up / Aufräumen...")
             self._ssh_execute(ssh, f'{sudo_prefix}apt-get autoremove -y', task)
             self._ssh_execute(ssh, f'{sudo_prefix}apt-get autoclean', task)
+
+            # A rolling update can avoid an unnecessary maintenance window when
+            # needrestart is available.  Do not install it or fail the update if
+            # it is absent: it is an optional Debian package.
+            should_reboot = task.reboot
+            if check_reboot_required:
+                installed_rc, _, _ = self._ssh_execute(
+                    ssh,
+                    "dpkg-query -W -f='${db:Status-Status}' needrestart 2>/dev/null | grep -qx installed",
+                    task
+                )
+                if installed_rc == 0:
+                    task.phase = 'needrestart'
+                    task.add_output("Checking whether reboot is required (needrestart -p)...")
+                    _, needrestart_output, needrestart_stderr = self._ssh_execute(
+                        ssh, f'{sudo_prefix}needrestart -p', task
+                    )
+                    needrestart_result = f'{needrestart_output}\n{needrestart_stderr}'
+                    # needrestart's Nagios-compatible output starts with OK when
+                    # no kernel, service, container, or session restart is due.
+                    if 'OK' in needrestart_result:
+                        should_reboot = False
+                        task.reboot_required = False
+                        task.add_output("[OK] needrestart reports no reboot required; skipping reboot")
+                    else:
+                        task.reboot_required = True
+                        task.add_output("needrestart reports that a restart may be required; rebooting")
+                else:
+                    task.add_output("needrestart is not installed; using requested reboot behaviour")
             
             # Close SSH before reboot
             ssh.close()
             ssh = None
             
             # Phase 4: Reboot if requested
-            if task.reboot:
+            if should_reboot:
+                task.reboot_performed = True
                 task.phase = 'reboot'
                 task.status = 'rebooting'
                 task.add_output("[SYNC] Initiating reboot / Starte Neustart...")
@@ -15109,6 +15150,11 @@ echo "AGENT_INSTALLED_OK"
             "echo '---KERNEL---' && uname -r ; "
             "echo '---PVE---' && pveversion 2>/dev/null || echo 'N/A' ; "
             "echo '---REBOOT---' && test -f /var/run/reboot-required && echo 'yes' || echo 'no' ; "
+            "echo '---NEEDRESTART---' && "
+            "if dpkg-query -W -f='${db:Status-Status}' needrestart 2>/dev/null | grep -qx installed; then "
+            "  needrestart -p >/dev/null 2>&1; "
+            "  if [ $? -eq 0 ]; then echo 'no'; else echo 'yes'; fi; "
+            "else echo 'NOT_INSTALLED'; fi ; "
             "echo '---DEBSECAN---' && "
             "if test -x /usr/bin/debsecan || command -v debsecan >/dev/null 2>&1; then "
             "  SUITE=$(lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release 2>/dev/null | cut -d= -f2 || echo bookworm); "
@@ -15134,6 +15180,7 @@ echo "AGENT_INSTALLED_OK"
             'timestamp': datetime.now().isoformat(),
             'os': '', 'kernel': '', 'pve_version': '',
             'reboot_required': False,
+            'needrestart_required': False,
             'debsecan_available': False,
             'cves': [],           # real CVE entries from debsecan
             'packages': [],       # pending updates from apt
@@ -15159,6 +15206,11 @@ echo "AGENT_INSTALLED_OK"
                     result['pve_version'] = line
             elif section == 'REBOOT':
                 result['reboot_required'] = line.strip() == 'yes'
+            elif section == 'NEEDRESTART':
+                # needrestart's Nagios-compatible check returns non-zero when
+                # a kernel, service, container, or session restart is needed.
+                # It is optional, so an absent package remains false.
+                result['needrestart_required'] = line.strip() == 'yes'
             elif section == 'DEBSECAN':
                 if line == 'NOT_INSTALLED':
                     result['debsecan_available'] = False
