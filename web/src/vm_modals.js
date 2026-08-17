@@ -792,9 +792,12 @@
 
             // LW: these could be extracted to utils but w/e
             const formatBytes = b => {
-                if(!b) return '0 B';
+                if (!Number.isFinite(b) || b <= 0) return '0 B';
                 const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-                const i = Math.floor(Math.log(b) / Math.log(k));
+                const i = Math.min(
+                    sizes.length - 1,
+                    Math.max(0, Math.floor(Math.log(b) / Math.log(k)))
+                );
                 return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
             };
 
@@ -1635,9 +1638,12 @@
             };
 
             const formatBytes = b => {
-                if(!b) return '0 B';
+                if (!Number.isFinite(b) || b <= 0) return '0 B';
                 const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-                const i = Math.floor(Math.log(b) / Math.log(k));
+                const i = Math.min(
+                    sizes.length - 1,
+                    Math.max(0, Math.floor(Math.log(b) / Math.log(k)))
+                );
                 return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
             };
 
@@ -2373,20 +2379,20 @@
                                                     <LineChart data={metricsData.metrics.cpu} timestamps={metricsData.timestamps}
                                                         label="CPU" color="#49afd9" unit="%" />
                                                     <LineChart data={memDataGB} timestamps={metricsData.timestamps}
-                                                        label="Memory" color="#9b59b6" unit=" GB" yMin={0} yMax={maxMemGB}
+                                                        label={t('memory') || 'Memory'} color="#9b59b6" unit=" GB" yMin={0} yMax={maxMemGB}
                                                         formatValue={v => v.toFixed(2)} />
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <LineChart data={metricsData.metrics.disk_read} timestamps={metricsData.timestamps}
-                                                        label="Disk Read" color="#efc006" unit="/s" formatValue={formatBytes} />
+                                                        label={t('diskRead') || 'Disk Read'} color="#efc006" unit="/s" formatValue={formatBytes} />
                                                     <LineChart data={metricsData.metrics.disk_write} timestamps={metricsData.timestamps}
-                                                        label="Disk Write" color="#f97316" unit="/s" formatValue={formatBytes} />
+                                                        label={t('diskWrite') || 'Disk Write'} color="#f97316" unit="/s" formatValue={formatBytes} />
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <LineChart data={metricsData.metrics.net_in} timestamps={metricsData.timestamps}
-                                                        label="Network In" color="#49afd9" unit="/s" formatValue={formatBytes} />
+                                                        label={t('networkIn') || 'Network In'} color="#49afd9" unit="/s" formatValue={formatBytes} />
                                                     <LineChart data={metricsData.metrics.net_out} timestamps={metricsData.timestamps}
-                                                        label="Network Out" color="#8b5cf6" unit="/s" formatValue={formatBytes} />
+                                                        label={t('networkOut') || 'Network Out'} color="#8b5cf6" unit="/s" formatValue={formatBytes} />
                                                 </div>
                                             </div>
                                         ) : (
