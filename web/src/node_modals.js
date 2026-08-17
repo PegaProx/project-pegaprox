@@ -4007,11 +4007,11 @@
                 : connectionStatus === 'connected' ? '#60b515'
                 : (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') ? '#efc006'
                 : '#f54f47';
-            const statusLabel = viewMode === 'term' ? 'Terminal'
-                : connectionStatus === 'connected' ? 'Connected'
-                : connectionStatus === 'connecting' ? 'Connecting…'
-                : connectionStatus === 'reconnecting' ? 'Reconnecting…'
-                : 'Error';
+            const statusLabel = viewMode === 'term' ? (t('term') || 'Terminal')
+                : connectionStatus === 'connected' ? (t('connected') || 'Connected')
+                : connectionStatus === 'connecting' ? (t('connecting') || 'Connecting…')
+                : connectionStatus === 'reconnecting' ? (t('reconnecting') || 'Reconnecting…')
+                : (t('consoleError') || 'Error');
 
             return (
                 <div className={isCorporate ? "corp-vm-modal-overlay" : "fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80"}
@@ -4061,7 +4061,7 @@
                                             title={t('consolePct') || 'xterm terminal (PVE termproxy)'}
                                         >
                                             <Icons.Terminal className="w-3.5 h-3.5" />
-                                            Term
+                                            {t('term') || 'Terminal'}
                                         </button>
                                     </div>
                                 )}
@@ -4075,18 +4075,18 @@
                                         onClick={() => {
                                             const conn = rfbRef.current;
                                             if (!conn) return;
-                                            const text = prompt('Paste text:');
+                                            const text = prompt(t('pasteTextPrompt') || 'Paste text:');
                                             if (text) typeTextToVM(conn, text);
                                         }}
                                         className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1"
                                         title={t('pasteClipboard') || 'Paste from clipboard'}
                                     >
                                         <Icons.ClipboardList className="w-3.5 h-3.5" />
-                                        Paste
+                                        {t('paste') || 'Paste'}
                                     </button>
                                 )}
                                 <button onClick={openInProxmox} className="corp-vm-btn corp-vm-btn-ghost">
-                                    External
+                                    {t('external') || 'External'}
                                 </button>
                                 <button onClick={handleFullscreen} className="corp-vm-btn corp-vm-btn-ghost"
                                     title={isFullscreen ? (t('exitFullscreen') || 'Exit fullscreen') : (t('fullscreen') || 'Fullscreen')}>
@@ -4111,11 +4111,11 @@
                                             (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') ? 'text-yellow-400' :
                                             'text-red-400'
                                         )}>
-                                            {viewMode === 'term' ? 'Terminal' :
-                                             connectionStatus === 'connected' ? 'Connected' :
-                                             connectionStatus === 'connecting' ? 'Connecting...' :
-                                             connectionStatus === 'reconnecting' ? 'Reconnecting...' :
-                                             'Error'}
+                                            {viewMode === 'term' ? (t('term') || 'Terminal') :
+                                             connectionStatus === 'connected' ? (t('connected') || 'Connected') :
+                                             connectionStatus === 'connecting' ? (t('connecting') || 'Connecting...') :
+                                             connectionStatus === 'reconnecting' ? (t('reconnecting') || 'Reconnecting...') :
+                                             (t('consoleError') || 'Error')}
                                         </span>
                                     </p>
                                 </div>
@@ -4135,7 +4135,7 @@
                                             className={'px-3 py-1.5 text-xs flex items-center gap-1 ' + (viewMode === 'term' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-proxmox-dark text-gray-400 hover:text-white')}
                                             title="xterm terminal"
                                         >
-                                            <Icons.Terminal className="w-3.5 h-3.5" />Term
+                                            <Icons.Terminal className="w-3.5 h-3.5" />{t('term') || 'Terminal'}
                                         </button>
                                     </div>
                                 )}
@@ -4152,20 +4152,20 @@
                                         onClick={() => {
                                             const conn = rfbRef.current;
                                             if (!conn) return;
-                                            const text = prompt('Paste text:');
+                                            const text = prompt(t('pasteTextPrompt') || 'Paste text:');
                                             if (text) typeTextToVM(conn, text);
                                         }}
                                         className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
                                         title={t('pasteClipboard') || 'Paste from clipboard'}
                                     >
-                                        <Icons.ClipboardList className="w-3.5 h-3.5 inline mr-1" />Paste
+                                        <Icons.ClipboardList className="w-3.5 h-3.5 inline mr-1" />{t('paste') || 'Paste'}
                                     </button>
                                 )}
                                 <button
                                     onClick={openInProxmox}
                                     className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
                                 >
-                                    External
+                                    {t('external') || 'External'}
                                 </button>
                                 <button
                                     onClick={handleFullscreen}
@@ -4200,7 +4200,9 @@
                                 <div className="absolute inset-0 flex items-center justify-center bg-proxmox-darker">
                                     <div className="text-center">
                                         <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full mx-auto mb-4"></div>
-                                        <p className="text-gray-400">{connectionStatus === 'reconnecting' ? `Reconnecting (${retryCount.current}/${maxRetries})...` : 'Connecting to console...'}</p>
+                                        <p className="text-gray-400">{connectionStatus === 'reconnecting'
+    ? `${t('reconnectingToConsole') || 'Reconnecting'} (${retryCount.current}/${maxRetries})...`
+    : (t('connectingToConsole') || 'Connecting to console...')}</p>
                                     </div>
                                 </div>
                             )}

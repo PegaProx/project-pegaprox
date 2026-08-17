@@ -1520,7 +1520,7 @@
                                                 <>
                                                     <span className="corp-meta-sep">·</span>
                                                     <span className={`corp-badge corp-badge-${vm.status === 'running' ? 'running' : 'stopped'}`}>
-                                                        {vm.status}
+                                                        {vm.status === 'running' ? t('running') : vm.status === 'stopped' ? t('stopped') : vm.status}
                                                     </span>
                                                 </>
                                             )}
@@ -1763,7 +1763,7 @@
                                                         dangerouslySetInnerHTML={{
                                                             __html: (() => {
                                                                 const raw = getValue('general', 'description');
-                                                                if (!raw) return '<span style="color:#6b7280">No description</span>';
+                                                                if (!raw) return `<span style="color:#6b7280">${t('noDescription') || 'No description'}</span>`;
                                                                 if (!window.marked) return (window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'));
                                                                 // MK: security audit — if DOMPurify not loaded, render as escaped plain text, NEVER unsanitized HTML
                                                                 const html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(raw)) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
@@ -1846,6 +1846,7 @@
                                                     value={getValue('hardware', 'cores')}
                                                     onChange={(v) => handleChange('hardware', 'cores', v)}
                                                     needsRestart={vm.status === 'running'}
+                                                    t={t}
                                                 />
                                                 {isQemu && (
                                                     <ConfigInputField
@@ -1854,6 +1855,7 @@
                                                         value={getValue('hardware', 'sockets')}
                                                         onChange={(v) => handleChange('hardware', 'sockets', v)}
                                                         needsRestart={true}
+                                                        t={t}
                                                     />
                                                 )}
                                                 {!isQemu && (
@@ -1874,6 +1876,7 @@
                                                     minMB={128}
                                                     stepMB={128}
                                                     needsRestart={vm.status === 'running'}
+                                                    t={t}
                                                 />
                                                 {isQemu ? (
                                                     <MemoryInputField
@@ -2699,7 +2702,7 @@
                                                             </div>
                                                             <div className="flex items-center gap-2">
                                                                 {net.firewall ? (
-                                                                    <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">Firewall</span>
+                                                                    <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">{t('firewall') || 'Firewall'}</span>
                                                                 ) : null}
                                                                 {/* NS: Connect/Disconnect toggle (QEMU only - hot-pluggable) */}
                                                                 {isQemu && (
@@ -2738,7 +2741,7 @@
                                                                 <>
                                                                     <div><span className="text-gray-500">{t('name')}:</span><span className="ml-2 text-gray-300">{net.name || 'eth0'}</span></div>
                                                                     <div><span className="text-gray-500">IP:</span><span className="ml-2 text-gray-300 font-mono">{net.ip || 'dhcp'}</span></div>
-                                                                    {net.gw && <div><span className="text-gray-500">Gateway:</span><span className="ml-2 text-gray-300 font-mono">{net.gw}</span></div>}
+                                                                    {net.gw && <div><span className="text-gray-500">{t('gateway') || 'Gateway'}:</span><span className="ml-2 text-gray-300 font-mono">{net.gw}</span></div>}
                                                                 </>
                                                             )}
                                                             {net.tag && <div><span className="text-gray-500">VLAN:</span><span className="ml-2 text-gray-300">{net.tag}</span></div>}
@@ -2759,7 +2762,7 @@
                                     {activeTab === 'snapshots' && (
                                         <div className="space-y-6">
                                             <div className="flex items-center justify-between">
-                                                <h3 className="text-sm font-semibold text-gray-300">Snapshots</h3>
+                                                <h3 className="text-sm font-semibold text-gray-300">{t('snapshots') || 'Snapshots'}</h3>
                                                 <button
                                                     onClick={() => setShowCreateSnapshot(true)}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700"
@@ -3260,7 +3263,7 @@
                                                                             ↑ {job.target}
                                                                         </div>
                                                                         <div className="text-xs text-gray-400">
-                                                                            Schedule: {job.schedule || '*/15'} | 
+                                                                            {t('schedule') || 'Schedule'}: {job.schedule || '*/15'} |
                                                                             {job.last_sync ? ` ${t('lastSync')}: ${new Date(job.last_sync * 1000).toLocaleString()}` : ` ${t('neverSynced')}`}
                                                                         </div>
                                                                         {job.error && (
@@ -3396,7 +3399,7 @@
                                                                         ))}
                                                                     </select>
                                                                 ) : (
-                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                                    <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst') || 'Select a target cluster first'}</div>
                                                                 )}
                                                             </div>
                                                             <div className="col-span-2">
@@ -3407,7 +3410,7 @@
                                                                         {t('loading')}...
                                                                     </div>
                                                                 ) : !xReplForm.target_cluster ? (
-                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                                    <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst') || 'Select a target cluster first'}</div>
                                                                 ) : [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))].length > 0 ? (
                                                                     // #532 - map each source NIC's bridge to a target bridge of choice
                                                                     <div className="space-y-2">
@@ -3421,7 +3424,7 @@
                                                                                     className="flex-1 px-2 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-white text-sm"
                                                                                 >
                                                                                     {xReplTargetBridges.filter(b => b.source !== 'sdn').length > 0 && (
-                                                                                        <optgroup label="Local Bridges">
+                                                                                        <optgroup label={t('localBridges') || 'Local Bridges'}>
                                                                                             {xReplTargetBridges.filter(b => b.source !== 'sdn').map(b => (
                                                                                                 <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
                                                                                             ))}
@@ -3445,7 +3448,7 @@
                                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                     >
                                                                         {xReplTargetBridges.filter(b => b.source !== 'sdn').length > 0 && (
-                                                                            <optgroup label="Local Bridges">
+                                                                            <optgroup label={t('localBridges') || 'Local Bridges'}>
                                                                                 {xReplTargetBridges.filter(b => b.source !== 'sdn').map(b => (
                                                                                     <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
                                                                                 ))}
@@ -5780,7 +5783,7 @@
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
                                             defaultValue="v2.0"
                                         >
-                                            <option value="v2.0">TPM 2.0 ({t('recommended') || 'Recommended'})</option>
+                                            <option value="v2.0">TPM 2.0 ({t('recommendedInline') || 'Recommended'})</option>
                                             <option value="v1.2">TPM 1.2</option>
                                         </select>
                                     </div>
@@ -5979,7 +5982,7 @@
                             )}
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Storage</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('storage') || 'Storage'}</label>
                                     <select
                                         value={diskConfig.storage}
                                         onChange={(e) => setDiskConfig({...diskConfig, storage: e.target.value})}
@@ -6701,17 +6704,17 @@
                         <div className="space-y-4">
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Interface ID</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('interfaceId') || 'Interface ID'}</label>
                                     <input type="text" value={netConfig.net_id} onChange={(e) => setNetConfig({...netConfig, net_id: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Bridge / VNet</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('bridgeVnet') || 'Bridge / VNet'}</label>
                                     <select value={netConfig.bridge} onChange={(e) => setNetConfig({...netConfig, bridge: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                         {/* Local bridges */}
                                         {bridgeList.filter(b => b.source !== 'sdn').length > 0 && (
-                                            <optgroup label="Local Bridges">
+                                            <optgroup label={t('localBridges') || 'Local Bridges'}>
                                                 {bridgeList.filter(b => b.source !== 'sdn').map(b => (
                                                     <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
                                                 ))}
@@ -6756,7 +6759,7 @@
                                 <>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Interface Name</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('interfaceName') || 'Interface Name'}</label>
                                             <input type="text" value={netConfig.name} onChange={(e) => setNetConfig({...netConfig, name: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
@@ -6779,7 +6782,7 @@
                                                 placeholder="dhcp or 10.0.0.10/24" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('gateway') || 'Gateway'}</label>
                                             <input type="text" value={netConfig.gw} onChange={(e) => setNetConfig({...netConfig, gw: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
@@ -6793,7 +6796,7 @@
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Rate (MB/s)</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('rateLimit') || 'Rate (MB/s)'}</label>
                                     <input type="text" value={netConfig.rate} onChange={(e) => setNetConfig({...netConfig, rate: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
@@ -6861,7 +6864,7 @@
                             )}
                             
                             <div>
-                                <label className="block text-xs text-gray-400 mb-1">Bridge / VNet</label>
+                                <label className="block text-xs text-gray-400 mb-1">{t('bridgeVnet') || 'Bridge / VNet'}</label>
                                 <select value={editConfig.bridge} onChange={(e) => setEditConfig({...editConfig, bridge: e.target.value})}
                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                     {/* Include current bridge if not in list (important for SDN VNets) */}
@@ -6870,7 +6873,7 @@
                                     )}
                                     {/* Local bridges */}
                                     {bridgeList.filter(b => b.source !== 'sdn').length > 0 && (
-                                        <optgroup label="Local Bridges">
+                                        <optgroup label={t('localBridges') || 'Local Bridges'}>
                                             {bridgeList.filter(b => b.source !== 'sdn').map(b => (
                                                 <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
                                             ))}
@@ -6914,7 +6917,7 @@
                                 <React.Fragment>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Interface Name</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('interfaceName') || 'Interface Name'}</label>
                                             <input type="text" value={editConfig.name} onChange={(e) => setEditConfig({...editConfig, name: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
@@ -6937,7 +6940,7 @@
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('gateway') || 'Gateway'}</label>
                                             <input type="text" value={editConfig.gw} onChange={(e) => setEditConfig({...editConfig, gw: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
@@ -6963,7 +6966,7 @@
                             
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Rate Limit (MB/s)</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('rateLimit') || 'Rate Limit (MB/s)'}</label>
                                     <input type="number" value={editConfig.rate} onChange={(e) => setEditConfig({...editConfig, rate: e.target.value})}
                                         placeholder={t('unlimited')}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />

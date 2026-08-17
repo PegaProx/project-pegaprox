@@ -6881,7 +6881,7 @@
                                                             ))}
                                                         </select>
                                                     ) : (
-                                                        <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a source cluster first'}</div>
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectSourceClusterFirst') || 'Select a source cluster first'}</div>
                                                     )}
                                                 </div>
 
@@ -6920,7 +6920,7 @@
                                                             ))}
                                                         </select>
                                                     ) : (
-                                                        <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst') || 'Select a target cluster first'}</div>
                                                     )}
                                                 </div>
 
@@ -6954,7 +6954,7 @@
                                                             )}
                                                         </select>
                                                     ) : (
-                                                        <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst') || 'Select a target cluster first'}</div>
                                                     )}
                                                 </div>
 
@@ -7349,7 +7349,7 @@
                                             </div>
                                             <div>
                                                 <label className="block text-[11px] mb-1" style={{color:'var(--corp-text-secondary)'}}>
-                                                    {t('snapshotSizeGb')} ({t('recommended')}: {efficientInfo.recommended_snap_size_gb?.toFixed(1)} GB)
+                                                    {t('snapshotSizeGb')} ({t('recommendedInline')}: {efficientInfo.recommended_snap_size_gb?.toFixed(1)} GB)
                                                 </label>
                                                 <input
                                                     type="number"
@@ -7490,7 +7490,7 @@
                                     {/* Snapshot size input */}
                                     <div>
                                         <label className="block text-xs text-gray-400 mb-1">
-                                            {t('snapshotSizeGb')} ({t('recommended')}: {efficientInfo.recommended_snap_size_gb?.toFixed(1)} GB)
+                                            {t('snapshotSizeGb')} ({t('recommendedInline')}: {efficientInfo.recommended_snap_size_gb?.toFixed(1)} GB)
                                         </label>
                                         <input
                                             type="number"
@@ -7612,7 +7612,7 @@
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">Schedule</label>
+                                <label className="block text-sm text-gray-400 mb-1">{t('schedule') || 'Schedule'}</label>
                                 <select
                                     value={schedule}
                                     onChange={(e) => setSchedule(e.target.value)}

@@ -1925,7 +1925,7 @@
             if (!data) {
                 return (
                     <div className="rounded-lg p-6" style={{ background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)' }}>
-                        <div className="opacity-70 text-sm">{loading ? 'Loading…' : 'No data yet — refresh to start collection'}</div>
+                        <div className="opacity-70 text-sm">{loading ? (t('loading') || 'Loading…') : t('apiNoDataYet')}</div>
                     </div>
                 );
             }
@@ -1937,11 +1937,11 @@
                         <StatTile label="P50" value={`${data.p50}ms`} color={colorFor(data.p50)} />
                         <StatTile label="P95" value={`${data.p95}ms`} color={colorFor(data.p95)} />
                         <StatTile label="P99" value={`${data.p99}ms`} color={colorFor(data.p99)} />
-                        <StatTile label="Max" value={`${data.max}ms`} color={colorFor(data.max)} />
-                        <StatTile label="Avg" value={`${data.avg}ms`} color={colorFor(data.avg)} />
-                        <StatTile label="Samples" value={data.samples} sub={`last ${Math.round((data.window_seconds || 300) / 60)}m`} />
+                        <StatTile label={t('maximumShort')} value={`${data.max}ms`} color={colorFor(data.max)} />
+                        <StatTile label={t('averageShort')} value={`${data.avg}ms`} color={colorFor(data.avg)} />
+                        <StatTile label={t('samples')} value={data.samples} sub={`${t('apiLastWindow')} ${Math.round((data.window_seconds || 300) / 60)} min`} />
                         <StatTile
-                            label="Error rate"
+                            label={t('apiErrorRate')}
                             value={`${data.error_rate}%`}
                             color={data.error_rate > 5 ? '#f54f47' : data.error_rate > 1 ? '#f7b428' : '#60b515'}
                         />
@@ -1954,14 +1954,14 @@
                                 color: '#fff', border: '1px solid var(--corp-border, #485764)',
                                 alignSelf: 'flex-end', height: 'fit-content',
                             }}
-                            title={autoRefresh ? 'Auto-refresh ON (10s)' : 'Auto-refresh OFF'}
-                        >{autoRefresh ? 'auto · 10s' : 'paused'}</button>
+                            title={autoRefresh ? t('autoRefreshOn') : t('autoRefreshOff')}
+                        >{autoRefresh ? 'auto · 10 s' : t('paused')}</button>
                     </div>
 
                     {/* sparkline */}
                     {sparkline && (
                         <div className="rounded-lg p-4" style={{ background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)' }}>
-                            <div className="text-xs uppercase tracking-wide opacity-70 mb-2">Recent samples</div>
+                            <div className="text-xs uppercase tracking-wide opacity-70 mb-2">{t('recentSamples')}</div>
                             <svg width={sparkline.W} height={sparkline.H} style={{ display: 'block', maxWidth: '100%' }}>
                                 <polyline
                                     fill="none"
@@ -1971,22 +1971,22 @@
                                 />
                             </svg>
                             <div className="text-xs opacity-60 mt-1" style={{ fontVariantNumeric: 'tabular-nums' }}>
-                                peak in window: {sparkline.max.toFixed(0)}ms
+                                {t('peakInWindow')}: {sparkline.max.toFixed(0)} ms
                             </div>
                         </div>
                     )}
 
                     {/* per-endpoint breakdown */}
                     <div className="rounded-lg overflow-hidden" style={{ background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)' }}>
-                        <div className="px-4 py-2 text-xs uppercase tracking-wide opacity-70" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>Top endpoints by total time</div>
+                        <div className="px-4 py-2 text-xs uppercase tracking-wide opacity-70" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>{t('topEndpointsByTotalTime')}</div>
                         <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
                             <thead>
                                 <tr style={{ background: 'var(--corp-surface-2, #29414e)' }}>
-                                    <th className="px-4 py-2 text-left" style={{ width: '50%' }}>Endpoint</th>
-                                    <th className="px-4 py-2 text-right">Calls</th>
-                                    <th className="px-4 py-2 text-right">Avg ms</th>
-                                    <th className="px-4 py-2 text-right">Max ms</th>
-                                    <th className="px-4 py-2 text-right">Errors</th>
+                                    <th className="px-4 py-2 text-left" style={{ width: '50%' }}>{t('endpointLabel')}</th>
+                                    <th className="px-4 py-2 text-right">{t('callsLabel')}</th>
+                                    <th className="px-4 py-2 text-right">{t('avgMsLabel')}</th>
+                                    <th className="px-4 py-2 text-right">{t('maxMsLabel')}</th>
+                                    <th className="px-4 py-2 text-right">{t('errors')}</th>
                                 </tr>
                             </thead>
                             <tbody>

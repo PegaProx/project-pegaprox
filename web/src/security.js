@@ -428,7 +428,7 @@
                                                 max={365}
                                                 className="flex-1 bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                             />
-                                            <span className="flex items-center text-gray-500 text-sm">{t('days') || 'days'}</span>
+                                            <span className="flex items-center text-gray-500 text-sm">{t('daysUnit') || 'days'}</span>
                                         </div>
                                         {/* NS: 90 days is a common default, but some orgs want 30 or 60 */}
                                     </div>
@@ -444,7 +444,7 @@
                                                 max={30}
                                                 className="flex-1 bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                             />
-                                            <span className="flex items-center text-gray-500 text-sm">{t('days') || 'days'}</span>
+                                            <span className="flex items-center text-gray-500 text-sm">{t('daysUnit') || 'days'}</span>
                                         </div>
                                     </div>
                                 </div>

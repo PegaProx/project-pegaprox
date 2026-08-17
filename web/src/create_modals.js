@@ -1147,7 +1147,7 @@
                                                     <label className="block text-sm text-gray-400 mb-1">{t('tpmVersion')}</label>
                                                     <select value={config.tpm_version} onChange={e => setConfig({...config, tpm_version: e.target.value})}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
-                                                        <option value="v2.0">TPM 2.0 ({t('recommended')})</option>
+                                                        <option value="v2.0">TPM 2.0 ({t('recommendedInline')})</option>
                                                         <option value="v1.2">TPM 1.2</option>
                                                     </select>
                                                 </div>
@@ -1653,7 +1653,7 @@
                                     <div className="space-y-2">
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.unprivileged} onChange={e => setConfig({...config, unprivileged: e.target.checked})} className="rounded" />
-                                            Unprivileged Container ({t('recommended') || 'recommended'})
+                                            Unprivileged Container ({t('recommendedInline') || 'recommended'})
                                         </label>
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.nesting} onChange={e => setConfig({...config, nesting: e.target.checked})} className="rounded" />
@@ -3343,7 +3343,7 @@
                                                     {tokenCopied ? <Icons.CheckCircle className="w-4 h-4 text-green-400" /> : <Icons.Copy className="w-4 h-4 text-gray-400" />}
                                                 </button>
                                             </div>
-                                            <button onClick={() => setCreatedToken(null)} className="text-xs text-gray-500 hover:text-gray-300 mt-2">Dismiss</button>
+                                            <button onClick={() => setCreatedToken(null)} className="text-xs text-gray-500 hover:text-gray-300 mt-2">{t('dismiss')}</button>
                                         </div>
                                     )}
                                     
@@ -3351,16 +3351,16 @@
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4">
                                         <h3 className="text-white font-medium mb-3 flex items-center gap-2">
                                             <Icons.Plus className="w-4 h-4 text-proxmox-orange" />
-                                            Create API Token
+                                            {t('createApiToken')}
                                         </h3>
                                         <div className="space-y-3">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Token Name</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('tokenName')}</label>
                                                 <input
                                                     type="text"
                                                     value={newTokenName}
                                                     onChange={e => setNewTokenName(e.target.value)}
-                                                    placeholder="e.g. ci-pipeline, monitoring, backup-script"
+                                                    placeholder={t('tokenNamePlaceholder')}
                                                     maxLength={64}
                                                     className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm"
                                                 />
@@ -3369,32 +3369,32 @@
                                                 {/* NS: Only admins can pick a different role - everyone else gets their own */}
                                                 {user?.role === 'admin' && (
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Role</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('role')}</label>
                                                     <select
                                                         value={newTokenRole}
                                                         onChange={e => setNewTokenRole(e.target.value)}
                                                         className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm"
                                                     >
-                                                        <option value="">Same as my role</option>
-                                                        <option value="viewer">Viewer</option>
-                                                        <option value="user">User</option>
-                                                        <option value="admin">Admin</option>
+                                                        <option value="">{t('sameAsMyRole')}</option>
+                                                        <option value="viewer">{t('apiRoleViewer')}</option>
+                                                        <option value="user">{t('apiRoleUser')}</option>
+                                                        <option value="admin">{t('apiRoleAdmin')}</option>
                                                     </select>
                                                 </div>
                                                 )}
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Expires (optional)</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('expiresOptional')}</label>
                                                     <select
                                                         value={newTokenExpiry}
                                                         onChange={e => setNewTokenExpiry(e.target.value)}
                                                         className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm"
                                                     >
-                                                        <option value="">Never</option>
-                                                        <option value="7">7 days</option>
-                                                        <option value="30">30 days</option>
-                                                        <option value="90">90 days</option>
-                                                        <option value="180">180 days</option>
-                                                        <option value="365">1 year</option>
+                                                        <option value="">{t('never')}</option>
+                                                        <option value="7">{t('apiExpiry7Days')}</option>
+                                                        <option value="30">{t('apiExpiry30Days')}</option>
+                                                        <option value="90">{t('apiExpiry90Days')}</option>
+                                                        <option value="180">{t('apiExpiry180Days')}</option>
+                                                        <option value="365">{t('apiExpiry1Year')}</option>
                                                     </select>
                                                 </div>
                                             </div>
@@ -3404,7 +3404,7 @@
                                                 className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded-lg text-white text-sm flex items-center gap-2"
                                             >
                                                 {loading ? <Icons.Loader className="w-4 h-4 animate-spin" /> : <Icons.Key className="w-4 h-4" />}
-                                                Generate Token
+                                                {t('generateToken')}
                                             </button>
                                         </div>
                                     </div>
@@ -3413,13 +3413,13 @@
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4">
                                         <h3 className="text-white font-medium mb-3 flex items-center gap-2">
                                             <Icons.Key className="w-4 h-4 text-blue-400" />
-                                            Your Tokens
-                                            <span className="text-xs text-gray-500 ml-auto">{tokens.filter(t => !t.revoked).length} active</span>
+                                            {t('yourTokens')}
+                                            <span className="text-xs text-gray-500 ml-auto">{tokens.filter(t => !t.revoked).length} {t('activeTokensSuffix')}</span>
                                         </h3>
                                         {tokensLoading ? (
                                             <div className="text-center py-4"><Icons.Loader className="w-5 h-5 animate-spin text-gray-400 mx-auto" /></div>
                                         ) : tokens.length === 0 ? (
-                                            <p className="text-gray-500 text-sm text-center py-4">No API tokens yet</p>
+                                            <p className="text-gray-500 text-sm text-center py-4">{t('noApiTokensYet')}</p>
                                         ) : (
                                             <div className="space-y-2">
                                                 {tokens.map(token => (
@@ -3432,25 +3432,25 @@
                                                                     token.role === 'admin' ? 'bg-red-500/20 text-red-400' :
                                                                     token.role === 'user' ? 'bg-blue-500/20 text-blue-400' :
                                                                     'bg-gray-500/20 text-gray-400'
-                                                                }`}>{token.role}</span>
-                                                                {token.revoked ? <span className="text-xs text-red-400">revoked</span> : null}
+                                                                }`}>{token.role === 'admin' ? t('apiRoleAdmin') : token.role === 'user' ? t('apiRoleUser') : t('apiRoleViewer')}</span>
+                                                                {token.revoked ? <span className="text-xs text-red-400">{t('revokedStatus')}</span> : null}
                                                             </div>
                                                             <div className="text-xs text-gray-500 mt-1 flex gap-3 flex-wrap">
-                                                                <span>Created: {new Date(token.created_at).toLocaleDateString()}</span>
+                                                                <span>{t('createdLabel')}: {new Date(token.created_at).toLocaleDateString()}</span>
                                                                 {token.expires_at && <span className={new Date(token.expires_at) < new Date() ? 'text-red-400' : ''}>
-                                                                    Expires: {new Date(token.expires_at).toLocaleDateString()}
+                                                                    {t('expiresLabel')}: {new Date(token.expires_at).toLocaleDateString()}
                                                                 </span>}
                                                                 {token.last_used_at ? (
-                                                                    <span>Last used: {new Date(token.last_used_at).toLocaleDateString()} from {token.last_used_ip}</span>
-                                                                ) : <span className="text-gray-600">Never used</span>}
+                                                                    <span>{t('lastUsed')}: {new Date(token.last_used_at).toLocaleDateString()} {t('fromAddress')} {token.last_used_ip}</span>
+                                                                ) : <span className="text-gray-600">{t('neverUsed')}</span>}
                                                             </div>
                                                         </div>
                                                         {!token.revoked && (
                                                             <button
-                                                                onClick={() => { if (confirm(`Revoke token "${token.name}"? This cannot be undone.`)) revokeToken(token.id); }}
+                                                                onClick={() => { if (confirm(`${t('revokeTokenConfirm')} "${token.name}"? ${t('cannotBeUndone')}`)) revokeToken(token.id); }}
                                                                 className="px-3 py-1.5 bg-red-500/10 text-red-400 rounded-lg text-xs hover:bg-red-500/20 border border-red-500/20 shrink-0"
                                                             >
-                                                                Revoke
+                                                                {t('revoke')}
                                                             </button>
                                                         )}
                                                     </div>
@@ -3461,8 +3461,8 @@
                                     
                                     {/* Usage Info */}
                                     <div className="bg-proxmox-dark/50 border border-proxmox-border rounded-xl p-4 text-sm text-gray-400 space-y-2">
-                                        <h4 className="text-gray-300 font-medium flex items-center gap-2"><Icons.Info className="w-4 h-4" /> Usage</h4>
-                                        <p>Use API tokens for scripts, CI/CD pipelines, and monitoring integrations:</p>
+                                        <h4 className="text-gray-300 font-medium flex items-center gap-2"><Icons.Info className="w-4 h-4" /> {t('usage')}</h4>
+                                        <p>{t('apiTokenUsageDesc')}</p>
                                         <code className="block bg-proxmox-dark px-3 py-2 rounded text-xs font-mono text-green-400 border border-proxmox-border">
                                             curl -H "Authorization: Bearer pgx_..." {window.location.origin}/api/clusters
                                         </code>

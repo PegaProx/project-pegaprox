@@ -2564,7 +2564,7 @@
                         <div className="flex items-center gap-4">
                             <span>
                                 {t('showing')} {((effectivePage - 1) * itemsPerPage) + 1}-{Math.min(effectivePage * itemsPerPage, filteredResources.length)} {t('of')} {filteredResources.length} {t('resources')}
-                                {filteredResources.length !== resources.length && ` (${resources.length} ${t('total')})`}
+                                {filteredResources.length !== resources.length && ` (${resources.length} ${t('totalInline')})`}
                             </span>
                             <div className="flex items-center gap-2">
                                 <span className="text-gray-500">{t('perPage')}:</span>

@@ -92,7 +92,7 @@
                                         </span>
                                         <button type="button" onClick={(e) => { e.stopPropagation(); toggleGroup(perms, !allChecked); }}
                                             className="text-xs px-1.5 py-0.5 rounded bg-proxmox-darker hover:bg-proxmox-hover text-gray-300">
-                                            {allChecked ? (t('deselectAll') || 'None') : (t('selectAll') || 'All')}
+                                            {allChecked ? (t('none') || 'None') : (t('all') || 'All')}
                                         </button>
                                     </div>
                                     {!isCollapsed && (
@@ -3145,18 +3145,18 @@
                                             <h4 className="text-white font-medium mb-4">{t('addTenant') || 'Add Tenant'}</h4>
                                             <div className="space-y-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Name</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
                                                     <input
                                                         type="text"
                                                         value={newTenant.name}
                                                         onChange={e => setNewTenant({...newTenant, name: e.target.value})}
                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
-                                                        placeholder="Company Name"
+                                                        placeholder={t('companyNamePlaceholder')}
                                                     />
                                                 </div>
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">{t('clusters') || 'Clusters'}</label>
-                                                    <p className="text-xs text-gray-500 mb-2">Select clusters this tenant can access (empty = all)</p>
+                                                    <p className="text-xs text-gray-500 mb-2">{t('tenantClustersHint')}</p>
                                                     <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto">
                                                         {clusters.map(c => (
                                                             <label key={c.id} className="flex items-center gap-2 p-2 bg-proxmox-darker rounded cursor-pointer hover:bg-proxmox-hover">
@@ -3188,7 +3188,7 @@
                                                                     body: JSON.stringify(newTenant)
                                                                 });
                                                                 if(r.ok) {
-                                                                    addToast('Tenant created', 'success');
+                                                                    addToast(t('tenantCreated'), 'success');
                                                                     setShowAddTenant(false);
                                                                     setNewTenant({ name: '', clusters: [] });
                                                                     fetchTenants();
@@ -3218,7 +3218,7 @@
                                         <table className="w-full">
                                             <thead>
                                                 <tr className="border-b border-proxmox-border bg-proxmox-darker">
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Name</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('name')}</th>
                                                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('clusters')}</th>
                                                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">{t('users')}</th>
                                                     <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase">{t('actions')}</th>
@@ -3232,12 +3232,12 @@
                                                                 <Icons.Building className="w-4 h-4 text-gray-400" />
                                                                 <span className="text-white font-medium">{tenant.name}</span>
                                                                 {tenant.id === 'default' && (
-                                                                    <span className="px-2 py-0.5 text-xs bg-blue-500/20 text-blue-400 rounded">Default</span>
+                                                                    <span className="px-2 py-0.5 text-xs bg-blue-500/20 text-blue-400 rounded">{t('defaultTenant')}</span>
                                                                 )}
                                                             </div>
                                                         </td>
                                                         <td className="px-4 py-3 text-sm text-gray-400">
-                                                            {tenant.clusters.length === 0 ? 'All clusters' : tenant.clusters.length + ' clusters'}
+                                                            {tenant.clusters.length === 0 ? t('allClusters') : `${t('clusters')}: ${tenant.clusters.length}`}
                                                             {(tenant.quota_max_vms > 0 || tenant.quota_max_cores > 0 || tenant.quota_max_memory_gb > 0) && (
                                                                 <div className="text-xs text-gray-600 mt-0.5">
                                                                     {t('quota') || 'Quota'}: {tenant.quota_max_vms > 0 ? `${tenant.quota_max_vms} VMs ` : ''}{tenant.quota_max_cores > 0 ? `${tenant.quota_max_cores}c ` : ''}{tenant.quota_max_memory_gb > 0 ? `${tenant.quota_max_memory_gb}GB` : ''}
@@ -3318,7 +3318,7 @@
                                                 
                                                 <div className="space-y-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Name</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
                                                         <input
                                                             type="text"
                                                             value={editingTenant.name}
@@ -3449,7 +3449,7 @@
                                                         <div className="space-y-1">
                                                             {(chargeback.by_cluster || []).map(c => (
                                                                 <div key={c.cluster_id} className="flex justify-between text-sm bg-proxmox-dark rounded px-3 py-2">
-                                                                    <span className="text-gray-300">{c.cluster_name} <span className="text-xs text-gray-500">({c.vm_count} VMs{c.enough_data ? '' : ' · ' + (t('noData') || 'no data')})</span></span>
+                                                                    <span className="text-gray-300">{c.cluster_name} <span className="text-xs text-gray-500">({c.vm_count} VMs{c.enough_data ? '' : ' · ' + (t('noDataInline') || 'no data')})</span></span>
                                                                     <span className="text-gray-200">{c.monthly_subtotal} {chargeback.currency}/mo</span>
                                                                 </div>
                                                             ))}
@@ -3658,30 +3658,30 @@
                                     {(showAddGroup || editingGroup) && (
                                         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-md p-6">
-                                                <h3 className="text-lg font-semibold mb-4">{editingGroup ? 'Edit Group' : 'Add Cluster Group'}</h3>
+                                                <h3 className="text-lg font-semibold mb-4">{editingGroup ? t('editGroup') : t('addGroup')}</h3>
                                                 <div className="space-y-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Name *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('name')} *</label>
                                                         <input
                                                             type="text"
                                                             value={editingGroup ? editingGroup.name : newGroup.name}
                                                             onChange={e => editingGroup ? setEditingGroup({...editingGroup, name: e.target.value}) : setNewGroup({...newGroup, name: e.target.value})}
-                                                            placeholder="Production Clusters"
+                                                            placeholder={t('groupNamePlaceholder')}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Description</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('groupDescription')}</label>
                                                         <input
                                                             type="text"
                                                             value={editingGroup ? editingGroup.description : newGroup.description}
                                                             onChange={e => editingGroup ? setEditingGroup({...editingGroup, description: e.target.value}) : setNewGroup({...newGroup, description: e.target.value})}
-                                                            placeholder="Production environment clusters"
+                                                            placeholder={t('groupDescriptionPlaceholder')}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Color</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('color')}</label>
                                                         <div className="flex items-center gap-2">
                                                             <input
                                                                 type="color"
@@ -3693,18 +3693,18 @@
                                                         </div>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Assign to Tenant (optional)</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('assignTenant')}</label>
                                                         <select
                                                             value={editingGroup ? (editingGroup.tenant_id || '') : (newGroup.tenant_id || '')}
                                                             onChange={e => editingGroup ? setEditingGroup({...editingGroup, tenant_id: e.target.value || null}) : setNewGroup({...newGroup, tenant_id: e.target.value || null})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="">No tenant (visible to all)</option>
+                                                            <option value="">{t('noTenantAllVisible')}</option>
                                                             {tenants.filter(t => t.id !== 'default').map(t => (
                                                                 <option key={t.id} value={t.id}>{t.name}</option>
                                                             ))}
                                                         </select>
-                                                        <p className="text-xs text-gray-500 mt-1">If assigned, only this tenant can see clusters in this group</p>
+                                                        <p className="text-xs text-gray-500 mt-1">{t('assignTenantHint')}</p>
                                                     </div>
                                                 </div>
                                                 <div className="flex justify-end gap-3 mt-6">
@@ -3717,7 +3717,7 @@
                                                     <button
                                                         onClick={async () => {
                                                             const data = editingGroup || newGroup;
-                                                            if(!data.name) { addToast('Name required', 'error'); return; }
+                                                            if(!data.name) { addToast(t('nameRequired'), 'error'); return; }
                                                             try {
                                                                 const url = editingGroup ? `${API_URL}/cluster-groups/${editingGroup.id}` : `${API_URL}/cluster-groups`;
                                                                 const r = await fetch(url, {
@@ -3726,7 +3726,7 @@
                                                                     body: JSON.stringify(data)
                                                                 });
                                                                 if(r.ok) {
-                                                                    addToast(editingGroup ? 'Group updated' : 'Group created', 'success');
+                                                                    addToast(editingGroup ? t('groupUpdated') : t('groupCreated'), 'success');
                                                                     setShowAddGroup(false);
                                                                     setEditingGroup(null);
                                                                     setNewGroup({ name: '', description: '', color: '#E86F2D' });
@@ -3740,7 +3740,7 @@
                                                         }}
                                                         className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                     >
-                                                        {editingGroup ? 'Save' : 'Create'}
+                                                        {editingGroup ? t('save') : t('create')}
                                                     </button>
                                                 </div>
                                             </div>
@@ -4890,11 +4890,11 @@
                                                                 role.scope === 'global' ? 'bg-purple-500/20 text-purple-400' :
                                                                 'bg-green-500/20 text-green-400'
                                                             }`}>
-                                                                {role.builtin ? 'Builtin' : role.scope === 'global' ? 'Global' : `Tenant: ${role.tenant_id}`}
+                                                                {role.builtin ? t('builtinRole') : role.scope === 'global' ? t('global') : `${t('tenant')}: ${role.tenant_id}`}
                                                             </span>
                                                         </td>
                                                         <td className="px-4 py-3 text-sm text-gray-400">
-                                                            {role.permissions?.length || 0} permissions
+                                                            {t('permissions')}: {role.permissions?.length || 0}
                                                         </td>
                                                         <td className="px-4 py-3 text-right">
                                                             {!role.builtin && (
@@ -4962,13 +4962,13 @@
                                                     className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4 hover:border-proxmox-orange/50 cursor-pointer transition-colors"
                                                     onClick={() => {
                                                         setSelectedTemplate(tpl);
-                                                        setTemplateConfig({ role_id: tpl.id, name: tpl.name, tenant_id: '' });
+                                                        setTemplateConfig({ role_id: tpl.id, name: t(`roleTemplateName_${tpl.id}`) || tpl.name, tenant_id: '' });
                                                         setShowTemplateModal(true);
                                                     }}
                                                 >
-                                                    <div className="font-medium text-white text-sm">{tpl.name}</div>
-                                                    <div className="text-xs text-gray-500 mt-1">{tpl.description}</div>
-                                                    <div className="text-xs text-proxmox-orange mt-2">{tpl.permission_count} {t('permissions') || 'permissions'}</div>
+                                                    <div className="font-medium text-white text-sm">{t(`roleTemplateName_${tpl.id}`) || tpl.name}</div>
+                                                    <div className="text-xs text-gray-500 mt-1">{t(`roleTemplateDesc_${tpl.id}`) || tpl.description}</div>
+                                                    <div className="text-xs text-proxmox-orange mt-2">{t('permissions')}: {tpl.permission_count}</div>
                                                 </div>
                                             ))}
                                         </div>
@@ -4979,7 +4979,7 @@
                                         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                                             <div className="bg-proxmox-darker border border-proxmox-border rounded-xl p-6 w-full max-w-md">
                                                 <h3 className="text-lg font-semibold text-white mb-4">
-                                                    {t('createFromTemplate') || 'Create from Template'}: {selectedTemplate.name}
+                                                    {t('createFromTemplate') || 'Create from Template'}: {t(`roleTemplateName_${selectedTemplate.id}`) || selectedTemplate.name}
                                                 </h3>
                                                 
                                                 <div className="space-y-4">

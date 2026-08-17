@@ -2913,7 +2913,7 @@
                                                                     <div key={r.node} className="flex items-center gap-2">
                                                                         <span className={r.success ? 'text-green-400' : 'text-red-400'}>{r.success ? '✓' : '✗'}</span>
                                                                         <span className="font-mono">{r.node}</span>
-                                                                        <span className="text-gray-400">{r.success ? (r.already_installed ? (t('alreadyInstalled') || 'already installed') : (t('installed') || 'installed')) : (r.error || '')}</span>
+                                                                        <span className="text-gray-400">{r.success ? (r.already_installed ? (t('alreadyInstalled') || 'already installed') : (t('installedStatus') || 'installed')) : (r.error || '')}</span>
                                                                     </div>
                                                                 ))}
                                                             </div>

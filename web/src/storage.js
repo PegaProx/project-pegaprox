@@ -1049,7 +1049,7 @@
                             </button>
                             <button onClick={() => { setActiveTab('balancing'); fetchStorageClusters(); }} className={activeTab === 'balancing' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
                                 <Icons.Zap style={{width: 14, height: 14, flexShrink: 0}} />
-                                <span>Storage Balancing</span>
+                                <span>{t('storageBalancingTitle')}</span>
                             </button>
                             <button onClick={() => {
                                 setActiveTab('sync'); refreshSyncStatus();
@@ -1082,7 +1082,7 @@
                             }`}
                         >
                             <Icons.Zap className="inline mr-2" />
-                            Storage Balancing
+                            {t('storageBalancingTitle')}
                         </button>
                         <button
                             onClick={() => {
@@ -1155,12 +1155,12 @@
                                     <table className="w-full text-sm">
                                         <thead>
                                             <tr className="border-b border-proxmox-border">
-                                                <th className="text-left py-2 px-3 text-gray-400 font-medium">File</th>
-                                                <th className="text-left py-2 px-3 text-gray-400 font-medium">Size</th>
+                                                <th className="text-left py-2 px-3 text-gray-400 font-medium">{t('fileColumn')}</th>
+                                                <th className="text-left py-2 px-3 text-gray-400 font-medium">{t('size')}</th>
                                                 {syncStatus.nodes?.map(n => (
                                                     <th key={n} className="text-center py-2 px-2 text-gray-400 font-medium text-xs">{n}</th>
                                                 ))}
-                                                <th className="text-center py-2 px-3 text-gray-400 font-medium" style={{minWidth: 70}}>Action</th>
+                                                <th className="text-center py-2 px-3 text-gray-400 font-medium" style={{minWidth: 70}}>{t('action')}</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1508,7 +1508,7 @@
                                                 {selectedStorage ? (
                                                     <>{t('content') || 'Content'}: {selectedStorage.name}</>
                                                 ) : (
-                                                    t('selectStorage') || 'Select a storage'
+                                                    t('selectStorageToView') || 'Select a storage'
                                                 )}
                                                 {/* NS Apr 2026 — when a shared storage is reachable from multiple
                                                     nodes (and the row showed "1/2 nodes"), let the user pick which
@@ -1753,7 +1753,7 @@
                             <div className="lg:col-span-2 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                 <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
                                     <h3 className="font-semibold">
-                                        {clusterStatus ? clusterStatus.name : (t('selectCluster') || 'Select a storage cluster')}
+                                        {clusterStatus ? clusterStatus.name : (t('selectStorageCluster') || 'Select a storage cluster')}
                                     </h3>
                                 </div>
                                 <div className="p-4">
@@ -1950,7 +1950,7 @@
                                             type="text"
                                             value={newClusterName}
                                             onChange={(e) => setNewClusterName(e.target.value)}
-                                            placeholder="e.g. Production Storage"
+                                            placeholder={t('storageClusterNamePlaceholder')}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                         />
                                     </div>
