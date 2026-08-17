@@ -548,7 +548,7 @@
                                 <h2 className="text-lg font-semibold text-white">
                                     {vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`} - {t('performanceMetrics') || 'Performance Metrics'}
                                 </h2>
-                                <p className="text-sm text-gray-500">Node: {vm.node}</p>
+                                <p className="text-sm text-gray-500">{t('node') || 'Node'}: {vm.node}</p>
                             </div>
                             <div className="flex items-center gap-4">
                                 <select
@@ -588,7 +588,7 @@
                                     <LineChart 
                                         data={memDataGB}
                                         timestamps={data.timestamps}
-                                        label="Memory" 
+                                        label={t('memory') || 'Memory'} 
                                         color="#22c55e" 
                                         unit=" GB"
                                         yMin={0}
@@ -599,7 +599,7 @@
                                         <LineChart 
                                             data={data.metrics.disk_read}
                                             timestamps={data.timestamps}
-                                            label="Disk Read" 
+                                            label={t('diskRead') || 'Disk Read'} 
                                             color="#eab308" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -607,7 +607,7 @@
                                         <LineChart 
                                             data={data.metrics.disk_write}
                                             timestamps={data.timestamps}
-                                            label="Disk Write" 
+                                            label={t('diskWrite') || 'Disk Write'} 
                                             color="#f97316" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -617,7 +617,7 @@
                                         <LineChart 
                                             data={data.metrics.net_in}
                                             timestamps={data.timestamps}
-                                            label="Network In" 
+                                            label={t('networkIn') || 'Network In'} 
                                             color="#06b6d4" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -625,7 +625,7 @@
                                         <LineChart 
                                             data={data.metrics.net_out}
                                             timestamps={data.timestamps}
-                                            label="Network Out" 
+                                            label={t('networkOut') || 'Network Out'} 
                                             color="#8b5cf6" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -635,11 +635,11 @@
                                     {data.metrics.pressurecpusome && (
                                         <LineChart
                                             datasets={[
-                                                { label: 'Some', data: data.metrics.pressurecpusome, color: '#3b82f6' },
-                                                { label: 'Full', data: data.metrics.pressurecpufull, color: '#ef4444' }
+                                                { label: t('psiSome') || 'Some', data: data.metrics.pressurecpusome, color: '#3b82f6' },
+                                                { label: t('psiFull') || 'Full', data: data.metrics.pressurecpufull, color: '#ef4444' }
                                             ]}
                                             timestamps={data.timestamps}
-                                            label="CPU Pressure Stall"
+                                            label={t('cpuPressureStall') || 'CPU Pressure Stall'}
                                             unit="%"
                                             yMin={0}
                                             yMax={100}
@@ -648,11 +648,11 @@
                                     {data.metrics.pressurememorysome && (
                                         <LineChart
                                             datasets={[
-                                                { label: 'Some', data: data.metrics.pressurememorysome, color: '#22c55e' },
-                                                { label: 'Full', data: data.metrics.pressurememoryfull, color: '#ef4444' }
+                                                { label: t('psiSome') || 'Some', data: data.metrics.pressurememorysome, color: '#22c55e' },
+                                                { label: t('psiFull') || 'Full', data: data.metrics.pressurememoryfull, color: '#ef4444' }
                                             ]}
                                             timestamps={data.timestamps}
-                                            label="Memory Pressure Stall"
+                                            label={t('memoryPressureStall') || 'Memory Pressure Stall'}
                                             unit="%"
                                             yMin={0}
                                             yMax={100}
@@ -661,11 +661,11 @@
                                     {data.metrics.pressureiosome && (
                                         <LineChart
                                             datasets={[
-                                                { label: 'Some', data: data.metrics.pressureiosome, color: '#eab308' },
-                                                { label: 'Full', data: data.metrics.pressureiofull, color: '#ef4444' }
+                                                { label: t('psiSome') || 'Some', data: data.metrics.pressureiosome, color: '#eab308' },
+                                                { label: t('psiFull') || 'Full', data: data.metrics.pressureiofull, color: '#ef4444' }
                                             ]}
                                             timestamps={data.timestamps}
-                                            label="IO Pressure Stall"
+                                            label={t('ioPressureStall') || 'IO Pressure Stall'}
                                             unit="%"
                                             yMin={0}
                                             yMax={100}
