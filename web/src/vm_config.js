@@ -289,7 +289,7 @@
                         setClusterTags(Array.from(tagSet).sort().map(name => ({ name })));
                     })
                     .catch(() => {});
-            }, [vm, clusterId]);
+            }, [vm.vmid, vm.node, vm.type, clusterId]);
 
             // NS: SSE vm_config live-update listener — split from the fetch effect so
             // re-subscribing when the user's edit state changes never re-fires the
