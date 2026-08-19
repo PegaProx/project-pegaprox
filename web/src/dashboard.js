@@ -796,7 +796,7 @@
                         {clusterIcon}
                         <span className="truncate flex-1 font-medium">{cluster.display_name || cluster.name}</span>
                         {cluster.cluster_type === 'xcpng' && <span className="text-[9px] px-1 py-0 font-medium rounded" style={{background: 'rgba(34,211,238,0.12)', color: '#22d3ee'}}>XCP - Tech Preview</span>}
-                        {cluster.connected === false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
+                        {cluster.connected === false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>{t('offline').toUpperCase()}</span>}
                         {hasOfflineNodes && cluster.connected !== false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(239,192,6,0.15)', color: '#efc006'}}>{offlineNodesCount}&#9888;</span>}
                         {cluster.connected !== false && (hwHealth === 'critical' || hwHealth === 'warning') && <span className="text-[9px] px-1 py-0 font-medium rounded" title={t('degradedHardware') || 'Degraded hardware'} style={{background: hwHealth === 'critical' ? 'rgba(245,79,71,0.15)' : 'rgba(239,192,6,0.15)', color: hwHealth === 'critical' ? '#f54f47' : '#efc006'}}>HW&#9888;</span>}
                         <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{background: clrStatusDot}} />
@@ -872,21 +872,21 @@
                     {/* Status Tags */}
                     <div className="flex gap-1 mt-2 flex-wrap">
                         {cluster.connected === false && (
-                            <span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">Offline</span>
+                            <span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">{t('offline') || 'Offline'}</span>
                         )}
                         {hasOfflineNodes && cluster.connected !== false && (
                             <span className="text-[10px] bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded animate-pulse">
-                                {offlineNodesCount} Node{offlineNodesCount > 1 ? 's' : ''} ⚠
+                                {offlineNodesCount} {offlineNodesCount > 1 ? (t('nodes') || 'Nodes') : (t('node') || 'Node')} ⚠
                             </span>
                         )}
                         {cluster.dry_run && (
-                            <span className="text-[10px] bg-yellow-500/10 text-yellow-400 px-1.5 py-0.5 rounded">Dry</span>
+                            <span className="text-[10px] bg-yellow-500/10 text-yellow-400 px-1.5 py-0.5 rounded">{t('dryRun') || 'Dry Run'}</span>
                         )}
                         {cluster.auto_migrate && (
-                            <span className="text-[10px] bg-green-500/10 text-green-400 px-1.5 py-0.5 rounded">Auto</span>
+                            <span className="text-[10px] bg-green-500/10 text-green-400 px-1.5 py-0.5 rounded">{t('autoMode') || 'Automatic'}</span>
                         )}
                         {!cluster.enabled && (
-                            <span className="text-[10px] bg-gray-500/10 text-gray-400 px-1.5 py-0.5 rounded">Paused</span>
+                            <span className="text-[10px] bg-gray-500/10 text-gray-400 px-1.5 py-0.5 rounded">{t('paused') || 'Paused'}</span>
                         )}
                     </div>
                 </div>
@@ -1396,7 +1396,7 @@
                     x1: clusterX, y1: TIER_Y.cluster + ICON / 2 + 8,
                     x2: node.x, y2: TIER_Y.nodes - ICON / 2 - 8,
                     color: node.isOnline ? '#60b515' : '#f54f47',
-                    dashed: false, label: node.isOnline ? null : 'OFFLINE'
+                    dashed: false, label: node.isOnline ? null : t('offline').toUpperCase()
                 });
                 // individual lines to each VM
                 node.vms.forEach(vm => {
@@ -2050,7 +2050,7 @@
                                                     <g transform={`translate(${cl.centerX}, ${MC_TIER.clusters})`}
                                                         style={{cursor: 'pointer'}}
                                                         onMouseEnter={(e) => showTooltip(e, cl.name, [
-                                                            `${totalN} ${totalN === 1 ? 'Node' : 'Nodes'}`,
+                                                            `${totalN} ${totalN === 1 ? t('node') : t('nodes')}`,
                                                             `${cl.totalGuests} VMs/CTs`,
                                                             cl.connPbs.length > 0 ? `${cl.connPbs.length} PBS` : null
                                                         ].filter(Boolean))}
@@ -2058,7 +2058,7 @@
                                                         {clusterIcon}
                                                         <text y={ICON / 2 + 14} textAnchor="middle" fill={topoColor.text} fontSize="12" fontWeight="600">{cl.name}</text>
                                                         <text y={ICON / 2 + 26} textAnchor="middle" fill={topoColor.muted} fontSize="9">
-                                                            {totalN} {totalN === 1 ? 'Node' : 'Nodes'} / {cl.totalGuests} VMs{cl.connPbs.length > 0 ? ` · ${cl.connPbs.length} PBS` : ''}
+                                                            {totalN} {totalN === 1 ? t('node') : t('nodes')} / {cl.totalGuests} VMs{cl.connPbs.length > 0 ? ` · ${cl.connPbs.length} PBS` : ''}
                                                         </text>
                                                     </g>
 
@@ -2081,10 +2081,10 @@
                                                             style={{cursor: 'pointer'}}
                                                             onMouseEnter={(e) => showTooltip(e, node.name, [
                                                                 `Cluster: ${cl.name}`,
-                                                                node.isOnline ? 'Online' : 'Offline',
+                                                                node.isOnline ? t('online') : t('offline'),
                                                                 node.isOnline ? `CPU ${node.cpuPct.toFixed(0)}%` : null,
                                                                 node.isOnline ? `RAM ${node.ramPct.toFixed(0)}%` : null,
-                                                                `${node.totalVms} ${node.totalVms === 1 ? 'Guest' : 'Guests'}`
+                                                                `${node.totalVms} ${node.totalVms === 1 ? t('guestSingular') : t('guestPlural')}`
                                                             ].filter(Boolean))}
                                                             onMouseLeave={hideTooltip}>
                                                             <rect x={-84} y={-36} width={168} height={96} rx={6}
@@ -2116,7 +2116,7 @@
                                                                 </React.Fragment>
                                                             )}
                                                             {!node.isOnline && (
-                                                                <text y={26} textAnchor="middle" fill="#f54f47" fontSize="10" fontWeight="600" letterSpacing="0.4">OFFLINE</text>
+                                                                <text y={26} textAnchor="middle" fill="#f54f47" fontSize="10" fontWeight="600" letterSpacing="0.4">{t('offline').toUpperCase()}</text>
                                                             )}
                                                         </g>
                                                     ))}
@@ -2147,7 +2147,7 @@
                                                                     onMouseEnter={(e) => showTooltip(e, label,
                                                                         [`Cluster: ${cl.name}`, `VMID: ${vm.vmid}`,
                                                                             `Type: ${isQemu ? 'QEMU' : 'LXC'}`,
-                                                                            `Status: ${vm.status}`].filter(Boolean)
+                                                                            `${t('status')}: ${vm.status === 'running' ? (t('running') || 'Running') : vm.status === 'stopped' ? (t('stopped') || 'Stopped') : (vm.status || '-')}`].filter(Boolean)
                                                                     )}
                                                                     onMouseLeave={hideTooltip}>
                                                                     <rect x={-75} y={-14} width={150} height={28} rx={4}
@@ -2250,7 +2250,7 @@
                                 <g transform={`translate(${clusterX}, ${TIER_Y.cluster})`}
                                     style={{cursor: 'pointer'}}
                                     onMouseEnter={(e) => showTooltip(e, clusterName, [
-                                        `${allNodes.length} ${allNodes.length === 1 ? 'Node' : 'Nodes'}`,
+                                        `${allNodes.length} ${allNodes.length === 1 ? t('node') : t('nodes')}`,
                                         `${totalGuests} VMs/CTs`,
                                         connectedPbs.length > 0 ? `${connectedPbs.length} PBS` : null
                                     ].filter(Boolean))}
@@ -2280,7 +2280,7 @@
                                         </g>
                                     )}
                                     <text y={ICON / 2 + 14} textAnchor="middle" fill={topoColor.text} fontSize="13" fontWeight="600">{clusterName}</text>
-                                    <text y={ICON / 2 + 28} textAnchor="middle" fill="#60b515" fontSize="10">ONLINE</text>
+                                    <text y={ICON / 2 + 28} textAnchor="middle" fill="#60b515" fontSize="10">{t('online').toUpperCase()}</text>
                                 </g>
 
                                 {/* node icons - switch style */}
@@ -2288,10 +2288,10 @@
                                     <g key={node.name} transform={`translate(${node.x}, ${TIER_Y.nodes})`}
                                         style={{cursor: 'pointer', opacity: matchOpacity(node.name), transition: 'opacity 0.2s'}}
                                         onMouseEnter={(e) => showTooltip(e, node.name, [
-                                            node.isOnline ? 'Online' : 'Offline',
+                                            node.isOnline ? t('online') : t('offline'),
                                             node.isOnline ? `CPU ${node.cpuPct.toFixed(0)}%` : null,
                                             node.isOnline ? `RAM ${node.ramPct.toFixed(0)}%` : null,
-                                            `${node.totalVms} ${node.totalVms === 1 ? 'Guest' : 'Guests'}`
+                                            `${node.totalVms} ${node.totalVms === 1 ? t('guestSingular') : t('guestPlural')}`
                                         ].filter(Boolean))}
                                         onMouseLeave={hideTooltip}>
                                         {/* LW May 2026: node "card" backdrop — used to look like a floating icon */}
@@ -2326,7 +2326,7 @@
                                             </React.Fragment>
                                         )}
                                         {!node.isOnline && (
-                                            <text y={26} textAnchor="middle" fill="#f54f47" fontSize="10" fontWeight="600" letterSpacing="0.4">OFFLINE</text>
+                                            <text y={26} textAnchor="middle" fill="#f54f47" fontSize="10" fontWeight="600" letterSpacing="0.4">{t('offline').toUpperCase()}</text>
                                         )}
                                     </g>
                                 ))}
@@ -2383,7 +2383,7 @@
                                             showTooltip(e, label, [
                                                 `VMID: ${vm.vmid}`,
                                                 `Type: ${isQemu ? 'QEMU' : 'LXC'}`,
-                                                `Status: ${vm.status}`,
+                                                `${t('status')}: ${vm.status === 'running' ? (t('running') || 'Running') : vm.status === 'stopped' ? (t('stopped') || 'Stopped') : (vm.status || '-')}`,
                                                 isRunning ? `CPU: ${((vm.cpu || 0) * 100).toFixed(0)}%` : null,
                                                 isRunning ? `RAM: ${fmtMem(vm.mem)}` : null,
                                                 bridges.length ? `Bridge${bridges.length > 1 ? 's' : ''}: ${bridges.join(', ')}`
@@ -2424,9 +2424,9 @@
                                     <g key={`pbs-${pbs.id}`} transform={`translate(${pbs.x}, ${pbs.y})`}
                                         style={{cursor: 'pointer'}}
                                         onMouseEnter={(e) => showTooltip(e, pbs.name || pbs.host, [
-                                            'Backup Server',
-                                            `Status: ${pbs.status}`,
-                                            pbs.cached_groups ? `${pbs.cached_groups.length} backup groups` : null
+                                            t('backupServer'),
+                                            `${t('status')}: ${pbs.status === 'connected' ? (t('connected') || 'Connected') : pbs.status === 'error' ? (t('error') || 'Error') : (pbs.status || '-')}`,
+                                            pbs.cached_groups ? t('backupGroupsCount').replace('{count}', pbs.cached_groups.length) : null
                                         ].filter(Boolean))}
                                         onMouseLeave={hideTooltip}>
                                         <ellipse cx={0} cy={-6} rx={14} ry={6} fill="none" stroke="#60b515" strokeWidth={1.3} />
@@ -2435,7 +2435,7 @@
                                         <line x1={14} y1={-6} x2={14} y2={6} stroke="#60b515" strokeWidth={1.3} />
                                         <circle cx={18} cy={-10} r={3} fill={pbs.status === 'connected' ? '#60b515' : '#efc006'} />
                                         <text y={ICON / 2 + 6} textAnchor="middle" fill={topoColor.text} fontSize="11">{pbs.name || pbs.host}</text>
-                                        <text y={ICON / 2 + 18} textAnchor="middle" fill={topoColor.muted} fontSize="9">Backup Server</text>
+                                        <text y={ICON / 2 + 18} textAnchor="middle" fill={topoColor.muted} fontSize="9">{t('backupServer')}</text>
                                     </g>
                                 ))}
 
@@ -2728,10 +2728,10 @@
                                         <span className="text-sm font-semibold text-white">{clusterName}</span>
                                         <span className="text-[10px] px-1.5 py-0.5 rounded" style={{
                                             background: 'rgba(96,181,21,0.12)', color: '#60b515'
-                                        }}>ONLINE</span>
+                                        }}>{t('online').toUpperCase()}</span>
                                     </div>
                                     <div className="flex items-center gap-3 mt-0.5 text-[10px]" style={{color: '#728b9a'}}>
-                                        <span>{allNodes.length} {allNodes.length === 1 ? 'Node' : 'Nodes'}</span>
+                                        <span>{allNodes.length} {allNodes.length === 1 ? t('node') : t('nodes')}</span>
                                         <span>{totalGuests} VMs/CTs</span>
                                         {connectedPbs.length > 0 && <span>{connectedPbs.length} PBS</span>}
                                     </div>
@@ -2740,7 +2740,7 @@
                                     <div className="flex items-center gap-1.5 ml-2">
                                         <MiniDonut pct={clusterAvgCpu} color={barColor(clusterAvgCpu)} sz={36} />
                                         <div>
-                                            <div className="text-[9px]" style={{color:'#728b9a'}}>AVG</div>
+                                            <div className="text-[9px]" style={{color:'#728b9a'}}>{t('average')}</div>
                                             <div className="text-[11px] font-medium" style={{color: barColor(clusterAvgCpu)}}>{clusterAvgCpu.toFixed(0)}%</div>
                                         </div>
                                     </div>
@@ -2794,7 +2794,7 @@
                                                             style={{background: isOnline ? '#60b515' : '#f54f47'}} />
                                                         <Icons.Server className="w-3.5 h-3.5 text-gray-400" />
                                                         <span className="text-[13px] font-medium text-white truncate">{node.name}</span>
-                                                        {!isOnline && <span className="text-[9px] font-bold px-1.5 py-0.5" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
+                                                        {!isOnline && <span className="text-[9px] font-bold px-1.5 py-0.5" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>{t('offline').toUpperCase()}</span>}
                                                         <span className="ml-auto text-gray-500 text-[11px]" style={{transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0)', transition: 'transform 0.15s'}}>&#9662;</span>
                                                     </div>
 
@@ -2818,8 +2818,8 @@
                                                     )}
 
                                                     <div className="flex gap-2 text-[11px]">
-                                                        {running > 0 && <span className="px-1.5 py-0.5 rounded" style={{background: 'rgba(96,181,21,0.1)', color: '#60b515'}}>{running} running</span>}
-                                                        {stopped > 0 && <span className="px-1.5 py-0.5 rounded" style={{background: 'rgba(255,255,255,0.04)', color: '#728b9a'}}>{stopped} stopped</span>}
+                                                        {running > 0 && <span className="px-1.5 py-0.5 rounded" style={{background: 'rgba(96,181,21,0.1)', color: '#60b515'}}>{running} {t('runningGuestsShort') || 'uruchomione'}</span>}
+                                                        {stopped > 0 && <span className="px-1.5 py-0.5 rounded" style={{background: 'rgba(255,255,255,0.04)', color: '#728b9a'}}>{stopped} {t('stoppedGuestsShort') || 'zatrzymane'}</span>}
                                                         {vms.length === 0 && <span className="text-gray-600">{t('noGuests') || 'no guests'}</span>}
                                                     </div>
                                                 </div>
@@ -2912,7 +2912,7 @@
                                                 <Icons.HardDrive className="w-4 h-4" style={{color: '#60b515'}} />
                                                 <div>
                                                     <div className="text-[13px] font-medium text-white">{pbs.name || pbs.host}</div>
-                                                    <div className="text-[10px]" style={{color: '#728b9a'}}>Backup Server</div>
+                                                    <div className="text-[10px]" style={{color: '#728b9a'}}>{t('backupServer')}</div>
                                                 </div>
                                                 <span className={`w-2 h-2 rounded-full ml-auto${pbs.status === 'connected' ? ' topo-status-glow' : ''}`}
                                                     style={{background: pbs.status === 'connected' ? '#60b515' : '#efc006'}} />
@@ -3811,7 +3811,15 @@
 
                             {/* Legend */}
                             <div className="flex flex-wrap gap-3 text-xs text-gray-400">
-                                {[['cluster','Cluster'],['node','Node'],['bridge','Bridge'],['bond','Bond'],['sdn_vnet','SDN VNet'],['vm','VM'],['ct','CT']].map(([k, lbl]) => (
+                                {[
+                                    ['cluster', t('cluster')],
+                                    ['node', t('node')],
+                                    ['bridge', t('bridge')],
+                                    ['bond', t('bond')],
+                                    ['sdn_vnet', `${t('sdn')} ${t('vnet')}`],
+                                    ['vm', 'VM'],
+                                    ['ct', 'CT']
+                                ].map(([k, lbl]) => (
                                     <div key={k} className="flex items-center gap-1">
                                         <span className="w-3 h-3 rounded-full" style={{ background: nodeColor(k) }}></span>
                                         {lbl}
@@ -13914,7 +13922,7 @@
                                                                                 result.status === 'stopped' ? 'bg-gray-500/20 text-gray-400' :
                                                                                 'bg-yellow-500/20 text-yellow-400'
                                                                             }`}>
-                                                                                {result.status}
+                                                                                {result.status === 'running' ? (t('running') || 'Running') : result.status === 'stopped' ? (t('stopped') || 'Stopped') : (result.status || '-')}
                                                                             </span>
                                                                             {result.match_field === 'tag' && (
                                                                                 <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400">Tag-Match</span>
@@ -15578,18 +15586,18 @@
                                                                     if (!rows.length) { addToast?.(t('noResources') || 'No VMs to export', 'info'); return; }
                                                                     const cols = [
                                                                         { key: 'vmid', label: 'VMID' },
-                                                                        { key: 'name', label: 'Name' },
-                                                                        { key: 'type', label: 'Type' },
-                                                                        { key: 'node', label: 'Node' },
-                                                                        { key: 'status', label: 'Status' },
+                                                                        { key: 'name', label: t('name') },
+                                                                        { key: 'type', label: t('type') },
+                                                                        { key: 'node', label: t('node') },
+                                                                        { key: 'status', label: t('status') },
                                                                         { key: 'cpu', label: 'CPU%', map: r => r.cpu != null ? Math.round(r.cpu * 100) : '' },
                                                                         { key: 'mem', label: 'Mem (MiB)', map: r => r.mem != null ? Math.round(r.mem / 1048576) : '' },
                                                                         { key: 'maxmem', label: 'MemMax (MiB)', map: r => r.maxmem != null ? Math.round(r.maxmem / 1048576) : '' },
-                                                                        { key: 'tags', label: 'Tags', map: r => Array.isArray(r.tags) ? r.tags.join(';') : (r.tags || '') },
+                                                                        { key: 'tags', label: t('tags'), map: r => Array.isArray(r.tags) ? r.tags.join(';') : (r.tags || '') },
                                                                     ];
                                                                     const fname = `pegaprox-${selectedCluster?.name || 'cluster'}-vms-${new Date().toISOString().slice(0,10)}.csv`;
                                                                     window.PegaProxDownloadCsv?.(fname, rows, cols);
-                                                                    addToast?.(`Exported ${rows.length} rows`, 'success');
+                                                                    addToast?.(t('exportedRows').replace('{count}', rows.length), 'success');
                                                                 }}
                                                                 className={isCorporate
                                                                     ? 'flex items-center gap-1.5 px-3 py-1.5 text-[13px] hover:bg-[#29414e] border border-[#485764]'
@@ -18780,11 +18788,19 @@
                                                                                     // not `health`; HDDs have no `wearout`, so the old read showed a bare N/A. Prefer
                                                                                     // status, fall back to health, then wearout for SSDs.
                                                                                     const smart = disk.status || disk.health || (disk.wearout != null ? `${disk.wearout}%` : '');
-                                                                                    const ok = smart === 'PASSED' || smart === 'OK';
-                                                                                    const unk = !smart || smart === 'UNKNOWN';
+                                                                                    const smartNorm = typeof smart === 'string' ? smart.toUpperCase() : smart;
+                                                                                    const ok = smartNorm === 'PASSED' || smartNorm === 'OK';
+                                                                                    const unk = !smart || smartNorm === 'UNKNOWN';
+                                                                                    const smartLabel = ok
+                                                                                        ? (t('ok') || 'OK')
+                                                                                        : unk
+                                                                                            ? (t('unknown') || 'Unknown')
+                                                                                            : smartNorm === 'FAILED'
+                                                                                                ? (t('failed') || 'Failed')
+                                                                                                : smart;
                                                                                     return (
                                                                                         <span className={`px-2 py-0.5 rounded text-xs ${ok ? 'bg-green-500/20 text-green-400' : unk ? 'bg-gray-500/20 text-gray-400' : 'bg-red-500/20 text-red-400'}`}>
-                                                                                            {smart || 'N/A'}
+                                                                                            {smartLabel}
                                                                                         </span>
                                                                                     );
                                                                                 })()}
@@ -18961,7 +18977,7 @@
                                                 <div className="w-64 shrink-0 space-y-2">
                                                     <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">{t('datastores') || 'Datastores'}</h3>
                                                     {/* NS May 2026 — Capacity forecast tile */}
-                                                    <PbsCapacityForecast pbsId={selectedPBS.id} authFetch={authFetch} apiUrl={API_URL} />
+                                                    <PbsCapacityForecast pbsId={selectedPBS.id} authFetch={authFetch} apiUrl={API_URL} t={t} />
                                                     {pbsDatastores.map(ds => {
                                                         const name = ds.name || ds.store;
                                                         const used = ds.used || 0;
@@ -19095,7 +19111,7 @@
                                                                         </table>
                                                                     </div>
                                                                 ) : (
-                                                                    <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">No backup groups found</div>
+                                                                    <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">{t('noBackupGroupsFound')}</div>
                                                                 )}
                                                             </div>
 

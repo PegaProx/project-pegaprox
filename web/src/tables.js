@@ -2078,12 +2078,12 @@
                                             { key: 'vmid', label: 'ID' },
                                             { key: 'name', label: t('name') },
                                             { key: 'type', label: t('type') },
-                                            { key: 'node', label: 'Node' },
+                                            { key: 'node', label: t('node') || 'Node' },
                                             { key: 'ip', label: 'IP' },
                                             { key: 'cpu_percent', label: 'CPU' },
                                             { key: 'mem', label: 'RAM' },
                                             { key: 'disk', label: t('disk') },
-                                            { key: 'status', label: 'Status' },
+                                            { key: 'status', label: t('status') || 'Status' },
                                             { key: 'actions', label: t('actions') },
                                         ].map(col => (
                                             <th
@@ -2270,7 +2270,7 @@
                                                         <span className={`w-1.5 h-1.5 rounded-full ${
                                                             resource.status === 'running' ? 'bg-green-400' : 'bg-red-400'
                                                         }`} />
-                                                        {resource.status}
+                                                        {resource.status === 'running' ? (t('running') || 'Running') : resource.status === 'stopped' ? (t('stopped') || 'Stopped') : (resource.status || '-')}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3" style={{whiteSpace:'nowrap'}}>
