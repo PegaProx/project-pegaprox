@@ -4273,7 +4273,7 @@ class PegaProxDB:
     def save_server_setting(self, key: str, value):
         """Save server setting - always JSON encode to ensure consistent retrieval"""
         cursor = self.conn.cursor()
-        if key == 'acme_dns_rfc2136_secret' and value and value != '********':
+        if key in ('acme_dns_rfc2136_secret', 'acme_dns_cloudflare_token') and value and value != '********':
             value = str(value)
             if not value.startswith(('aes256:', 'gAAAA')):
                 value = self._encrypt(value)

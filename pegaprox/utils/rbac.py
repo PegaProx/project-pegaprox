@@ -679,7 +679,7 @@ def user_has_any_pool_access(user: dict, cluster_id: str) -> bool:
     return any(p for p in perms.values())
 
 
-def get_user_pool_vmids(user: dict, cluster_id: str, permission: str = None) -> set:
+def get_user_pool_vmids(user: dict, cluster_id: str, permission: str = None, _perms: dict = None) -> set:
     """#555 — set of int vmids the user can reach via pool perms in this cluster.
     Reuses the pool-membership cache + a single DB read. Empty set if none.
     Only consulted for non-admins (list callers handle admin-all separately).
@@ -692,11 +692,14 @@ def get_user_pool_vmids(user: dict, cluster_id: str, permission: str = None) -> 
     username = user.get('username', '')
     if not username:
         return set()
-    try:
-        user_pool_perms = get_db().get_user_pool_permissions(cluster_id, username, user.get('groups', []))
-    except Exception as e:
-        logging.error(f"[POOL] vmid-list failed for {username}@{cluster_id}: {e}")
-        return set()
+    if _perms is not None:
+        user_pool_perms = _perms
+    else:
+        try:
+            user_pool_perms = get_db().get_user_pool_permissions(cluster_id, username, user.get('groups', []))
+        except Exception as e:
+            logging.error(f"[POOL] vmid-list failed for {username}@{cluster_id}: {e}")
+            return set()
     if not user_pool_perms:
         return set()
     if permission is None:
@@ -708,7 +711,11 @@ def get_user_pool_vmids(user: dict, cluster_id: str, permission: str = None) -> 
                     if 'pool.admin' in perms or permission in perms}
     if not ok_pools:
         return set()
-    membership = get_pool_membership_cache(cluster_id)  # {'vmid:type': pool_id}
+    try:
+        membership = get_pool_membership_cache(cluster_id)  # {'vmid:type': pool_id}
+    except Exception as e:
+        logging.error(f"[POOL] membership lookup failed for {username}@{cluster_id}: {e}")
+        return set()
     out = set()
     for key, pid in membership.items():
         if pid in ok_pools:
@@ -854,6 +861,38 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
     if tenant_clusters is not None and cluster_id not in tenant_clusters:
         logging.debug(f"[VM-ACL] {username} reached {cluster_id} only via ACL/pool; no grant for VM {vmid} → deny {permission}")
         return False
+    # MK Aug 2026 (sec-report, symplasson): a user EXPLICITLY scoped to specific VMs via VM-ACL
+    # in this cluster (the Client Portal setup — an admin granted them "their" VMs) must not
+    # fall through to the role-wide grant for a VM they were never granted, just because their
+    # tenant happens to own the cluster. The ACL scope wins for per-VM ops — this keeps the
+    # decision consistent with get_user_vms() (what the portal uses to decide what to SHOW).
+    # Without it a portal user could substitute a foreign vmid on the console and reach a VM
+    # outside their grant. Explicit membership only ('*' grants are handled at the top gate).
+    acl_scoped = set(int(v) for v, a in cluster_acls.items()
+                     if username in (a.get('users') or []) and str(v).lstrip('-').isdigit())
+    scoped_vms = set(acl_scoped)
+    # a user with ANY explicit per-resource grant (a VM-ACL row OR a pool permission) is confined
+    # to their granted resources — even when live pool membership can't be resolved to concrete
+    # vmids, so an unresolvable pool membership fails CLOSED (deny) instead of widening to the
+    # whole tenant cluster. Pure operators (no ACL, no pool grant) keep cluster-wide access.
+    # Resolve the pool grant ONCE (get_user_pool_permissions is not cached) and reuse it, so the
+    # per-VM authz path stays a single DB read instead of two.
+    has_pool_grant = False
+    try:
+        _pp = get_db().get_user_pool_permissions(cluster_id, username, user.get('groups', []))
+        has_pool_grant = any(p for p in (_pp or {}).values())
+        if has_pool_grant:
+            scoped_vms |= get_user_pool_vmids(user, cluster_id, _perms=_pp)
+    except Exception as _pe:
+        logging.error(f"[VM-ACL] pool-scope lookup failed for {username}@{cluster_id}: {_pe} → fail closed")
+        has_pool_grant = True   # unknown → treat as scoped (deny), never widen to the cluster
+    try:
+        _req_vmid = int(vmid)
+    except (ValueError, TypeError):
+        _req_vmid = None   # non-numeric vmid → out-of-scope for a scoped user (fail closed), no raise
+    if (acl_scoped or has_pool_grant) and _req_vmid not in scoped_vms:
+        logging.debug(f"[VM-ACL] {username} is ACL/pool-scoped on {cluster_id}; VM {vmid} not in {sorted(scoped_vms)} → deny {permission}")
+        return False
     result = has_permission(user, permission)
     logging.debug(f"[VM-ACL] Fallback to general permission check for {permission}: {result}")
     return result
@@ -958,7 +997,17 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
     except Exception as _e:
         logging.error(f"[VMWARE-ACL] tenant-gate error for {vmware_id}: {_e}")
 
-    # No VM-specific ACL - use general permissions (now tenant-gated)
+    # MK Aug 2026 (sec-report, symplasson) — mirror the Proxmox user_can_access_vm scope-wins
+    # guard: a user EXPLICITLY scoped to specific VMware VMs via a vmware:<id> ACL must stay
+    # confined to those VMs, not inherit every VM on the server once their tenant reaches a
+    # linked cluster. Without this the tenant gate above only stops cross-tenant reach, never
+    # per-VM scope, so a scoped user could substitute a foreign vm_id (power/config/delete/…).
+    scoped_ids = [str(v) for v, a in vmware_acls.items() if username in (a.get('users') or [])]
+    if scoped_ids and str(vm_id) not in scoped_ids:
+        logging.debug(f"[VMWARE-ACL] {username} is VMware-ACL-scoped on {vmware_id}; VM {vm_id} not in {scoped_ids} → deny {permission}")
+        return False
+
+    # No VM-specific ACL - use general permissions (now tenant-gated + scope-confined)
     return has_permission(user, permission)
 
 

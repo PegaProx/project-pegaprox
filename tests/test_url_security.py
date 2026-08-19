@@ -16,6 +16,7 @@ from pegaprox.utils import url_security
 from pegaprox.utils.url_security import (
     is_safe_outbound_url,
     sanitize_outbound_url,
+    resolve_and_pin_url,
     SsrfError,
 )
 
@@ -172,3 +173,56 @@ def test_sanitize_returns_url_on_ok(monkeypatch):
     monkeypatch.setattr(url_security, '_resolve_all',
                         _fake_resolver({'good.example': ['93.184.216.34']}))
     assert sanitize_outbound_url('https://good.example/') == 'https://good.example/'
+
+
+# ---------------------------------------------------------------------------
+# resolve_and_pin_url — closes the DNS-rebinding TOCTOU (GHSA-hmcf-9q7f-vx35, senti-man).
+# The guard only *checks* the host; the real fetch re-resolves and can be rebound. Pinning
+# rewrites the host to the vetted IP so there is no second lookup for an attacker to rebind.
+# ---------------------------------------------------------------------------
+
+def test_pin_http_rewrites_host_to_ip_literal(monkeypatch):
+    monkeypatch.setattr(url_security, '_resolve_all',
+                        _fake_resolver({'rebind.example': ['93.184.216.34']}))
+    pinned = resolve_and_pin_url('http://rebind.example/path?q=1', allowed_schemes=('https', 'http'))
+    # host is now an IP literal → the fetcher connects to the vetted address, never re-resolving
+    assert pinned == 'http://93.184.216.34/path?q=1'
+
+
+def test_pin_https_unverified_is_pinned(monkeypatch):
+    # verify-off fetch (e.g. PVE download-url with verify-certificates=0, SIEM verify_tls=False):
+    # TLS won't catch the rebind, so https must be pinned too.
+    monkeypatch.setattr(url_security, '_resolve_all',
+                        _fake_resolver({'good.example': ['93.184.216.34']}))
+    pinned = resolve_and_pin_url('https://good.example/x', allowed_schemes=('https', 'http'),
+                                 tls_verified=False)
+    assert pinned == 'https://93.184.216.34/x'
+
+
+def test_pin_https_verified_keeps_hostname_for_cert_check(monkeypatch):
+    monkeypatch.setattr(url_security, '_resolve_all',
+                        _fake_resolver({'good.example': ['93.184.216.34']}))
+    # verified https: a rebind to an internal IP fails the cert check, so keep the hostname
+    # (pinning to an IP would break the legitimate cert)
+    assert resolve_and_pin_url('https://good.example/x', tls_verified=True) == 'https://good.example/x'
+
+
+def test_pin_preserves_port_and_userinfo(monkeypatch):
+    monkeypatch.setattr(url_security, '_resolve_all',
+                        _fake_resolver({'h.example': ['8.8.8.8']}))
+    pinned = resolve_and_pin_url('http://user:pw@h.example:8443/p', allowed_schemes=('https', 'http'))
+    assert pinned == 'http://user:pw@8.8.8.8:8443/p'
+
+
+def test_pin_ip_literal_unchanged():
+    assert resolve_and_pin_url('http://93.184.216.34/x',
+                               allowed_schemes=('https', 'http')) == 'http://93.184.216.34/x'
+
+
+def test_pin_rejects_rebind_to_loopback(monkeypatch):
+    # the pin's own resolution is re-checked — a host that resolves to loopback is rejected, never
+    # pinned to it (fail-closed)
+    monkeypatch.setattr(url_security, '_resolve_all',
+                        _fake_resolver({'evil.example': ['127.0.0.1']}))
+    with pytest.raises(SsrfError):
+        resolve_and_pin_url('http://evil.example/', allowed_schemes=('https', 'http'))

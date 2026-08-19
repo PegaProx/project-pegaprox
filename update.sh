@@ -70,6 +70,43 @@ else
     echo ""
 fi
 
+# NS 2026-08-11 — install-method guard. This script does a git-tree download + pip and only
+# fits a source/deploy.sh layout. On an apt/dpkg-managed install the right update is
+# `apt upgrade` (a git+pip run diverges from dpkg and can't lift the dpkg-owned crypto libs, so
+# the service fail-closes on TLS at restart). Inside a container a file update is discarded on
+# the next image pull. Detect + refuse unless --force is passed.
+_pgx_install_method() {
+    if [ -f /.dockerenv ] || grep -qE 'docker|containerd|kubepods' /proc/1/cgroup 2>/dev/null; then
+        echo docker; return
+    fi
+    if command -v dpkg >/dev/null 2>&1 \
+        && dpkg -S "$SCRIPT_DIR/pegaprox_multi_cluster.py" 2>/dev/null | grep -q '^pegaprox:'; then
+        echo apt; return
+    fi
+    echo source
+}
+
+_PGX_FORCE=0
+for _a in "$@"; do
+    case "$_a" in --force|--allow-managed) _PGX_FORCE=1 ;; esac
+done
+_PGX_METHOD="$(_pgx_install_method)"
+if [ "$_PGX_METHOD" != "source" ] && [ "$_PGX_FORCE" -eq 0 ]; then
+    echo -e "${YELLOW}This PegaProx instance was installed via: ${_PGX_METHOD}.${NC}"
+    if [ "$_PGX_METHOD" = "apt" ]; then
+        echo -e "${YELLOW}Update it through the package manager, not this script:${NC}"
+        echo    "    sudo apt update && sudo apt upgrade pegaprox"
+        echo -e "${YELLOW}(A git+pip update would diverge from dpkg and can break dependency handling.)${NC}"
+    else
+        echo -e "${YELLOW}Update it by pulling a fresh image and recreating the container:${NC}"
+        echo    "    docker pull ghcr.io/pegaprox/pegaprox:latest   # then recreate: compose up -d / docker run"
+        echo -e "${YELLOW}(An in-place update here is discarded on the next image pull.)${NC}"
+    fi
+    echo ""
+    echo -e "  Override at your own risk with: ${BLUE}./update.sh --force${NC}"
+    exit 0
+fi
+
 # Check current version
 CURRENT_VERSION="unknown"
 if [ -f "version.json" ]; then
@@ -417,6 +454,32 @@ if [ "$PIP_SUCCESS" = true ]; then
     echo -e "${GREEN}OK${NC}"
 else
     echo -e "${YELLOW}Couldn't install - run: pip install -r requirements.txt${NC}"
+fi
+
+# MK 2026-08-11 — preflight the crypto/TLS stack BEFORE bouncing the service. Startup is
+# fail-closed (#633): if the dependency step above didn't land a loadable cryptography/
+# pyOpenSSL pair (offline host, a source build that timed out, or a venv that kept the old
+# version), a restart takes the service down and it won't come back. Verify a self-signed
+# cert can actually be generated first; if not, leave the running service untouched.
+PY_BIN="python3"
+[ -x "venv/bin/python" ] && PY_BIN="venv/bin/python"
+CRYPTO_OK=true
+"$PY_BIN" - <<'PYEOF' >/dev/null 2>&1 || CRYPTO_OK=false
+from OpenSSL import crypto
+k = crypto.PKey(); k.generate_key(crypto.TYPE_RSA, 2048)
+c = crypto.X509(); c.set_pubkey(k); c.sign(k, 'sha256')
+PYEOF
+
+if [ "$CRYPTO_OK" = false ]; then
+    echo ""
+    echo -e "${YELLOW}⚠ Dependency/crypto preflight FAILED — NOT restarting the service.${NC}"
+    echo -e "${YELLOW}  The new version needs an updated cryptography/pyOpenSSL that isn't installed yet.${NC}"
+    echo -e "${YELLOW}  The service is still running the previous version. To finish the upgrade:${NC}"
+    echo    "    1) $PY_BIN -m pip install -r requirements.txt   (needs PyPI access; watch for build errors)"
+    echo    "    2) sudo systemctl restart pegaprox"
+    echo ""
+    echo -e "  Files are on disk at version ${GREEN}$LATEST_VERSION${NC}; it goes live once deps install and the service restarts."
+    exit 0
 fi
 
 # Restart service

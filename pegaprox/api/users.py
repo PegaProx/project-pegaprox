@@ -92,6 +92,33 @@ def _caller_can_grant_role(target_role):
     return all(has_permission(caller, p) for p in _role_permissions(target_role))
 
 
+def _caller_can_grant_perms(permissions):
+    # NS Aug 2026 (audit) — a non-global-admin defining/editing a custom role (or applying a
+    # template) must not grant it permissions the caller doesn't hold; otherwise an admin.roles
+    # delegate could rewrite its own tenant role to admin.settings/admin.users and self-escalate to
+    # global-admin-equivalent. Global admins keep full delegation.
+    if request.session.get('role') == ROLE_ADMIN:
+        return True
+    from pegaprox.utils.auth import build_authz_user
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    return all(has_permission(caller, p) for p in (permissions or []))
+
+
+def _caller_can_manage_user(target_user):
+    # NS Aug 2026 (audit re-verify) — for account-takeover-capable ops (password reset, 2FA clear) the
+    # guard must weigh the target's EFFECTIVE permissions (role + direct permissions +
+    # tenant_permissions), not just the role label: a global admin can legitimately give a low-role
+    # user direct admin.* grants, and a lesser delegate must not be able to reset such a peer and
+    # inherit those grants. Global admins pass; otherwise the caller must hold every effective perm
+    # the target has.
+    if request.session.get('role') == ROLE_ADMIN:
+        return True
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_permissions
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    return all(has_permission(caller, p) for p in get_user_permissions(target_user or {}))
+
+
 def _parse_avatar_data_url(value: str):
     """Validate avatar data URL and return (mime, base64-data)."""
     if not isinstance(value, str) or not value.startswith('data:'):
@@ -297,6 +324,10 @@ def admin_disable_2fa(username):
     _ct = _caller_tenant_or_none()
     if _ct is not None and user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
         return jsonify({'error': 'Access denied: cannot manage 2FA for users in other tenants'}), 403
+    # NS Aug 2026 (audit) — a same-tenant delegate must not clear 2FA on a peer whose EFFECTIVE perms
+    # (role + direct grants) exceed the delegate's; combined with a password reset that is a takeover.
+    if not _caller_can_manage_user(user):
+        return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
     user['totp_enabled'] = False
     user.pop('totp_secret', None)
     user.pop('totp_pending_secret', None)
@@ -336,6 +367,11 @@ def admin_change_password(username):
     _ct = _caller_tenant_or_none()
     if _ct is not None and user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
         return jsonify({'error': 'Access denied: cannot change passwords for users in other tenants'}), 403
+    # NS Aug 2026 (audit) — a delegate must not reset the password of a same-tenant peer whose
+    # EFFECTIVE perms (role + direct grants) exceed the delegate's; that is a vertical privesc
+    # (reset, then log in as them).
+    if not _caller_can_manage_user(user):
+        return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
 
     # NS: Block password reset for LDAP/OIDC users - their password is managed externally
     if user.get('auth_source', 'local') in ('ldap', 'oidc', 'entra'):
@@ -923,12 +959,17 @@ def update_user(username):
     if 'email' in data:
         user['email'] = data['email']
     
+    _disabled = False
     if 'enabled' in data:
         # Prevent disabling last admin
         if user['role'] == ROLE_ADMIN and not data['enabled']:
             admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
             if admin_count <= 1:
                 return jsonify({'error': 'Cannot disable last admin'}), 400
+        # NS Aug 2026 (audit) — capture the enabled→disabled transition so we can drop live sessions
+        # after save; validate_session (used by the decorator-less shell/VNC auth endpoints) has no
+        # enabled recheck, so a stale session otherwise keeps node-shell access until it expires.
+        _disabled = user.get('enabled', True) and not data['enabled']
         user['enabled'] = data['enabled']
     
     # NS: Apr 2026 — portal_only flag (user can only log in via /portal)
@@ -950,6 +991,12 @@ def update_user(username):
     
     _password_changed = False
     if 'password' in data and data['password']:
+        # NS Aug 2026 (audit re-verify) — same tier guard as admin_change_password: a delegate must
+        # not reset a same-tenant peer whose role grants perms beyond the delegate's (takeover). The
+        # role-branch guard above only fires when 'role' is in the body, so a password-only PUT would
+        # otherwise slip through this second-order path.
+        if not _caller_can_manage_user(user):
+            return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
         # NS: Block password change for LDAP/OIDC users
         if user.get('auth_source', 'local') in ('ldap', 'oidc', 'entra'):
             return jsonify({'error': f"Cannot set password for {user['auth_source']} user. Password is managed by external identity provider."}), 400
@@ -974,6 +1021,17 @@ def update_user(username):
         invalidate_all_user_sessions(username)
         log_audit(request.session['user'], 'user.sessions_invalidated',
                   f"Invalidated sessions after password change for {username}")
+
+    # NS Aug 2026 (audit) — disabling an account must immediately drop its live sessions (root cause
+    # of the "disabled operator keeps node-shell" gap); the enabled recheck added to the WS-auth
+    # endpoints is the defence-in-depth backstop.
+    if _disabled:
+        from pegaprox.utils.auth import invalidate_all_user_sessions
+        from pegaprox.utils.realtime import invalidate_user_ws_tokens
+        invalidate_all_user_sessions(username)
+        invalidate_user_ws_tokens(username)   # a pre-minted ws_token must not outlive the disable
+        log_audit(request.session['user'], 'user.sessions_invalidated',
+                  f"Invalidated sessions after disabling {username}")
 
     logging.info(f"Admin '{request.session['user']}' updated user '{username}'")
     log_audit(request.session['user'], 'user.updated', f"Updated user: {username}")
@@ -1030,7 +1088,9 @@ def delete_user(username):
     # LIVE store and persists. Also revoke the user's API tokens so a long-lived pgx_ token
     # can't outlive the account.
     from pegaprox.utils.auth import invalidate_all_user_sessions
+    from pegaprox.utils.realtime import invalidate_user_ws_tokens
     invalidate_all_user_sessions(username)
+    invalidate_user_ws_tokens(username)   # drop any pre-minted console/shell ws_token too
     try:
         db.execute('UPDATE api_tokens SET revoked = 1 WHERE username = ?', (username,))
     except Exception as e:
@@ -1377,6 +1437,9 @@ def create_custom_role():
             return jsonify({'error': 'Access denied - cannot create roles in other tenants'}), 403
         # pin to own tenant — a non-admin must not create a global (cross-tenant) role
         tenant_id = user_tenant
+        # NS Aug 2026 (audit) — and it must not mint a role granting perms it doesn't hold itself
+        if not _caller_can_grant_perms(permissions):
+            return jsonify({'error': 'Cannot grant permissions beyond your own'}), 403
 
     custom = get_custom_roles()
     
@@ -1444,6 +1507,11 @@ def update_custom_role(role_id):
             return jsonify({'error': 'Access denied - cannot update roles in other tenants'}), 403
         # pin to own tenant — a non-admin can't reach a global role this way
         tenant_id = user_tenant
+        # NS Aug 2026 (audit) — a non-admin must not raise a role's perms above what it holds
+        # itself; without this an admin.roles delegate rewrites its own role to admin.* and
+        # self-escalates on the next request (require_auth re-resolves perms live).
+        if permissions is not None and not _caller_can_grant_perms(permissions):
+            return jsonify({'error': 'Cannot grant permissions beyond your own'}), 403
 
     custom = get_custom_roles()
     
@@ -1563,9 +1631,21 @@ def apply_role_template(template_id):
     # validate role_id
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot use builtin role name'}), 400
-    
+
+    # NS Aug 2026 (audit) — mirror create_custom_role's boundary: a non-admin admin.roles delegate
+    # must not inject a role into another tenant, create a global role, or mint a role granting
+    # perms it doesn't hold (templates carry admin.* perms). create_custom_role guards this; the
+    # template path did not.
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller_tenant = _caller_tenant_or_none()
+        if tenant_id and tenant_id != _caller_tenant:
+            return jsonify({'error': 'Access denied - cannot create roles in other tenants'}), 403
+        tenant_id = _caller_tenant  # pin; no global roles for a non-admin
+        if not _caller_can_grant_perms(ROLE_TEMPLATES[template_id]['permissions']):
+            return jsonify({'error': 'Cannot grant permissions beyond your own'}), 403
+
     custom = get_custom_roles()
-    
+
     template = ROLE_TEMPLATES[template_id]
     role_data = {
         'name': role_name,

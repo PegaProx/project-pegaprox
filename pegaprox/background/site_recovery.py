@@ -43,8 +43,10 @@ def _fire_webhook(url):
         # NS May 2026 — SSRF guard: failover webhooks are admin-set; refuse
         # internal/metadata targets so a misconfig doesn't ping AWS metadata.
         try:
-            from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
-            sanitize_outbound_url(url, allowed_schemes=('https', 'http'))
+            from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
+            # GHSA-hmcf-9q7f-vx35 — pin the vetted IP so requests can't re-resolve to an internal
+            # address (http pinned; verified https stays a hostname so its TLS cert check applies).
+            url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'))
         except SsrfError as guard_err:
             logger.warning(f"[SR] webhook URL rejected: {guard_err}")
             return

@@ -77,6 +77,23 @@ def _validate_sid(sid):
     return sid, None
 
 
+def _authz_sid_or_error(cluster_id, validated_sid, permission):
+    """NS Aug 2026 (audit) — object-level gate: the caller must be allowed to touch the specific
+    VM/CT behind the sid, not merely hold ha.view/ha.config on a reachable cluster. Cluster access
+    passes for any VM-ACL/pool-scoped tenant user, so without this a portal user could add/remove/
+    reconfigure another customer's VM in HA. Mirrors the built-in set_vm_ha_priority_api gate.
+    Returns None if allowed, else an (error_response, status) tuple."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    kind, _, num = validated_sid.partition(':')
+    if kind not in ('vm', 'ct') or not num.isdigit():
+        return jsonify({'error': 'Permission denied for this HA resource'}), 403
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vm(user, cluster_id, int(num), permission, 'lxc' if kind == 'ct' else 'qemu'):
+        return jsonify({'error': 'Permission denied for this HA resource'}), 403
+    return None
+
+
 def _px_url(manager, path):
     """Build a full Proxmox API URL from a path."""
     return f"https://{manager.host}:8006/api2/json{path}"
@@ -181,6 +198,9 @@ def ha_handler():
                 validated_sid, err = _validate_sid(sid)
                 if err:
                     return err
+                err = _authz_sid_or_error(cluster_id, validated_sid, 'vm.view')
+                if err:
+                    return err
                 r = manager._api_get(_px_url(manager, f'/cluster/ha/resources/{validated_sid}'))
                 if r.status_code == 404:
                     return jsonify({'error': f'HA resource {sid} not found'}), 404
@@ -195,7 +215,18 @@ def ha_handler():
                     detail = _parse_proxmox_error(r)
                     status = r.status_code if 400 <= r.status_code < 500 else 502
                     return jsonify({'error': f'Proxmox returned {r.status_code}', 'detail': detail}), status
-                return jsonify({'data': r.json().get('data', [])})
+                # NS Aug 2026 (audit) — filter the listing to HA resources the caller may see;
+                # otherwise a scoped user enumerates every tenant's guests + HA state on the cluster.
+                from pegaprox.utils.auth import build_authz_user
+                from pegaprox.utils.rbac import user_can_access_vm
+                _u = build_authz_user(request.session.get('user', ''), request.session)
+                _visible = []
+                for _e in r.json().get('data', []):
+                    _kind, _, _num = str(_e.get('sid', '')).partition(':')
+                    if _kind in ('vm', 'ct') and _num.isdigit() and user_can_access_vm(
+                            _u, cluster_id, int(_num), 'vm.view', 'lxc' if _kind == 'ct' else 'qemu'):
+                        _visible.append(_e)
+                return jsonify({'data': _visible})
         except Exception as e:
             log.exception(f"[{cluster_id}] HA GET error")
             return jsonify({'error': safe_error(e, 'HA GET failed')}), 500
@@ -217,6 +248,9 @@ def ha_handler():
         if err:
             return err
         validated_sid, err = _validate_sid(sid)
+        if err:
+            return err
+        err = _authz_sid_or_error(cluster_id, validated_sid, 'vm.config')
         if err:
             return err
 
@@ -280,6 +314,9 @@ def ha_handler():
         validated_sid, err = _validate_sid(sid)
         if err:
             return err
+        err = _authz_sid_or_error(cluster_id, validated_sid, 'vm.config')
+        if err:
+            return err
 
         payload = {}
         state, err = _get_optional_string(body, 'state')
@@ -336,6 +373,9 @@ def ha_handler():
 
         sid = request.args.get('sid', '').strip()
         validated_sid, err = _validate_sid(sid)
+        if err:
+            return err
+        err = _authz_sid_or_error(cluster_id, validated_sid, 'vm.config')
         if err:
             return err
 

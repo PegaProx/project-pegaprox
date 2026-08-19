@@ -8411,6 +8411,7 @@
             const [globalSnapshots, setGlobalSnapshots] = useState([]);
             const [snapshotSortBy, setSnapshotSortBy] = useState('age'); // vmid, vm_name, node, snapshot_name, snapshot_date, age
             const [snapshotSortDir, setSnapshotSortDir] = useState('desc');
+            const [selectedSnaps, setSelectedSnaps] = useState({}); // #696 — multi-select in the snapshot overview (key -> true)
             const [logEvents, setLogEvents] = useState([]);
             const [logEventsLoading, setLogEventsLoading] = useState(false);
             const [logEventsError, setLogEventsError] = useState('');
@@ -9646,6 +9647,31 @@
                 await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
             };
             
+            // #696 — stable per-row key for multi-select (the render idx is unstable across sorts)
+            const snapKey = (s) => `${s.cluster_id || ''}:${s.node || ''}:${s.vm_type || ''}:${s.vmid}:${s.snapshot_name}`;
+
+            // #696 — bulk-delete the checked snapshots (backend /snapshots/delete already loops an array)
+            const deleteSelectedSnapshots = async (clusterId) => {
+                const chosen = (sortedSnapshots || []).filter(s => selectedSnaps[snapKey(s)]);
+                if (chosen.length === 0) return;
+                if (!window.confirm(`Delete ${chosen.length} selected snapshot(s)?`)) {
+                    return;
+                }
+                try {
+                    await authFetch(`${API_URL}/snapshots/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ snapshots: chosen.map(s => ({ ...s, cluster_id: s.cluster_id || clusterId })) })
+                    });
+                    addToast(`${chosen.length} snapshot(s) deleted`, 'success');
+                    setSelectedSnaps({});
+                    await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
+                } catch (err) {
+                    console.error('Bulk snapshot delete failed:', err);
+                    addToast('Failed to delete selected snapshots', 'error');
+                }
+            };
+
             const deleteGlobalSnapshot = async (snap, clusterId) => {
                 if (!window.confirm(`Delete snapshot "${snap.snapshot_name}" from VM ${snap.vmid}?`)) {
                     return;
@@ -12599,7 +12625,13 @@
                         setTimeout(() => logout(), 2000);
                     } else {
                         const err = await response.json().catch(() => ({}));
-                        setError(err.error || t('connectionFailed'));
+                        // #683 — a 2FA-enabled PVE account can't be added by password; show the
+                        // localized hint (API token OR temporarily disable 2FA) instead of the raw text.
+                        if (err.error_code === 'NEEDS_2FA') {
+                            setError(t('cluster2FAHint') || err.error);
+                        } else {
+                            setError(err.error || t('connectionFailed'));
+                        }
                     }
                 } catch (error) {
                     setError(t('connectionError') + ': ' + error.message);
@@ -15645,6 +15677,23 @@
                                                           </div>
                                                         )}
 
+                                                        {/* #696 — bulk actions bar (shows once one or more snapshots are checked; works in both layouts) */}
+                                                        {(() => {
+                                                            const selCount = (sortedSnapshots || []).filter(s => selectedSnaps[snapKey(s)]).length;
+                                                            return selCount > 0 ? (
+                                                                <div className="flex items-center gap-3 mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
+                                                                    <span className="text-sm text-gray-200">{selCount} {t('selected') || 'selected'}</span>
+                                                                    <button
+                                                                        onClick={() => deleteSelectedSnapshots(selectedCluster.id)}
+                                                                        className="inline-flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-500 px-3 py-1.5 text-sm font-medium text-white">
+                                                                        <Icons.Trash className="w-4 h-4" /> {t('deleteSelected') || 'Delete selected'}
+                                                                    </button>
+                                                                    <button onClick={() => setSelectedSnaps({})} className="text-sm text-gray-400 hover:text-white">
+                                                                        {t('clear') || 'Clear'}
+                                                                    </button>
+                                                                </div>
+                                                            ) : null;
+                                                        })()}
                                                         {snapshotsLoading ? (
                                                             <div className={isCorporate ? 'corp-snap-empty' : 'bg-proxmox-dark rounded-xl p-8 text-center'}>
                                                                 <div className={isCorporate
@@ -15673,6 +15722,16 @@
                                                                 <table className={isCorporate ? 'corp-snap-table' : 'min-w-full text-sm'}>
                                                                     <thead className={isCorporate ? '' : 'bg-black/40 text-gray-400'}>
                                                                         <tr>
+                                                                            <th className={isCorporate ? '' : 'px-4 py-3 text-left w-8'}>
+                                                                                {/* #696 — select-all across the currently listed snapshots */}
+                                                                                <input type="checkbox"
+                                                                                    checked={(sortedSnapshots || []).length > 0 && sortedSnapshots.every(s => selectedSnaps[snapKey(s)])}
+                                                                                    onChange={(e) => {
+                                                                                        if (e.target.checked) { const all = {}; (sortedSnapshots || []).forEach(s => { all[snapKey(s)] = true; }); setSelectedSnaps(all); }
+                                                                                        else { setSelectedSnaps({}); }
+                                                                                    }}
+                                                                                    className="rounded" title={t('selectAll') || 'Select all'} />
+                                                                            </th>
                                                                             <th onClick={() => toggleSnapshotSort('vmid')} className={isCorporate ? '' : 'px-4 py-3 text-left cursor-pointer hover:text-white'}>
                                                                                 VM ID {snapshotSortBy === 'vmid' && (snapshotSortDir === 'asc' ? '↑' : '↓')}
                                                                             </th>
@@ -15703,6 +15762,13 @@
                                                                                 key={`${snap.vmid}-${snap.snapshot_name}-${idx}`}
                                                                                 className={isCorporate ? 'group' : 'group hover:bg-white/5 transition-colors'}
                                                                             >
+                                                                                <td className={isCorporate ? '' : 'px-4 py-3'}>
+                                                                                    {/* #696 — per-row select */}
+                                                                                    <input type="checkbox"
+                                                                                        checked={!!selectedSnaps[snapKey(snap)]}
+                                                                                        onChange={(e) => setSelectedSnaps(prev => { const n = {...prev}; if (e.target.checked) n[snapKey(snap)] = true; else delete n[snapKey(snap)]; return n; })}
+                                                                                        className="rounded" />
+                                                                                </td>
                                                                                 <td className={isCorporate ? '' : 'px-4 py-3 text-gray-300'}>{snap.vmid ?? '-'}</td>
                                                                                 <td className={isCorporate ? '' : 'px-4 py-3 text-gray-200'}>{snap.vm_name ?? '-'}</td>
                                                                                 <td className={isCorporate ? '' : 'px-4 py-3'}>
@@ -18709,9 +18775,19 @@
                                                                             <td className="p-3 text-gray-300">{disk.size ? formatBytes(disk.size) : '-'}</td>
                                                                             <td className="p-3 text-gray-400 truncate max-w-[200px]">{disk.model || disk.vendor || '-'}</td>
                                                                             <td className="p-3">
-                                                                                <span className={`px-2 py-0.5 rounded text-xs ${disk.health === 'PASSED' || disk.health === 'OK' ? 'bg-green-500/20 text-green-400' : disk.health === 'UNKNOWN' ? 'bg-gray-500/20 text-gray-400' : 'bg-red-500/20 text-red-400'}`}>
-                                                                                    {disk.health || disk.wearout || 'N/A'}
-                                                                                </span>
+                                                                                {(() => {
+                                                                                    // #690 — PBS /disks/list carries SMART health in `status` (PASSED/FAILED/UNKNOWN),
+                                                                                    // not `health`; HDDs have no `wearout`, so the old read showed a bare N/A. Prefer
+                                                                                    // status, fall back to health, then wearout for SSDs.
+                                                                                    const smart = disk.status || disk.health || (disk.wearout != null ? `${disk.wearout}%` : '');
+                                                                                    const ok = smart === 'PASSED' || smart === 'OK';
+                                                                                    const unk = !smart || smart === 'UNKNOWN';
+                                                                                    return (
+                                                                                        <span className={`px-2 py-0.5 rounded text-xs ${ok ? 'bg-green-500/20 text-green-400' : unk ? 'bg-gray-500/20 text-gray-400' : 'bg-red-500/20 text-red-400'}`}>
+                                                                                            {smart || 'N/A'}
+                                                                                        </span>
+                                                                                    );
+                                                                                })()}
                                                                             </td>
                                                                         </tr>
                                                                     ))}

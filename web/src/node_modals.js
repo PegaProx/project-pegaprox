@@ -4463,6 +4463,24 @@
                                 </div>
                             </div>
 
+                            {/* MK Aug 2026 (#686) — surface WHAT drove a Critical/Warning rollup so it
+                                isn't a red badge over a list of green sensors. */}
+                            {hw && hw.available && (hw.health === 'critical' || hw.health === 'warning') && Array.isArray(hw.health_reasons) && hw.health_reasons.length > 0 && (
+                                <div className="flex items-start gap-1.5 text-[12px]" style={sub}>
+                                    <Icons.AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{color: statusColor(hw.health)}} />
+                                    <span>
+                                        {t('hwHealthCause') || 'Contributing'}:{' '}
+                                        {hw.health_reasons.map((r, i) => (
+                                            <span key={i}>
+                                                <span style={{color: statusColor(r.severity)}}>{r.label}</span>
+                                                {r.source === 'event' ? ' (SEL)' : r.source === 'system' ? ' (system health)' : ''}
+                                                {i < hw.health_reasons.length - 1 ? ', ' : ''}
+                                            </span>
+                                        ))}
+                                    </span>
+                                </div>
+                            )}
+
                             {/* ipmitool missing → install */}
                             {ipmitoolMissing && (
                                 <div style={card}>

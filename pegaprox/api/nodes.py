@@ -2803,6 +2803,13 @@ def disable_pool_ha_api(cluster_id):
 def set_vm_ha_priority_api(cluster_id, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec-audit 2026-08-17 (BOLA/CWE-639): cluster reach != per-VM grant.
+    # Re-check the explicit VM-ACL/pool scope before this state-changing write.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    user = build_authz_user(request.session['user'], request.session)
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.config'):
+        return jsonify({'error': 'Access denied: you do not have permission for this VM'}), 403
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2824,6 +2831,13 @@ def set_vm_ha_priority_api(cluster_id, vmid):
 def get_vm_guest_metrics_api(cluster_id, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec-audit 2026-08-17 (BOLA/CWE-639): cluster reach != per-VM grant.
+    # Enforce VM-ACL/pool scope before serving guest-agent data (IPs, hostname).
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    user = build_authz_user(request.session['user'], request.session)
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.view'):
+        return jsonify({'error': 'Access denied: you do not have permission for this VM'}), 403
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]

@@ -155,18 +155,33 @@ def parse_sel(members, limit=25):
 
 
 def _health_rollup(sensors, events, system_health, chassis):
-    """Overall node hardware health: worst of system health, sensor/event status,
-    and chassis intrusion (mirrors bmc._health_rollup + the Redfish system rollup)."""
-    if system_health == 'critical' or \
-       any(s['status'] == 'critical' for s in sensors) or \
-       any(e['severity'] == 'critical' for e in events) or \
-       (str(chassis.get('intrusion', '')).lower() not in ('', 'inactive', 'not present', 'disabled')):
-        return 'critical'
-    if system_health == 'warning' or \
-       any(s['status'] == 'warning' for s in sensors) or \
-       any(e['severity'] == 'warning' for e in events):
-        return 'warning'
-    return 'ok'
+    """Overall node hardware health + the items driving it.
+
+    MK Aug 2026 (#686) — Redfish's own system Health is the authoritative live rollup from the
+    BMC, so LogEntry history no longer drives the status (it stays available as the event list);
+    otherwise an old critical-severity log line pinned the node Critical while every live sensor
+    read green. Status = worst of system health, live sensors, chassis intrusion — and we return
+    the concrete contributors so the UI can show WHAT is wrong. `events` is kept for signature
+    parity but is history, not current state.
+
+    Returns {'status': 'ok'|'warning'|'critical', 'reasons': [{source, label, severity}]}.
+    """
+    reasons = []
+    if system_health in ('critical', 'warning'):
+        reasons.append({'source': 'system', 'label': 'system health', 'severity': system_health})
+    for s in sensors:
+        if s.get('status') in ('critical', 'warning'):
+            reasons.append({'source': 'sensor', 'label': s.get('name') or 'sensor', 'severity': s['status']})
+    if str(chassis.get('intrusion', '') or '').lower() not in ('', 'inactive', 'not present', 'disabled'):
+        reasons.append({'source': 'chassis', 'label': f"chassis intrusion: {chassis.get('intrusion')}",
+                        'severity': 'critical'})
+    if any(r['severity'] == 'critical' for r in reasons):
+        status = 'critical'
+    elif any(r['severity'] == 'warning' for r in reasons):
+        status = 'warning'
+    else:
+        status = 'ok'
+    return {'status': status, 'reasons': reasons}
 
 
 def parse_redfish(system_doc, thermal_doc, power_doc, sel_members):
@@ -179,10 +194,12 @@ def parse_redfish(system_doc, thermal_doc, power_doc, sel_members):
     events = parse_sel(sel_members)
     if not (sensors or events or power_w is not None or any(fru.values()) or health_sys != 'na'):
         return {'available': False, 'reason': 'Redfish returned no usable data'}
+    hr = _health_rollup(sensors, events, health_sys, chassis)
     return {
         'available': True,
         'source': 'redfish',
-        'health': _health_rollup(sensors, events, health_sys, chassis),
+        'health': hr['status'],
+        'health_reasons': hr['reasons'],
         'sensors': sensors,
         'chassis': chassis,
         'power_w': power_w,

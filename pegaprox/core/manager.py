@@ -1169,6 +1169,29 @@ class PegaProxManager:
 
                         if resp.status_code == 200:
                             data = resp.json()['data']
+                            # NS Aug 2026 (#683) — PVE returns HTTP 200 with NeedTFA:1 and a PARTIAL
+                            # ticket when the account has TFA/2FA enabled. A partial ticket can't make
+                            # API calls (and can't even auto-create a token), so blindly accepting it
+                            # marked the cluster "connected" and then every request failed — the
+                            # reported "connected for ~2 min then offline" with no guidance. Fail fast
+                            # with an actionable message; this is an account-level issue, so don't
+                            # retry the other hosts with the same credentials.
+                            if data.get('NeedTFA'):
+                                # English fallback for logs / non-UI callers; the frontend renders a
+                                # translated message off `error_code` (see add_cluster / translations).
+                                msg = ("This Proxmox account has two-factor authentication enabled. "
+                                       "Password login only returns a partial ticket that cannot be used "
+                                       "for API access. Either add the cluster with an API token "
+                                       "(Datacenter → Permissions → API Tokens), or temporarily disable "
+                                       "two-factor authentication on the account to add it (PegaProx "
+                                       "creates an API token automatically), then re-enable it.")
+                                self.logger.warning(f"{host}: account requires 2FA (NeedTFA) — password auth cannot proceed")
+                                self._ticket = None
+                                self._csrf_token = None
+                                self.is_connected = False
+                                self.connection_error = msg
+                                self.connection_error_code = 'NEEDS_2FA'   # #683 — frontend maps this to a localized message
+                                return False
                             self._ticket = data['ticket']
                             self._csrf_token = data['CSRFPreventionToken']
                             self._api_token = None
@@ -8935,35 +8958,63 @@ echo "AGENT_INSTALLED_OK"
                         stdin, stdout, stderr = ssh.exec_command('id -u')
                         uid = stdout.read().decode().strip()
                         is_root = (uid == '0')
-                        
-                        self.logger.info(f"Sending reboot command to {node_name} (root={is_root})")
-                        task.add_output(f"Running as {'root' if is_root else 'non-root user'}")
-                        
-                        # Get transport and open channel with PTY for sudo support
-                        transport = ssh.get_transport()
-                        channel = transport.open_session()
-                        channel.get_pty()
-                        channel.settimeout(10)
-                        
-                        # Execute reboot command
-                        if is_root:
-                            channel.exec_command('shutdown -r now')
+
+                        # Check if related node requires a reboot
+                        needrestart_utility = False
+                        needrestart_validated = False
+                        self.logger.info(f"Validate if package needrestart is installed on node: {node_name}")
+                        exit_code, output, stderr = self._ssh_execute(ssh, f'{sudo_prefix}dpkg -s needrestart', task)
+
+                        if exit_code == 0:
+                            needrestart_utility = True
+                            self.logger.info(f"Package needrestart is installed on node: {node_name}")
                         else:
-                            channel.exec_command('sudo shutdown -r now')
-                        
-                        # Wait briefly for command to be sent
-                        time.sleep(3)
-                        
-                        # Try to read any output (will fail when connection drops, that's ok)
-                        try:
-                            output = channel.recv(1024).decode()
-                            if output:
-                                task.add_output(f"Reboot output: {output.strip()}")
-                        except:
-                            pass
-                        
-                        channel.close()
-                        task.add_output("Reboot command sent / Reboot-Befehl gesendet")
+                            self.logger.info(f"Package needrestart is not installed on node: {node_name} - forcing to reboot!")
+                            needrestart_validated = True
+
+                        if needrestart_utility:
+                            self.logger.info(f"Validate if node {node_name} requires a restart (needrestart utility mode)")
+                            exit_code, output, stderr = self._ssh_execute(ssh, f'{sudo_prefix}needrestart -p', task)
+                            
+                            if exit_code != 0:
+                                self.logger.info(f"Node {node_name} requires a restart (needrestart utility mode)")
+                                needrestart_validated = True
+                            else:
+                                self.logger.info(f"Node {node_name} does NOT require a restart (needrestart utility mode)")
+
+                        # Run reboot only if this got validated for the related node
+                        if needrestart_validated:
+                            self.logger.info(f"Sending reboot command to {node_name} (root={is_root})")
+                            task.add_output(f"Running as {'root' if is_root else 'non-root user'}")
+                            
+                            # Get transport and open channel with PTY for sudo support
+                            transport = ssh.get_transport()
+                            channel = transport.open_session()
+                            channel.get_pty()
+                            channel.settimeout(10)
+                            
+                            # Execute reboot command
+                            if is_root:
+                                channel.exec_command('shutdown -r now')
+                            else:
+                                channel.exec_command('sudo shutdown -r now')
+                            
+                            # Wait briefly for command to be sent
+                            time.sleep(3)
+                            
+                            # Try to read any output (will fail when connection drops, that's ok)
+                            try:
+                                output = channel.recv(1024).decode()
+                                if output:
+                                    task.add_output(f"Reboot output: {output.strip()}")
+                            except:
+                                pass
+                            
+                            channel.close()
+                            task.add_output("Reboot command sent / Reboot-Befehl gesendet")
+                        else:
+                            self.logger.info(f"Skipping reboot for node: {node_name}")
+                            task.add_output(f"Skipping reboot for node: {node_name}")
                         
                     except Exception as e:
                         self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
@@ -8974,25 +9025,7 @@ echo "AGENT_INSTALLED_OK"
                         except:
                             pass
                         ssh = None
-                else:
-                    task.add_output("[WARN] Could not reconnect for reboot / Konnte nicht für Reboot verbinden")
-                    task.add_output("Trying alternative reboot method / Versuche alternative Methode...")
-                    
-                    # Try via Proxmox API as fallback
-                    try:
-                        # MK May 2026 — was `self.session.post(..., verify=False)` which
-                        # hardcoded the SSL bypass even when the operator configured
-                        # `_ssl_verify=True` on this cluster. Use _create_session()
-                        # so the per-cluster TLS preference is honoured (proper CA
-                        # verification when the user pinned a custom CA bundle).
-                        url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node_name}/status"
-                        response = self._create_session().post(url, data={'command': 'reboot'})
-                        if response.status_code == 200:
-                            task.add_output("Reboot initiated via Proxmox API")
-                        else:
-                            task.add_output(f"API reboot failed: {response.status_code}")
-                    except Exception as api_e:
-                        task.add_output(f"API reboot also failed: {api_e}")
+
                 
                 task.add_output("Waiting for node to reboot / Warte auf Neustart...")
                 
@@ -9781,10 +9814,16 @@ echo "AGENT_INSTALLED_OK"
                 # parse volume ID ':1'". `or storage` handles both missing + empty.
                 efi_storage = vm_config.get('efi_storage') or storage
                 efi_type = "4m"
+                _efi = f"{efi_storage}:1,efitype={efi_type}"
                 if vm_config.get('efi_pre_enroll'):
-                    data['efidisk0'] = f"{efi_storage}:1,efitype={efi_type},pre-enrolled-keys=1"
-                else:
-                    data['efidisk0'] = f"{efi_storage}:1,efitype={efi_type}"
+                    _efi += ",pre-enrolled-keys=1"
+                # #678 — expose the disk format (raw/qcow2) like Proxmox does; omitting it keeps the
+                # storage's implicit default (previous behaviour). The UI only offers formats the
+                # target storage actually supports.
+                efi_fmt = vm_config.get('efi_format')
+                if efi_fmt:
+                    _efi += f",format={efi_fmt}"
+                data['efidisk0'] = _efi
                 # UEFI requires q35 machine type
                 if not vm_config.get('machine') or vm_config.get('machine') in ['i440fx', 'pc']:
                     data['machine'] = 'q35'
@@ -9792,7 +9831,11 @@ echo "AGENT_INSTALLED_OK"
             # TPM
             if vm_config.get('tpm_storage'):
                 tpm_version = vm_config.get('tpm_version', 'v2.0')
-                data['tpmstate0'] = f"{vm_config['tpm_storage']}:1,version={tpm_version}"
+                _tpm = f"{vm_config['tpm_storage']}:1,version={tpm_version}"
+                tpm_fmt = vm_config.get('tpm_format')   # #678 — same optional format= as efidisk0
+                if tpm_fmt:
+                    _tpm += f",format={tpm_fmt}"
+                data['tpmstate0'] = _tpm
             
             # Network
             net_model = vm_config.get('net_model', 'virtio')

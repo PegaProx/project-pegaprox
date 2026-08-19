@@ -258,6 +258,16 @@ def get_migration_history():
     if _allowed is not None:
         migrations = [m for m in migrations if m.get('cluster_id') in _allowed]
 
+    # NS Aug 2026 (audit re-verify) — per-VM object filter on EVERY returned row, not only when a
+    # ?vmid= was supplied: cluster scope alone let a VM-ACL/pool-scoped user read foreign VMs'
+    # migration metadata by simply OMITTING the vmid filter. Admins short-circuit True in
+    # user_can_access_vm; a plain cluster-wide operator keeps all their cluster's rows.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    migrations = [m for m in migrations
+                  if user_can_access_vm(_u, m.get('cluster_id'), m.get('vmid'), 'vm.view')]
+
     return jsonify(migrations[:limit])
 
 @bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/migration-history', methods=['GET'])
@@ -266,6 +276,16 @@ def get_vm_migration_history(cluster_id, vmid):
     """Get migration history for a specific VM"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+
+    # NS Aug 2026 (audit) — per-VM object check; cluster access alone let a VM-ACL/pool-scoped user
+    # read a foreign VM's migration metadata (name, node placement, operator, timestamps) by
+    # substituting the vmid — same BOLA class as the console CVE. Mirror snapshots.py / nodes.py.
+    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.rbac import user_can_access_vm
+    _u = load_users().get(request.session['user'], {})
+    _u['username'] = request.session['user']
+    if not user_can_access_vm(_u, cluster_id, vmid, 'vm.view'):
+        return jsonify({'error': 'Permission denied'}), 403
 
     config = load_migration_history()
     

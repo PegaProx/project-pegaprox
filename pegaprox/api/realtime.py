@@ -38,6 +38,20 @@ bp = Blueprint('realtime', __name__)
 sock = Sock()
 
 
+def _scope_ws_clusters(allowed, requested):
+    """NS Aug 2026 (audit) — clamp a WebSocket client's cluster subscription to what RBAC permits.
+    `allowed` is get_user_clusters(user) — None means admin (no restriction). A scoped user that
+    names nothing gets THEIR clusters (never all); naming foreign clusters yields only the
+    intersection (falling back to their own set if the intersection is empty). Mirrors the SSE
+    subscription filter so the WS channel can't leak another tenant's live action events."""
+    if allowed is None:
+        return requested  # admin: honor request (None = all)
+    if not requested:
+        return list(allowed)  # default to the user's own clusters, never all
+    scoped = [c for c in requested if c in allowed]
+    return scoped if scoped else list(allowed)
+
+
 @sock.route('/api/ws/updates')
 def ws_live_updates(ws):
     """WebSocket endpoint for live updates"""
@@ -56,7 +70,19 @@ def ws_live_updates(ws):
             return
 
         username = session['user']
-        subscribed_clusters = auth_data.get('clusters', None)
+        # NS Aug 2026 (audit) — scope the WS cluster subscription to what RBAC allows, mirroring the
+        # SSE path (/api/sse/updates). Without this a client could omit "clusters" (→ None = all) or
+        # name a foreign cluster and receive another tenant's live action events.
+        # use the indexed get_user() (not whole-table load_users(), which can transiently degrade to
+        # {} under gevent/WAL contention — that would silently drop an admin to a scoped view, or a
+        # scoped user onto the default tenant's clusters).
+        try:
+            from pegaprox.core.db import get_db as _gdb
+            _user_data = _gdb().get_user(username)
+        except Exception:
+            _user_data = load_users().get(username, {})
+        _allowed = get_user_clusters(_user_data or {})  # None = admin (all clusters)
+        subscribed_clusters = _scope_ws_clusters(_allowed, auth_data.get('clusters', None))
 
         with ws_clients_lock:
             ws_clients[client_id] = {
@@ -89,7 +115,7 @@ def ws_live_updates(ws):
                 elif msg_type == 'subscribe':
                     with ws_clients_lock:
                         if client_id in ws_clients:
-                            ws_clients[client_id]['clusters'] = data.get('clusters')
+                            ws_clients[client_id]['clusters'] = _scope_ws_clusters(_allowed, data.get('clusters'))
 
             except Exception as e:
                 err_str = str(e).lower()
@@ -162,6 +188,19 @@ def validate_ws_token_api():
     if not data:
         return jsonify({'error': 'Invalid or expired token'}), 401
 
+    # NS Aug 2026 (audit + CodeAnt) — reject a disabled account for EVERY ws_token consume, not only
+    # the ?cluster_id= path below: the DEFAULT VM-console/shell path passes no cluster_id, so the
+    # enabled recheck inside `if requested_cluster:` would never run. Belt-and-suspenders with the
+    # ws_token purge on disable. Tolerant of a transient lookup miss (the purge covers deletion).
+    try:
+        from pegaprox.core.db import get_db as _gdb
+        _acct = _gdb().get_user(data.get('user'))
+    except Exception:
+        _acct = None
+    if _acct is not None and not _acct.get('enabled', True):
+        logging.warning(f"[WS-TOKEN] user '{_sl(data.get('user'))}' is disabled")
+        return jsonify({'error': 'Account disabled'}), 401
+
     requested_cluster = (request.args.get('cluster_id') or '').strip()
     cluster_context = None
     if requested_cluster:
@@ -182,6 +221,12 @@ def validate_ws_token_api():
                 user = load_users().get(data['user'])
             if not user:
                 return jsonify({'error': 'Invalid or expired token'}), 401
+            # NS Aug 2026 (audit re-verify) — a ws_token minted while enabled must not keep opening a
+            # console/shell after the account is disabled (this validate path is the ws_token
+            # chokepoint and never rechecked account state).
+            if not user.get('enabled', True):
+                logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is disabled")
+                return jsonify({'error': 'Account disabled'}), 401
             allowed = get_user_clusters(user)
             access_ok = allowed is None or requested_cluster in allowed
             if not access_ok:

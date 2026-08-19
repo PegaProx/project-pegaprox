@@ -195,7 +195,18 @@ def _xhm_reachable(t):
     # NS Jul 2026 (CodeAnt IDOR) — show a migration only if the caller reaches one of its clusters.
     from pegaprox.api.helpers import check_cluster_access
     cids = [c for c in (getattr(t, 'target_cluster', None), getattr(t, 'source_cluster', None)) if c]
-    return (not cids) or any(check_cluster_access(c)[0] for c in cids)
+    if cids and not any(check_cluster_access(c)[0] for c in cids):
+        return False
+    # NS Aug 2026 (Aikido #469089253) — and only if the caller can access the source VM itself,
+    # matching the plan/start gate; cluster reach alone leaked other VMs' migration records.
+    svmid, scluster = getattr(t, 'source_vmid', None), getattr(t, 'source_cluster', None)
+    if svmid and scluster:
+        try:
+            _u = build_authz_user(request.session.get('user', ''), request.session)
+            return user_can_access_vm(_u, scluster, int(svmid), 'vm.migrate')
+        except Exception:
+            return False
+    return True
 
 
 # NS Aug 2026 (#654) — same slip as the vmware list route: decorators were on _xhm_reachable

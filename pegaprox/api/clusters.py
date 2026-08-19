@@ -186,7 +186,10 @@ def add_cluster():
         # Test connection - MK: return actual error instead of generic message (#88)
         if not manager.connect_to_proxmox():
             error_detail = manager.connection_error or 'Failed to connect to Proxmox cluster'
-            return jsonify({'error': f'Failed to connect: {error_detail}'}), 400
+            # #683 — surface a machine code so the UI can show a localized 2FA hint (API token OR
+            # temporarily disable 2FA), not just the English fallback text.
+            return jsonify({'error': f'Failed to connect: {error_detail}',
+                            'error_code': getattr(manager, 'connection_error_code', None)}), 400
 
     manager.start()
     cluster_managers[cluster_id] = manager
@@ -370,7 +373,8 @@ def reconfigure_cluster(cluster_id):
     else:
         new_mgr = PegaProxManager(cluster_id, new_config)
         if not new_mgr.connect_to_proxmox():
-            return jsonify({'error': f'Connection failed: {new_mgr.connection_error or "unknown"}'}), 400
+            return jsonify({'error': f'Connection failed: {new_mgr.connection_error or "unknown"}',
+                            'error_code': getattr(new_mgr, 'connection_error_code', None)}), 400
 
     # Stop old manager, swap in new one
     old_mgr = cluster_managers[cluster_id]
@@ -1800,6 +1804,16 @@ def cancel_task(cluster_id, node, upid):
     
     mgr = cluster_managers[cluster_id]
     
+    # NS Aug 2026 (Aikido #469089252) — the UPID encodes the task's VM; gate per-VM so a
+    # pool-scoped user can't cancel another pool/tenant's VM task on a shared cluster.
+    _p = str(upid).split(':')
+    _tvmid = _p[6] if len(_p) > 6 and _p[6].isdigit() else None
+    if _tvmid is not None:
+        from pegaprox.utils.auth import build_authz_user
+        _u = build_authz_user(request.session.get('user', ''), request.session)
+        if not user_can_access_vm(_u, cluster_id, int(_tvmid), 'vm.stop'):
+            return jsonify({'error': 'Access denied to this VM task'}), 403
+
     try:
         result = mgr.stop_task(node, upid)
         if result:

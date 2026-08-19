@@ -78,6 +78,27 @@ def _plan_with_vms(plan):
     return plan
 
 
+# NS Aug 2026 (BOLA/CWE-639 sec-report) — cluster reach via the #248/#555 VM-ACL
+# fallback is NOT sufficient for plan actions/reads: a VM-ACL/pool-scoped caller
+# who reaches the source cluster must still be scoped to EVERY VM the plan
+# protects, otherwise they could failover/read VMs outside their explicit grant.
+# ACL-scope-wins (mirrors add_plan_vm's per-VM gate). Returns (True, None) when the
+# caller can access every plan VM, else (False, <403 response>) to `return err`.
+def _authz_plan_vms(plan):
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    user = build_authz_user(request.session['user'], request.session)
+    for vm in _get_plan_vms(plan['id']):
+        try:
+            vmid = int(vm['vmid'])
+        except (ValueError, TypeError, KeyError):
+            # can't derive the vmid → deny for scoped users
+            return False, (jsonify({'error': 'Access denied: unresolved VM in plan'}), 403)
+        if not user_can_access_vm(user, plan['source_cluster'], vmid, 'vm.view', vm.get('vm_type', 'qemu')):
+            return False, (jsonify({'error': 'Access denied: you do not have permission for every VM in this plan'}), 403)
+    return True, None
+
+
 # ---- CRUD: Plans ----
 
 @bp.route('/api/site-recovery/plans', methods=['GET'])
@@ -124,6 +145,16 @@ def create_plan():
     if data['source_cluster'] not in cluster_managers or data['target_cluster'] not in cluster_managers:
         return jsonify({'error': 'One or both clusters not found'}), 404
 
+    # NS Aug 2026 (BOLA sec-report) — this route was the only one without a
+    # cluster gate, so a tenant-scoped operator could bind a plan (+ webhooks) to
+    # clusters outside their scope. Enforce cluster-scope on both, like siblings.
+    ok, err = check_cluster_access(data['source_cluster'])
+    if not ok:
+        return err
+    ok, err = check_cluster_access(data['target_cluster'])
+    if not ok:
+        return err
+
     plan_id = str(uuid.uuid4())[:8]
     now = datetime.utcnow().isoformat()
     db = get_db()
@@ -164,6 +195,12 @@ def get_plan_detail(plan_id):
     if not ok:
         return err
     ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
+    # per-VM scope (BOLA sec-report): detail leaks the full VM list + mappings +
+    # webhooks, so a scoped caller must be scoped to every VM in the plan.
+    ok, err = _authz_plan_vms(plan)
     if not ok:
         return err
 
@@ -265,6 +302,11 @@ def list_plan_vms(plan_id):
     if not ok:
         return err
     ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
+    # per-VM scope (BOLA sec-report) — same leak as get_plan_detail
+    ok, err = _authz_plan_vms(plan)
     if not ok:
         return err
 
@@ -512,6 +554,12 @@ def execute_planned_failover(plan_id):
     if not ok:
         return err
 
+    # per-VM scope (BOLA sec-report): cluster reach isn't enough — the caller must
+    # be scoped to every VM in the plan before we drive an authorized failover.
+    ok, err = _authz_plan_vms(plan)
+    if not ok:
+        return err
+
     if plan['status'] == 'running':
         return jsonify({'error': 'Failover already in progress'}), 409
 
@@ -571,6 +619,11 @@ def execute_emergency_failover(plan_id):
     if not ok:
         return err
 
+    # per-VM scope (BOLA sec-report): scoped caller must be scoped to every plan VM
+    ok, err = _authz_plan_vms(plan)
+    if not ok:
+        return err
+
     if plan['status'] == 'running':
         return jsonify({'error': 'Failover already in progress'}), 409
 
@@ -619,6 +672,11 @@ def execute_test_failover(plan_id):
     if not ok:
         return err
     ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
+    # per-VM scope (BOLA sec-report): scoped caller must be scoped to every plan VM
+    ok, err = _authz_plan_vms(plan)
     if not ok:
         return err
 
@@ -679,6 +737,11 @@ def execute_failback(plan_id):
     if not ok:
         return err
     ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
+    # per-VM scope (BOLA sec-report): scoped caller must be scoped to every plan VM
+    ok, err = _authz_plan_vms(plan)
     if not ok:
         return err
 
@@ -749,6 +812,11 @@ def get_plan_events(plan_id):
     if not ok:
         return err
     ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+
+    # per-VM scope (BOLA sec-report) — same leak as get_plan_detail
+    ok, err = _authz_plan_vms(plan)
     if not ok:
         return err
 

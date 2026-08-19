@@ -80,8 +80,10 @@ def _send_ntfy(alert_data, cfg):
         # NS May 2026 — SSRF guard: ntfy URLs are admin-supplied and could
         # accidentally (or maliciously) point at metadata / internal services.
         try:
-            from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
-            sanitize_outbound_url(url, allowed_schemes=('https', 'http'))
+            from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
+            # GHSA-hmcf-9q7f-vx35 — pin the vetted IP so requests can't re-resolve to an internal
+            # address between the check and the POST.
+            url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'))
         except SsrfError as guard_err:
             return False, f"ntfy URL rejected: {guard_err}"
         r = requests.post(url, data=alert_data.get('message', ''), headers=headers, timeout=10)
@@ -103,7 +105,7 @@ def _send_apprise(alert_data, cfg):
     # NS Jul 2026 (CodeAnt SSRF) — the prefix blocklist missed decimal/hex/IPv6/metadata-by-
     # hostname encodings; run the real SSRF guard on http(s) apprise targets (other apprise
     # schemes like discord://, tgram:// go to provider APIs, not arbitrary IPs, so leave them).
-    from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+    from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
     try:
         ap = apprise.Apprise()
         for u in urls:
@@ -113,7 +115,9 @@ def _send_apprise(alert_data, cfg):
                 continue
             if _ul.startswith(('http://', 'https://')):
                 try:
-                    sanitize_outbound_url(u, allowed_schemes=('http', 'https'), allow_private=False)
+                    # GHSA-hmcf-9q7f-vx35 — pin the vetted IP so apprise's own fetch can't be
+                    # DNS-rebound to an internal address (http pinned; verified https stays a hostname).
+                    u = resolve_and_pin_url(u, allowed_schemes=('http', 'https'), allow_private=False)
                 except SsrfError as _se:
                     logging.warning(f"[Notifications] Blocked SSRF apprise URL: {_se}")
                     continue

@@ -226,6 +226,17 @@ def validate_ws_token(token: str) -> dict:
         return token_data
 
 
+def invalidate_user_ws_tokens(username: str) -> int:
+    """NS Aug 2026 (audit re-verify) — drop every outstanding single-use WS token for a user, so a
+    ws_token minted while the account was enabled can't still open a console/shell within its TTL
+    after the account is disabled/deleted. Called alongside invalidate_all_user_sessions."""
+    with ws_tokens_lock:
+        gone = [t for t, d in ws_tokens.items() if d.get('user') == username]
+        for t in gone:
+            del ws_tokens[t]
+    return len(gone)
+
+
 def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_clusters=None):
     """Broadcast update to SSE clients
 

@@ -50,6 +50,34 @@ def test_vmware_route_cross_tenant_denied(api, seed):
         ppglobals.vmware_managers.clear()
 
 
+def _vmware_config_denied(api, seed, method, path):
+    ppglobals.vmware_managers.clear()
+    seed.tenant('tenant_a', clusters=['cluster_1'])
+    seed.tenant('tenant_b', clusters=['cluster_2'])
+    alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['vmware.config'])
+    _mk_vmware('vmw_b', ['cluster_2'])
+    try:
+        r = getattr(api.as_user(alice), method)(path, **({'json': {'name': 'x'}} if method in ('put', 'post') else {}))
+        assert r.status_code == 403, r.get_data(as_text=True)
+    finally:
+        ppglobals.vmware_managers.clear()
+
+
+def test_vmware_update_cross_tenant_denied(api, seed):
+    # NS Aug 2026 (Aikido #469089245) — write route was vmware.config-only, no object gate.
+    _vmware_config_denied(api, seed, 'put', '/api/vmware/vmw_b')
+
+
+def test_vmware_delete_cross_tenant_denied(api, seed):
+    # NS Aug 2026 (Aikido #469089207)
+    _vmware_config_denied(api, seed, 'delete', '/api/vmware/vmw_b')
+
+
+def test_vmware_diagnose_cross_tenant_denied(api, seed):
+    # NS Aug 2026 (Aikido #469089204)
+    _vmware_config_denied(api, seed, 'get', '/api/vmware/vmw_b/diagnose')
+
+
 def test_tenant_admin_cannot_amplify_via_tenant_perms(api, seed):
     # the set_user_perms TENANT branch must reject a non-global-admin granting admin role/perms
     seed.tenant('tenant_a', clusters=['cluster_1'])

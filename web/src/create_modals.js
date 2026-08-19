@@ -136,8 +136,10 @@
                 agent: true,
                 efi_storage: '',     // Storage for EFI disk
                 efi_pre_enroll: true, // Pre-enroll Microsoft keys
+                efi_format: '',      // #678 — EFI disk format ('' = storage default)
                 tpm_storage: '',     // Storage for TPM state
                 tpm_version: 'v2.0', // TPM version
+                tpm_format: '',      // #678 — TPM state format ('' = storage default)
                 ha_enabled: false,   // MK: Enable Proxmox native HA
                 ha_group: '',        // MK: HA group name
                 
@@ -1115,13 +1117,20 @@
                                                         {diskStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage}</option>)}
                                                     </select>
                                                 </div>
-                                                <div className="flex items-end">
-                                                    <label className="flex items-center gap-2 text-sm text-gray-300">
-                                                        <input type="checkbox" checked={config.efi_pre_enroll} onChange={e => setConfig({...config, efi_pre_enroll: e.target.checked})} className="rounded" />
-                                                        {t('preEnrollKeys')}
-                                                    </label>
+                                                <div>
+                                                    {/* #678 — EFI disk format (raw/qcow2), like Proxmox; '' keeps the storage default */}
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('format') || 'Format'}</label>
+                                                    <select value={config.efi_format || ''} onChange={e => setConfig({...config, efi_format: e.target.value})}
+                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
+                                                        <option value="">{t('storageDefault') || 'Storage default'}</option>
+                                                        {getAllowedFormats(config.efi_storage || config.storage).map(f => <option key={f} value={f}>{f}</option>)}
+                                                    </select>
                                                 </div>
                                             </div>
+                                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                <input type="checkbox" checked={config.efi_pre_enroll} onChange={e => setConfig({...config, efi_pre_enroll: e.target.checked})} className="rounded" />
+                                                {t('preEnrollKeys')}
+                                            </label>
                                         </div>
                                     )}
                                     
@@ -1149,6 +1158,15 @@
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
                                                         <option value="v2.0">TPM 2.0 ({t('recommendedInline')})</option>
                                                         <option value="v1.2">TPM 1.2</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    {/* #678 — TPM state format, same optional format= as the EFI disk */}
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('format') || 'Format'}</label>
+                                                    <select value={config.tpm_format || ''} onChange={e => setConfig({...config, tpm_format: e.target.value})}
+                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
+                                                        <option value="">{t('storageDefault') || 'Storage default'}</option>
+                                                        {getAllowedFormats(config.tpm_storage).map(f => <option key={f} value={f}>{f}</option>)}
                                                     </select>
                                                 </div>
                                             </div>

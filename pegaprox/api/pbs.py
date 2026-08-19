@@ -117,6 +117,9 @@ def add_pbs_server():
 @require_auth(perms=['pbs.config'])
 def update_pbs_server(pbs_id):
     """Update a PBS server config"""
+    ok, err = check_pbs_access(pbs_id)  # NS Aug 2026 (Aikido) — object-level authz on write
+    if not ok:
+        return err
     data = request.json or {}
     
     if pbs_id not in pbs_managers:
@@ -176,6 +179,9 @@ def update_pbs_server(pbs_id):
 @require_auth(perms=['pbs.config'])
 def delete_pbs_server(pbs_id):
     """Delete a PBS server"""
+    ok, err = check_pbs_access(pbs_id)  # NS Aug 2026 (Aikido) — object-level authz on delete
+    if not ok:
+        return err
     if pbs_id in pbs_managers:
         name = pbs_managers[pbs_id].name
         del pbs_managers[pbs_id]
@@ -241,9 +247,15 @@ def test_pbs_connection(pbs_id):
         return jsonify({'success': False, 'error': test_mgr.last_error}), 400
     
     # Test existing connection
+    # NS Aug 2026 (audit) — object-level gate for the existing-connection branch (siblings
+    # update/delete/status all carry it); without it a pbs.config holder could probe any tenant's
+    # PBS by id and read its reachability/version.
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
-    
+
     mgr = pbs_managers[pbs_id]
     success = mgr.connect()
     if success:
@@ -588,6 +600,13 @@ def pbs_prune(pbs_id, store):
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
     data = request.json or {}
+    # NS Aug 2026 (audit re-verify) — a TARGETED prune (a specific backup group) deletes that group's
+    # snapshots, so re-check the per-backup owner like the other write ops. A store-wide prune (no
+    # backup-id) stays a datastore-level op gated by pbs.datastore.prune.
+    if data.get('backup_id'):
+        ok, err = _authz_pbs_backup(mgr, data.get('backup_type'), data.get('backup_id'))
+        if not ok:
+            return err
     result = mgr.prune_datastore(
         store, ns=data.get('ns'),
         keep_last=data.get('keep_last'), keep_daily=data.get('keep_daily'),
@@ -602,6 +621,40 @@ def pbs_prune(pbs_id, store):
     return jsonify(result)
 
 
+def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup'):
+    """NS Aug 2026 (sec-report, BOLA/CWE-639) — object-level scope for PBS backup ops.
+
+    check_pbs_access only proves the caller reaches ONE of the PBS's linked clusters; it
+    does NOT prove they own the VM/CT whose backup they're about to touch. A datastore is
+    shared across every VM on every linked cluster, so a VM-ACL/pool-scoped user could
+    delete/browse/download another tenant's backup by substituting its backup-id.
+
+    Resolve the backup's owning VMID and require user_can_access_vm on it against one of the
+    linked clusters (ACL/pool-scope-wins via the fixed chokepoint in rbac.py). Admins pass;
+    a scoped user whose vmid can't be resolved (host-type or non-numeric id) is denied.
+    Returns (ok, err_response)."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return True, None
+    deny = (jsonify({'error': 'Access denied: you do not have permission for this backup'}), 403)
+    bt = (backup_type or '').strip().lower()
+    # only vm/ct backups carry a VMID we can scope; host/other → deny scoped users
+    if bt not in ('vm', 'ct') or backup_id is None or not str(backup_id).strip().isdigit():
+        return False, deny
+    vmid = int(str(backup_id).strip())
+    vm_type = 'lxc' if bt == 'ct' else 'qemu'
+    # linked clusters own the backups; fall back to all connected clusters when a PBS has
+    # no explicit linking (mirrors _pbs_vm_name_lookup). user_can_access_vm still enforces
+    # per-cluster ACL/pool scope, so an empty-scope user gets no free pass here.
+    cluster_ids = list(mgr.linked_clusters or []) or list(cluster_managers.keys())
+    for cid in cluster_ids:
+        if user_can_access_vm(user, cid, vmid, permission, vm_type):
+            return True, None
+    return False, deny
+
+
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/snapshots', methods=['DELETE'])
 @require_auth(perms=['pbs.snapshot.delete'])
 def pbs_delete_snapshot(pbs_id, store):
@@ -610,18 +663,24 @@ def pbs_delete_snapshot(pbs_id, store):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
-    
+
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
     data = request.json or {}
-    
+
     required = ['backup_type', 'backup_id', 'backup_time']
     for field in required:
         if field not in data:
             return jsonify({'error': f'Missing: {field}'}), 400
-    
-    result = mgr.delete_snapshot(store, data['backup_type'], data['backup_id'], 
+
+    # NS Aug 2026 (sec-report, BOLA) — per-backup scope: the owning VMID must be one the
+    # caller can access; check_pbs_access above only proves server/tenant reach.
+    _ok, _err = _authz_pbs_backup(mgr, data['backup_type'], data['backup_id'], 'vm.backup')
+    if not _ok:
+        return _err
+
+    result = mgr.delete_snapshot(store, data['backup_type'], data['backup_id'],
                                   data['backup_time'], ns=data.get('ns'))
     if 'error' not in result:
         log_audit(request.session.get('user', 'admin'), 'pbs.snapshot.delete',
@@ -837,6 +896,11 @@ def set_pbs_snapshot_notes(pbs_id, store):
     notes = data.get('notes', '')
     if not all([bt, bid, btime is not None]):
         return jsonify({'error': 'Missing backup-type, backup-id, or backup-time'}), 400
+    # NS Aug 2026 (audit) — per-backup owner check (delete/browse/download all carry it); a shared
+    # datastore spans tenants, so without this a scoped user could rewrite another tenant's backup.
+    ok, err = _authz_pbs_backup(mgr, bt, bid)
+    if not ok:
+        return err
     result = mgr.set_snapshot_notes(store, bt, bid, int(btime), notes)
     if 'error' in result:
         return jsonify(result), 500
@@ -880,6 +944,10 @@ def set_pbs_group_notes(pbs_id, store):
     notes = data.get('notes', '')
     if not all([bt, bid]):
         return jsonify({'error': 'Missing backup-type or backup-id'}), 400
+    # NS Aug 2026 (audit) — per-backup owner check; a shared datastore spans tenants.
+    ok, err = _authz_pbs_backup(mgr, bt, bid)
+    if not ok:
+        return err
     result = mgr.set_group_notes(store, bt, bid, notes)
     if 'error' in result:
         return jsonify(result), 500
@@ -906,6 +974,11 @@ def set_pbs_snapshot_protected(pbs_id, store):
     protected = data.get('protected', True)
     if not all([bt, bid, btime is not None]):
         return jsonify({'error': 'Missing backup-type, backup-id, or backup-time'}), 400
+    # NS Aug 2026 (audit) — per-backup owner check; protect-flag tamper on a shared datastore
+    # (clear→enables a later prune to delete a co-tenant's backup; set→blocks their pruning).
+    ok, err = _authz_pbs_backup(mgr, bt, bid)
+    if not ok:
+        return err
     result = mgr.set_snapshot_protected(store, bt, bid, int(btime), protected)
     if 'error' in result:
         return jsonify(result), 500
@@ -1003,6 +1076,10 @@ def browse_pbs_catalog(pbs_id, store):
     filepath = request.args.get('filepath', '/')
     if not all([bt, bid, btime]):
         return jsonify({'error': 'Missing backup-type, backup-id, or backup-time'}), 400
+    # NS Aug 2026 (sec-report, BOLA) — per-backup scope on top of the server/tenant gate
+    _ok, _err = _authz_pbs_backup(mgr, bt, bid, 'vm.backup')
+    if not _ok:
+        return _err
     result = mgr.browse_catalog(store, bt, bid, int(btime), filepath)
     if 'error' in result:
         return jsonify(result), 500
@@ -1025,6 +1102,11 @@ def download_pbs_file(pbs_id, store):
     filepath = request.args.get('filepath')
     if not all([bt, bid, btime, filepath]):
         return jsonify({'error': 'Missing parameters'}), 400
+    # NS Aug 2026 (sec-report, BOLA) — per-backup scope: only stream files from a backup
+    # whose owning VMID the caller can access, not any backup on a reachable datastore.
+    _ok, _err = _authz_pbs_backup(mgr, bt, bid, 'vm.backup')
+    if not _ok:
+        return _err
     try:
         resp = mgr.download_file_from_snapshot(store, bt, bid, int(btime), filepath)
         if resp is None or resp.status_code != 200:
@@ -2018,6 +2100,29 @@ def start_backup_verification(cluster_id):
         if f not in data:
             return jsonify({'error': f'Missing: {f}'}), 400
 
+    # NS Aug 2026 (sec-report, BOLA) — verification restores + boots the backup, so it needs
+    # the same per-VM ACL as a direct VM op; cluster reach alone let a vm.backup holder restore
+    # ANY VM's backup on a reachable cluster. Also bind backup_volid's id to vmid so a scoped
+    # user can't pass their own vmid but a foreign VM's archive.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    try:
+        _vmid = int(data['vmid'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'vmid must be a number'}), 400
+    _volid = str(data.get('backup_volid') or '')
+    _is_lxc = '/ct/' in _volid or _volid.endswith('.lxc.tar') or 'vzdump-lxc' in _volid
+    if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
+                              cluster_id, _vmid, 'vm.backup', 'lxc' if _is_lxc else 'qemu'):
+        return jsonify({'error': 'Access denied: you do not have permission for this VM'}), 403
+    import re as _re
+    _m = _re.search(r'/(?:vm|ct)/(\d+)/', _volid) or _re.search(r'-(?:qemu|lxc)-(\d+)-', _volid)
+    # fail closed: a non-empty volid whose owning id we can't parse (unrecognised format) must
+    # be rejected, not silently trusted — otherwise a scoped user passes their own vmid but a
+    # foreign archive in an odd format and the bind is skipped.
+    if _volid and (not _m or int(_m.group(1)) != _vmid):
+        return jsonify({'error': 'Access denied: backup_volid does not belong to the given VM'}), 403
+
     data['cluster_id'] = cluster_id
     pve_mgr = cluster_managers[cluster_id]
 
@@ -2369,6 +2474,11 @@ def auto_attach_pbs_to_clusters(pbs_id):
     Body: {"clusters": ["cluster_id1", ...], "storage_name": "pbs-wui",
            "content": "backup"}  — storage_name defaults to pbs-<pbs_name>.
     """
+    # NS Aug 2026 (Aikido) — this pushes the PBS's stored credentials into a PVE storage
+    # config, so authz the PBS object AND every target cluster before touching anything.
+    ok, err = check_pbs_access(pbs_id)
+    if not ok:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS not found'}), 404
     pbs_mgr = pbs_managers[pbs_id]
@@ -2376,6 +2486,10 @@ def auto_attach_pbs_to_clusters(pbs_id):
     cluster_ids = body.get('clusters') or pbs_mgr.linked_clusters or []
     if not cluster_ids:
         return jsonify({'error': 'no clusters specified or linked'}), 400
+    for _cid in cluster_ids:
+        _ok, _err = check_cluster_access(_cid)
+        if not _ok:
+            return _err
 
     storage_name = (body.get('storage_name') or f"pbs-{pbs_mgr.name}").lower()
     storage_name = ''.join(c if c.isalnum() or c in ('-', '_', '.') else '-' for c in storage_name)
@@ -2817,6 +2931,15 @@ def run_backup_job_now(cluster_id, job_id):
     if not job:
         return jsonify({'error': f'job {job_id} not found'}), 404
 
+    # NS Aug 2026 (sec-report, BOLA) — a scoped vm.backup holder must not trigger a job that
+    # targets VMs outside their scope. Re-use the create/update selection gate: all=1/pool/
+    # exclude/empty selection is admin-only, explicit vmids are re-checked per-VM. The job's
+    # own selection fields (all/pool/exclude/vmid) map straight onto that helper's expectations.
+    from pegaprox.api.storage import _authz_backup_targets
+    _aerr = _authz_backup_targets(cluster_id, job)
+    if _aerr:
+        return _aerr
+
     # Pick a node to run vzdump on. Prefer a node listed in the job's `node` field;
     # otherwise the first online node we know.
     pve_node = (job.get('node') or '').split(',')[0].strip()
@@ -2888,6 +3011,22 @@ def restore_backup(cluster_id):
         return jsonify({'error': 'target_vmid must be a number'}), 400
     if mode not in ('new', 'overwrite', 'test'):
         return jsonify({'error': "mode must be 'new', 'overwrite', or 'test'"}), 400
+
+    # NS Aug 2026 (audit) — authorize the SOURCE backup, not only the target. Every mode reads the
+    # backup's disk image (overwrite→qmrestore --force, test→boot, new→into a fresh VMID), so a
+    # vm.backup holder scoped to their own VM could otherwise restore/boot ANOTHER VM's backup and
+    # read its contents. Resolve the backup's owning VMID from the volid and require access to it.
+    import re as _re
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _src_authz_user = build_authz_user(request.session.get('user', ''), request.session)
+    if _src_authz_user.get('effective_role', _src_authz_user.get('role')) != ROLE_ADMIN:
+        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
+        _src_vmid = int(_sm.group(1)) if _sm else None
+        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
+        if _src_vmid is None or not user_can_access_vm(_src_authz_user, cluster_id, _src_vmid,
+                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+            return jsonify({'error': 'Permission denied for source backup'}), 403
 
     # NS Aug 2026 (Aikido pentest) — overwrite (destructive qmrestore --force) and test (boots into
     # the VMID) both act on an EXISTING target VM, so require the same per-VM ACL as a direct VM op;

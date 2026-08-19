@@ -38,16 +38,29 @@ bp = Blueprint('settings', __name__)
 
 def _sanitize_acme_dns_settings(settings, data):
     dns_provider = str(data.get('acme_dns_provider', settings.get('acme_dns_provider', 'manual')) or 'manual').strip()
-    settings['acme_dns_provider'] = dns_provider if dns_provider in ('manual', 'rfc2136') else 'manual'
+    settings['acme_dns_provider'] = dns_provider if dns_provider in ('manual', 'rfc2136', 'cloudflare') else 'manual'
     settings['acme_dns_rfc2136_nameserver'] = str(data.get('acme_dns_rfc2136_nameserver', settings.get('acme_dns_rfc2136_nameserver', '')) or '').strip()
     settings['acme_dns_rfc2136_zone'] = str(data.get('acme_dns_rfc2136_zone', settings.get('acme_dns_rfc2136_zone', '')) or '').strip()
     settings['acme_dns_rfc2136_key_name'] = str(data.get('acme_dns_rfc2136_key_name', settings.get('acme_dns_rfc2136_key_name', '')) or '').strip()
     settings['acme_dns_rfc2136_algorithm'] = str(data.get('acme_dns_rfc2136_algorithm', settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512')) or 'hmac-sha512').strip().lower()
+    settings['acme_dns_cloudflare_zone'] = str(data.get('acme_dns_cloudflare_zone', settings.get('acme_dns_cloudflare_zone', '')) or '').strip().rstrip('.').lower()
+
+    def _cf_id(key):
+        value = str(data.get(key, settings.get(key, '')) or '').strip()
+        return value if value and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', value) else ''
+
+    settings['acme_dns_cloudflare_zone_id'] = _cf_id('acme_dns_cloudflare_zone_id')
+    settings['acme_dns_cloudflare_account_id'] = _cf_id('acme_dns_cloudflare_account_id')
 
     if 'acme_dns_rfc2136_secret' in data:
         secret = str(data.get('acme_dns_rfc2136_secret', '') or '').strip()
         if secret != '********':
             settings['acme_dns_rfc2136_secret'] = get_db()._encrypt(secret) if secret else ''
+
+    if 'acme_dns_cloudflare_token' in data:
+        token = str(data.get('acme_dns_cloudflare_token', '') or '').strip()
+        if token != '********':
+            settings['acme_dns_cloudflare_token'] = get_db()._encrypt(token) if token else ''
 
     try:
         settings['acme_dns_rfc2136_port'] = max(1, min(65535, int(data.get('acme_dns_rfc2136_port', settings.get('acme_dns_rfc2136_port', 53)) or 53)))
@@ -230,6 +243,57 @@ def migrate_all_encryption():
     })
 
 
+def _detect_install_method(install_dir):
+    """How was THIS running instance installed? Governs how it may self-update.
+
+    NS 2026-08-11 — the built-in updater is a git-tree download + pip run and only fits the
+    deploy.sh / source layout. It must NOT run on:
+      - 'apt'   : files are owned by the pegaprox .deb and deps are system python3-* packages;
+                  the correct update is `apt upgrade`. A git+pip run diverges from dpkg and
+                  can't lift the dpkg-owned crypto libs → fail-closed TLS on restart.
+      - 'docker': the image is immutable; a file-level update is discarded on the next image
+                  pull / container recreate, so it's pointless (and misleading).
+    Anything else → 'source' (deploy.sh / git checkout, optionally a venv) = the updater's turf.
+    Docker wins over apt: our images are built by apt-installing pegaprox, but a container is
+    still updated by pulling a new image, never by apt inside it.
+    """
+    try:
+        if os.path.exists('/.dockerenv'):
+            return 'docker'
+        with open('/proc/1/cgroup', 'r') as _cg:
+            if any(k in _cg.read() for k in ('docker', 'containerd', 'kubepods')):
+                return 'docker'
+    except Exception:
+        pass
+    try:
+        probe = os.path.join(install_dir, 'pegaprox_multi_cluster.py')
+        r = subprocess.run(['dpkg', '-S', probe], capture_output=True, text=True, timeout=5)
+        # dpkg -S prints "pegaprox: /usr/lib/pegaprox/pegaprox_multi_cluster.py" when tracked
+        if r.returncode == 0 and 'pegaprox' in (r.stdout.split(':', 1)[0] if ':' in r.stdout else ''):
+            return 'apt'
+    except Exception:
+        pass
+    return 'source'
+
+
+def _managed_update_guidance(method):
+    """Operator-facing 'update it the right way' message for a non-source install."""
+    return {
+        'apt': 'This instance is managed by APT/dpkg. Update it with the command below. '
+               'For hands-off updates, enable unattended-upgrades on the PegaProx repo.',
+        'docker': 'This instance runs in a container. Pull a fresh image and recreate the '
+                  'container — an in-place update would be discarded on the next pull.',
+    }.get(method, '')
+
+
+def _managed_update_command(method):
+    """The bare, copy-pasteable command for a non-source install (rendered as a code block)."""
+    return {
+        'apt': 'sudo apt update && sudo apt upgrade pegaprox',
+        'docker': 'docker compose pull && docker compose up -d',
+    }.get(method, '')
+
+
 @bp.route('/api/pegaprox/check-update', methods=['GET'])
 @require_auth(perms=['update.manage'])
 def check_pegaprox_update():
@@ -293,7 +357,13 @@ def check_pegaprox_update():
         latest_tuple = parse_version(latest_version)
         
         update_available = latest_tuple > current_tuple
-        
+
+        # NS 2026-08-11 — tell the UI how this instance was installed so it can render the
+        # right update path (apt upgrade / docker pull) instead of the in-app file updater,
+        # which only fits the source/deploy.sh layout.
+        _install_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        _method = _detect_install_method(_install_dir)
+
         return jsonify({
             'current_version': PEGAPROX_VERSION,
             'current_build': PEGAPROX_BUILD,
@@ -303,6 +373,10 @@ def check_pegaprox_update():
             'changelog': remote_version.get('changelog', []),
             'download_url': remote_version.get('download_url', GITHUB_REPO_URL),
             'update_available': update_available,
+            'install_method': _method,
+            'in_app_update_supported': _method == 'source',
+            'managed_update_hint': _managed_update_guidance(_method),
+            'managed_update_command': _managed_update_command(_method),
             'min_python': remote_version.get('min_python', '3.8'),
             'breaking_changes': remote_version.get('breaking_changes', []),
         })
@@ -359,6 +433,22 @@ def perform_pegaprox_update():
     try:
         data = request.json or {}
         force = data.get('force', False)
+        allow_managed = bool(data.get('allow_managed', False))  # power-user escape hatch
+
+        # NS 2026-08-11 — refuse the git+pip file updater on installs it doesn't fit. On an
+        # apt/dpkg instance the correct path is `apt upgrade` (deps are system python3-*
+        # packages; a pip run can't lift the dpkg-owned crypto libs → fail-closed TLS brick on
+        # restart, and the file copy diverges from dpkg). On Docker the update is discarded at
+        # the next image pull. Route the operator instead of bricking them; allow_managed lets a
+        # power-user force it anyway.
+        _install_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        _method = _detect_install_method(_install_dir)
+        if _method in ('apt', 'docker') and not allow_managed:
+            return jsonify({
+                'error': 'in_app_update_not_supported',
+                'install_method': _method,
+                'message': _managed_update_guidance(_method),
+            }), 409
 
         # Protected paths - NEVER overwrite
         PROTECTED = [
@@ -744,6 +834,30 @@ def perform_pegaprox_update():
                 audit_detail += f" (+{len(failed_files) - 5} more)"
         log_audit(user, 'pegaprox.update_completed', audit_detail)
 
+        # MK 2026-08-11 — preflight the crypto/TLS stack in the interpreter the restarted
+        # service will actually use (the venv), NOT this already-running one that still has the
+        # old deps in memory. Our TLS startup is fail-closed (#633): if the just-synced
+        # requirements didn't land a loadable cryptography/pyOpenSSL pair, restarting now takes
+        # the service down and it won't come back. Verify a self-signed cert can be generated
+        # first; if it can't, keep the current process up and let the operator fix deps.
+        deps_ok, deps_reason = True, ''
+        try:
+            _venv_py = os.path.join(install_dir, 'venv', 'bin', 'python')
+            _pf_py = _venv_py if os.path.exists(_venv_py) else sys.executable
+            _pf = subprocess.run(
+                [_pf_py, '-c',
+                 "from OpenSSL import crypto; k=crypto.PKey(); "
+                 "k.generate_key(crypto.TYPE_RSA, 2048); c=crypto.X509(); "
+                 "c.set_pubkey(k); c.sign(k, 'sha256')"],
+                capture_output=True, text=True, timeout=30)
+            if _pf.returncode != 0:
+                deps_ok = False
+                _err = (_pf.stderr or _pf.stdout or 'crypto preflight failed').strip().splitlines()
+                deps_reason = (_err[-1] if _err else 'crypto preflight failed')[:200]
+        except Exception as _pfe:
+            deps_ok = False
+            deps_reason = str(_pfe)[:200]
+
         # Schedule restart
         restart_delay = 3
 
@@ -780,7 +894,12 @@ def perform_pegaprox_update():
             except:
                 os._exit(0)
 
-        threading.Thread(target=restart_server, daemon=True).start()
+        if deps_ok:
+            threading.Thread(target=restart_server, daemon=True).start()
+        else:
+            logging.error(f"[update] restart SKIPPED — dependency/crypto preflight failed: {deps_reason}")
+            log_audit(user, 'pegaprox.update_restart_skipped',
+                      f"Restart withheld after update to {new_version}: crypto/deps preflight failed")
 
         # MK 2026-06-02: surface partial-success in the response so the UI can
         # show a warning instead of a green check when N files failed to write.
@@ -802,20 +921,29 @@ def perform_pegaprox_update():
         if version_mismatch:
             logging.warning(f"[update] post-copy version mismatch: on-disk {on_disk_version}, expected {new_version}")
 
-        partial = len(failed_files) > 0 or version_mismatch
+        partial = len(failed_files) > 0 or version_mismatch or not deps_ok
         _verb = 'Re-synced all files for' if resync else 'Update to'
+        if not deps_ok:
+            _msg = (f'{_verb} {new_version} was written to disk, but the Python dependency '
+                    f'upgrade did not complete — the service was NOT restarted and is still '
+                    f'running the previous version (this avoids a failed start). Update the '
+                    f'dependencies on the host (pip install -r requirements.txt) and restart '
+                    f'the service manually. Detail: {deps_reason}')
+        elif partial:
+            _msg = (f'{_verb} {new_version} partially applied — '
+                    f'{len(failed_files)} file(s) failed to write'
+                    f'{", on-disk version mismatch" if version_mismatch else ""}. '
+                    f'Restarting in {restart_delay}s...')
+        else:
+            _msg = f'{_verb} {new_version} complete! Restarting in {restart_delay}s...'
         return jsonify({
             'success': True,
             'partial': partial,
             'resync': resync,
+            'deps_ok': deps_ok,
             'on_disk_version': on_disk_version,
             'version_mismatch': version_mismatch,
-            'message': (f'{_verb} {new_version} complete! Restarting in {restart_delay}s...'
-                        if not partial else
-                        f'{_verb} {new_version} partially applied — '
-                        f'{len(failed_files)} file(s) failed to write'
-                        f'{", on-disk version mismatch" if version_mismatch else ""}. '
-                        f'Restarting in {restart_delay}s...'),
+            'message': _msg,
             'updated_version': new_version,
             'update_method': update_method,
             'backup_path': backup_path,
@@ -823,7 +951,7 @@ def perform_pegaprox_update():
             'files_failed': failed_files,
             'files_protected': skipped_protected,
             'pip_install': pip_result,
-            'restarting': True,
+            'restarting': deps_ok,
             'restart_delay': restart_delay
         })
 
@@ -1195,6 +1323,8 @@ def get_server_settings():
         settings['oidc_client_secret'] = '********'
     if settings.get('acme_dns_rfc2136_secret'):
         settings['acme_dns_rfc2136_secret'] = '********'
+    if settings.get('acme_dns_cloudflare_token'):
+        settings['acme_dns_cloudflare_token'] = '********'
     return jsonify(settings)
 
 
@@ -1258,6 +1388,8 @@ def update_server_settings():
                 settings['acme_email'] = str(data['acme_email']).strip()
             if 'acme_staging' in data:
                 settings['acme_staging'] = bool(data['acme_staging'])
+            if 'acme_allow_private_ca' in data:
+                settings['acme_allow_private_ca'] = bool(data['acme_allow_private_ca'])
             if 'acme_challenge_type' in data:
                 challenge_type = str(data['acme_challenge_type'] or 'http-01').strip()
                 settings['acme_challenge_type'] = challenge_type if challenge_type in ('http-01', 'dns-01') else 'http-01'
@@ -1639,6 +1771,8 @@ def update_server_settings():
             settings['acme_enabled'] = request.form.get('acme_enabled', str(settings.get('acme_enabled', 'false'))).lower() == 'true'
             settings['acme_email'] = request.form.get('acme_email', settings.get('acme_email', '')).strip()
             settings['acme_staging'] = request.form.get('acme_staging', str(settings.get('acme_staging', 'false'))).lower() == 'true'
+            # NS Aug 2026 (#685) — opt-in to reach a private/internal ACME CA (StepCA on RFC1918)
+            settings['acme_allow_private_ca'] = request.form.get('acme_allow_private_ca', str(settings.get('acme_allow_private_ca', 'false'))).lower() == 'true'
             acme_challenge_type = request.form.get('acme_challenge_type', settings.get('acme_challenge_type', 'http-01')).strip()
             settings['acme_challenge_type'] = acme_challenge_type if acme_challenge_type in ('http-01', 'dns-01') else 'http-01'
             settings = _sanitize_acme_dns_settings(settings, request.form)
@@ -1881,6 +2015,10 @@ def get_acme_status():
             'acme_dns_rfc2136_algorithm': settings.get('acme_dns_rfc2136_algorithm', 'hmac-sha512'),
             'acme_dns_rfc2136_ttl': settings.get('acme_dns_rfc2136_ttl', 60),
             'acme_dns_propagation_seconds': settings.get('acme_dns_propagation_seconds', 30),
+            'acme_dns_cloudflare_token': '********' if settings.get('acme_dns_cloudflare_token') else '',
+            'acme_dns_cloudflare_zone': settings.get('acme_dns_cloudflare_zone', ''),
+            'acme_dns_cloudflare_zone_id': settings.get('acme_dns_cloudflare_zone_id', ''),
+            'acme_dns_cloudflare_account_id': settings.get('acme_dns_cloudflare_account_id', ''),
             'acme_provider': settings.get('acme_provider', 'letsencrypt'),
             'acme_directory_url': settings.get('acme_directory_url', ''),
             'domain': settings.get('domain', ''),
@@ -1923,7 +2061,7 @@ def request_acme_certificate():
             return jsonify({'error': 'Invalid ACME provider'}), 400
         if challenge_type not in ('http-01', 'dns-01'):
             return jsonify({'error': 'Invalid ACME challenge type'}), 400
-        if dns_provider not in ('manual', 'rfc2136'):
+        if dns_provider not in ('manual', 'rfc2136', 'cloudflare'):
             return jsonify({'error': 'Invalid DNS-01 provider'}), 400
         if challenge_type == 'dns-01' and dns_provider == 'rfc2136':
             missing = [
@@ -1936,6 +2074,9 @@ def request_acme_certificate():
             ]
             if missing:
                 return jsonify({'error': ', '.join(missing) + ' required'}), 400
+        if challenge_type == 'dns-01' and dns_provider == 'cloudflare':
+            if not settings.get('acme_dns_cloudflare_token'):
+                return jsonify({'error': 'Cloudflare API token required'}), 400
         if acme_provider == 'custom':
             if not directory_url:
                 return jsonify({'error': 'Custom ACME directory URL is required'}), 400
@@ -2128,6 +2269,8 @@ def backup_config():
                 backup_data['server_settings']['smtp_password'] = ''
             if 'acme_dns_rfc2136_secret' in backup_data['server_settings']:
                 backup_data['server_settings']['acme_dns_rfc2136_secret'] = ''
+            if 'acme_dns_cloudflare_token' in backup_data['server_settings']:
+                backup_data['server_settings']['acme_dns_cloudflare_token'] = ''
         
         # Clusters
         clusters = database.get_all_clusters()
@@ -4305,6 +4448,7 @@ def start_rolling_update(cluster_id):
                     # Step 4: If reboot was included, wait for node to come back
                     if include_reboot:
                         mgr._rolling_update['current_step'] = 'rebooting'
+                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Evaluating if node {node_name} requires a reboot. Analyzing...")
                         mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Node {node_name} rebooting (timeout: {reboot_timeout}s)...")
                         if 'rebooting_nodes' not in mgr._rolling_update:
                             mgr._rolling_update['rebooting_nodes'] = []

@@ -94,6 +94,9 @@ def add_vmware_server():
 @require_auth(perms=['vmware.config'])
 def update_vmware_server(vmware_id):
     """Update a VMware server config"""
+    ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on write
+    if not ok:
+        return err
     data = request.json or {}
     
     if vmware_id not in vmware_managers:
@@ -147,6 +150,9 @@ def update_vmware_server(vmware_id):
 @require_auth(perms=['vmware.config'])
 def delete_vmware_server(vmware_id):
     """Delete a VMware server"""
+    ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on delete
+    if not ok:
+        return err
     name = vmware_managers[vmware_id].name if vmware_id in vmware_managers else vmware_id
     if vmware_id in vmware_managers:
         del vmware_managers[vmware_id]
@@ -178,6 +184,9 @@ def test_vmware_connection():
 @require_auth(perms=['vmware.config'])
 def diagnose_vmware_connection(vmware_id):
     """diagnose connection issues -- compares stored vs. fresh credentials"""
+    ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on diagnose
+    if not ok:
+        return err
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -289,6 +298,12 @@ def get_vmware_vm_detail(vmware_id, vm_id):
     ok, err = check_vmware_access(vmware_id)
     if not ok:
         return err
+    # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
+    users = load_users()
+    user = users.get(request.session.get('user', ''), {})
+    user['username'] = request.session.get('user', '')
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -348,6 +363,12 @@ def get_vmware_snapshots(vmware_id, vm_id):
     ok, err = check_vmware_access(vmware_id)
     if not ok:
         return err
+    # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
+    users = load_users()
+    user = users.get(request.session.get('user', ''), {})
+    user['username'] = request.session.get('user', '')
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.snapshot'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]
@@ -607,6 +628,12 @@ def get_vmware_vm_performance(vmware_id, vm_id):
     ok, err = check_vmware_access(vmware_id)
     if not ok:
         return err
+    # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
+    users = load_users()
+    user = users.get(request.session.get('user', ''), {})
+    user['username'] = request.session.get('user', '')
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
     mgr = vmware_managers[vmware_id]

@@ -207,7 +207,10 @@ jobs:
                 echo "deb [signed-by=/etc/apt/keyrings/gyptazy.asc] https://packages.gyptazy.com/api/packages/gyptazy/debian ${DEBIAN_RELEASE} main" \\
                   > /etc/apt/sources.list.d/gyptazy.list
                 apt-get update
-                apt-get -y install pegaprox
+                # NS Aug 2026 (#688) — sshpass: PegaProx falls back to it for password-auth SSH
+                # (CVE scan et al.); the prebuilt image must ship it or that path dies with
+                # "sshpass not installed". Key auth works without it, but the appliance supports both.
+                apt-get -y install pegaprox sshpass
                 systemctl enable pegaprox || true
                 # --- Root-Login setzen ---
                 echo 'root:PegaProx2026!' | chpasswd
@@ -311,6 +314,8 @@ jobs:
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Tools installieren
         run: |
@@ -379,7 +384,7 @@ jobs:
           dpkg -i python3-flask-sock_0.7.1_all.deb
           dpkg -i python3-xenapi_26.8.1_all.deb
           apt-get -y install sudo sqlite3 ca-certificates curl
-          apt-get -y install pegaprox
+          apt-get -y install pegaprox sshpass
           systemctl enable pegaprox || true
 
           # --- Login-User mit sudo ---

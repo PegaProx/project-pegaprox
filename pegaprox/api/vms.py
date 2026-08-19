@@ -1242,9 +1242,13 @@ def download_iso_from_url(cluster_id, storage_name):
         # metadata-by-hostname. Delegate to the central guard, which fails CLOSED
         # (require_resolution) and blocks private/loopback/link-local/metadata. The URL is
         # fetched by the Proxmox node, so this SSRF would fire from the PVE management LAN.
-        from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+        from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
         try:
-            url = sanitize_outbound_url(url, allowed_schemes=('https', 'http'))
+            # GHSA-hmcf-9q7f-vx35 — the download is delegated to the PVE node, which re-resolves the
+            # host on its own box AND (below) fetches with verify-certificates=0, so a low-TTL rebind
+            # could dodge the guard. Pin the vetted IP into the URL (both http and https, since PVE
+            # won't verify the cert) so there is no second resolution to rebind.
+            url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'), tls_verified=False)
         except SsrfError as _ssrf:
             return jsonify({'error': f'URL rejected by SSRF guard: {_ssrf}'}), 400
 
@@ -1587,7 +1591,20 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
     
     if not volid:
         return jsonify({'error': 'Backup volume ID required'}), 400
-    
+
+    # NS Aug 2026 (audit re-verify) — authorize the SOURCE backup, not only the URL vmid; else a user
+    # scoped to their own VM could restore ANOTHER VM's backup image into it (force=1 when
+    # target==vmid) and read the contents. Mirrors pbs.py restore_backup's source check.
+    _authz_user = build_authz_user(request.session.get('user', ''), request.session)
+    if _authz_user.get('effective_role', _authz_user.get('role')) != ROLE_ADMIN:
+        import re as _re
+        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
+        _src_vmid = int(_sm.group(1)) if _sm else None
+        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
+        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
+                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+            return jsonify({'error': 'Permission denied for source backup'}), 403
+
     try:
         host, port = manager.host, manager.api_port
         session = manager._create_session()
@@ -7774,6 +7791,10 @@ def _console_authz(user, cluster_id, vmid, vm_type=None):
     from pegaprox.utils.rbac import get_user_clusters, load_vm_acls, user_can_access_vm
     if not user:
         return False, 'no user'
+    # NS Aug 2026 (audit re-verify) — a disabled account keeps no console access, even via a
+    # pre-minted ws_token (this path is reached without require_auth's account-state gate).
+    if not user.get('enabled', True):
+        return False, 'account disabled'
     if user.get('role') == ROLE_ADMIN:
         return True, None
     username = user.get('username', '') or ''
@@ -10190,12 +10211,26 @@ def bulk_migrate_api(cluster_id):
     
     user = getattr(request, 'session', {}).get('user', 'system')
     log_audit(user, 'vm.bulk_migrated', f"Bulk migration of {len(vms)} VMs to {target_node}", cluster=mgr.config.name)
+
+    # NS Aug 2026 (audit) — the single-VM migrate gates every vmid via user_can_access_vm, but this
+    # bulk twin only had the cluster gate, so a VM-ACL/pool-scoped user could relocate foreign VMs
+    # by listing their vmids. Build the authz user once and skip (don't abort on) each VM the caller
+    # isn't scoped to.
+    _authz_user = load_users().get(request.session['user'], {})
+    _authz_user['username'] = request.session['user']
     
     # LW: Feb 2026 - enforced violations skip that VM but don't abort the whole batch
     from pegaprox.api.history import check_affinity_violation
 
     results = []
     for vm in vms:
+        if not user_can_access_vm(_authz_user, cluster_id, vm['vmid'], 'vm.migrate', vm.get('type', 'qemu')):
+            results.append({
+                'vmid': vm['vmid'], 'success': False, 'task': None,
+                'error': 'Permission denied: vm.migrate'
+            })
+            continue
+
         # NS: affinity check per VM
         aff = check_affinity_violation(cluster_id, vm['vmid'], target_node)
         if aff.get('violation') and aff.get('enforce'):
@@ -10354,6 +10389,14 @@ def cross_cluster_migrate_api():
         return err
     ok, err = check_cluster_access(target_cluster_id)
     if not ok:
+        return err
+
+    # NS Aug 2026 (audit re-verify) — object-level authz on the SOURCE VM. Cross-cluster migrate
+    # relocates and (delete_source defaults True) DELETES the source guest, yet only had the two
+    # cluster gates. The per-node twin remote_migrate_vm_api gates via _require_vm_access; this
+    # route was missed, letting a VM-ACL/pool-scoped user relocate+delete a foreign VM.
+    err = _require_vm_access(source_cluster_id, vmid, 'vm.migrate', vm_type)
+    if err:
         return err
 
     source_manager = cluster_managers[source_cluster_id]

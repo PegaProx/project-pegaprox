@@ -8,6 +8,7 @@ import time
 import logging
 import hashlib
 import base64
+import re
 import requests
 import secrets
 
@@ -19,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 ACME_DIRECTORY_PROD = 'https://acme-v02.api.letsencrypt.org/directory'
 ACME_DIRECTORY_STAGING = 'https://acme-staging-v02.api.letsencrypt.org/directory'
+CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
+_CF_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
 # challenge tokens currently being served — { token: key_authorization }
 _pending_challenges = {}
@@ -110,14 +113,27 @@ def _signed_request(url, payload, account_key, nonce, kid=None):
     return resp
 
 
+def _acme_allow_private():
+    """NS Aug 2026 (#685) — opt-in to allow an ACME directory on a private/internal address
+    (e.g. an in-house StepCA on RFC1918). Off by default, so the SSRF guard still blocks
+    private/loopback targets; when on, ONLY private-range blocking is relaxed — cloud-metadata
+    endpoints stay blocked regardless. Mirrors alert_webhook_allow_private / oidc_allow_private_ip."""
+    try:
+        from pegaprox.api.helpers import load_server_settings
+        return bool((load_server_settings() or {}).get('acme_allow_private_ca', False))
+    except Exception:
+        return False
+
+
 def _guard_acme_url(url):
     """M-8/M-9 (security audit): every ACME follow-on URL pulled out of the
     directory doc (newNonce/newAccount/newOrder/finalize/certificate/authz/
     challenge) must pass the SAME SSRF guard as the directory itself — a
     hostile/MITM'd directory response could point them at 169.254.169.254 /
-    RFC1918. Public CAs (Let's Encrypt) are unaffected. Raises SsrfError."""
+    RFC1918. Public CAs (Let's Encrypt) are unaffected. An internal CA (#685)
+    is allowed only when the operator opted in. Raises SsrfError."""
     from pegaprox.utils.url_security import sanitize_outbound_url
-    return sanitize_outbound_url(url)  # https-only + block-private (matches directory guard)
+    return sanitize_outbound_url(url, allow_private=_acme_allow_private())  # https-only
 
 
 def _get_nonce(directory):
@@ -207,6 +223,252 @@ def _rfc2136_update(config, dns_name, dns_value, action='present'):
     except Exception as e:
         logging.error(f"[ACME] RFC 2136 update failed: {e}")
         return {'success': False, 'message': f'RFC 2136 DNS update failed: {e}'}
+
+
+def _cloudflare_safe_id(value):
+    """Return a Cloudflare zone/record/account id, or '' if it is not a safe path segment."""
+    value = (value or '').strip()
+    return value if value and _CF_ID_RE.match(value) else ''
+
+
+def _normalize_dns_host(name):
+    """Strip wildcards, trailing dots, and the _acme-challenge prefix from a hostname."""
+    host = (name or '').strip().rstrip('.').lower()
+    if host.startswith('*.'):
+        host = host[2:]
+    if host.startswith('_acme-challenge.'):
+        host = host[len('_acme-challenge.'):]
+    return host
+
+
+def _cloudflare_zone_candidates(dns_name, zone_hint=None):
+    """Return zone names to try, most-specific first (certbot-style label walking)."""
+    candidates = []
+
+    def add(name):
+        host = _normalize_dns_host(name)
+        if not host:
+            return
+        labels = host.split('.')
+        for i in range(0, max(0, len(labels) - 1)):
+            guess = '.'.join(labels[i:])
+            if guess not in candidates:
+                candidates.append(guess)
+
+    add(zone_hint)
+    add(dns_name)
+    return candidates
+
+
+def _txt_contents_match(stored, expected):
+    """Compare TXT rdata, ignoring optional Cloudflare quoting."""
+    left = (stored or '').strip().strip('"')
+    right = (expected or '').strip().strip('"')
+    return left == right
+
+
+def _cloudflare_api(token, method, path, params=None, json_body=None):
+    """Call the public Cloudflare API. Base URL is hardcoded to avoid SSRF."""
+    url = CLOUDFLARE_API_BASE + path
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+    }
+    try:
+        resp = requests.request(
+            method, url, headers=headers, params=params, json=json_body,
+            timeout=20, allow_redirects=False,
+        )
+    except Exception as e:
+        logging.error(f"[ACME] Cloudflare API request failed: {e}")
+        return {'success': False, 'message': f'Cloudflare API request failed: {e}'}
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return {'success': False, 'message': f'Cloudflare API returned HTTP {resp.status_code}', 'status_code': resp.status_code}
+
+    # MK Aug 2026 (#691 follow-up) — a non-object JSON body (list/null/string from a proxy or a
+    # weird error) would make payload.get() below throw; that AttributeError could propagate out
+    # of the cleanup finally and leave the TXT record behind. Treat anything non-dict as failure.
+    if not isinstance(payload, dict):
+        return {'success': False, 'message': f'Cloudflare API returned an unexpected body (HTTP {resp.status_code})', 'status_code': resp.status_code}
+
+    if not payload.get('success'):
+        errors = payload.get('errors') or []
+        detail = '; '.join(
+            (err.get('message') if isinstance(err, dict) else str(err)) or 'unknown error'
+            for err in errors
+        ) or f'HTTP {resp.status_code}'
+        return {
+            'success': False,
+            'message': f'Cloudflare API error: {detail}',
+            'status_code': resp.status_code,
+        }
+    return {'success': True, 'result': payload.get('result'), 'status_code': resp.status_code}
+
+
+def _cloudflare_resolve_zone(config, dns_name):
+    """Resolve the Cloudflare zone id from an override or by walking the domain."""
+    token = (config.get('token') or '').strip()
+    cached = _cloudflare_safe_id(config.get('_cloudflare_zone_id'))
+    if cached:
+        return {'success': True, 'zone_id': cached}
+
+    raw_zone_id = (config.get('zone_id') or '').strip()
+    if raw_zone_id:
+        zone_id = _cloudflare_safe_id(raw_zone_id)
+        if not zone_id:
+            return {'success': False, 'message': 'Invalid Cloudflare zone ID'}
+        config['_cloudflare_zone_id'] = zone_id
+        return {'success': True, 'zone_id': zone_id}
+
+    account_id = _cloudflare_safe_id(config.get('account_id'))
+    params_base = {'status': 'active', 'per_page': 50}
+    if account_id:
+        params_base['account.id'] = account_id
+    elif (config.get('account_id') or '').strip():
+        return {'success': False, 'message': 'Invalid Cloudflare account ID'}
+
+    last_error = None
+    for name in _cloudflare_zone_candidates(dns_name, config.get('cloudflare_zone')):
+        listed = _cloudflare_api(token, 'GET', '/zones', params={**params_base, 'name': name})
+        if not listed.get('success'):
+            status = listed.get('status_code')
+            if status in (401, 403):
+                return {
+                    'success': False,
+                    'message': (
+                        f"{listed.get('message')}. Use a token with Zone → DNS → Edit; "
+                        "if auto-detect fails, set the Zone ID override."
+                    ),
+                }
+            last_error = listed
+            continue
+        zones = listed.get('result') or []
+        if len(zones) == 1:
+            zone_id = _cloudflare_safe_id((zones[0] or {}).get('id'))
+            if not zone_id:
+                return {'success': False, 'message': 'Cloudflare returned an invalid zone ID'}
+            config['_cloudflare_zone_id'] = zone_id
+            return {'success': True, 'zone_id': zone_id, 'zone_name': (zones[0] or {}).get('name')}
+        if len(zones) > 1:
+            return {'success': False, 'message': 'Multiple Cloudflare zones matched; set a Zone ID override'}
+
+    if last_error:
+        return {'success': False, 'message': last_error.get('message') or 'Cloudflare zone lookup failed'}
+    return {
+        'success': False,
+        'message': 'Could not find a Cloudflare zone for this domain. Set the zone name or Zone ID.',
+    }
+
+
+def _cloudflare_update(config, dns_name, dns_value, action='present'):
+    """Create or remove the ACME DNS-01 TXT record via the Cloudflare DNS API."""
+    token = (config.get('token') or '').strip()
+    if not token:
+        return {'success': False, 'message': 'Cloudflare API token is required'}
+
+    resolved = _cloudflare_resolve_zone(config, dns_name)
+    if not resolved.get('success'):
+        return resolved
+    zone_id = resolved['zone_id']
+    record_name = (dns_name or '').strip().rstrip('.')
+
+    if action == 'delete':
+        rec_id = _cloudflare_safe_id(config.get('_cloudflare_record_id'))
+        if not rec_id:
+            listed = _cloudflare_api(
+                token, 'GET', f'/zones/{zone_id}/dns_records',
+                params={'type': 'TXT', 'name': record_name, 'per_page': 100},
+            )
+            if not listed.get('success'):
+                return listed
+            for rec in listed.get('result') or []:
+                if _txt_contents_match((rec or {}).get('content'), dns_value):
+                    rec_id = _cloudflare_safe_id((rec or {}).get('id'))
+                    if rec_id:
+                        break
+        if not rec_id:
+            logging.info("[ACME] Cloudflare TXT record already absent")
+            return {'success': True}
+        deleted = _cloudflare_api(token, 'DELETE', f'/zones/{zone_id}/dns_records/{rec_id}')
+        if not deleted.get('success'):
+            return deleted
+        config.pop('_cloudflare_record_id', None)
+        return {'success': True}
+
+    try:
+        ttl = max(60, min(86400, int(config.get('ttl') or 60)))
+    except (TypeError, ValueError):
+        ttl = 60
+
+    created = _cloudflare_api(
+        token, 'POST', f'/zones/{zone_id}/dns_records',
+        json_body={'type': 'TXT', 'name': record_name, 'content': dns_value, 'ttl': ttl},
+    )
+    if not created.get('success'):
+        return created
+    rec_id = _cloudflare_safe_id((created.get('result') or {}).get('id'))
+    if rec_id:
+        config['_cloudflare_record_id'] = rec_id
+    return {'success': True}
+
+
+_AUTOMATED_DNS_UPDATERS = {
+    'rfc2136': ('RFC 2136', _rfc2136_update),
+    'cloudflare': ('Cloudflare', _cloudflare_update),
+}
+
+
+def _run_automated_dns01(provider_name, updater, dns_config, dns_name, dns_value, context, dns_challenge, domain, ssl_dir):
+    """Present the TXT record, wait, validate, then always try to clean it up."""
+    dns_config = dns_config or {}
+    update_result = updater(dns_config, dns_name, dns_value, action='present')
+    if not update_result.get('success'):
+        return update_result
+
+    try:
+        propagation_seconds = max(0, min(600, int(dns_config.get('propagation_seconds') or 30)))
+    except (TypeError, ValueError):
+        propagation_seconds = 30
+
+    result = None
+    try:
+        if propagation_seconds:
+            logging.info(f"[ACME] Waiting {propagation_seconds}s for {provider_name} DNS propagation")
+            time.sleep(propagation_seconds)
+        result = _validate_challenge(
+            context['authz_url'],
+            dns_challenge['url'],
+            context['account_key'],
+            context['nonce'],
+            context['kid'],
+        )
+    finally:
+        # MK Aug 2026 — the cleanup runs in a finally, so a *raised* updater (not just a
+        # failure dict) would propagate out and mask the validation result / abort finalization,
+        # leaving the challenge TXT behind. The non-dict guard in _cloudflare_api covers the one
+        # known CF trigger; wrap the whole call so no updater can ever swallow the real outcome.
+        try:
+            cleanup = updater(dns_config, dns_name, dns_value, action='delete')
+            if not cleanup.get('success'):
+                logging.warning(f"[ACME] {provider_name} TXT cleanup failed: {cleanup.get('message')}")
+        except Exception as cleanup_err:
+            logging.warning(f"[ACME] {provider_name} TXT cleanup raised, ignoring: {cleanup_err}")
+
+    if not result or not result.get('success'):
+        return result or {'success': False, 'message': f'{provider_name} DNS-01 validation failed'}
+
+    return _finalize_order(
+        domain,
+        ssl_dir,
+        context['order'],
+        context['order_url'],
+        context['account_key'],
+        result['nonce'],
+        context['kid'],
+    )
 
 
 def _validate_challenge(authz_url, challenge_url, account_key, nonce, kid, token=None):
@@ -311,9 +573,10 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
     logging.info(f"[ACME] Starting certificate request for {domain} ({env}) via {acme_url}")
     try:
         from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
-        sanitize_outbound_url(acme_url)
+        sanitize_outbound_url(acme_url, allow_private=_acme_allow_private())
     except SsrfError as guard_err:
-        return {'success': False, 'message': f'ACME directory URL rejected: {guard_err}'}
+        return {'success': False, 'message': f'ACME directory URL rejected: {guard_err} '
+                '(set "Allow private/internal ACME CA" in SSL settings if this is an internal CA)'}
 
     dir_resp = requests.get(acme_url, timeout=15, allow_redirects=False)  # M-8: no redirect to internal
     dir_resp.raise_for_status()
@@ -439,38 +702,12 @@ def prepare_dns01_challenge(domain, email, ssl_dir, staging=False, directory_url
         dns_name = _dns01_record_name(domain)
         dns_value = _dns01_value(key_authorization)
 
-        if dns_provider == 'rfc2136':
-            dns_config = dns_config or {}
-            update_result = _rfc2136_update(dns_config, dns_name, dns_value, action='present')
-            if not update_result.get('success'):
-                return update_result
-
-            propagation_seconds = max(0, min(600, int(dns_config.get('propagation_seconds') or 30)))
-            if propagation_seconds:
-                logging.info(f"[ACME] Waiting {propagation_seconds}s for RFC 2136 DNS propagation")
-                time.sleep(propagation_seconds)
-
-            result = _validate_challenge(
-                context['authz_url'],
-                dns_challenge['url'],
-                context['account_key'],
-                context['nonce'],
-                context['kid'],
-            )
-            cleanup = _rfc2136_update(dns_config, dns_name, dns_value, action='delete')
-            if not cleanup.get('success'):
-                logging.warning(f"[ACME] RFC 2136 TXT cleanup failed: {cleanup.get('message')}")
-            if not result.get('success'):
-                return result
-
-            return _finalize_order(
-                domain,
-                ssl_dir,
-                context['order'],
-                context['order_url'],
-                context['account_key'],
-                result['nonce'],
-                context['kid'],
+        automated = _AUTOMATED_DNS_UPDATERS.get(dns_provider)
+        if automated:
+            provider_name, updater = automated
+            return _run_automated_dns01(
+                provider_name, updater, dns_config, dns_name, dns_value,
+                context, dns_challenge, domain, ssl_dir,
             )
         if dns_provider != 'manual':
             return {'success': False, 'message': 'Unsupported DNS-01 provider'}

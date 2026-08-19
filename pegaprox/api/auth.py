@@ -1133,7 +1133,22 @@ def auth_validate():
     session = validate_session(session_id)
     if not session:
         return jsonify({'valid': False, 'error': 'Invalid session'}), 401
-    
+
+    # NS Aug 2026 (audit) — validate_session only proves the session is fresh; require_auth does the
+    # account-state gate, but this decorator-less WS-auth endpoint bypasses it. Recheck 'enabled' so
+    # a just-disabled operator can't keep authenticating the shell/VNC WebSocket. Use the indexed
+    # get_user() (not whole-table load_users(), which can degrade to {} under gevent/WAL contention
+    # and falsely 401 a live user).
+    try:
+        _u = get_db().get_user(session['user'])
+    except Exception:
+        _u = load_users().get(session['user'])
+    # tolerant of a transient lookup miss (only reject a record that EXISTS and is disabled) — a
+    # deleted/disabled account already had its sessions invalidated, so a None here is a transient
+    # read, not a live disabled user, and must not false-401 a valid console handshake.
+    if _u is not None and not _u.get('enabled', True):
+        return jsonify({'valid': False, 'error': 'Account disabled'}), 401
+
     return jsonify({
         'valid': True,
         'user': session['user'],
@@ -1183,6 +1198,17 @@ def get_cluster_creds_internal(cluster_id):
     # Check permissions - NS Feb 2026
     users_db = load_users()
     user_data = users_db.get(session['user'], {})
+    # NS Aug 2026 (audit) — recheck account state via the indexed get_user() (not the whole-table
+    # users_db view, which can transiently degrade to {} under gevent/WAL contention and falsely deny
+    # a live console); a disabled operator's live session must not keep minting node-shell creds / a
+    # fresh PVE console ticket (validate_session has no enabled gate).
+    try:
+        _acct = get_db().get_user(session['user'])
+    except Exception:
+        _acct = user_data or None
+    if _acct is not None and not _acct.get('enabled', True):
+        logging.warning(f"[CLUSTER-CREDS] User {session['user']} is disabled")
+        return jsonify({'error': 'Account disabled'}), 403
     # MK 2026-06-10 (RBAC): gate on node.shell only — admin holds it via all-perms, so the
     # explicit admin bypass was redundant; a custom role with node.shell now works too.
     user_perms = get_user_permissions(user_data)

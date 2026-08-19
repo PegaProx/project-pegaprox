@@ -366,23 +366,69 @@ def parse_sel(text, limit=25):
         sev = 'critical' if any(w in low for w in ('fail', 'critical', 'fault', 'error', 'lost')) \
             else 'warning' if any(w in low for w in ('warn', 'non-critical', 'degrad', 'intrusion')) \
             else 'info'
+        # MK Aug 2026 (#686) — track assert vs deassert so the health rollup can tell a
+        # currently-active fault from a months-old event that has since cleared.
+        _st = state.lower()
+        assertion = 'deasserted' if 'deassert' in _st else 'asserted' if 'assert' in _st else ''
         events.append({'id': cols[0], 'time': ts, 'sensor': sensor,
                        'description': (desc + (' — ' + state if state else '')).strip(' —'),
-                       'severity': sev})
+                       'severity': sev, 'assertion': assertion})
     events.reverse()  # newest first
     return events[:limit]
 
 
+def _active_sel_events(sel):
+    """SEL events that represent a *currently-active* condition. `sel` is newest-first (see
+    parse_sel). A 'Deasserted' entry clears its sensor, so an older 'Asserted' for the same
+    sensor no longer counts — this is what stops a months-old 'AC lost' / 'PSU fail' log line
+    from pinning the whole node to Critical after the fault cleared. Events with no
+    assert/deassert marker are treated as history, not current state.
+
+    Truncation-safe: parse_sel keeps the NEWEST events, and a deassert is always newer than the
+    assert it clears — so if an assert survives the cut, its deassert did too. The 25-event cap
+    can never strand a resolved assert as permanently active."""
+    cleared, active = set(), []
+    for e in sel:  # newest -> oldest
+        key = (e.get('sensor') or '').lower()
+        a = e.get('assertion', '')
+        if a == 'deasserted':
+            cleared.add(key)
+        elif a == 'asserted' and key not in cleared:
+            active.append(e)
+    return active
+
+
 def _health_rollup(sensors, sel, chassis):
-    """Overall node hardware health from the parsed pieces: ok / warning / critical."""
-    if any(s['status'] == 'critical' for s in sensors) or \
-       any(e['severity'] == 'critical' for e in sel) or \
-       (chassis.get('intrusion', '').lower() not in ('', 'inactive', 'not present', 'disabled')):
-        return 'critical'
-    if any(s['status'] == 'warning' for s in sensors) or \
-       any(e['severity'] == 'warning' for e in sel):
-        return 'warning'
-    return 'ok'
+    """Overall node hardware health + the specific items that drive it.
+
+    MK Aug 2026 (#686) — was `any(e['severity']=='critical' for e in sel)`, which latched the
+    whole node Critical on ANY historical SEL entry (incl. months-old, already-deasserted power
+    events) even while every live sensor read green. Now the status is driven by live sensor
+    status, chassis intrusion and only *currently-active* SEL assertions — and it returns the
+    concrete contributors so the UI can show WHAT is wrong instead of a red badge over green dots.
+
+    Returns {'status': 'ok'|'warning'|'critical', 'reasons': [{source, label, severity}]}.
+    """
+    reasons = []
+    for s in sensors:
+        if s.get('status') in ('critical', 'warning'):
+            reasons.append({'source': 'sensor', 'label': s.get('name') or 'sensor',
+                            'severity': s['status']})
+    if (chassis.get('intrusion', '') or '').lower() not in ('', 'inactive', 'not present', 'disabled'):
+        reasons.append({'source': 'chassis', 'label': f"chassis intrusion: {chassis.get('intrusion')}",
+                        'severity': 'critical'})
+    for e in _active_sel_events(sel):
+        if e.get('severity') in ('critical', 'warning'):
+            reasons.append({'source': 'event',
+                            'label': e.get('sensor') or e.get('description') or 'SEL event',
+                            'severity': e['severity']})
+    if any(r['severity'] == 'critical' for r in reasons):
+        status = 'critical'
+    elif any(r['severity'] == 'warning' for r in reasons):
+        status = 'warning'
+    else:
+        status = 'ok'
+    return {'status': status, 'reasons': reasons}
 
 
 def parse_inband(raw):
@@ -414,9 +460,11 @@ def parse_inband(raw):
     events = parse_sel(section(_M_SEL, []))
     if not (sensors or chassis or events or power_w is not None or any(fru.values())):
         return {'available': False, 'reason': 'in-band BMC returned no data'}
+    hr = _health_rollup(sensors, sel=events, chassis=chassis)
     return {
         'available': True,
-        'health': _health_rollup(sensors, sel=events, chassis=chassis),
+        'health': hr['status'],
+        'health_reasons': hr['reasons'],
         'sensors': sensors,
         'chassis': chassis,
         'power_w': power_w,

@@ -422,8 +422,9 @@ def _is_internal_or_metadata_host(host):
     import ipaddress, socket
     if not host:
         return True
-    # strip :port if present
-    h = host.split(':', 1)[0].strip('[]')
+    # NS Aug 2026 (Aikido #469089273) — parsed.hostname is already port/bracket-free; do NOT
+    # split on ':' (that mangled every IPv6 literal, e.g. '::1' -> '', bypassing the block).
+    h = host.strip().strip('[]')
     # quick string checks
     if h in ('localhost', '0.0.0.0', '::', '::1'):
         return True
@@ -432,6 +433,8 @@ def _is_internal_or_metadata_host(host):
     # parse as IP
     try:
         ip = ipaddress.ip_address(h)
+        if getattr(ip, 'ipv4_mapped', None):   # unwrap ::ffff:a.b.c.d so private/metadata checks apply
+            ip = ip.ipv4_mapped
         # block private + loopback + link-local + multicast + unspecified +
         # carrier-grade NAT (100.64/10) + AWS/GCP metadata (169.254.169.254)
         if (ip.is_private or ip.is_loopback or ip.is_link_local

@@ -591,8 +591,10 @@ def create_policy(cluster_id):
     except Exception as e:
         return jsonify({'error': f'failed to resolve targets: {e}'}), 400
     if denied:
-        return jsonify({'error': 'Permission denied: you lack vm.snapshot on some target VMs',
-                        'unauthorized_vms': denied[:10]}), 403
+        # don't echo the specific out-of-scope VM identifiers back — that would disclose the
+        # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) creating a policy on {cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
 
     pid = uuid.uuid4().hex[:12]
     try:
@@ -643,8 +645,8 @@ def update_policy(cluster_id, pid):
         except Exception as e:
             return jsonify({'error': f'failed to resolve targets: {e}'}), 400
         if denied:
-            return jsonify({'error': 'Permission denied: you lack vm.snapshot on some target VMs',
-                            'unauthorized_vms': denied[:10]}), 403
+            logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) updating policy {pid}@{cluster_id}")
+            return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
 
     # #586 — validate the new schedule fields when present
     if body.get('schedule') and body['schedule'] not in ('hourly', 'daily', 'weekly', 'monthly', 'once', 'cron'):
@@ -700,6 +702,31 @@ def update_policy(cluster_id, pid):
 def delete_policy(cluster_id, pid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+
+    # sec-report 2026-08-17 (BOLA): the cluster gate above can pass via the VM-ACL
+    # fallback, so re-check the caller against the policy's targets before the
+    # DELETE — a scoped user must not remove retention policies protecting VMs
+    # outside their scope. Mirror update_policy's target re-validation.
+    dc = get_db().conn.cursor()
+    dc.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+    prow = dc.fetchone()
+    if not prow:
+        return jsonify({'error': 'not found'}), 404
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'cluster manager not found'}), 404
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    try:
+        denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, _row_to_policy(prow))
+                  if not user_can_access_vm(caller, cluster_id, v, 'vm.snapshot', t)]
+    except Exception as e:
+        return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    if denied:
+        # don't echo the specific out-of-scope VM identifiers back — that would disclose the
+        # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) for policy {pid}@{cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
+
     try:
         c = get_db().conn.cursor()
         c.execute('DELETE FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
@@ -719,9 +746,30 @@ def run_policy_now(cluster_id, pid):
     if not ok: return err
     # verify it exists + belongs to this cluster
     c = get_db().conn.cursor()
-    c.execute('SELECT id FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
-    if not c.fetchone():
+    c.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+    prow = c.fetchone()
+    if not prow:
         return jsonify({'error': 'not found'}), 404
+
+    # sec-report 2026-08-17 (BOLA): _execute_policy gates each VM against the policy
+    # CREATOR's access, not the caller's — so a scoped user could force-run a policy
+    # covering VMs outside their grant. Re-check the CALLER against the policy targets
+    # here before dispatch (ACL-scope-wins), mirroring create/update_policy.
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'cluster manager not found'}), 404
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    try:
+        denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, _row_to_policy(prow))
+                  if not user_can_access_vm(caller, cluster_id, v, 'vm.snapshot', t)]
+    except Exception as e:
+        return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    if denied:
+        # don't echo the specific out-of-scope VM identifiers back — that would disclose the
+        # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) for policy {pid}@{cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
+
     # fire in a thread so the request returns fast. force=True so 'run now' works
     # even on a disabled policy (#586 — run without having to enable the schedule).
     t = threading.Thread(target=_execute_policy, args=(pid, True), daemon=True,

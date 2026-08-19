@@ -2793,7 +2793,9 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                 finally { setBusy(false); }
             };
             const update = (k, v) => setCfg(c => ({ ...c, [k]: v }));
-            return (
+            // portal to <body> so an ancestor stacking context (a transform/filter on the PBS
+            // view) can't trap this fixed overlay under the PBS table — #701
+            return ReactDOM.createPortal(
                 <div className="fixed inset-0 z-[10010] flex items-center justify-center p-4" style={{ background: 'rgba(8,14,24,0.72)' }} onClick={onClose}>
                     <div
                         className="rounded-lg shadow-2xl w-full max-w-md"
@@ -2873,7 +2875,8 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                             </div>
                         )}
                     </div>
-                </div>
+                </div>,
+                document.body
             );
         }
         try { window.PegaProxVerifyScheduleModal = VerifyScheduleModal; } catch (_) {}

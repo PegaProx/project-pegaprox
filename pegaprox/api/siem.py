@@ -255,9 +255,12 @@ def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
     almost always public, so this is an honest fit.
     """
     import ssl
-    from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+    from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
     try:
-        sanitize_outbound_url(url, allowed_schemes=('https', 'http'))
+        # GHSA-hmcf-9q7f-vx35 — pin the vetted IP so urllib can't re-resolve the host to an internal
+        # address between the check and the connect; when the admin disabled cert verification
+        # (verify_tls=False) https must be pinned too, since TLS won't catch the rebind.
+        url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'), tls_verified=verify_tls)
     except SsrfError as exc:
         raise RuntimeError(f"SIEM endpoint rejected: {exc}")
     req = urllib.request.Request(url, data=body_bytes, method='POST', headers=headers)
