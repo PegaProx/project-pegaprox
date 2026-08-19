@@ -340,6 +340,10 @@
                 { value: 'virtio', label: 'VirtIO-GPU' },
                 { value: 'virtio-gl', label: 'VirtIO-GPU (virgl)' },
                 { value: 'cirrus', label: 'Cirrus Logic' },
+                { value: 'serial0', label: 'Serial 0' },
+                { value: 'serial1', label: 'Serial 1' },
+                { value: 'serial2', label: 'Serial 2' },
+                { value: 'serial3', label: 'Serial 3' },
                 { value: 'none', label: 'None (headless)' },
             ];
 
