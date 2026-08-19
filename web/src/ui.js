@@ -2373,7 +2373,7 @@
         try { window.PegaProxBackupProgressPane = BackupProgressPane; } catch (_) {}
 
         // PBS Capacity Forecast Tile
-        function PbsCapacityForecast({ pbsId, authFetch, apiUrl }) {
+        function PbsCapacityForecast({ pbsId, authFetch, apiUrl, t }) {
             const [data, setData] = React.useState(null);
             React.useEffect(() => {
                 if (!pbsId) return;
@@ -2389,7 +2389,7 @@
             if (!data || data.length === 0) return null;
             return (
                 <div className="rounded-md p-3" style={{ background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)' }}>
-                    <div className="text-xs uppercase tracking-wide opacity-70 mb-2">Capacity forecast</div>
+                    <div className="text-xs uppercase tracking-wide opacity-70 mb-2">{t ? (t('capacityForecast') || 'Capacity forecast') : 'Capacity forecast'}</div>
                     <div className="space-y-2">
                         {data.map(d => {
                             const days = d.eta_days_to_full;
@@ -2401,8 +2401,12 @@
                                         <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.8 }}>{d.used_pct}%</span>
                                         {days != null ? (
                                             <span style={{ color, fontVariantNumeric: 'tabular-nums' }}
-                                                title={`Slope: ${d.slope_pct_per_day}% / day, ${d.samples} samples`}>
-                                                {days < 1 ? '<1d' : days < 365 ? `${days.toFixed(0)}d` : '>1y'}
+                                                title={`${t ? (t('slope') || 'Slope') : 'Slope'}: ${d.slope_pct_per_day}% / ${t ? (t('day') || 'day') : 'day'}, ${d.samples} ${t ? (t('samples') || 'samples') : 'samples'}`}>
+                                                {days < 1
+                                                    ? `<1 ${t ? (t('dayShort') || 'd') : 'd'}`
+                                                    : days < 365
+                                                        ? `${days.toFixed(0)} ${t ? (t('dayShort') || 'd') : 'd'}`
+                                                        : `>1 ${t ? (t('yearShort') || 'y') : 'y'}`}
                                             </span>
                                         ) : (
                                             <span style={{ opacity: 0.5 }}>—</span>

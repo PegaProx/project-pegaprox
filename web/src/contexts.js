@@ -142,20 +142,39 @@
             }
 
             return(
-                <div className="flex items-center gap-1 bg-proxmox-dark rounded-lg p-1 border border-proxmox-border">
-                    {langs.map(l => (
-                        <button
-                            key={l.code}
-                            onClick={() => !l.soon && switchLang(l.code)}
-                            className={`flex items-center gap-1 px-1.5 py-1 rounded text-sm transition-all ${language === l.code ? 'bg-proxmox-orange text-white' : l.soon ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white'}`}
-                            title={l.title}
-                            disabled={l.soon}
+                <>
+                    <div className="flex min-[1800px]:hidden items-center gap-2 bg-proxmox-dark rounded-lg px-2 py-1.5 border border-proxmox-border">
+                        <span className="text-base leading-none" aria-hidden="true">{activeLanguage.flag}</span>
+                        <select
+                            value={language}
+                            onChange={(e) => switchLang(e.target.value)}
+                            className="bg-transparent text-xs text-gray-200 border-0 p-0 pr-5 focus:ring-0 focus:outline-none"
+                            aria-label="Select language"
+                            title={activeLanguage.title}
                         >
-                            <span className={`text-base ${l.soon ? 'opacity-50' : ''}`}>{l.flag}</span>
-                            <span className="hidden sm:inline text-xs">{l.label}</span>
-                        </button>
-                    ))}
-                </div>
+                            {langs.map(l => (
+                                <option key={l.code} value={l.code}>
+                                    {l.label}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div className="hidden min-[1800px]:flex items-center gap-1 bg-proxmox-dark rounded-lg p-1 border border-proxmox-border">
+                        {langs.map(l => (
+                            <button
+                                key={l.code}
+                                onClick={() => !l.soon && switchLang(l.code)}
+                                className={`flex items-center gap-1 px-1.5 py-1 rounded text-sm transition-all ${language === l.code ? 'bg-proxmox-orange text-white' : l.soon ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white'}`}
+                                title={l.title}
+                                disabled={l.soon}
+                            >
+                                <span className={`text-base ${l.soon ? 'opacity-50' : ''}`}>{l.flag}</span>
+                                <span className="text-xs">{l.label}</span>
+                            </button>
+                        ))}
+                    </div>
+                </>
             );
         }
 

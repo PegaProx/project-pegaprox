@@ -2035,7 +2035,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('clusterName')}</label>
                                     <input type="text" value={config.name} onChange={e => setConfig({...config, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
-                                        placeholder="Production Cluster" />
+                                        placeholder={t('clusterNamePlaceholder') || 'Production Cluster'} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2069,7 +2069,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('passwordOrToken') || t('password')}</label>
                                     <input type="password" value={config.pass} onChange={e => setConfig({...config, pass: e.target.value})}
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
-                                        placeholder={config.user.includes('!') ? 'Token Secret' : 'Password'} />
+                                        placeholder={config.user.includes('!') ? (t('tokenSecret') || 'Token Secret') : (t('password') || 'Password')} />
                                 </div>
                             </div>
                             
@@ -2132,7 +2132,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('clusterName')}</label>
                                     <input type="text" value={xcpConfig.name} onChange={e => setXcpConfig({...xcpConfig, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder="XCP-ng Pool 1" />
+                                        placeholder={t('xcpngNamePlaceholder') || 'XCP-ng Pool 1'} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2152,7 +2152,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
                                     <input type="password" value={xcpConfig.pass} onChange={e => setXcpConfig({...xcpConfig, pass: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder="Password" />
+                                        placeholder={t('password') || 'Password'} />
                                 </div>
                             </div>
 
@@ -2160,7 +2160,7 @@
                                 <p className="text-xs text-cyan-300/70">
                                     {t('xcpngConnectHint') || 'Connect to the pool master host. XAPI port 443 is used by default.'}
                                 </p>
-                                <p className="text-xs text-amber-400/80 mt-1.5 font-medium">Tech Preview - {t('xcpngTechPreviewNote') || 'Some features may be limited or subject to change.'}</p>
+                                <p className="text-xs text-amber-400/80 mt-1.5 font-medium">{t('techPreview') || 'Tech Preview'} - {t('xcpngTechPreviewNote') || 'Some features may be limited or subject to change.'}</p>
                             </div>
 
                             <div className="space-y-4 pt-4 border-t border-proxmox-border">
@@ -2184,7 +2184,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('name')}</label>
                                     <input type="text" value={pbsConfig.name} onChange={e => setPbsConfig({...pbsConfig, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400 transition-colors"
-                                        placeholder="Backup Server 1" />
+                                        placeholder={t('pbsNamePlaceholder') || 'Backup Server 1'} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2204,10 +2204,10 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
                                     <input type="password" value={pbsConfig.password} onChange={e => setPbsConfig({...pbsConfig, password: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400 transition-colors"
-                                        placeholder="Password" />
+                                        placeholder={t('password') || 'Password'} />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">Port</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('port') || 'Port'}</label>
                                     <input type="number" value={pbsConfig.port} onChange={e => setPbsConfig({...pbsConfig, port: parseInt(e.target.value) || 8007})}
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:outline-none focus:border-blue-400 transition-colors" />
                                 </div>
@@ -2222,7 +2222,7 @@
                                 <label className="block text-sm font-medium text-gray-300 mb-2">{t('notes') || 'Notes'} ({t('optional') || 'Optional'})</label>
                                 <input type="text" value={pbsConfig.notes} onChange={e => setPbsConfig({...pbsConfig, notes: e.target.value})}
                                     className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400 transition-colors"
-                                    placeholder="Backup for production cluster" />
+                                    placeholder={t('pbsNotesPlaceholder') || 'Backup for production cluster'} />
                             </div>
 
                             {/* NS Apr 2026: SSH settings — needed for running apt upgrade on the PBS host */}
@@ -2268,7 +2268,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('name')}</label>
                                     <input type="text" value={vmwConfig.name} onChange={e => setVmwConfig({...vmwConfig, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                        placeholder="ESXi Host 1" />
+                                        placeholder={t('esxiNamePlaceholder') || 'ESXi Host 1'} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2288,10 +2288,10 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
                                     <input type="password" value={vmwConfig.password} onChange={e => setVmwConfig({...vmwConfig, password: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                        placeholder="Password" />
+                                        placeholder={t('password') || 'Password'} />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">Port</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('port') || 'Port'}</label>
                                     <input type="number" value={vmwConfig.port} onChange={e => setVmwConfig({...vmwConfig, port: parseInt(e.target.value) || 443})}
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:outline-none focus:border-emerald-400 transition-colors" />
                                 </div>
@@ -2303,7 +2303,7 @@
                                 <label className="block text-sm font-medium text-gray-300 mb-2">{t('notes') || 'Notes'} ({t('optional') || 'Optional'})</label>
                                 <input type="text" value={vmwConfig.notes} onChange={e => setVmwConfig({...vmwConfig, notes: e.target.value})}
                                     className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                    placeholder="Production ESXi host" />
+                                    placeholder={t('esxiNotesPlaceholder') || 'Production ESXi host'} />
                             </div>
                             </>)}
 

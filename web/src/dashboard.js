@@ -15830,7 +15830,7 @@
                                                                 <div>
                                                                     <h3 className="text-lg font-semibold text-white">{t('syslog') || 'Syslog Viewer'}</h3>
                                                                     <p className="text-xs text-gray-500">
-                                                                        {logEventsTotal > 0 ? `${logEventsTotal} events` : 'No events'} · UDP/TCP on port 1514
+                                                                        {logEventsTotal > 0 ? `${logEventsTotal} ${t('events') || 'events'}` : (t('noEvents') || 'No events')} · UDP/TCP 1514
                                                                     </p>
                                                                 </div>
                                                             </div>
@@ -15874,7 +15874,7 @@
                                                                                     { label: 'Errors', value: String(logEvents.filter(e => ['emergency','alert','critical','error'].includes((e.severity_text||'').toLowerCase())).length), color: '#ef4444' },
                                                                                     { label: 'Warnings', value: String(logEvents.filter(e => (e.severity_text||'').toLowerCase() === 'warning').length), color: '#eab308' },
                                                                                 ]},
-                                                                                { type: 'table', title: 'Log Events', columns: ['Time', 'Severity', 'Host', 'Source IP', 'Facility', 'Message'],
+                                                                                { type: 'table', title: t('logEvents') || 'Log Events', columns: [t('time') || 'Time', t('severity') || 'Severity', t('host') || 'Host', t('sourceIp') || 'Source IP', t('facility') || 'Facility', t('message') || 'Message'],
                                                                                     rows: logEvents.slice(0, 200).map(e => [
                                                                                         e.timestamp ? new Date(e.timestamp).toLocaleString([], {month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-',
                                                                                         e.severity_text || '-',
@@ -15910,35 +15910,35 @@
                                                                     <input type="text" value={logEventFilters.search}
                                                                         onChange={(e) => setLogEventFilters(prev => ({ ...prev, search: e.target.value }))}
                                                                         onKeyDown={(e) => { if (e.key === 'Enter') applyLogEventFilters(); }}
-                                                                        placeholder="Search messages..."
+                                                                        placeholder={t('searchMessages') || 'Search messages...'}
                                                                         className="w-full text-sm text-white placeholder-gray-600"
                                                                         style={{paddingLeft:'32px',paddingRight:'12px',paddingTop:'6px',paddingBottom:'6px',background:'var(--corp-surface-0, #0e161b)',border:'1px solid var(--corp-border-medium, #344955)',borderRadius:'3px'}} />
                                                                 </div>
                                                             </div>
                                                             <select value={logEventFilters.severity} onChange={(e) => setLogEventFilters(prev => ({ ...prev, severity: e.target.value }))}
                                                                 className="rounded-lg bg-proxmox-dark border border-proxmox-border px-2.5 py-1.5 text-sm text-white">
-                                                                <option value="">All severities</option>
-                                                                {logEventsSeverities.map((sev) => (<option key={sev.value} value={sev.value}>{sev.label}</option>))}
+                                                                <option value="">{t('allSeverities') || 'All severities'}</option>
+                                                                {logEventsSeverities.map((sev) => (<option key={sev.value} value={sev.value}>{t('syslogSeverity_' + sev.value) || sev.label}</option>))}
                                                             </select>
                                                             <select value={logEventFilters.protocol} onChange={(e) => setLogEventFilters(prev => ({ ...prev, protocol: e.target.value }))}
                                                                 className="rounded-lg bg-proxmox-dark border border-proxmox-border px-2.5 py-1.5 text-sm text-white">
-                                                                <option value="">All protocols</option>
+                                                                <option value="">{t('allProtocols') || 'All protocols'}</option>
                                                                 {logEventsProtocols.map((p) => (<option key={p} value={p}>{p}</option>))}
                                                             </select>
                                                             <input type="text" value={logEventFilters.hostname}
                                                                 onChange={(e) => setLogEventFilters(prev => ({ ...prev, hostname: e.target.value }))}
                                                                 onKeyDown={(e) => { if (e.key === 'Enter') applyLogEventFilters(); }}
-                                                                placeholder="Hostname"
+                                                                placeholder={t('hostname') || 'Hostname'}
                                                                 className="w-28 rounded-lg bg-proxmox-dark border border-proxmox-border px-2.5 py-1.5 text-sm text-white placeholder-gray-600" />
                                                             <input type="text" value={logEventFilters.source_ip}
                                                                 onChange={(e) => setLogEventFilters(prev => ({ ...prev, source_ip: e.target.value }))}
                                                                 onKeyDown={(e) => { if (e.key === 'Enter') applyLogEventFilters(); }}
-                                                                placeholder="Source IP"
+                                                                placeholder={t('sourceIp') || 'Source IP'}
                                                                 className="w-28 rounded-lg bg-proxmox-dark border border-proxmox-border px-2.5 py-1.5 text-sm text-white placeholder-gray-600" />
                                                             <input type="number" min="0" value={logEventFilters.facility}
                                                                 onChange={(e) => setLogEventFilters(prev => ({ ...prev, facility: e.target.value }))}
                                                                 onKeyDown={(e) => { if (e.key === 'Enter') applyLogEventFilters(); }}
-                                                                placeholder="Fac."
+                                                                placeholder={t('facilityShort') || 'Fac.'}
                                                                 className="w-16 rounded-lg bg-proxmox-dark border border-proxmox-border px-2 py-1.5 text-sm text-white placeholder-gray-600" />
                                                             <button onClick={applyLogEventFilters}
                                                                 className="rounded-lg bg-proxmox-orange px-3 py-1.5 text-sm font-medium text-white hover:bg-orange-600 transition-colors">
@@ -15946,13 +15946,13 @@
                                                             </button>
                                                             <button onClick={resetLogEventFilters}
                                                                 className="rounded-lg bg-proxmox-dark border border-proxmox-border px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors">
-                                                                Reset
+                                                                {t('reset') || 'Reset'}
                                                             </button>
                                                         </div>
 
                                                         {logEventsLoading ? (
                                                             <div className="bg-proxmox-dark rounded-xl p-8 text-center text-gray-400">
-                                                                Loading log events...
+                                                                {t('loadingLogEvents') || 'Loading log events...'}
                                                             </div>
                                                         ) : logEventsError ? (
                                                             <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-300">
@@ -15961,8 +15961,8 @@
                                                         ) : !Array.isArray(logEvents) || logEvents.length === 0 ? (
                                                             <div className="bg-proxmox-dark rounded-xl p-8 text-center">
                                                                 <Icons.Terminal className="mx-auto mb-3 w-10 h-10 text-gray-600" />
-                                                                <p className="text-gray-500">No log events found</p>
-                                                                <p className="text-xs text-gray-600 mt-2">Adjust the filters or wait for new syslog messages to arrive</p>
+                                                                <p className="text-gray-500">{t('noLogEventsFound') || 'No log events found'}</p>
+                                                                <p className="text-xs text-gray-600 mt-2">{t('adjustSyslogFilters') || 'Adjust the filters or wait for new syslog messages to arrive'}</p>
                                                             </div>
                                                         ) : (
                                                             <>
@@ -15971,7 +15971,7 @@
                                                                         <thead className="bg-black/40 text-gray-400">
                                                                             <tr>
                                                                                 <th className="px-4 py-3 text-left cursor-pointer hover:text-white" onClick={() => toggleLogEventSort('timestamp')}>
-                                                                                    Timestamp {logEventsSortBy === 'timestamp' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
+                                                                                    {t('timestamp') || 'Timestamp'} {logEventsSortBy === 'timestamp' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
                                                                                 </th>
                                                                                 <th className="px-4 py-3 text-left cursor-pointer hover:text-white" onClick={() => toggleLogEventSort('severity')}>
                                                                                     Severity {logEventsSortBy === 'severity' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
@@ -15980,10 +15980,10 @@
                                                                                     Protocol {logEventsSortBy === 'protocol' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
                                                                                 </th>
                                                                                 <th className="px-4 py-3 text-left cursor-pointer hover:text-white" onClick={() => toggleLogEventSort('hostname')}>
-                                                                                    Hostname {logEventsSortBy === 'hostname' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
+                                                                                    {t('hostname') || 'Hostname'} {logEventsSortBy === 'hostname' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
                                                                                 </th>
                                                                                 <th className="px-4 py-3 text-left cursor-pointer hover:text-white" onClick={() => toggleLogEventSort('source_ip')}>
-                                                                                    Source IP {logEventsSortBy === 'source_ip' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
+                                                                                    {t('sourceIp') || 'Source IP'} {logEventsSortBy === 'source_ip' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
                                                                                 </th>
                                                                                 <th className="px-4 py-3 text-left cursor-pointer hover:text-white" onClick={() => toggleLogEventSort('facility')}>
                                                                                     Facility {logEventsSortBy === 'facility' && (logEventsSortDir === 'asc' ? '↑' : '↓')}
@@ -20520,7 +20520,7 @@
                                                                         <div className="flex justify-end gap-3">
                                                                             <button onClick={() => setVmwareConfigEdit({ cpu: '', memory: '', notes: '', cpu_hot_add: false, memory_hot_add: false })}
                                                                                 className="px-4 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm">
-                                                                                Reset
+                                                                                {t('reset') || 'Reset'}
                                                                             </button>
                                                                             <button onClick={() => handleVmwareConfigSave(vmwareSelectedVm)}
                                                                                 disabled={vmwareConfigSaving}

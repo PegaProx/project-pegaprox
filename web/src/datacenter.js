@@ -25,7 +25,7 @@
             const [subscriptionsExporting, setSubscriptionsExporting] = useState(false);
             const [subscriptionKeys, setSubscriptionKeys] = useState({});
             const [subscriptionBusy, setSubscriptionBusy] = useState({});
-            
+
             // Multipath Easy Setup - NS Feb 2026
             const [multipathStatus, setMultipathStatus] = useState(null);
             const [multipathLoading, setMultipathLoading] = useState(false);
@@ -33,7 +33,7 @@
             const [multipathSetupData, setMultipathSetupData] = useState({ vendor: 'default', policy: 'service-time', skipExistingConfig: false });
             const [multipathSetupResult, setMultipathSetupResult] = useState(null);
             const [multipathSelectedNodes, setMultipathSelectedNodes] = useState(null);  // null = all nodes
-            
+
             // Reset multipath state when cluster changes
             useEffect(() => {
                 setMultipathStatus(null);
@@ -58,7 +58,7 @@
             const [firewallRules, setFirewallRules] = useState([]);
             const [showAddRuleModal, setShowAddRuleModal] = useState(false);
             const [newRule, setNewRule] = useState({ type: 'in', action: 'ACCEPT', enable: 1 });
-            
+
             // MK: HA State Variables
             const [haManagerStatus, setHaManagerStatus] = useState([]);
             const [haResources, setHaResources] = useState([]);
@@ -70,7 +70,7 @@
             const [showEditHaGroup, setShowEditHaGroup] = useState(null);
             const [newHaResource, setNewHaResource] = useState({ sid: '', state: 'started', group: '', max_restart: 1, max_relocate: 1, comment: '', auto_rebalance: null });
             const [newHaGroup, setNewHaGroup] = useState({ group: '', nodes: '', restricted: 0, nofailback: 0 });
-            
+
             const [metricServers, setMetricServers] = useState([]);
             const [showAddBackupJob, setShowAddBackupJob] = useState(false);
             const [editBackupJob, setEditBackupJob] = useState(null);
@@ -88,14 +88,14 @@
             const [cpuInfo, setCpuInfo] = useState([]);
             const [recommendedCpu, setRecommendedCpu] = useState(null);
             const authHeaders = getAuthHeaders();
-            
+
             // Node Management state
             const [showNodeJoinWizard, setShowNodeJoinWizard] = useState(false);
             const [showRemoveNodeModal, setShowRemoveNodeModal] = useState(false);
             const [nodeToRemove, setNodeToRemove] = useState(null);
             const [showMoveNodeModal, setShowMoveNodeModal] = useState(false);
             const [nodeToMove, setNodeToMove] = useState(null);
-            
+
             // LW: SDN State - Feb 2026, GitHub Issue #38
             const [sdnData, setSdnData] = useState({ available: false, zones: [], vnets: [], subnets: [], controllers: [], ipams: [], dns: [], pending: false, debug: {} });
             // LW May 2026 — PVE 9.2 SDN extras. Three new object families (fabrics,
@@ -167,14 +167,14 @@
              * MK: CPU generation detection for recommended CPU type
              * Maps physical CPU model to x86-64 microarchitecture level
              * Used to suggest optimal QEMU cpu type in VM settings
-             * 
+             *
              * Levels: v1 (baseline), v2-AES (most compatible), v3 (AVX2), v4 (AVX-512)
              * ChatGPT helped compile this list, I double-checked against Intel ARK
              */
             const detectCpuGeneration = (cpuModel) => {
                 if (!cpuModel) return { level: 'v2-AES', generation: 'Unknown' };
                 const model = cpuModel.toLowerCase();
-                
+
                 // Intel Xeon generations (server CPUs)
                 if (model.includes('xeon')) {
                     // Xeon Scalable (Sapphire Rapids, Emerald Rapids)
@@ -198,7 +198,7 @@
                     // Older Xeons
                     return { level: 'v2-AES', generation: 'Intel Xeon (Legacy)' };
                 }
-                
+
                 // Intel Core generations (desktop/laptop CPUs)
                 if (model.includes('core')) {
                     if (model.includes('13th') || model.includes('14th') || model.includes('i9-13') || model.includes('i9-14') || model.includes('i7-13') || model.includes('i7-14'))
@@ -217,7 +217,7 @@
                         return { level: 'v2-AES', generation: 'Intel Core 2nd/3rd Gen (Sandy/Ivy Bridge)' };
                     return { level: 'v2-AES', generation: 'Intel Core (Legacy)' };
                 }
-                
+
                 // AMD EPYC generations (server CPUs)
                 if (model.includes('epyc')) {
                     // EPYC 9xx4 series (Genoa, Zen 4)
@@ -234,7 +234,7 @@
                         return { level: 'v2-AES', generation: 'AMD EPYC Naples (Zen 1)' };
                     return { level: 'v2-AES', generation: 'AMD EPYC' };
                 }
-                
+
                 // AMD Ryzen/Threadripper generations
                 if (model.includes('ryzen') || model.includes('threadripper')) {
                     if (model.includes('7000') || model.includes('9000') || model.match(/\d{1}-7\d{3}/) || model.match(/\d{1}-9\d{3}/))
@@ -247,33 +247,33 @@
                         return { level: 'v2-AES', generation: 'AMD Ryzen 1000/2000 (Zen/Zen+)' };
                     return { level: 'v2-AES', generation: 'AMD Ryzen' };
                 }
-                
+
                 // fallback for other/unknown CPUs
                 if (model.includes('amd'))
                     return { level: 'v2-AES', generation: 'AMD (Unknown)' };
                 if (model.includes('intel'))
                     return { level: 'v2-AES', generation: 'Intel (Unknown)' };
-                
+
                 return { level: 'v2-AES', generation: 'Unknown CPU' };
             };
-            
+
             // Determine recommended CPU level based on all nodes
             const calculateRecommendedCpu = (cpuInfoList) => {
                 if (!cpuInfoList || cpuInfoList.length === 0) return 'x86-64-v2-AES';
-                
+
                 const levels = cpuInfoList.map(c => c.detectedLevel);
                 const levelOrder = ['v2-AES', 'v3', 'v4'];
-                
+
                 // Find the lowest common denominator
                 let lowestIndex = levelOrder.length - 1;
                 for (const level of levels) {
                     const idx = levelOrder.indexOf(level);
                     if (idx < lowestIndex && idx >= 0) lowestIndex = idx;
                 }
-                
+
                 return `x86-64-${levelOrder[lowestIndex]}`;
             };
-            
+
             // NS: authFetch wrapper with proper error handling
             // Returns null on network failure so callers need to check
             const authFetch = async function(url, options) {
@@ -332,20 +332,20 @@
             ];
 
             const storageTypes = [
-                { id: 'dir', label: 'Directory', icon: '📁' },
-                { id: 'lvm', label: 'LVM', icon: '💾' },
-                { id: 'lvmthin', label: 'LVM-Thin', icon: '💾' },
-                { id: 'starlvm', label: 'StarWind LVM', icon: '🛰️' },
-                { id: 'btrfs', label: 'BTRFS', icon: '🌲' },
-                { id: 'nfs', label: 'NFS', icon: '🌐' },
-                { id: 'cifs', label: 'SMB/CIFS', icon: '🖥' },
-                { id: 'iscsi', label: 'iSCSI', icon: '🔗' },
-                { id: 'cephfs', label: 'CephFS', icon: '🐙' },
-                { id: 'rbd', label: 'RBD', icon: '🐙' },
-                { id: 'zfs', label: 'ZFS over iSCSI', icon: '⚡' },
-                { id: 'zfspool', label: 'ZFS', icon: '⚡' },
-                { id: 'pbs', label: 'Proxmox Backup Server', icon: '💼' },
-                { id: 'esxi', label: 'ESXi', icon: '🖥' },
+                { id: 'dir', label: t('storageTypeDirectory'), icon: '📁' },
+                { id: 'lvm', label: t('storageTypeLvm'), icon: '💾' },
+                { id: 'lvmthin', label: t('storageTypeLvmThin'), icon: '💾' },
+                { id: 'starlvm', label: t('storageTypeStarwindLvm'), icon: '🛰️' },
+                { id: 'btrfs', label: t('storageTypeBtrfs'), icon: '🌲' },
+                { id: 'nfs', label: t('storageTypeNfs'), icon: '🌐' },
+                { id: 'cifs', label: t('storageTypeCifs'), icon: '🖥' },
+                { id: 'iscsi', label: t('storageTypeIscsi'), icon: '🔗' },
+                { id: 'cephfs', label: t('storageTypeCephfs'), icon: '🐙' },
+                { id: 'rbd', label: t('storageTypeRbd'), icon: '🐙' },
+                { id: 'zfs', label: t('storageTypeZfsIscsi'), icon: '⚡' },
+                { id: 'zfspool', label: t('storageTypeZfsPool'), icon: '⚡' },
+                { id: 'pbs', label: t('storageTypePbs'), icon: '💼' },
+                { id: 'esxi', label: t('storageTypeEsxi'), icon: '🖥' },
             ];
 
             const defaultOptions = {
@@ -387,11 +387,11 @@
                 tag_style_color_map: '',
                 tag_style_ordering: '',
             };
-            
+
             // MK: Parse complex options from API response into editable fields
             const parseOptionsForEdit = (opts) => {
                 const parsed = {...defaultOptions};
-                
+
                 // Simple fields
                 if (opts.keyboard) parsed.keyboard = opts.keyboard;
                 if (opts.http_proxy) parsed.http_proxy = opts.http_proxy;
@@ -399,7 +399,7 @@
                 if (opts.email_from) parsed.email_from = opts.email_from;
                 if (opts.mac_prefix) parsed.mac_prefix = opts.mac_prefix;
                 if (opts.max_workers) parsed.max_workers = opts.max_workers;
-                
+
                 // Migration: can be string "type=secure,network=10.0.0.0/24" or object {type, network}
                 if (opts.migration) {
                     if (typeof opts.migration === 'object') {
@@ -413,7 +413,7 @@
                         });
                     }
                 }
-                
+
                 // HA: can be object {shutdown_policy} or string
                 if (opts.ha) {
                     if (typeof opts.ha === 'object') {
@@ -425,7 +425,7 @@
                         });
                     }
                 }
-                
+
                 // CRS: can be object {ha-rebalance-on-start, scheduling,
                 //   ha-auto-rebalance, ha-auto-rebalance-{threshold,method,hold-duration,margin}}
                 // OR the raw composite string PVE sometimes returns.
@@ -457,7 +457,7 @@
                         });
                     }
                 }
-                
+
                 // Next ID: can be object {lower, upper} or string
                 const nextId = opts['next-id'] || opts.next_id;
                 if (nextId) {
@@ -472,7 +472,7 @@
                         });
                     }
                 }
-                
+
                 // Bandwidth limits: can be object or string
                 if (opts.bwlimit) {
                     if (typeof opts.bwlimit === 'object') {
@@ -492,7 +492,7 @@
                         });
                     }
                 }
-                
+
                 // Tag access - can be string "user-allow=free" or object
                 const userTagAccess = opts['user-tag-access'] || opts.user_tag_access;
                 if (userTagAccess) {
@@ -508,11 +508,11 @@
                         parsed.user_tag_access = userTagAccess;
                     }
                 }
-                
+
                 // Registered tags
                 const regTags = opts['registered-tags'] || opts.registered_tags;
                 if (regTags) parsed.registered_tags = regTags;
-                
+
                 // Tag style: can be object or string
                 const tagStyle = opts['tag-style'] || opts.tag_style;
                 if (tagStyle) {
@@ -529,10 +529,10 @@
                         });
                     }
                 }
-                
+
                 return parsed;
             };
-            
+
             // MK: Load datacenter options from API
             const loadOptions = async () => {
                 try {
@@ -591,11 +591,11 @@
                         setSubscriptions(await res.json());
                     } else {
                         const err = await res?.json().catch(() => ({}));
-                        addToast(err?.error || 'Failed to load subscriptions', 'error');
+                        addToast(err?.error || t('failedLoadSubscriptions'), 'error');
                     }
                 } catch (e) {
                     console.error('Error loading subscriptions:', e);
-                    addToast('Failed to load subscriptions', 'error');
+                    addToast(t('failedLoadSubscriptions'), 'error');
                 } finally {
                     setSubscriptionsLoading(false);
                 }
@@ -611,14 +611,14 @@
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/subscriptions`);
                     if (!res?.ok) {
                         const err = await res?.json().catch(() => ({}));
-                        addToast(err?.error || 'Failed to export subscriptions', 'error');
+                        addToast(err?.error || t('failedExportSubscriptions'), 'error');
                         return;
                     }
 
                     const data = await res.json();
                     const rows = Array.isArray(data) ? data : [];
                     if (!rows.length) {
-                        addToast('No subscription data available', 'info');
+                        addToast(t('noSubscriptionDataAvailable'), 'info');
                         return;
                     }
 
@@ -638,10 +638,10 @@
                     ];
                     const filename = `pegaprox-${clusterName || 'cluster'}-subscriptions-${new Date().toISOString().slice(0, 10)}.csv`;
                     window.PegaProxDownloadCsv?.(filename, rows, columns);
-                    addToast(`Exported ${rows.length} subscription rows`, 'success');
+                    addToast(`${t('subscriptionRowsExported')}: ${rows.length}`, 'success');
                 } catch (e) {
                     console.error('Error exporting subscriptions:', e);
-                    addToast('Failed to export subscriptions', 'error');
+                    addToast(t('failedExportSubscriptions'), 'error');
                 } finally {
                     setSubscriptionsExporting(false);
                 }
@@ -663,15 +663,15 @@
                     });
                     if (res?.ok) {
                         setSubscriptionKeys(prev => ({ ...prev, [node]: '' }));
-                        addToast(t('licenseActivated') || 'Subscription key saved', 'success');
+                        addToast(t('subscriptionKeySaved'), 'success');
                         await loadSubscriptions();
                     } else {
                         const err = await res?.json().catch(() => ({}));
-                        addToast(err?.error || t('activationFailed') || 'Activation failed', 'error');
+                        addToast(err?.error || t('failedSaveSubscriptionKey'), 'error');
                     }
                 } catch (e) {
                     console.error('Error saving subscription:', e);
-                    addToast(t('activationFailed') || 'Activation failed', 'error');
+                    addToast(t('failedSaveSubscriptionKey'), 'error');
                 } finally {
                     setSubscriptionBusyForNode(node, false);
                 }
@@ -686,22 +686,22 @@
                         body: JSON.stringify({ force: true })
                     });
                     if (res?.ok) {
-                        addToast(t('refreshStatus') || 'Subscription status refreshed', 'success');
+                        addToast(t('subscriptionStatusRefreshed'), 'success');
                         await loadSubscriptions();
                     } else {
                         const err = await res?.json().catch(() => ({}));
-                        addToast(err?.error || 'Failed to refresh subscription', 'error');
+                        addToast(err?.error || t('failedRefreshSubscription'), 'error');
                     }
                 } catch (e) {
                     console.error('Error checking subscription:', e);
-                    addToast('Failed to refresh subscription', 'error');
+                    addToast(t('failedRefreshSubscription'), 'error');
                 } finally {
                     setSubscriptionBusyForNode(node, false);
                 }
             };
 
             const deleteSubscriptionKey = async (node) => {
-                if (!confirm('Delete subscription key from this node?')) return;
+                if (!confirm(t('confirmDeleteSubscriptionKey'))) return;
 
                 setSubscriptionBusyForNode(node, true);
                 try {
@@ -709,15 +709,15 @@
                         method: 'DELETE'
                     });
                     if (res?.ok) {
-                        addToast('Subscription key deleted', 'success');
+                        addToast(t('subscriptionKeyDeleted'), 'success');
                         await loadSubscriptions();
                     } else {
                         const err = await res?.json().catch(() => ({}));
-                        addToast(err?.error || 'Failed to delete subscription key', 'error');
+                        addToast(err?.error || t('failedDeleteSubscriptionKey'), 'error');
                     }
                 } catch (e) {
                     console.error('Error deleting subscription:', e);
-                    addToast('Failed to delete subscription key', 'error');
+                    addToast(t('failedDeleteSubscriptionKey'), 'error');
                 } finally {
                     setSubscriptionBusyForNode(node, false);
                 }
@@ -746,13 +746,13 @@
                         // NS: snapshot-based replication jobs (Issue #103)
                         authFetch(`${API_URL}/clusters/${clusterId}/snapshot-replications`)
                     ]);
-                    
+
                     const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14] = results;
 
                     if (r1?.ok) setDcStatus(await r1.json());
                     if (r2?.ok) {
                         const tmp = await r2.json();
-                        
+
                         // Fetch summary for each node - NS Jan 2026
                         const nodesWithSummary = await Promise.all((tmp || []).map(async (node) => {
                             try {
@@ -764,9 +764,9 @@
                             } catch(e) { console.error('Failed to load node summary:', e); }
                             return { ...node, summary: null, name: node.node || node.name };
                         }));
-                        
+
                         setClusterNodes(nodesWithSummary);
-                        
+
                         // Fetch CPU info for each online node
                         const online = (nodesWithSummary || []).filter(n => n.online !== 0);
                         const cpuPromises = online.map(async (node) => {
@@ -801,7 +801,7 @@
                             } catch(e) {}
                             return null;
                         });
-                        
+
                         const cpuResults = (await Promise.all(cpuPromises)).filter(Boolean);
                         setCpuInfo(cpuResults);
                         setRecommendedCpu(calculateRecommendedCpu(cpuResults));
@@ -913,33 +913,33 @@
             const saveOptions = async () => {
                 try {
                     const payload = {};
-                    
+
                     // === Basic Settings ===
                     if (editingOptions.keyboard && editingOptions.keyboard !== '') {
                         payload.keyboard = editingOptions.keyboard;
                     }
-                    
+
                     const validConsoleValues = ['vv', 'html5', 'xtermjs'];
                     if (editingOptions.console && validConsoleValues.includes(editingOptions.console)) {
                         payload.console = editingOptions.console;
                     }
-                    
+
                     if (editingOptions.http_proxy && editingOptions.http_proxy.trim() !== '') {
                         payload.http_proxy = editingOptions.http_proxy;
                     }
-                    
+
                     if (editingOptions.email_from && editingOptions.email_from.includes('@') && !editingOptions.email_from.includes('$')) {
                         payload.email_from = editingOptions.email_from;
                     }
-                    
+
                     if (editingOptions.mac_prefix && /^[A-Fa-f0-9]{2}(:[A-Fa-f0-9]{2})*$/.test(editingOptions.mac_prefix)) {
                         payload.mac_prefix = editingOptions.mac_prefix.toUpperCase();
                     }
-                    
+
                     if (editingOptions.max_workers && !isNaN(editingOptions.max_workers)) {
                         payload.max_workers = Math.max(1, Math.min(64, parseInt(editingOptions.max_workers)));
                     }
-                    
+
                     // === Migration Settings ===
                     const migrationParts = [];
                     if (editingOptions.migration_type && editingOptions.migration_type !== '') {
@@ -951,12 +951,12 @@
                     if (migrationParts.length > 0) {
                         payload.migration = migrationParts.join(',');
                     }
-                    
+
                     // === HA Settings ===
                     if (editingOptions.ha_shutdown_policy && editingOptions.ha_shutdown_policy !== '') {
                         payload.ha = `shutdown_policy=${editingOptions.ha_shutdown_policy}`;
                     }
-                    
+
                     // === CRS Settings ===
                     // Mix of pre-9.2 (scheduling, ha-rebalance-on-start) and
                     // 9.2+ (ha-auto-rebalance + its tuning sub-keys). Send
@@ -990,7 +990,7 @@
                     if (crsParts.length > 0) {
                         payload.crs = crsParts.join(',');
                     }
-                    
+
                     // === Next ID Range ===
                     const nextIdParts = [];
                     if (editingOptions.next_id_lower && !isNaN(editingOptions.next_id_lower)) {
@@ -1002,7 +1002,7 @@
                     if (nextIdParts.length > 0) {
                         payload['next-id'] = nextIdParts.join(',');
                     }
-                    
+
                     // === Bandwidth Limits ===
                     const bwParts = [];
                     if (editingOptions.bwlimit_clone && editingOptions.bwlimit_clone !== '' && editingOptions.bwlimit_clone !== '0') {
@@ -1023,18 +1023,18 @@
                     if (bwParts.length > 0) {
                         payload.bwlimit = bwParts.join(',');
                     }
-                    
+
                     // === Tag Settings ===
                     if (editingOptions.user_tag_access) {
                         payload['user-tag-access'] = `user-allow=${editingOptions.user_tag_access}`;
                     }
-                    
+
                     // registered-tags is simpler - just semicolon-separated list
-                    
+
                     if (editingOptions.registered_tags && editingOptions.registered_tags.trim() !== '') {
                         payload['registered-tags'] = editingOptions.registered_tags;
                     }
-                    
+
                     // === Tag Style ===
                     const tagStyleParts = [];
                     if (editingOptions.tag_style_shape && editingOptions.tag_style_shape !== '') {
@@ -1049,9 +1049,9 @@
                     if (tagStyleParts.length > 0) {
                         payload['tag-style'] = tagStyleParts.join(',');
                     }
-                    
+
                     console.log('Sending datacenter options:', payload);
-                    
+
                     const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/options`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
@@ -1068,8 +1068,8 @@
                         console.error('Datacenter options error:', err);
                         addToast(err.errors ? JSON.stringify(err.errors) : (err.error || 'Failed to save options'), 'error');
                     }
-                } catch(e) { 
-                    console.error(e); 
+                } catch(e) {
+                    console.error(e);
                     addToast('Failed to save options', 'error');
                 }
             };
@@ -1092,52 +1092,52 @@
                     pbs: ['server', 'datastore', 'username', 'password'],
                     btrfs: ['path'],
                 };
-                
+
                 const required = requiredFields[newStorage.type] || [];
                 const missing = required.filter(f => !newStorage[f]);
-                
+
                 if (!newStorage.storage) {
                     addToast(t('storageIdRequired') || 'Storage ID is required', 'error');
                     return;
                 }
-                
+
                 // Validate storage ID format
                 if (!/^[a-zA-Z][a-zA-Z0-9\-\_\.]*$/.test(newStorage.storage)) {
                     addToast(t('invalidStorageId') || 'Storage ID must start with a letter and contain only letters, numbers, -, _, .', 'error');
                     return;
                 }
-                
+
                 if (missing.length > 0) {
                     addToast(`${t('missingFields') || 'Missing required fields'}: ${missing.join(', ')}`, 'error');
                     return;
                 }
-                
+
                 // NS: Additional validation for Shared LVM - need base (storage:lun) when baseStorage is set
                 if (newStorage.type === 'lvm' && newStorage.baseStorage && !newStorage.base) {
                     addToast('Please select a LUN for Shared LVM', 'error');
                     return;
                 }
-                
+
                 try {
                     // Build storage data based on type
                     const storageData = { ...newStorage };
-                    
+
                     // Remove UI-only fields that shouldn't be sent to API
                     delete storageData.baseStorage; // LW: This is UI-only, 'base' contains the actual value
-                    
+
                     // Remove empty fields
                     Object.keys(storageData).forEach(key => {
                         if (storageData[key] === '' || storageData[key] === undefined) {
                             delete storageData[key];
                         }
                     });
-                    
+
                     // Convert enabled to disable (Proxmox uses disable=1 to disable)
                     if (storageData.enabled === false) {
                         storageData.disable = 1;
                     }
                     delete storageData.enabled;
-                    
+
                     // NS: Debug output for troubleshooting
                     console.log('=== Storage Creation Debug ===');
                     console.log('Type:', storageData.type);
@@ -1145,17 +1145,17 @@
                     console.log('Base:', storageData.base);
                     console.log('VGName:', storageData.vgname);
                     console.log('Full data:', JSON.stringify(storageData, null, 2));
-                    
+
                     const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/storage`, {
                         method: 'POST',
                         credentials: 'include',
                         headers: { ...authHeaders, 'Content-Type': 'application/json' },
                         body: JSON.stringify(storageData)
                     });
-                    
+
                     const data = await res.json();
                     console.log('Create storage response:', res.status, data);
-                    
+
                     if (res.ok && data.success) {
                         setShowAddStorage(false);
                         setNewStorage({ type: 'dir', storage: '', path: '', content: 'images,rootdir', enabled: true });
@@ -1168,23 +1168,23 @@
                         const errorMsg = data.error || data.message || 'Failed to create storage';
                         addToast(`Error: ${errorMsg}`, 'error');
                     }
-                } catch(e) { 
+                } catch(e) {
                     console.error('Create storage error:', e);
                     addToast(`Error creating storage: ${e.message}`, 'error');
                 }
             };
-            
+
             // NS: Scan storage targets (iSCSI, NFS, CIFS, etc.)
             const [scanning, setScanning] = useState(false);
             const [scanResults, setScanResults] = useState([]);
-            
+
             const scanStorage = async (type) => {
                 setScanning(true);
                 setScanResults([]);
-                
+
                 try {
                     const scanData = { type };
-                    
+
                     // Add required params for each type
                     if (type === 'iscsi' && newStorage.portal) {
                         scanData.portal = newStorage.portal;
@@ -1206,16 +1206,16 @@
                         setScanning(false);
                         return;
                     }
-                    
+
                     const res = await fetch(`${API_URL}/clusters/${clusterId}/storage/scan`, {
                         method: 'POST',
                         credentials: 'include',
                         headers: { ...authHeaders, 'Content-Type': 'application/json' },
                         body: JSON.stringify(scanData)
                     });
-                    
+
                     const data = await res.json();
-                    
+
                     if (res.ok && data.success) {
                         setScanResults(data.data || []);
                         if (data.data?.length === 0) {
@@ -1235,7 +1235,7 @@
             const deleteStorage = async (storageId) => {
                 if (!confirm(t('deleteStorageConfirm'))) return;
                 try {
-                    const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/storage/${storageId}`, { 
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/storage/${storageId}`, {
                         method: 'DELETE',
                         credentials: 'include',
                         headers: authHeaders
@@ -1246,7 +1246,7 @@
                         const data = await res.json();
                         alert(`Error: ${data.error || 'Failed to delete storage'}`);
                     }
-                } catch(e) { 
+                } catch(e) {
                     console.error('Delete storage error:', e);
                     // dont show alert here, too annoying
                 }
@@ -1256,7 +1256,7 @@
             const deleteBackupJob = async (jobId) => {
                 if (!confirm(t('deleteBackupJobConfirm'))) return;
                 try {
-                    const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/backup/${jobId}`, { 
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/backup/${jobId}`, {
                         method: 'DELETE',
                         credentials: 'include',
                         headers: authHeaders
@@ -1279,27 +1279,27 @@
                     if(scheduleMap[jobData.schedule]) {
                         jobData.schedule = scheduleMap[jobData.schedule];
                     }
-                    
+
                     // handle vmid: if empty or 'all', set all=1 flag
                     if(!jobData.vmid || jobData.vmid === '' || jobData.vmid === 'all') {
                         jobData.all = 1;
                         delete jobData.vmid;
                     }
-                    
+
                     // Remove empty fileds (but not 'all')
                     Object.keys(jobData).forEach(key => {
                         if(key !== 'all' && (jobData[key] === '' || jobData[key] === null)) {
                             delete jobData[key];
                         }
                     });
-                    
+
                     const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/backup`, {
                         method: 'POST',
                         credentials: 'include',
                         headers: { ...authHeaders, 'Content-Type': 'application/json' },
                         body: JSON.stringify(jobData)
                     });
-                    
+
                     if(res.ok) {
                         setShowAddBackupJob(false);
                         setNewBackupJob({
@@ -1504,7 +1504,7 @@
             const deleteFirewallRule = async (pos) => {
                 if(!confirm(t('deleteRuleConfirm'))) return;
                 try {
-                    const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/firewall/rules/${pos}`, { 
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/firewall/rules/${pos}`, {
                         method: 'DELETE',
                         credentials: 'include',
                         headers: authHeaders
@@ -1544,8 +1544,8 @@
                             </label>
                             <select value={editingOptions.crs_mode || ''} onChange={e => setEditingOptions({...editingOptions, crs_mode: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
                                 <option value="">—</option>
-                                <option value="basic">Basic</option>
-                                <option value="static">Static</option>
+                                <option value="basic">{t('basic')}</option>
+                                <option value="static">{t('staticMode')}</option>
                             </select>
                             <p className="text-[11px] text-gray-500 mt-1">{t('crsSchedulingModeRemoved') || 'Removed from schema in PVE 9.2 — backend silently drops the field on 9.2+ clusters so the rest of the form still saves.'}</p>
                         </div>
@@ -1657,7 +1657,7 @@
                             <>
                                 <div className="grid grid-cols-2 gap-6">
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
-                                        <h3 className="text-lg font-semibold mb-4 text-green-400">Status</h3>
+                                        <h3 className="text-lg font-semibold mb-4 text-green-400">{t('status')}</h3>
                                         <div className="flex items-center justify-center">
                                             <div className={`w-20 h-20 rounded-full flex items-center justify-center text-3xl ${dcStatus.cluster?.standalone ? 'bg-blue-500/20 text-blue-400' : dcStatus.cluster?.quorate ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
                                                 {dcStatus.cluster?.standalone ? '●' : dcStatus.cluster?.quorate ? '✓' : '✗'}
@@ -1665,48 +1665,48 @@
                                         </div>
                                         <p className="text-center mt-4 text-sm text-gray-400">
                                             {dcStatus.cluster?.standalone
-                                                ? `${dcStatus.cluster?.name} | Standalone Node`
-                                                : `${dcStatus.cluster?.name} | Quorate: ${dcStatus.cluster?.quorate ? 'Yes' : 'No'}`}
+                                                ? `${dcStatus.cluster?.name} | ${t('standaloneNode')}`
+                                                : `${dcStatus.cluster?.name} | ${t('quorum')}: ${dcStatus.cluster?.quorate ? t('yes') : t('no')}`}
                                         </p>
                                     </div>
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
-                                        <h3 className="text-lg font-semibold mb-4">Nodes</h3>
+                                        <h3 className="text-lg font-semibold mb-4">{t('nodes')}</h3>
                                         <div className="space-y-3">
-                                            <div className="flex justify-between"><span className="text-green-400">● Online</span><span className="font-bold text-xl">{dcStatus.nodes?.online || 0}</span></div>
-                                            <div className="flex justify-between"><span className="text-red-400">✗ Offline</span><span className="font-bold text-xl">{dcStatus.nodes?.offline || 0}</span></div>
+                                            <div className="flex justify-between"><span className="text-green-400">● {t('online')}</span><span className="font-bold text-xl">{dcStatus.nodes?.online || 0}</span></div>
+                                            <div className="flex justify-between"><span className="text-red-400">✗ {t('offline')}</span><span className="font-bold text-xl">{dcStatus.nodes?.offline || 0}</span></div>
                                         </div>
                                     </div>
                                 </div>
 
                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
-                                    <h3 className="text-lg font-semibold mb-4 text-cyan-400">Guests</h3>
+                                    <h3 className="text-lg font-semibold mb-4 text-cyan-400">{t('guests')}</h3>
                                     <div className="grid grid-cols-2 gap-6">
                                         <div>
-                                            <h4 className="font-medium mb-3">Virtual Machines</h4>
+                                            <h4 className="font-medium mb-3">{t('virtualMachines')}</h4>
                                             <div className="space-y-2 text-sm">
-                                                <div className="flex justify-between"><span className="text-green-400">● Running</span><span>{dcStatus.guests?.vms?.running || 0}</span></div>
-                                                <div className="flex justify-between"><span className="text-gray-400">○ Stopped</span><span>{dcStatus.guests?.vms?.stopped || 0}</span></div>
+                                                <div className="flex justify-between"><span className="text-green-400">● {t('running')}</span><span>{dcStatus.guests?.vms?.running || 0}</span></div>
+                                                <div className="flex justify-between"><span className="text-gray-400">○ {t('stopped')}</span><span>{dcStatus.guests?.vms?.stopped || 0}</span></div>
                                             </div>
                                         </div>
                                         <div>
-                                            <h4 className="font-medium mb-3">LXC Container</h4>
+                                            <h4 className="font-medium mb-3">{t('lxcContainer')}</h4>
                                             <div className="space-y-2 text-sm">
-                                                <div className="flex justify-between"><span className="text-green-400">● Running</span><span>{dcStatus.guests?.containers?.running || 0}</span></div>
-                                                <div className="flex justify-between"><span className="text-gray-400">○ Stopped</span><span>{dcStatus.guests?.containers?.stopped || 0}</span></div>
+                                                <div className="flex justify-between"><span className="text-green-400">● {t('running')}</span><span>{dcStatus.guests?.containers?.running || 0}</span></div>
+                                                <div className="flex justify-between"><span className="text-gray-400">○ {t('stopped')}</span><span>{dcStatus.guests?.containers?.stopped || 0}</span></div>
                                             </div>
                                         </div>
                                     </div>
                                 </div>
 
                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
-                                    <h3 className="text-lg font-semibold mb-4 text-yellow-400">Resources</h3>
+                                    <h3 className="text-lg font-semibold mb-4 text-yellow-400">{t('resources')}</h3>
                                     <div className="grid grid-cols-3 gap-6">
                                         {['cpu', 'memory', 'storage'].map(type => (
                                             <div key={type} className="text-center">
-                                                <h4 className="font-medium mb-3 capitalize">{type}</h4>
+                                                <h4 className="font-medium mb-3 capitalize">{t(type)}</h4>
                                                 <div className="text-3xl font-bold text-blue-400">{dcStatus.resources?.[type]?.percent || 0}%</div>
                                                 <p className="text-xs text-gray-500 mt-2">
-                                                    {type === 'cpu' ? `${dcStatus.resources?.cpu?.total || 0} CPU(s)` : formatBytes(dcStatus.resources?.[type]?.total)}
+                                                    {type === 'cpu' ? `${dcStatus.resources?.cpu?.total || 0} ${t('cpu')}` : formatBytes(dcStatus.resources?.[type]?.total)}
                                                 </p>
                                             </div>
                                         ))}
@@ -1723,56 +1723,56 @@
                                     <div className="p-4 border-b border-proxmox-border">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.Info />
-                                            Cluster Information
+                                            {t('clusterInformation')}
                                         </h3>
                                     </div>
                                     <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-xs text-gray-500 mb-1">Cluster Name</label>
+                                            <label className="block text-xs text-gray-500 mb-1">{t('clusterName')}</label>
                                             <div className="flex items-center gap-2">
-                                                <input 
-                                                    readOnly 
-                                                    value={joinInfo?.cluster_name || dcStatus?.cluster?.name || 'Loading...'} 
+                                                <input
+                                                    readOnly
+                                                    value={joinInfo?.cluster_name || dcStatus?.cluster?.name || `${t('loading')}...`}
                                                     className="flex-1 bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 font-mono text-sm"
                                                 />
-                                                <button 
+                                                <button
                                                     onClick={() => navigator.clipboard.writeText(joinInfo?.cluster_name || dcStatus?.cluster?.name || '')}
                                                     className="p-2 bg-proxmox-dark hover:bg-proxmox-border rounded transition-colors"
-                                                    title="Copy"
+                                                    title={t('copy')}
                                                 >
                                                     <Icons.Copy />
                                                 </button>
                                             </div>
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-500 mb-1">Cluster IP / Join Address</label>
+                                            <label className="block text-xs text-gray-500 mb-1">{t('clusterIpJoinAddress')}</label>
                                             <div className="flex items-center gap-2">
-                                                <input 
-                                                    readOnly 
-                                                    value={joinInfo?.preferred_node || clusterNodes[0]?.ring0_addr || clusterNodes[0]?.ip || 'Loading...'} 
+                                                <input
+                                                    readOnly
+                                                    value={joinInfo?.preferred_node || clusterNodes[0]?.ring0_addr || clusterNodes[0]?.ip || `${t('loading')}...`}
                                                     className="flex-1 bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 font-mono text-sm"
                                                 />
-                                                <button 
+                                                <button
                                                     onClick={() => navigator.clipboard.writeText(joinInfo?.preferred_node || clusterNodes[0]?.ring0_addr || '')}
                                                     className="p-2 bg-proxmox-dark hover:bg-proxmox-border rounded transition-colors"
-                                                    title="Copy"
+                                                    title={t('copy')}
                                                 >
                                                     <Icons.Copy />
                                                 </button>
                                             </div>
                                         </div>
                                         <div className="md:col-span-2">
-                                            <label className="block text-xs text-gray-500 mb-1">Fingerprint</label>
+                                            <label className="block text-xs text-gray-500 mb-1">{t('fingerprint')}</label>
                                             <div className="flex items-center gap-2">
-                                                <textarea 
-                                                    readOnly 
-                                                    value={joinInfo?.fingerprint || 'Loading... (If empty, run "pvecm status" on a node)'} 
+                                                <textarea
+                                                    readOnly
+                                                    value={joinInfo?.fingerprint || t('fingerprintLoadingHint')}
                                                     className="flex-1 bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 font-mono text-xs h-16 resize-none"
                                                 />
-                                                <button 
+                                                <button
                                                     onClick={() => navigator.clipboard.writeText(joinInfo?.fingerprint || '')}
                                                     className="p-2 bg-proxmox-dark hover:bg-proxmox-border rounded transition-colors self-start"
-                                                    title="Copy"
+                                                    title={t('copy')}
                                                 >
                                                     <Icons.Copy />
                                                 </button>
@@ -1780,7 +1780,7 @@
                                         </div>
                                         {joinInfo?.nodelist && joinInfo.nodelist.length > 0 && (
                                             <div className="md:col-span-2">
-                                                <label className="block text-xs text-gray-500 mb-1">Available Join Nodes</label>
+                                                <label className="block text-xs text-gray-500 mb-1">{t('availableJoinNodes')}</label>
                                                 <div className="flex flex-wrap gap-2">
                                                     {joinInfo.nodelist.map((node, idx) => (
                                                         <div key={idx} className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm font-mono">
@@ -1801,19 +1801,19 @@
                                 {/* Cluster Nodes Table */}
                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                        <h3 className="font-semibold">Cluster Nodes</h3>
+                                        <h3 className="font-semibold">{t('clusterNodes')}</h3>
                                         <div className="flex items-center gap-3">
-                                            <span className="text-sm text-gray-400">{(clusterNodes || []).length} Node(s)</span>
-                                            <button onClick={() => setShowNodeJoinWizard(true)} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white"><Icons.Plus className="w-4 h-4" />Add Node</button>
+                                            <span className="text-sm text-gray-400">{t('nodes')}: {(clusterNodes || []).length}</span>
+                                            <button onClick={() => setShowNodeJoinWizard(true)} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white"><Icons.Plus className="w-4 h-4" />{t('addNode')}</button>
                                         </div>
                                     </div>
                                     <table className="w-full">
                                         <thead className="bg-proxmox-dark">
                                             <tr>
-                                                <th className="text-left p-3 text-sm text-gray-400">Nodename</th>
-                                                <th className="text-left p-3 text-sm text-gray-400">ID</th>
-                                                <th className="text-left p-3 text-sm text-gray-400">Votes</th>
-                                                <th className="text-left p-3 text-sm text-gray-400">Ring 0 Address</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('nodeName')}</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('id')}</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('votes')}</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('ring0Address')}</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1830,13 +1830,13 @@
                                 </div>
                             </div>
                         )}
-                        
-                        
+
+
                         {/* Options */}
                         {activeSection === 'options' && (
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                    <h3 className="font-semibold">Datacenter Options</h3>
+                                    <h3 className="font-semibold">{t('datacenterOptions')}</h3>
                                     <button onClick={() => {
                                         if (!showEditOptions) {
                                             // MK: Parse complex options when opening edit form
@@ -1844,7 +1844,7 @@
                                         }
                                         setShowEditOptions(!showEditOptions);
                                     }} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">
-                                        <Icons.Edit /> Edit
+                                        <Icons.Edit /> {t('edit')}
                                     </button>
                                 </div>
                                 {showEditOptions ? (
@@ -1852,190 +1852,190 @@
                                         <div className="grid grid-cols-2 gap-4">
                                             {/* Basic Settings */}
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Keyboard Layout</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('keyboardLayout')}</label>
                                                 <select value={editingOptions.keyboard || 'de'} onChange={e => setEditingOptions({...editingOptions, keyboard: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                    <option value="de">German (de)</option>
-                                                    <option value="de-ch">German (Swiss)</option>
-                                                    <option value="en-us">English (US)</option>
-                                                    <option value="en-gb">English (GB)</option>
-                                                    <option value="fr">French</option>
-                                                    <option value="fr-ch">French (Swiss)</option>
-                                                    <option value="es">Spanish</option>
-                                                    <option value="it">Italian</option>
-                                                    <option value="nl">Dutch</option>
-                                                    <option value="pl">Polish</option>
-                                                    <option value="pt">Portuguese</option>
-                                                    <option value="pt-br">Portuguese (Brazil)</option>
-                                                    <option value="ru">Russian</option>
-                                                    <option value="ja">Japanese</option>
-                                                    <option value="sv">Swedish</option>
-                                                    <option value="no">Norwegian</option>
-                                                    <option value="da">Danish</option>
-                                                    <option value="fi">Finnish</option>
-                                                    <option value="tr">Turkish</option>
+                                                    <option value="de">{t('keyboardGerman')}</option>
+                                                    <option value="de-ch">{t('keyboardGermanSwiss')}</option>
+                                                    <option value="en-us">{t('keyboardEnglishUS')}</option>
+                                                    <option value="en-gb">{t('keyboardEnglishGB')}</option>
+                                                    <option value="fr">{t('keyboardFrench')}</option>
+                                                    <option value="fr-ch">{t('keyboardFrenchSwiss')}</option>
+                                                    <option value="es">{t('keyboardSpanish')}</option>
+                                                    <option value="it">{t('keyboardItalian')}</option>
+                                                    <option value="nl">{t('keyboardDutch')}</option>
+                                                    <option value="pl">{t('keyboardPolish')}</option>
+                                                    <option value="pt">{t('keyboardPortuguese')}</option>
+                                                    <option value="pt-br">{t('keyboardPortugueseBrazil')}</option>
+                                                    <option value="ru">{t('keyboardRussian')}</option>
+                                                    <option value="ja">{t('keyboardJapanese')}</option>
+                                                    <option value="sv">{t('keyboardSwedish')}</option>
+                                                    <option value="no">{t('keyboardNorwegian')}</option>
+                                                    <option value="da">{t('keyboardDanish')}</option>
+                                                    <option value="fi">{t('keyboardFinnish')}</option>
+                                                    <option value="tr">{t('keyboardTurkish')}</option>
                                                 </select>
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Console Viewer</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('consoleViewer')}</label>
                                                 <select value={editingOptions.console || ''} onChange={e => setEditingOptions({...editingOptions, console: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                    <option value="">Default (xterm.js)</option>
+                                                    <option value="">{t('default')} (xterm.js)</option>
                                                     <option value="xtermjs">xterm.js</option>
                                                     <option value="html5">noVNC</option>
                                                     <option value="vv">SPICE (virt-viewer)</option>
                                                 </select>
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">HTTP Proxy</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('httpProxy')}</label>
                                                 <input value={editingOptions.http_proxy || ''} onChange={e => setEditingOptions({...editingOptions, http_proxy: e.target.value})} placeholder="http://proxy:port" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Email from address</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('emailFromAddress')}</label>
                                                 <input value={editingOptions.email_from || ''} onChange={e => setEditingOptions({...editingOptions, email_from: e.target.value})} placeholder="root@$hostname" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">MAC address prefix</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('macAddressPrefix')}</label>
                                                 <input value={editingOptions.mac_prefix || ''} onChange={e => setEditingOptions({...editingOptions, mac_prefix: e.target.value})} placeholder="BC:24:11" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Max Workers/bulk-action</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('maxWorkersBulkAction')}</label>
                                                 <input type="number" min="1" max="64" value={editingOptions.max_workers || 4} onChange={e => setEditingOptions({...editingOptions, max_workers: parseInt(e.target.value) || 4})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                             </div>
                                         </div>
-                                        
+
                                         {/* Migration Settings */}
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <h4 className="text-sm font-medium text-gray-300 mb-3">Migration Settings</h4>
+                                            <h4 className="text-sm font-medium text-gray-300 mb-3">{t('migrationSettings')}</h4>
                                             <div className="grid grid-cols-2 gap-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Migration Type</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('migrationType')}</label>
                                                     <select value={editingOptions.migration_type || ''} onChange={e => setEditingOptions({...editingOptions, migration_type: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                        <option value="">Default (secure)</option>
-                                                        <option value="secure">Secure (encrypted)</option>
-                                                        <option value="insecure">Insecure (faster)</option>
+                                                        <option value="">{t('migrationDefaultSecure')}</option>
+                                                        <option value="secure">{t('migrationSecureEncrypted')}</option>
+                                                        <option value="insecure">{t('migrationInsecureFaster')}</option>
                                                     </select>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Migration Network</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('migrationNetwork')}</label>
                                                     <input value={editingOptions.migration_network || ''} onChange={e => setEditingOptions({...editingOptions, migration_network: e.target.value})} placeholder="e.g. 10.0.0.0/24" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
-                                                    <span className="text-xs text-gray-500">CIDR network for migration traffic</span>
+                                                    <span className="text-xs text-gray-500">{t('migrationNetworkHint')}</span>
                                                 </div>
                                             </div>
                                         </div>
-                                        
+
                                         {/* HA Settings */}
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <h4 className="text-sm font-medium text-gray-300 mb-3">HA Settings</h4>
+                                            <h4 className="text-sm font-medium text-gray-300 mb-3">{t('haSettings')}</h4>
                                             <div className="grid grid-cols-2 gap-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Shutdown Policy</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('shutdownPolicy')}</label>
                                                     <select value={editingOptions.ha_shutdown_policy || ''} onChange={e => setEditingOptions({...editingOptions, ha_shutdown_policy: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                        <option value="">Default (conditional)</option>
-                                                        <option value="freeze">Freeze - keep resources frozen on shutdown</option>
-                                                        <option value="failover">Failover - migrate to other node</option>
-                                                        <option value="migrate">Migrate - always migrate</option>
-                                                        <option value="conditional">Conditional - migrate if possible</option>
+                                                        <option value="">{t('shutdownDefaultConditional')}</option>
+                                                        <option value="freeze">{t('shutdownFreeze')}</option>
+                                                        <option value="failover">{t('shutdownFailover')}</option>
+                                                        <option value="migrate">{t('shutdownMigrate')}</option>
+                                                        <option value="conditional">{t('shutdownConditional')}</option>
                                                     </select>
                                                 </div>
                                             </div>
                                         </div>
-                                        
+
                                         {crsBlock /* LW May 2026 — shared with 'ha' section */}
 
                                         {/* VMID Range */}
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <h4 className="text-sm font-medium text-gray-300 mb-3">Next Free VMID Range</h4>
+                                            <h4 className="text-sm font-medium text-gray-300 mb-3">{t('nextFreeVmidRange')}</h4>
                                             <div className="grid grid-cols-2 gap-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Lower Bound</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('lowerBound')}</label>
                                                     <input type="number" min="100" max="999999999" value={editingOptions.next_id_lower || 100} onChange={e => setEditingOptions({...editingOptions, next_id_lower: parseInt(e.target.value) || 100})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Upper Bound</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('upperBound')}</label>
                                                     <input type="number" min="100" max="999999999" value={editingOptions.next_id_upper || 999999999} onChange={e => setEditingOptions({...editingOptions, next_id_upper: parseInt(e.target.value) || 999999999})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                             </div>
                                         </div>
-                                        
+
                                         {/* Bandwidth Limits */}
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <h4 className="text-sm font-medium text-gray-300 mb-3">Bandwidth Limits (MiB/s, 0 = unlimited)</h4>
+                                            <h4 className="text-sm font-medium text-gray-300 mb-3">{t('bandwidthLimits')} (MiB/s, {t('zeroUnlimited')})</h4>
                                             <div className="grid grid-cols-3 gap-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Clone</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('clone')}</label>
                                                     <input type="number" min="0" value={editingOptions.bwlimit_clone || ''} onChange={e => setEditingOptions({...editingOptions, bwlimit_clone: e.target.value})} placeholder="0" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Migration</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('migration')}</label>
                                                     <input type="number" min="0" value={editingOptions.bwlimit_migration || ''} onChange={e => setEditingOptions({...editingOptions, bwlimit_migration: e.target.value})} placeholder="0" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Move</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('move')}</label>
                                                     <input type="number" min="0" value={editingOptions.bwlimit_move || ''} onChange={e => setEditingOptions({...editingOptions, bwlimit_move: e.target.value})} placeholder="0" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Restore</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('restore')}</label>
                                                     <input type="number" min="0" value={editingOptions.bwlimit_restore || ''} onChange={e => setEditingOptions({...editingOptions, bwlimit_restore: e.target.value})} placeholder="0" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Default</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('default')}</label>
                                                     <input type="number" min="0" value={editingOptions.bwlimit_default || ''} onChange={e => setEditingOptions({...editingOptions, bwlimit_default: e.target.value})} placeholder="0" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                             </div>
                                         </div>
-                                        
+
                                         {/* Tags */}
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <h4 className="text-sm font-medium text-gray-300 mb-3">Tag Settings</h4>
+                                            <h4 className="text-sm font-medium text-gray-300 mb-3">{t('tagSettings')}</h4>
                                             <div className="grid grid-cols-2 gap-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">User Tag Access</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('userTagAccess')}</label>
                                                     <select value={editingOptions.user_tag_access || 'free'} onChange={e => setEditingOptions({...editingOptions, user_tag_access: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                        <option value="free">Free - users can create any tags</option>
-                                                        <option value="existing">Existing - only use existing tags</option>
-                                                        <option value="list">List - only use registered tags</option>
-                                                        <option value="none">None - no tag editing allowed</option>
+                                                        <option value="free">{t('tagAccessFree')}</option>
+                                                        <option value="existing">{t('tagAccessExisting')}</option>
+                                                        <option value="list">{t('tagAccessList')}</option>
+                                                        <option value="none">{t('tagAccessNone')}</option>
                                                     </select>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Registered Tags</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('registeredTags')}</label>
                                                     <input value={editingOptions.registered_tags || ''} onChange={e => setEditingOptions({...editingOptions, registered_tags: e.target.value})} placeholder="tag1;tag2;tag3" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
-                                                    <span className="text-xs text-gray-500">Semicolon-separated list of allowed tags</span>
+                                                    <span className="text-xs text-gray-500">{t('registeredTagsHint')}</span>
                                                 </div>
                                             </div>
                                         </div>
-                                        
+
                                         {/* Tag Style */}
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <h4 className="text-sm font-medium text-gray-300 mb-3">Tag Style Override</h4>
+                                            <h4 className="text-sm font-medium text-gray-300 mb-3">{t('tagStyleOverride')}</h4>
                                             <div className="grid grid-cols-3 gap-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Shape</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('shape')}</label>
                                                     <select value={editingOptions.tag_style_shape || ''} onChange={e => setEditingOptions({...editingOptions, tag_style_shape: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                        <option value="">Default</option>
-                                                        <option value="full">Full</option>
-                                                        <option value="circle">Circle</option>
-                                                        <option value="dense">Dense</option>
-                                                        <option value="none">None</option>
+                                                        <option value="">{t('default')}</option>
+                                                        <option value="full">{t('tagShapeFull')}</option>
+                                                        <option value="circle">{t('tagShapeCircle')}</option>
+                                                        <option value="dense">{t('tagShapeDense')}</option>
+                                                        <option value="none">{t('none')}</option>
                                                     </select>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Color Mode</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('colorMode')}</label>
                                                     <select value={editingOptions.tag_style_color_map || ''} onChange={e => setEditingOptions({...editingOptions, tag_style_color_map: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                        <option value="">Default</option>
-                                                        <option value="auto">Auto - generate from tag name</option>
+                                                        <option value="">{t('default')}</option>
+                                                        <option value="auto">{t('tagColorAuto')}</option>
                                                     </select>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Ordering</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('ordering')}</label>
                                                     <select value={editingOptions.tag_style_ordering || ''} onChange={e => setEditingOptions({...editingOptions, tag_style_ordering: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                        <option value="">Default (config)</option>
-                                                        <option value="config">Config order</option>
-                                                        <option value="alphabetical">Alphabetical</option>
+                                                        <option value="">{t('orderingDefaultConfig')}</option>
+                                                        <option value="config">{t('configOrder')}</option>
+                                                        <option value="alphabetical">{t('alphabetical')}</option>
                                                     </select>
                                                 </div>
                                             </div>
                                         </div>
-                                        
+
                                         <div className="flex gap-2 pt-4 border-t border-proxmox-border">
                                             <button onClick={saveOptions} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm">{t('save')}</button>
                                             <button onClick={() => setShowEditOptions(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">{t('cancel')}</button>
@@ -2046,7 +2046,7 @@
                                         <tbody>
                                             {(() => {
                                                 // MK: Helper to safely format values - API sometimes returns objects
-                                                const formatVal = (val, fallback = 'Default') => {
+                                                const formatVal = (val, fallback = t('default')) => {
                                                     if (val === null || val === undefined || val === '') return fallback;
                                                     if (typeof val === 'object') {
                                                         // Convert object to readable string
@@ -2055,22 +2055,22 @@
                                                     return String(val);
                                                 };
                                                 return [
-                                                    ['Keyboard Layout', formatVal(dcOptions.keyboard, 'German (de)')],
-                                                    ['HTTP proxy', formatVal(dcOptions.http_proxy, 'none')],
-                                                    ['Console Viewer', formatVal(dcOptions.console, 'Default (xterm.js)')],
-                                                    ['Email from address', formatVal(dcOptions.email_from, 'root@$hostname')],
-                                                    ['MAC address prefix', formatVal(dcOptions.mac_prefix, 'BC:24:11')],
-                                                    ['Migration Settings', formatVal(dcOptions.migration, 'Default')],
-                                                    ['HA Settings', formatVal(dcOptions.ha, 'Default')],
-                                                    ['Cluster Resource Scheduling', formatVal(dcOptions.crs, 'Default')],
-                                                    ['U2F Settings', formatVal(dcOptions.u2f, 'None')],
-                                                    ['WebAuthn Settings', formatVal(dcOptions.webauthn, 'None')],
-                                                    ['Bandwidth Limits', formatVal(dcOptions.bwlimit, 'None')],
-                                                    ['Maximal Workers/bulk-action', formatVal(dcOptions.max_workers, '4')],
-                                                    ['Next Free VMID Range', formatVal(dcOptions['next-id'], 'Default')],
-                                                    ['Tag Style Override', formatVal(dcOptions['tag-style'], 'No Overrides')],
-                                                    ['User Tag Access', formatVal(dcOptions['user-tag-access'], 'Mode: free')],
-                                                    ['Registered Tags', formatVal(dcOptions['registered-tags'], 'No Registered Tags')],
+                                                    [t('keyboardLayout'), formatVal(dcOptions.keyboard, t('keyboardGerman'))],
+                                                    [t('httpProxy'), formatVal(dcOptions.http_proxy, t('none'))],
+                                                    [t('consoleViewer'), formatVal(dcOptions.console, `${t('default')} (xterm.js)`)],
+                                                    [t('emailFromAddress'), formatVal(dcOptions.email_from, 'root@$hostname')],
+                                                    [t('macAddressPrefix'), formatVal(dcOptions.mac_prefix, 'BC:24:11')],
+                                                    [t('migrationSettings'), formatVal(dcOptions.migration, t('default'))],
+                                                    [t('haSettings'), formatVal(dcOptions.ha, t('default'))],
+                                                    [t('crsHeader'), formatVal(dcOptions.crs, t('default'))],
+                                                    [t('u2fSettings'), formatVal(dcOptions.u2f, t('none'))],
+                                                    [t('webauthnSettings'), formatVal(dcOptions.webauthn, t('none'))],
+                                                    [t('bandwidthLimits'), formatVal(dcOptions.bwlimit, t('none'))],
+                                                    [t('maxWorkersBulkAction'), formatVal(dcOptions.max_workers, '4')],
+                                                    [t('nextFreeVmidRange'), formatVal(dcOptions['next-id'], t('default'))],
+                                                    [t('tagStyleOverride'), formatVal(dcOptions['tag-style'], t('noOverrides'))],
+                                                    [t('userTagAccess'), formatVal(dcOptions['user-tag-access'], t('modeFree'))],
+                                                    [t('registeredTags'), formatVal(dcOptions['registered-tags'], t('noRegisteredTags'))],
                                                 ].map(([key, value], idx) => (
                                                     <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/30">
                                                         <td className="p-3 text-gray-400 w-1/3">{key}</td>
@@ -2091,14 +2091,14 @@
                                 {isCorporate && (
                                     <div style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
                                         <div className="flex justify-between items-center" style={{padding: '6px 12px', borderBottom: '1px solid var(--corp-divider)'}}>
-                                            <span className="text-[12px] font-medium" style={{color: 'var(--corp-text-secondary)'}}>Storage Configuration</span>
+                                            <span className="text-[12px] font-medium" style={{color: 'var(--corp-text-secondary)'}}>{t('storageConfiguration')}</span>
                                             <div className="flex gap-1">
-                                                <button onClick={refreshStorage} className="corp-action-btn" title="Refresh"><Icons.RefreshCw style={{width: 14, height: 14}} /></button>
+                                                <button onClick={refreshStorage} className="corp-action-btn" title={t('refresh')}><Icons.RefreshCw style={{width: 14, height: 14}} /></button>
                                                 <button onClick={() => setShowAddStorage(true)} className="corp-action-btn" style={{color: 'var(--corp-accent)'}} title={t('add')}><Icons.Plus style={{width: 14, height: 14}} /></button>
                                             </div>
                                         </div>
                                         {(!storage || storage.length === 0) ? (
-                                            <div className="p-4 text-center text-[12px]" style={{color: 'var(--corp-text-muted)'}}>No storage configured</div>
+                                            <div className="p-4 text-center text-[12px]" style={{color: 'var(--corp-text-muted)'}}>{t('noStorageConfigured')}</div>
                                         ) : storage.map((s, idx) => {
                                             const isShared = s.shared || ['nfs', 'cifs', 'rbd', 'cephfs', 'iscsi', 'pbs', 'starlvm'].includes(s.type);
                                             const typeColor = isShared ? {bg: 'rgba(73,175,217,0.12)', color: '#49afd9'} : s.type === 'lvm' || s.type === 'lvmthin' || s.type === 'zfspool' ? {bg: 'rgba(155,89,182,0.12)', color: '#9b59b6'} : {bg: 'rgba(114,139,154,0.12)', color: '#728b9a'};
@@ -2107,10 +2107,10 @@
                                                     <span className={`w-2 h-2 rounded-full flex-shrink-0 ${s.disable ? 'bg-gray-500' : 'bg-green-500'}`}></span>
                                                     <span className="font-medium text-[13px] w-28 truncate" style={{color: 'var(--color-text)'}}>{s.storage}</span>
                                                     <span className="corp-storage-type-badge" style={{background: typeColor.bg, color: typeColor.color, border: `1px solid ${typeColor.color}33`}}>{s.type}</span>
-                                                    {isShared && <span className="corp-storage-type-badge" style={{background: 'rgba(96,181,21,0.1)', color: '#60b515', border: '1px solid rgba(96,181,21,0.2)'}}>shared</span>}
+                                                    {isShared && <span className="corp-storage-type-badge" style={{background: 'rgba(96,181,21,0.1)', color: '#60b515', border: '1px solid rgba(96,181,21,0.2)'}}>{t('shared')}</span>}
                                                     <span className="text-[11px] flex-1 truncate" style={{color: 'var(--corp-text-muted)'}}>{s.path || s.server || s.pool || s.portal || s.export || ''}</span>
                                                     <div className="flex gap-0.5 ml-auto">
-                                                        <button onClick={() => { setNewStorage({...s, enabled: !s.disable}); setShowAddStorage(true); }} className="corp-action-btn" title="Edit"><Icons.Cog style={{width: 13, height: 13}} /></button>
+                                                        <button onClick={() => { setNewStorage({...s, enabled: !s.disable}); setShowAddStorage(true); }} className="corp-action-btn" title={t('edit')}><Icons.Cog style={{width: 13, height: 13}} /></button>
                                                         <button onClick={() => deleteStorage(s.storage)} className="corp-action-btn danger" title={t('delete')}><Icons.Trash style={{width: 13, height: 13}} /></button>
                                                     </div>
                                                 </div>
@@ -2123,13 +2123,13 @@
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.HardDrive />
-                                            Storage Configuration
+                                            {t('storageConfiguration')}
                                         </h3>
                                         <div className="flex gap-2">
-                                            <button 
-                                                onClick={refreshStorage} 
+                                            <button
+                                                onClick={refreshStorage}
                                                 className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg text-sm transition-colors"
-                                                title="Refresh storage list"
+                                                title={t('refreshStorageList')}
                                             >
                                                 <Icons.RefreshCw />
                                             </button>
@@ -2142,19 +2142,19 @@
                                         <table className="w-full">
                                             <thead className="bg-proxmox-dark">
                                                 <tr>
-                                                    <th className="text-left p-3 text-sm text-gray-400">ID</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('id')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Content</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Path/Server</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('content')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('pathServer')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('nodes')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Shared</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('shared')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400"></th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 {(!storage || storage.length === 0) ? (
-                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">No storage configured</td></tr>
+                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">{t('noStorageConfigured')}</td></tr>
                                                 ) : storage.map((s, idx) => (
                                                     <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                         <td className="p-3">
@@ -2185,8 +2185,8 @@
                                                                 const nodeList = s.nodes.split(',').map(n => n.trim());
                                                                 const show = nodeList.slice(0, 2);
                                                                 const rest = nodeList.length - show.length;
-                                                                return <span>{show.join(', ')}{rest > 0 && <span className="text-xs text-gray-500 ml-1 cursor-help" title={nodeList.join(', ')}>+{rest} more</span>}</span>;
-                                                            })() : <span className="text-gray-500 italic">All</span>}
+                                                                return <span>{show.join(', ')}{rest > 0 && <span className="text-xs text-gray-500 ml-1 cursor-help" title={nodeList.join(', ')}>+{rest} {t('more')}</span>}</span>;
+                                                            })() : <span className="text-gray-500 italic">{t('all')}</span>}
                                                         </td>
                                                         <td className="p-3">
                                                             {s.shared ? (
@@ -2204,19 +2204,19 @@
                                                         </td>
                                                         <td className="p-3">
                                                             <div className="flex gap-1">
-                                                                <button 
+                                                                <button
                                                                     onClick={() => {
                                                                         setNewStorage({...s, enabled: !s.disable});
                                                                         setShowAddStorage(true);
                                                                     }}
-                                                                    className="p-1.5 hover:bg-blue-500/20 rounded text-blue-400 transition-colors" 
-                                                                    title="Edit"
+                                                                    className="p-1.5 hover:bg-blue-500/20 rounded text-blue-400 transition-colors"
+                                                                    title={t('edit')}
                                                                 >
                                                                     <Icons.Cog />
                                                                 </button>
-                                                                <button 
-                                                                    onClick={() => deleteStorage(s.storage)} 
-                                                                    className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors" 
+                                                                <button
+                                                                    onClick={() => deleteStorage(s.storage)}
+                                                                    className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
                                                                     title={t('delete')}
                                                                 >
                                                                     <Icons.Trash />
@@ -2236,7 +2236,7 @@
                                     <div className={isCorporate ? 'flex justify-between items-center' : 'p-4 border-b border-proxmox-border flex justify-between items-center'} style={isCorporate ? {padding: '6px 12px', borderBottom: '1px solid var(--corp-divider)'} : undefined}>
                                         <h3 className={isCorporate ? 'text-[12px] font-medium flex items-center gap-2' : 'font-semibold flex items-center gap-2'} style={isCorporate ? {color: 'var(--corp-text-secondary)'} : undefined}>
                                             <Icons.Layers className="text-purple-400" />
-                                            Multipath Redundancy
+                                            {t('multipathRedundancy')}
                                         </h3>
                                         <div className="flex gap-2">
                                             <button
@@ -2273,15 +2273,15 @@
                                                 }}
                                                 className="flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm"
                                             >
-                                                <Icons.Zap /> Easy Setup
+                                                <Icons.Zap /> {t('easySetup')}
                                             </button>
                                         </div>
                                     </div>
                                     <div className="p-4">
                                         {!multipathStatus ? (
                                             <div className="text-center text-gray-500 py-4">
-                                                <p>Click refresh to check multipath status across all nodes.</p>
-                                                <p className="text-xs mt-2">Multipath provides redundant SAN/iSCSI connectivity for high availability.</p>
+                                                <p>{t('multipathRefreshHint')}</p>
+                                                <p className="text-xs mt-2">{t('multipathRedundancyDesc')}</p>
                                             </div>
                                         ) : (
                                             <div className="space-y-4">
@@ -2289,23 +2289,23 @@
                                                 <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                         <div className="text-2xl font-bold">{multipathStatus.summary?.nodes_with_multipath || 0}</div>
-                                                        <div className="text-xs text-gray-400">Nodes with Multipath</div>
+                                                        <div className="text-xs text-gray-400">{t('nodesWithMultipath')}</div>
                                                     </div>
                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                         <div className="text-2xl font-bold">{multipathStatus.summary?.total_devices || 0}</div>
-                                                        <div className="text-xs text-gray-400">Total Devices</div>
+                                                        <div className="text-xs text-gray-400">{t('totalDevices')}</div>
                                                     </div>
                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                         <div className="text-2xl font-bold text-green-400">{multipathStatus.summary?.healthy_devices || 0}</div>
-                                                        <div className="text-xs text-gray-400">Healthy</div>
+                                                        <div className="text-xs text-gray-400">{t('healthy')}</div>
                                                     </div>
                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                         <div className="text-2xl font-bold text-yellow-400">{multipathStatus.summary?.degraded_devices || 0}</div>
-                                                        <div className="text-xs text-gray-400">Degraded</div>
+                                                        <div className="text-xs text-gray-400">{t('degraded')}</div>
                                                     </div>
                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                         <div className="text-2xl font-bold text-red-400">{multipathStatus.summary?.failed_devices || 0}</div>
-                                                        <div className="text-xs text-gray-400">Failed</div>
+                                                        <div className="text-xs text-gray-400">{t('failed')}</div>
                                                     </div>
                                                 </div>
 
@@ -2319,11 +2319,11 @@
                                                             </span>
                                                             <div className="flex items-center gap-2">
                                                                 {nodeData.running ? (
-                                                                    <span className="px-2 py-0.5 bg-green-500/20 text-green-400 rounded text-xs">multipathd running</span>
+                                                                    <span className="px-2 py-0.5 bg-green-500/20 text-green-400 rounded text-xs">{t('multipathdRunning')}</span>
                                                                 ) : nodeData.installed ? (
-                                                                    <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-400 rounded text-xs">installed but stopped</span>
+                                                                    <span className="px-2 py-0.5 bg-yellow-500/20 text-yellow-400 rounded text-xs">{t('multipathInstalledStopped')}</span>
                                                                 ) : (
-                                                                    <span className="px-2 py-0.5 bg-gray-500/20 text-gray-400 rounded text-xs">not installed</span>
+                                                                    <span className="px-2 py-0.5 bg-gray-500/20 text-gray-400 rounded text-xs">{t('notInstalled')}</span>
                                                                 )}
                                                             </div>
                                                         </div>
@@ -2339,7 +2339,7 @@
                                                                                 dev.status === 'degraded' ? 'bg-yellow-500/20 text-yellow-400' :
                                                                                 'bg-red-500/20 text-red-400'
                                                                             }`}>
-                                                                                {dev.active_paths}/{dev.total_paths} paths
+                                                                                {t('multipathPaths')}: {dev.active_paths}/{dev.total_paths}
                                                                             </span>
                                                                         </div>
                                                                     </div>
@@ -2363,7 +2363,7 @@
                                             <div className="flex justify-between items-center p-4 border-b border-proxmox-border">
                                                 <h3 className="text-lg font-semibold flex items-center gap-2">
                                                     <Icons.Zap className="text-purple-400" />
-                                                    Multipath Easy Setup
+                                                    {t('multipathEasySetup')}
                                                 </h3>
                                                 <button onClick={() => setShowMultipathSetup(false)} className="text-gray-400 hover:text-white">
                                                     <Icons.X />
@@ -2371,29 +2371,29 @@
                                             </div>
                                             <div className="p-4 space-y-4">
                                                 <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-sm">
-                                                    <p className="text-blue-400 font-medium mb-1">What this does:</p>
+                                                    <p className="text-blue-400 font-medium mb-1">{t('multipathWhatThisDoes')}:</p>
                                                     <ul className="text-gray-300 text-xs space-y-1 list-disc list-inside">
-                                                        <li>Installs multipath-tools on all nodes (if not already installed)</li>
-                                                        <li>Generates optimized multipath.conf for your storage vendor</li>
-                                                        <li>Enables and starts multipathd service</li>
-                                                        <li>Scans for existing multipath devices</li>
+                                                        <li>{t('multipathInstallTools')}</li>
+                                                        <li>{t('multipathGenerateConfig')}</li>
+                                                        <li>{t('multipathEnableService')}</li>
+                                                        <li>{t('multipathScanDevices')}</li>
                                                     </ul>
                                                     <p className="text-green-400 text-xs mt-2">
-                                                        ✓ Once active, all future iSCSI/FC connections automatically use multipath!
+                                                        ✓ {t('multipathFutureConnections')}
                                                     </p>
                                                 </div>
 
                                                 {/* Node Status Summary */}
                                                 {multipathStatus && (
                                                     <div className="bg-proxmox-dark rounded-lg p-3">
-                                                        <p className="text-sm font-medium mb-2">Current Node Status:</p>
+                                                        <p className="text-sm font-medium mb-2">{t('currentNodeStatus')}:</p>
                                                         <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
                                                             {Object.entries(multipathStatus.nodes || {}).map(([nodeName, nodeData]) => (
                                                                 <div key={nodeName} className="flex items-center gap-2">
                                                                     <span className={`w-2 h-2 rounded-full ${nodeData.running ? 'bg-green-500' : nodeData.installed ? 'bg-yellow-500' : 'bg-gray-500'}`}></span>
                                                                     <span>{nodeName}</span>
                                                                     <span className="text-gray-500">
-                                                                        {nodeData.running ? '(active)' : nodeData.installed ? '(stopped)' : '(not installed)'}
+                                                                        {nodeData.running ? `(${t('active')})` : nodeData.installed ? `(${t('stopped')})` : `(${t('notInstalled')})`}
                                                                     </span>
                                                                 </div>
                                                             ))}
@@ -2404,7 +2404,7 @@
                                                 {/* Node Selection */}
                                                 <div className="bg-proxmox-dark rounded-lg p-3">
                                                     <div className="flex items-center justify-between mb-2">
-                                                        <p className="text-sm font-medium">Target Nodes</p>
+                                                        <p className="text-sm font-medium">{t('targetNodes')}</p>
                                                         <button
                                                             onClick={() => {
                                                                 if (multipathSelectedNodes === null) {
@@ -2417,11 +2417,11 @@
                                                             }}
                                                             className="text-xs text-purple-400 hover:text-purple-300"
                                                         >
-                                                            {multipathSelectedNodes === null ? 'Select individual nodes' : 'Select all nodes'}
+                                                            {multipathSelectedNodes === null ? t('selectIndividualNodes') : t('selectAllNodes')}
                                                         </button>
                                                     </div>
                                                     {multipathSelectedNodes === null ? (
-                                                        <p className="text-xs text-gray-400">All {(clusterNodes || []).filter(n => n.online !== 0).length} online nodes will be configured.</p>
+                                                        <p className="text-xs text-gray-400">{t('onlineNodesToConfigure')}: {(clusterNodes || []).filter(n => n.online !== 0).length}</p>
                                                     ) : (
                                                         <div className="space-y-1">
                                                             {(clusterNodes || []).filter(n => n.online !== 0).map(n => {
@@ -2444,27 +2444,27 @@
                                                                         <span className="text-sm">{name}</span>
                                                                         {nodeStatus && (
                                                                             <span className={`text-xs ml-auto ${nodeStatus.running ? 'text-green-500' : nodeStatus.installed ? 'text-yellow-500' : 'text-gray-500'}`}>
-                                                                                {nodeStatus.running ? 'active' : nodeStatus.installed ? 'stopped' : 'not installed'}
+                                                                                {nodeStatus.running ? t('active') : nodeStatus.installed ? t('stopped') : t('notInstalled')}
                                                                             </span>
                                                                         )}
                                                                     </label>
                                                                 );
                                                             })}
                                                             {multipathSelectedNodes.length === 0 && (
-                                                                <p className="text-xs text-yellow-400 mt-1">Select at least one node</p>
+                                                                <p className="text-xs text-yellow-400 mt-1">{t('selectAtLeastOneNode')}</p>
                                                             )}
                                                         </div>
                                                     )}
                                                 </div>
 
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-2">Storage Vendor</label>
+                                                    <label className="block text-sm text-gray-400 mb-2">{t('storageVendor')}</label>
                                                     <select
                                                         value={multipathSetupData.vendor}
                                                         onChange={e => setMultipathSetupData({...multipathSetupData, vendor: e.target.value})}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                     >
-                                                        <option value="default">Default (Generic) - Works with most storage</option>
+                                                        <option value="default">{t('multipathVendorDefault')}</option>
                                                         <option value="netapp">NetApp - ONTAP, E-Series, SolidFire</option>
                                                         <option value="emc">Dell EMC - VNX, Unity, PowerStore, XtremIO</option>
                                                         <option value="hpe">HPE - 3PAR, Primera, Nimble, MSA</option>
@@ -2474,25 +2474,25 @@
                                                 </div>
 
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-2">Load Balancing Policy</label>
+                                                    <label className="block text-sm text-gray-400 mb-2">{t('loadBalancingPolicy')}</label>
                                                     <select
                                                         value={multipathSetupData.policy}
                                                         onChange={e => setMultipathSetupData({...multipathSetupData, policy: e.target.value})}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                     >
-                                                        <option value="service-time">Service Time (Recommended)</option>
-                                                        <option value="round-robin">Round Robin</option>
-                                                        <option value="queue-length">Queue Length</option>
+                                                        <option value="service-time">{t('serviceTimeRecommended')}</option>
+                                                        <option value="round-robin">{t('roundRobin')}</option>
+                                                        <option value="queue-length">{t('queueLength')}</option>
                                                     </select>
                                                     <div className="text-xs text-gray-500 mt-2 space-y-1">
                                                         {multipathSetupData.policy === 'service-time' && (
-                                                            <p>📊 <strong>Service Time:</strong> Routes I/O to the path with the shortest estimated service time. Best for mixed workloads - automatically adapts to path latency.</p>
+                                                            <p>📊 <strong>{t('serviceTime')}:</strong> {t('serviceTimeDesc')}</p>
                                                         )}
                                                         {multipathSetupData.policy === 'round-robin' && (
-                                                            <p>🔄 <strong>Round Robin:</strong> Distributes I/O evenly across all paths in rotation. Good for symmetric active/active arrays with equal path performance.</p>
+                                                            <p>🔄 <strong>{t('roundRobin')}:</strong> {t('roundRobinDesc')}</p>
                                                         )}
                                                         {multipathSetupData.policy === 'queue-length' && (
-                                                            <p>📋 <strong>Queue Length:</strong> Routes I/O to the path with the fewest pending requests. Good for paths with different throughput capabilities.</p>
+                                                            <p>📋 <strong>{t('queueLength')}:</strong> {t('queueLengthDesc')}</p>
                                                         )}
                                                     </div>
                                                 </div>
@@ -2505,17 +2505,17 @@
                                                             onChange={e => setMultipathSetupData({...multipathSetupData, skipExistingConfig: !e.target.checked})}
                                                             className="w-4 h-4 rounded"
                                                         />
-                                                        <span className="text-sm">Write multipath.conf (uncheck to keep existing config)</span>
+                                                        <span className="text-sm">{t('writeMultipathConfig')}</span>
                                                     </label>
                                                     <p className="text-xs text-gray-500 mt-1 ml-6">
-                                                        If unchecked, only installs/enables multipathd without changing existing configuration.
+                                                        {t('writeMultipathConfigHint')}
                                                     </p>
                                                 </div>
 
                                                 {multipathSetupResult && (
                                                     <div className={`rounded-lg p-3 ${multipathSetupResult.success ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
                                                         <p className={`font-medium ${multipathSetupResult.success ? 'text-green-400' : 'text-red-400'}`}>
-                                                            {multipathSetupResult.success ? '✓ Setup completed successfully!' : '✗ Setup had errors'}
+                                                            {multipathSetupResult.success ? `✓ ${t('setupCompleted')}` : `✗ ${t('setupHadErrors')}`}
                                                         </p>
                                                         {multipathSetupResult.error && (
                                                             <p className="text-red-400 text-sm mt-1">{multipathSetupResult.error}</p>
@@ -2528,7 +2528,7 @@
                                                                             {r.success ? '✓' : '✗'}
                                                                         </span>
                                                                         <span className="font-medium">{r.node}</span>
-                                                                        {r.skipped_config && <span className="text-yellow-400">(config preserved)</span>}
+                                                                        {r.skipped_config && <span className="text-yellow-400">({t('configPreserved')})</span>}
                                                                     </div>
                                                                     {r.error && <p className="text-red-400 text-xs ml-5 mt-0.5">{r.error}</p>}
                                                                     {r.steps && r.steps.length > 0 && !r.success && (
@@ -2547,7 +2547,7 @@
                                                         </div>
                                                         {multipathSetupResult.success && (
                                                             <p className="text-green-400 text-xs mt-2">
-                                                                ✓ New iSCSI/FC LUNs will automatically use multipath redundancy!
+                                                                ✓ {t('newLunsUseMultipath')}
                                                             </p>
                                                         )}
                                                     </div>
@@ -2555,9 +2555,9 @@
                                             </div>
                                             <div className="flex justify-between items-center gap-3 p-4 border-t border-proxmox-border">
                                                 <div className="text-xs text-gray-500">
-                                                    {multipathSelectedNodes === null 
-                                                        ? `Deploys to all ${(clusterNodes || []).filter(n => n.online !== 0).length} online nodes`
-                                                        : `Deploys to ${multipathSelectedNodes.length} selected node${multipathSelectedNodes.length !== 1 ? 's' : ''}`
+                                                    {multipathSelectedNodes === null
+                                                        ? `${t('onlineNodesToDeploy')}: ${(clusterNodes || []).filter(n => n.online !== 0).length}`
+                                                        : `${t('selectedNodesToDeploy')}: ${multipathSelectedNodes.length}`
                                                     }
                                                 </div>
                                                 <div className="flex gap-3">
@@ -2573,11 +2573,11 @@
                                                                 ? multipathSelectedNodes
                                                                 : (clusterNodes || []).filter(n => n.online !== 0).map(n => n.node || n.name);
                                                             if (targetNodes.length === 0) {
-                                                                addToast('No nodes selected', 'error');
+                                                                addToast(t('noNodesSelected'), 'error');
                                                                 return;
                                                             }
                                                             setMultipathSetupResult(null);
-                                                            addToast(`Starting multipath setup on ${targetNodes.length} node${targetNodes.length !== 1 ? 's' : ''}...`, 'info');
+                                                            addToast(`${t('startingMultipathSetup')}: ${targetNodes.length}...`, 'info');
                                                             try {
                                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/multipath/setup`, {
                                                                     method: 'POST',
@@ -2590,14 +2590,14 @@
                                                                 const data = await res.json();
                                                                 if (!res.ok && !data.results) {
                                                                     // API returned error before reaching nodes (e.g. missing credentials)
-                                                                    setMultipathSetupResult({ success: false, error: data.error || `Server error (${res.status})`, results: [] });
-                                                                    addToast(data.error || 'Setup failed', 'error');
+                                                                    setMultipathSetupResult({ success: false, error: data.error || `${t('serverError')} (${res.status})`, results: [] });
+                                                                    addToast(data.error || t('setupFailed'), 'error');
                                                                 } else {
                                                                     setMultipathSetupResult(data);
                                                                     if (data.success) {
-                                                                        addToast('Multipath setup completed!', 'success');
+                                                                        addToast(t('multipathSetupCompleted'), 'success');
                                                                         // Wait a moment for services to stabilize, then refresh status
-                                                                        addToast('Refreshing multipath status...', 'info');
+                                                                        addToast(t('refreshingMultipathStatus'), 'info');
                                                                         await new Promise(r => setTimeout(r, 2000));
                                                                         try {
                                                                             const statusRes = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/multipath/status`);
@@ -2606,26 +2606,26 @@
                                                                                 setMultipathStatus(statusData);
                                                                                 const running = statusData.summary?.nodes_with_multipath || 0;
                                                                                 const total = statusData.summary?.total_nodes || 0;
-                                                                                addToast(`Multipath active on ${running}/${total} nodes`, running === total ? 'success' : 'warning');
+                                                                                addToast(`${t('multipathActiveOnNodes')}: ${running}/${total}`, running === total ? 'success' : 'warning');
                                                                             }
                                                                         } catch (e) {
                                                                             console.error('Status refresh failed:', e);
                                                                         }
                                                                     } else {
-                                                                        addToast(data.error || 'Multipath setup completed with errors', data.error ? 'error' : 'warning');
+                                                                        addToast(data.error || t('multipathSetupCompletedWithErrors'), data.error ? 'error' : 'warning');
                                                                     }
                                                                 }
                                                             } catch (e) {
-                                                                addToast('Setup failed: ' + e.message, 'error');
+                                                                addToast(`${t('setupFailed')}: ${e.message}`, 'error');
                                                             }
                                                         }}
                                                         className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                                         disabled={multipathSelectedNodes !== null && multipathSelectedNodes.length === 0}
                                                     >
                                                         <Icons.Zap className="w-4 h-4" />
-                                                        {multipathSelectedNodes === null 
-                                                            ? 'Deploy to All Nodes'
-                                                            : `Deploy to ${multipathSelectedNodes.length} Node${multipathSelectedNodes.length !== 1 ? 's' : ''}`
+                                                        {multipathSelectedNodes === null
+                                                            ? t('deployToAllNodes')
+                                                            : `${t('deployToSelectedNodes')}: ${multipathSelectedNodes.length}`
                                                         }
                                                     </button>
                                                 </div>
@@ -2641,14 +2641,14 @@
                                             <div className="flex justify-between items-center p-4 border-b border-proxmox-border sticky top-0 bg-proxmox-card z-10">
                                                 <h3 className="text-lg font-semibold flex items-center gap-2">
                                                     <Icons.HardDrive />
-                                                    {newStorage.storage ? `Edit: ${newStorage.storage}` : `Add: ${storageTypes.find(s => s.id === newStorage.type)?.label || 'Storage'}`}
+                                                    {newStorage.storage ? `${t('edit')}: ${newStorage.storage}` : `${t('add')}: ${storageTypes.find(s => s.id === newStorage.type)?.label || t('storage')}`}
                                                 </h3>
                                                 <button onClick={() => setShowAddStorage(false)} className="p-1.5 hover:bg-proxmox-dark rounded-lg transition-colors"><Icons.X /></button>
                                             </div>
-                                            
+
                                             {/* Storage Type Selection */}
                                             <div className="p-4 border-b border-proxmox-border">
-                                                <label className="block text-sm text-gray-400 mb-2">Type</label>
+                                                <label className="block text-sm text-gray-400 mb-2">{t('type')}</label>
                                                 <div className="grid grid-cols-5 gap-2">
                                                     {storageTypes.map(st => (
                                                         <button key={st.id} onClick={() => {
@@ -2669,13 +2669,13 @@
                                                 {/* Common Fields */}
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">ID *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('id')} *</label>
                                                         <input value={newStorage.storage || ''} onChange={e => setNewStorage({...newStorage, storage: e.target.value})} placeholder="storage-name" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Nodes</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('nodes')}</label>
                                                         <select value={newStorage.nodes || ''} onChange={e => setNewStorage({...newStorage, nodes: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                            <option value="">All (No restrictions)</option>
+                                                            <option value="">{t('allNoRestrictions')}</option>
                                                             {(clusterNodes || []).map(n => <option key={n.name} value={n.name}>{n.name}</option>)}
                                                         </select>
                                                     </div>
@@ -2685,27 +2685,27 @@
                                                 {newStorage.type === 'iscsi' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Portal *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('portal')} *</label>
                                                             <div className="flex gap-2">
                                                                 <input value={newStorage.portal || ''} onChange={e => setNewStorage({...newStorage, portal: e.target.value})} placeholder="192.168.1.100" className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
-                                                                <button 
-                                                                    onClick={() => scanStorage('iscsi')} 
+                                                                <button
+                                                                    onClick={() => scanStorage('iscsi')}
                                                                     disabled={!newStorage.portal || scanning}
                                                                     className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm whitespace-nowrap"
                                                                 >
-                                                                    {scanning ? '...' : 'Scan'}
+                                                                    {scanning ? '...' : t('scan')}
                                                                 </button>
                                                             </div>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Target *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('target')} *</label>
                                                             {scanResults.length > 0 && newStorage.type === 'iscsi' ? (
-                                                                <select 
-                                                                    value={newStorage.target || ''} 
-                                                                    onChange={e => setNewStorage({...newStorage, target: e.target.value})} 
+                                                                <select
+                                                                    value={newStorage.target || ''}
+                                                                    onChange={e => setNewStorage({...newStorage, target: e.target.value})}
                                                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono"
                                                                 >
-                                                                    <option value="">Select target...</option>
+                                                                    <option value="">{t('selectTarget')}</option>
                                                                     {scanResults.map((r, i) => (
                                                                         <option key={i} value={r.target}>{r.target}</option>
                                                                     ))}
@@ -2716,10 +2716,10 @@
                                                         </div>
                                                         <div className="flex items-center gap-4 col-span-2">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.comstar_tg || false} onChange={e => setNewStorage({...newStorage, comstar_tg: e.target.checked})} className="rounded" /> Use LUNs directly
+                                                                <input type="checkbox" checked={newStorage.comstar_tg || false} onChange={e => setNewStorage({...newStorage, comstar_tg: e.target.checked})} className="rounded" /> {t('useLunsDirectly')}
                                                             </label>
                                                         </div>
                                                     </div>
@@ -2729,7 +2729,7 @@
                                                 {newStorage.type === 'lvm' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Base storage (for Shared LVM)</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('baseStorageSharedLvm')}</label>
                                                             <select value={newStorage.baseStorage || ''} onChange={e => {
                                                                 const baseStorage = e.target.value;
                                                                 // NS: If base storage is selected, it becomes shared automatically
@@ -2737,36 +2737,36 @@
                                                                 // Clear scan results when base changes
                                                                 setScanResults([]);
                                                             }} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="">Existing volume groups (local)</option>
+                                                                <option value="">{t('existingVolumeGroupsLocal')}</option>
                                                                 {storage.filter(s => s.type === 'iscsi').map(s => <option key={s.storage} value={s.storage}>iSCSI: {s.storage}</option>)}
                                                             </select>
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
-                                                        
+
                                                         {/* Shared LVM Info */}
                                                         {newStorage.baseStorage && (
                                                             <div className="col-span-2 p-3 bg-blue-900/30 border border-blue-500/50 rounded text-sm text-blue-300">
-                                                                <strong>Shared LVM:</strong> Select a LUN from "{newStorage.baseStorage}" below. 
-                                                                The volume group will be created on or use the selected LUN.
-                                                                All cluster nodes must have access to the iSCSI target.
+                                                                <strong>{t('sharedLvm')}:</strong> {t('selectLunFrom')} "{newStorage.baseStorage}".
+                                                                {t('sharedLvmCreateOrUseVg')}
+                                                                {t('sharedLvmAllNodesAccess')}
                                                             </div>
                                                         )}
-                                                        
+
                                                         {/* LUN Selection for Shared LVM */}
                                                         {newStorage.baseStorage && (
                                                             <div className="col-span-2">
-                                                                <label className="block text-sm text-gray-400 mb-1">Select LUN *</label>
+                                                                <label className="block text-sm text-gray-400 mb-1">{t('selectLunLabel')} *</label>
                                                                 <div className="flex gap-2">
-                                                                    <select 
-                                                                        value={newStorage.base || ''} 
+                                                                    <select
+                                                                        value={newStorage.base || ''}
                                                                         onChange={e => setNewStorage({...newStorage, base: e.target.value})}
                                                                         className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono"
                                                                     >
-                                                                        <option value="">Select LUN...</option>
+                                                                        <option value="">{t('selectLun')}</option>
                                                                         {/* NS: volid from Proxmox already includes storage name like "iscsi-storage:0.0.0.1.lun-0" */}
                                                                         {scanResults.filter(l => l.volid).map((lun, i) => (
                                                                             <option key={i} value={lun.volid}>
@@ -2774,7 +2774,7 @@
                                                                             </option>
                                                                         ))}
                                                                     </select>
-                                                                    <button 
+                                                                    <button
                                                                         onClick={async () => {
                                                                             // Fetch LUNs from iSCSI storage
                                                                             setScanning(true);
@@ -2785,105 +2785,105 @@
                                                                                     console.log('LUNs from', newStorage.baseStorage, ':', luns);
                                                                                     setScanResults(luns || []);
                                                                                 } else {
-                                                                                    addToast('Failed to scan LUNs', 'error');
+                                                                                    addToast(t('failedScanLuns'), 'error');
                                                                                 }
                                                                             } catch (e) {
                                                                                 console.error('Error fetching LUNs:', e);
-                                                                                addToast('Error scanning LUNs', 'error');
+                                                                                addToast(t('errorScanLuns'), 'error');
                                                                             }
                                                                             setScanning(false);
                                                                         }}
                                                                         disabled={scanning}
                                                                         className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm whitespace-nowrap"
                                                                     >
-                                                                        {scanning ? '...' : 'Scan LUNs'}
+                                                                        {scanning ? '...' : t('scanLuns')}
                                                                     </button>
                                                                 </div>
                                                                 {scanResults.length === 0 && !scanning && (
-                                                                    <p className="text-xs text-gray-500 mt-1">Click "Scan LUNs" to discover available LUNs</p>
+                                                                    <p className="text-xs text-gray-500 mt-1">{t('scanLunsHint')}</p>
                                                                 )}
                                                                 {newStorage.baseStorage && !newStorage.base && scanResults.length > 0 && (
-                                                                    <p className="text-xs text-yellow-400 mt-1">⚠️ Select a LUN to continue</p>
+                                                                    <p className="text-xs text-yellow-400 mt-1">⚠️ {t('selectLunContinue')}</p>
                                                                 )}
                                                             </div>
                                                         )}
-                                                        
+
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Volume group name *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('volumeGroupName')} *</label>
                                                             <div className="flex gap-2">
                                                                 {!newStorage.baseStorage && scanResults.length > 0 && newStorage.type === 'lvm' ? (
-                                                                    <select 
-                                                                        value={newStorage.vgname || ''} 
-                                                                        onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} 
+                                                                    <select
+                                                                        value={newStorage.vgname || ''}
+                                                                        onChange={e => setNewStorage({...newStorage, vgname: e.target.value})}
                                                                         className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                                     >
-                                                                        <option value="">Select VG...</option>
+                                                                        <option value="">{t('selectVg')}</option>
                                                                         {scanResults.filter(r => r.vg).map((r, i) => (
                                                                             <option key={i} value={r.vg}>{r.vg} ({(r.size / 1024 / 1024 / 1024).toFixed(1)} GB)</option>
                                                                         ))}
                                                                     </select>
                                                                 ) : (
-                                                                    <input 
-                                                                        value={newStorage.vgname || ''} 
-                                                                        onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} 
-                                                                        placeholder={newStorage.baseStorage ? "shared-vg" : "pve"} 
-                                                                        className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" 
+                                                                    <input
+                                                                        value={newStorage.vgname || ''}
+                                                                        onChange={e => setNewStorage({...newStorage, vgname: e.target.value})}
+                                                                        placeholder={newStorage.baseStorage ? "shared-vg" : "pve"}
+                                                                        className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                                     />
                                                                 )}
                                                                 {!newStorage.baseStorage && (
-                                                                    <button 
-                                                                        onClick={() => scanStorage('lvm')} 
+                                                                    <button
+                                                                        onClick={() => scanStorage('lvm')}
                                                                         disabled={scanning}
                                                                         className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm whitespace-nowrap"
                                                                     >
-                                                                        {scanning ? '...' : 'Scan'}
+                                                                        {scanning ? '...' : t('scan')}
                                                                     </button>
                                                                 )}
                                                             </div>
                                                             {newStorage.baseStorage && !newStorage.vgname && (
-                                                                <p className="text-xs text-yellow-400 mt-1">⚠️ Enter a volume group name</p>
+                                                                <p className="text-xs text-yellow-400 mt-1">⚠️ {t('enterVolumeGroupName')}</p>
                                                             )}
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input 
-                                                                    type="checkbox" 
-                                                                    checked={newStorage.shared || false} 
-                                                                    onChange={e => setNewStorage({...newStorage, shared: e.target.checked})} 
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={newStorage.shared || false}
+                                                                    onChange={e => setNewStorage({...newStorage, shared: e.target.checked})}
                                                                     disabled={!!newStorage.baseStorage}
-                                                                    className="rounded" 
-                                                                /> Shared {newStorage.baseStorage && '(auto)'}
+                                                                    className="rounded"
+                                                                /> {t('shared')} {newStorage.baseStorage && `(${t('automatic')})`}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images,rootdir'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="images">Disk image</option>
-                                                                <option value="rootdir">Container</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="images">{t('diskImage')}</option>
+                                                                <option value="rootdir">{t('container')}</option>
                                                             </select>
                                                         </div>
                                                         <div className="flex items-center gap-4">
-                                                            <label className="flex items-center gap-2 text-sm" title="Wipe disk when deleting volumes (more secure, slower)">
-                                                                <input type="checkbox" checked={newStorage.saferemove || false} onChange={e => setNewStorage({...newStorage, saferemove: e.target.checked})} className="rounded" /> Wipe on Delete
+                                                            <label className="flex items-center gap-2 text-sm" title={t('wipeOnDeleteHint')}>
+                                                                <input type="checkbox" checked={newStorage.saferemove || false} onChange={e => setNewStorage({...newStorage, saferemove: e.target.checked})} className="rounded" /> {t('wipeOnDelete')}
                                                             </label>
                                                         </div>
-                                                        
+
                                                         {/* Snapshot as Volume Chain - PVE 9+ Feature for LVM */}
                                                         <div className="col-span-2 p-3 bg-proxmox-dark border border-proxmox-border rounded">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input 
-                                                                    type="checkbox" 
-                                                                    checked={newStorage['snapshot-as-volume-chain'] || false} 
-                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})} 
-                                                                    className="rounded" 
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={newStorage['snapshot-as-volume-chain'] || false}
+                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})}
+                                                                    className="rounded"
                                                                 />
-                                                                <span className="font-medium">Snapshot as Volume Chain</span>
+                                                                <span className="font-medium">{t('snapshotAsVolumeChain')}</span>
                                                                 <span className="text-xs px-1.5 py-0.5 bg-green-600/30 text-green-400 rounded">PVE 9+</span>
                                                             </label>
                                                             <p className="text-xs text-gray-500 mt-1 ml-6">
-                                                                Uses separate volumes for snapshot data instead of internal LVM snapshots. 
-                                                                This provides better performance and compatibility.
+                                                                {t('snapshotLvmSeparateVolumes')}
+                                                                {t('snapshotBetterPerformanceCompatibility')}
                                                             </p>
                                                         </div>
                                                     </div>
@@ -2893,7 +2893,7 @@
                                                 {newStorage.type === 'starlvm' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div className="col-span-2 p-3 bg-teal-900/30 border border-teal-500/50 rounded text-sm text-teal-200">
-                                                            <strong>StarWind shared LVM:</strong> the volume group must already exist on the shared SAN LUN, and the <code>starwind-proxmox-plugin</code> must be installed on every node. Gives thin snapshots + live migration on shared block storage.
+                                                            <strong>{t('starwindSharedLvm')}:</strong> {t('starwindSharedLvmDesc')}
                                                         </div>
                                                         <div className="col-span-2 p-3 bg-amber-900/30 border border-amber-500/50 rounded text-xs text-amber-200">
                                                             ⚠️ {t('starwindThirdPartyNote') || 'StarWind LVM is a third-party product by StarWind Software, not part of PegaProx. PegaProx gives no support or warranty for it — for problems, contact StarWind directly:'}{' '}
@@ -2919,23 +2919,23 @@
                                                             </div>
                                                         )}
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Volume group name *</label>
-                                                            <input type="text" value={newStorage.vgname || ''} onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} placeholder="e.g. swvg" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('volumeGroupName')} *</label>
+                                                            <input type="text" value={newStorage.vgname || ''} onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} placeholder={t('exampleSwvg')} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images,rootdir'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="images">Disk image</option>
-                                                                <option value="rootdir">Container</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="images">{t('diskImage')}</option>
+                                                                <option value="rootdir">{t('container')}</option>
                                                             </select>
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.shared !== false} onChange={e => setNewStorage({...newStorage, shared: e.target.checked})} className="rounded" /> Shared
+                                                                <input type="checkbox" checked={newStorage.shared !== false} onChange={e => setNewStorage({...newStorage, shared: e.target.checked})} className="rounded" /> {t('shared')}
                                                             </label>
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                     </div>
@@ -2945,15 +2945,15 @@
                                                 {newStorage.type === 'lvmthin' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Volume group *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('volumeGroup')} *</label>
                                                             <div className="flex gap-2">
                                                                 {scanResults.length > 0 && newStorage.type === 'lvmthin' && !newStorage.vgname ? (
-                                                                    <select 
-                                                                        value={newStorage.vgname || ''} 
-                                                                        onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} 
+                                                                    <select
+                                                                        value={newStorage.vgname || ''}
+                                                                        onChange={e => setNewStorage({...newStorage, vgname: e.target.value})}
                                                                         className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                                     >
-                                                                        <option value="">Select VG...</option>
+                                                                        <option value="">{t('selectVg')}</option>
                                                                         {scanResults.filter(r => r.vg).map((r, i) => (
                                                                             <option key={i} value={r.vg}>{r.vg}</option>
                                                                         ))}
@@ -2961,80 +2961,80 @@
                                                                 ) : (
                                                                     <input value={newStorage.vgname || ''} onChange={e => setNewStorage({...newStorage, vgname: e.target.value})} placeholder="pve" className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                                 )}
-                                                                <button 
-                                                                    onClick={() => scanStorage('lvm')} 
+                                                                <button
+                                                                    onClick={() => scanStorage('lvm')}
                                                                     disabled={scanning}
                                                                     className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm whitespace-nowrap"
                                                                 >
-                                                                    {scanning ? '...' : 'Scan VG'}
+                                                                    {scanning ? '...' : t('scanVg')}
                                                                 </button>
                                                             </div>
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Thin Pool *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('thinPool')} *</label>
                                                             <div className="flex gap-2">
                                                                 {scanResults.length > 0 && newStorage.vgname && scanResults.some(r => r.lv) ? (
-                                                                    <select 
-                                                                        value={newStorage.thinpool || ''} 
-                                                                        onChange={e => setNewStorage({...newStorage, thinpool: e.target.value})} 
+                                                                    <select
+                                                                        value={newStorage.thinpool || ''}
+                                                                        onChange={e => setNewStorage({...newStorage, thinpool: e.target.value})}
                                                                         className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                                     >
-                                                                        <option value="">Select pool...</option>
+                                                                        <option value="">{t('selectPool')}</option>
                                                                         {scanResults.filter(r => r.lv).map((r, i) => (
-                                                                            <option key={i} value={r.lv}>{r.lv} ({(r.size / 1024 / 1024 / 1024).toFixed(1)} GB, {r.used_percent}% used)</option>
+                                                                            <option key={i} value={r.lv}>{r.lv} ({(r.size / 1024 / 1024 / 1024).toFixed(1)} GB, {r.used_percent}% {t('used')})</option>
                                                                         ))}
                                                                     </select>
                                                                 ) : (
                                                                     <input value={newStorage.thinpool || ''} onChange={e => setNewStorage({...newStorage, thinpool: e.target.value})} placeholder="data" className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                                 )}
                                                                 {newStorage.vgname && (
-                                                                    <button 
-                                                                        onClick={() => scanStorage('lvmthin')} 
+                                                                    <button
+                                                                        onClick={() => scanStorage('lvmthin')}
                                                                         disabled={scanning || !newStorage.vgname}
                                                                         className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm whitespace-nowrap"
                                                                     >
-                                                                        {scanning ? '...' : 'Scan'}
+                                                                        {scanning ? '...' : t('scan')}
                                                                     </button>
                                                                 )}
                                                             </div>
                                                         </div>
                                                         <div></div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images,rootdir'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="images">Disk image</option>
-                                                                <option value="rootdir">Container</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="images">{t('diskImage')}</option>
+                                                                <option value="rootdir">{t('container')}</option>
                                                             </select>
                                                         </div>
                                                         <div></div>
-                                                        
+
                                                         {/* Snapshot as Volume Chain - PVE 9+ Feature */}
                                                         <div className="col-span-2 p-3 bg-proxmox-dark border border-proxmox-border rounded">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input 
-                                                                    type="checkbox" 
-                                                                    checked={newStorage['snapshot-as-volume-chain'] || false} 
-                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})} 
-                                                                    className="rounded" 
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={newStorage['snapshot-as-volume-chain'] || false}
+                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})}
+                                                                    className="rounded"
                                                                 />
-                                                                <span className="font-medium">Snapshot as Volume Chain</span>
+                                                                <span className="font-medium">{t('snapshotAsVolumeChain')}</span>
                                                                 <span className="text-xs px-1.5 py-0.5 bg-green-600/30 text-green-400 rounded">PVE 9+</span>
                                                             </label>
                                                             <p className="text-xs text-gray-500 mt-1 ml-6">
-                                                                Uses separate volumes for snapshot data instead of internal snapshots. 
-                                                                Improves performance and allows online snapshots for LVM-thin.
+                                                                {t('snapshotLvmThinSeparateVolumes')}
+                                                                {t('snapshotLvmThinPerformance')}
                                                             </p>
                                                         </div>
-                                                        
+
                                                         {/* LVM-thin cannot be shared warning */}
                                                         <div className="col-span-2 p-2 bg-yellow-900/30 border border-yellow-500/50 rounded text-xs text-yellow-300">
-                                                            ⚠️ LVM-thin storage cannot be shared between cluster nodes. For shared block storage, use regular LVM on iSCSI or Ceph RBD.
+                                                            ⚠️ {t('lvmThinNotShared')}
                                                         </div>
                                                     </div>
                                                 )}
@@ -3043,34 +3043,34 @@
                                                 {newStorage.type === 'btrfs' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Path *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('storagePath')} *</label>
                                                             <input value={newStorage.path || ''} onChange={e => setNewStorage({...newStorage, path: e.target.value})} placeholder="/mnt/btrfs" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images,rootdir'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="images">Disk image</option>
-                                                                <option value="rootdir">Container</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="images">{t('diskImage')}</option>
+                                                                <option value="rootdir">{t('container')}</option>
                                                             </select>
                                                         </div>
                                                         <div></div>
                                                         <div className="col-span-2 p-3 bg-blue-900/30 border border-blue-500/50 rounded text-sm text-blue-300">
-                                                            BTRFS integration is currently a technology preview.
+                                                            {t('btrfsTechnologyPreview')}
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Preallocation</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('preallocation')}</label>
                                                             <select value={newStorage.preallocation || ''} onChange={e => setNewStorage({...newStorage, preallocation: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="">Default</option>
-                                                                <option value="off">Off</option>
-                                                                <option value="metadata">Metadata</option>
-                                                                <option value="falloc">Falloc</option>
-                                                                <option value="full">Full</option>
+                                                                <option value="">{t('default')}</option>
+                                                                <option value="off">{t('preallocationOff')}</option>
+                                                                <option value="metadata">{t('preallocationMetadata')}</option>
+                                                                <option value="falloc">{t('preallocationFalloc')}</option>
+                                                                <option value="full">{t('preallocationFull')}</option>
                                                             </select>
                                                         </div>
                                                     </div>
@@ -3080,32 +3080,32 @@
                                                 {newStorage.type === 'nfs' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Server *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('server')} *</label>
                                                             <div className="flex gap-2">
                                                                 <input value={newStorage.server || ''} onChange={e => setNewStorage({...newStorage, server: e.target.value})} placeholder="192.168.1.100" className="flex-1 bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
-                                                                <button 
-                                                                    onClick={() => scanStorage('nfs')} 
+                                                                <button
+                                                                    onClick={() => scanStorage('nfs')}
                                                                     disabled={!newStorage.server || scanning}
                                                                     className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm whitespace-nowrap"
                                                                 >
-                                                                    {scanning ? '...' : 'Scan'}
+                                                                    {scanning ? '...' : t('scan')}
                                                                 </button>
                                                             </div>
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Export *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('export')} *</label>
                                                             {scanResults.length > 0 && newStorage.type === 'nfs' ? (
-                                                                <select 
-                                                                    value={newStorage.export || ''} 
-                                                                    onChange={e => setNewStorage({...newStorage, export: e.target.value})} 
+                                                                <select
+                                                                    value={newStorage.export || ''}
+                                                                    onChange={e => setNewStorage({...newStorage, export: e.target.value})}
                                                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono"
                                                                 >
-                                                                    <option value="">Select export...</option>
+                                                                    <option value="">{t('selectExport')}</option>
                                                                     {scanResults.map((r, i) => (
                                                                         <option key={i} value={r.path}>{r.path} {r.options ? `(${r.options})` : ''}</option>
                                                                     ))}
@@ -3116,20 +3116,20 @@
                                                         </div>
                                                         <div></div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images">Disk image</option>
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="backup">Backup</option>
-                                                                <option value="iso">ISO image</option>
-                                                                <option value="vztmpl">Container template</option>
-                                                                <option value="snippets">Snippets</option>
+                                                                <option value="images">{t('diskImage')}</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="backup">{t('backup')}</option>
+                                                                <option value="iso">{t('isoImage')}</option>
+                                                                <option value="vztmpl">{t('containerTemplate')}</option>
+                                                                <option value="snippets">{t('snippets')}</option>
                                                             </select>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">NFS Version</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('nfsVersion')}</label>
                                                             <select value={newStorage.options || ''} onChange={e => setNewStorage({...newStorage, options: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="">Default</option>
+                                                                <option value="">{t('default')}</option>
                                                                 <option value="vers=3">NFSv3</option>
                                                                 <option value="vers=4">NFSv4</option>
                                                                 <option value="vers=4.1">NFSv4.1</option>
@@ -3138,27 +3138,27 @@
                                                         </div>
                                                         <div className="col-span-2 p-3 bg-proxmox-dark border border-proxmox-border rounded">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input 
-                                                                    type="checkbox" 
-                                                                    checked={newStorage['snapshot-as-volume-chain'] || false} 
-                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})} 
-                                                                    className="rounded" 
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={newStorage['snapshot-as-volume-chain'] || false}
+                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})}
+                                                                    className="rounded"
                                                                 />
-                                                                <span className="font-medium">Snapshot as Volume Chain</span>
+                                                                <span className="font-medium">{t('snapshotAsVolumeChain')}</span>
                                                                 <span className="text-xs px-1.5 py-0.5 bg-green-600/30 text-green-400 rounded">PVE 9+</span>
                                                             </label>
                                                             <p className="text-xs text-gray-500 mt-1 ml-6">
-                                                                Uses separate qcow2 files for snapshot data instead of internal qcow2 snapshots.
+                                                                {t('snapshotQcow2SeparateFiles')}
                                                             </p>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Preallocation</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('preallocation')}</label>
                                                             <select value={newStorage.preallocation || ''} onChange={e => setNewStorage({...newStorage, preallocation: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="">Default</option>
-                                                                <option value="off">Off</option>
-                                                                <option value="metadata">Metadata</option>
-                                                                <option value="falloc">Falloc</option>
-                                                                <option value="full">Full</option>
+                                                                <option value="">{t('default')}</option>
+                                                                <option value="off">{t('preallocationOff')}</option>
+                                                                <option value="metadata">{t('preallocationMetadata')}</option>
+                                                                <option value="falloc">{t('preallocationFalloc')}</option>
+                                                                <option value="full">{t('preallocationFull')}</option>
                                                             </select>
                                                         </div>
                                                     </div>
@@ -3168,65 +3168,65 @@
                                                 {newStorage.type === 'cifs' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Server *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('server')} *</label>
                                                             <input value={newStorage.server || ''} onChange={e => setNewStorage({...newStorage, server: e.target.value})} placeholder="192.168.1.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Username</label>
-                                                            <input value={newStorage.username || ''} onChange={e => setNewStorage({...newStorage, username: e.target.value})} placeholder="Guest user" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('username')}</label>
+                                                            <input value={newStorage.username || ''} onChange={e => setNewStorage({...newStorage, username: e.target.value})} placeholder={t('guestUser')} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images">Disk image</option>
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="backup">Backup</option>
-                                                                <option value="iso">ISO image</option>
+                                                                <option value="images">{t('diskImage')}</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="backup">{t('backup')}</option>
+                                                                <option value="iso">{t('isoImage')}</option>
                                                             </select>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Password</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('password')}</label>
                                                             <input type="password" value={newStorage.password || ''} onChange={e => setNewStorage({...newStorage, password: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Domain</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('domain')}</label>
                                                             <input value={newStorage.domain || ''} onChange={e => setNewStorage({...newStorage, domain: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Share *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('share')} *</label>
                                                             <input value={newStorage.share || ''} onChange={e => setNewStorage({...newStorage, share: e.target.value})} placeholder="share-name" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Subdirectory</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('subdirectory')}</label>
                                                             <input value={newStorage.subdir || ''} onChange={e => setNewStorage({...newStorage, subdir: e.target.value})} placeholder="/some/path" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Preallocation</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('preallocation')}</label>
                                                             <select value={newStorage.preallocation || ''} onChange={e => setNewStorage({...newStorage, preallocation: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="">Default</option>
-                                                                <option value="off">Off</option>
-                                                                <option value="metadata">Metadata</option>
-                                                                <option value="full">Full</option>
+                                                                <option value="">{t('default')}</option>
+                                                                <option value="off">{t('preallocationOff')}</option>
+                                                                <option value="metadata">{t('preallocationMetadata')}</option>
+                                                                <option value="full">{t('preallocationFull')}</option>
                                                             </select>
                                                         </div>
                                                         <div className="col-span-2 p-3 bg-proxmox-dark border border-proxmox-border rounded">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input 
-                                                                    type="checkbox" 
-                                                                    checked={newStorage['snapshot-as-volume-chain'] || false} 
-                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})} 
-                                                                    className="rounded" 
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={newStorage['snapshot-as-volume-chain'] || false}
+                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})}
+                                                                    className="rounded"
                                                                 />
-                                                                <span className="font-medium">Snapshot as Volume Chain</span>
+                                                                <span className="font-medium">{t('snapshotAsVolumeChain')}</span>
                                                                 <span className="text-xs px-1.5 py-0.5 bg-green-600/30 text-green-400 rounded">PVE 9+</span>
                                                             </label>
                                                             <p className="text-xs text-gray-500 mt-1 ml-6">
-                                                                Uses separate qcow2 files for snapshot data instead of internal qcow2 snapshots.
+                                                                {t('snapshotQcow2SeparateFiles')}
                                                             </p>
                                                         </div>
                                                     </div>
@@ -3236,41 +3236,41 @@
                                                 {newStorage.type === 'dir' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Directory *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('directory')} *</label>
                                                             <input value={newStorage.path || ''} onChange={e => setNewStorage({...newStorage, path: e.target.value})} placeholder="/mnt/storage" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.shared || false} onChange={e => setNewStorage({...newStorage, shared: e.target.checked})} className="rounded" /> Shared
+                                                                <input type="checkbox" checked={newStorage.shared || false} onChange={e => setNewStorage({...newStorage, shared: e.target.checked})} className="rounded" /> {t('shared')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images,rootdir,vztmpl,backup,iso,snippets'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images,rootdir,vztmpl,backup,iso,snippets">All</option>
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="backup">Backup</option>
-                                                                <option value="iso">ISO image</option>
-                                                                <option value="vztmpl">Container template</option>
+                                                                <option value="images,rootdir,vztmpl,backup,iso,snippets">{t('all')}</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="backup">{t('backup')}</option>
+                                                                <option value="iso">{t('isoImage')}</option>
+                                                                <option value="vztmpl">{t('containerTemplate')}</option>
                                                             </select>
                                                         </div>
                                                         <div></div>
                                                         <div className="col-span-2 p-3 bg-proxmox-dark border border-proxmox-border rounded">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input 
-                                                                    type="checkbox" 
-                                                                    checked={newStorage['snapshot-as-volume-chain'] || false} 
-                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})} 
-                                                                    className="rounded" 
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={newStorage['snapshot-as-volume-chain'] || false}
+                                                                    onChange={e => setNewStorage({...newStorage, 'snapshot-as-volume-chain': e.target.checked})}
+                                                                    className="rounded"
                                                                 />
-                                                                <span className="font-medium">Snapshot as Volume Chain</span>
+                                                                <span className="font-medium">{t('snapshotAsVolumeChain')}</span>
                                                                 <span className="text-xs px-1.5 py-0.5 bg-green-600/30 text-green-400 rounded">PVE 9+</span>
                                                             </label>
                                                             <p className="text-xs text-gray-500 mt-1 ml-6">
-                                                                Uses separate qcow2 files for snapshot data instead of internal qcow2 snapshots.
+                                                                {t('snapshotQcow2SeparateFiles')}
                                                             </p>
                                                         </div>
                                                     </div>
@@ -3280,29 +3280,29 @@
                                                 {newStorage.type === 'pbs' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Server *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('server')} *</label>
                                                             <input value={newStorage.server || ''} onChange={e => setNewStorage({...newStorage, server: e.target.value})} placeholder="pbs.example.com" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Username *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('username')} *</label>
                                                             <input value={newStorage.username || ''} onChange={e => setNewStorage({...newStorage, username: e.target.value})} placeholder="user@pbs" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Password *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('password')} *</label>
                                                             <input type="password" value={newStorage.password || ''} onChange={e => setNewStorage({...newStorage, password: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Datastore *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('datastore')} *</label>
                                                             <input value={newStorage.datastore || ''} onChange={e => setNewStorage({...newStorage, datastore: e.target.value})} placeholder="store1" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
                                                             <label className="block text-sm text-gray-400 mb-1 flex items-center justify-between">
-                                                                <span>Fingerprint</span>
+                                                                <span>{t('fingerprint')}</span>
                                                                 {/* NS May 2026 — auto-fetch + preflight */}
                                                                 {window.PegaProxFingerprintFetcher && React.createElement(window.PegaProxFingerprintFetcher, {
                                                                     host: newStorage.server,
@@ -3312,7 +3312,7 @@
                                                                     onFetched: (fp) => setNewStorage({...newStorage, fingerprint: fp}),
                                                                 })}
                                                             </label>
-                                                            <input value={newStorage.fingerprint || ''} onChange={e => setNewStorage({...newStorage, fingerprint: e.target.value})} placeholder="optional" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono text-xs" />
+                                                            <input value={newStorage.fingerprint || ''} onChange={e => setNewStorage({...newStorage, fingerprint: e.target.value})} placeholder={t('optional')} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono text-xs" />
                                                         </div>
                                                     </div>
                                                 )}
@@ -3329,20 +3329,20 @@
                                                 {newStorage.type === 'zfspool' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Pool *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('pool')} *</label>
                                                             <input value={newStorage.pool || ''} onChange={e => setNewStorage({...newStorage, pool: e.target.value})} placeholder="rpool/data" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Content</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('content')}</label>
                                                             <select value={newStorage.content || 'images,rootdir'} onChange={e => setNewStorage({...newStorage, content: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                                <option value="images,rootdir">Disk image, Container</option>
-                                                                <option value="images">Disk image</option>
-                                                                <option value="rootdir">Container</option>
+                                                                <option value="images,rootdir">{t('diskImageContainer')}</option>
+                                                                <option value="images">{t('diskImage')}</option>
+                                                                <option value="rootdir">{t('container')}</option>
                                                             </select>
                                                         </div>
                                                     </div>
@@ -3352,25 +3352,25 @@
                                                 {newStorage.type === 'esxi' && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Server *</label>
-                                                            <input value={newStorage.server || ''} onChange={e => setNewStorage({...newStorage, server: e.target.value})} placeholder="IP address or hostname" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('server')} *</label>
+                                                            <input value={newStorage.server || ''} onChange={e => setNewStorage({...newStorage, server: e.target.value})} placeholder={t('ipOrHostname')} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> Enable
+                                                                <input type="checkbox" checked={newStorage.enabled !== false} onChange={e => setNewStorage({...newStorage, enabled: e.target.checked})} className="rounded" /> {t('enable')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Username *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('username')} *</label>
                                                             <input value={newStorage.username || ''} onChange={e => setNewStorage({...newStorage, username: e.target.value})} placeholder="root" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div className="flex items-center gap-4">
                                                             <label className="flex items-center gap-2 text-sm">
-                                                                <input type="checkbox" checked={newStorage.skip_cert_verification || false} onChange={e => setNewStorage({...newStorage, skip_cert_verification: e.target.checked})} className="rounded" /> Skip Certificate Verification
+                                                                <input type="checkbox" checked={newStorage.skip_cert_verification || false} onChange={e => setNewStorage({...newStorage, skip_cert_verification: e.target.checked})} className="rounded" /> {t('skipCertificateVerification')}
                                                             </label>
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Password *</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('password')} *</label>
                                                             <input type="password" value={newStorage.password || ''} onChange={e => setNewStorage({...newStorage, password: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                     </div>
@@ -3378,17 +3378,17 @@
                                             </div>
 
                                             <div className="flex justify-end gap-3 p-4 border-t border-proxmox-border sticky bottom-0 bg-proxmox-card">
-                                                <button 
+                                                <button
                                                     onClick={() => {
                                                         setShowAddStorage(false);
                                                         setNewStorage({ type: 'dir', storage: '', path: '', content: 'images,rootdir', enabled: true });
-                                                    }} 
+                                                    }}
                                                     className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors"
                                                 >
                                                     {t('cancel')}
                                                 </button>
-                                                <button 
-                                                    onClick={createStorage} 
+                                                <button
+                                                    onClick={createStorage}
                                                     disabled={!newStorage.storage}
                                                     className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm text-white transition-colors"
                                                 >
@@ -3411,36 +3411,36 @@
                                         <p className="text-gray-400 text-sm mb-4">
                                             {sdnData.error || t('sdnNotConfigured') || 'Software Defined Networking is not configured on this cluster.'}
                                         </p>
-                                        
+
                                         {/* Troubleshooting hints */}
                                         <div className="bg-proxmox-dark rounded-lg p-4 text-left mb-4 max-w-md mx-auto">
-                                            <p className="text-xs text-gray-400 mb-2 font-medium">Troubleshooting:</p>
+                                            <p className="text-xs text-gray-400 mb-2 font-medium">{t('sdnTroubleshooting')}:</p>
                                             <ul className="text-xs text-gray-500 space-y-1 list-disc list-inside">
-                                                <li>SDN requires Proxmox VE 6.2 or newer</li>
-                                                <li>Install: <code className="text-orange-400">apt install libpve-network-perl</code></li>
-                                                <li>Enable SDN in Datacenter ↑ SDN in Proxmox UI</li>
-                                                <li>API user needs SDN.Audit permission</li>
+                                                <li>{t('sdnRequiresPve62')}</li>
+                                                <li>{t('sdnInstallPackage')}: <code className="text-orange-400">apt install libpve-network-perl</code></li>
+                                                <li>{t('sdnEnableInUi')}</li>
+                                                <li>{t('sdnAuditPermission')}</li>
                                             </ul>
                                         </div>
-                                        
+
                                         <div className="flex gap-3 justify-center">
-                                            <a 
-                                                href="https://pve.proxmox.com/wiki/Software_Defined_Network" 
-                                                target="_blank" 
+                                            <a
+                                                href="https://pve.proxmox.com/wiki/Software_Defined_Network"
+                                                target="_blank"
                                                 rel="noopener noreferrer"
                                                 className="text-blue-400 hover:underline text-sm"
                                             >
-                                                {t('learnMore') || 'Learn more about Proxmox SDN'} ↑
+                                                {t('learnMoreProxmoxSdn')} ↑
                                             </a>
                                             <button
                                                 onClick={() => {
                                                     console.log('SDN Data:', sdnData);
                                                     console.log('SDN Debug:', sdnData.debug);
-                                                    alert(`SDN Debug Info:\n\nAvailable: ${sdnData.available}\nSDN Status: ${sdnData.debug?.sdn_status || 'N/A'}\nZones Status: ${sdnData.debug?.zones_status || 'N/A'}\nError: ${sdnData.debug?.error || sdnData.debug?.zones_error || 'None'}\n\nCheck browser console (F12) for full details.`);
+                                                    alert(`${t('sdnDebugInfoTitle')}:\n\n${t('sdnDebugAvailable')}: ${sdnData.available ? t('yes') : t('no')}\n${t('sdnDebugStatus')}: ${sdnData.debug?.sdn_status || t('notAvailableShort')}\n${t('sdnDebugZonesStatus')}: ${sdnData.debug?.zones_status || t('notAvailableShort')}\n${t('sdnDebugError')}: ${sdnData.debug?.error || sdnData.debug?.zones_error || t('none')}\n\n${t('sdnDebugConsoleHint')}`);
                                                 }}
                                                 className="text-gray-400 hover:text-white text-sm"
                                             >
-                                                Debug Info
+                                                {t('debugInfo')}
                                             </button>
                                         </div>
                                     </div>
@@ -3477,15 +3477,15 @@
                                                             setTimeout(() => fetchAllData(), 1000);
                                                         } else {
                                                             const err = await res.json();
-                                                            addToast(err.error || 'Failed to apply SDN', 'error');
+                                                            addToast(err.error || t('failedApplySdn'), 'error');
                                                         }
                                                     } catch (e) {
-                                                        addToast('Failed to apply SDN', 'error');
+                                                        addToast(t('failedApplySdn'), 'error');
                                                     }
                                                 }}
                                                 className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 ${
-                                                    sdnData.pending 
-                                                        ? 'bg-yellow-500 hover:bg-yellow-600 text-black' 
+                                                    sdnData.pending
+                                                        ? 'bg-yellow-500 hover:bg-yellow-600 text-black'
                                                         : 'bg-proxmox-orange hover:bg-orange-600 text-white'
                                                 }`}
                                             >
@@ -3501,7 +3501,7 @@
                                                     <Icons.Layers className="w-5 h-5" />
                                                     {t('sdnZones') || 'Zones'}
                                                 </h3>
-                                                <button 
+                                                <button
                                                     onClick={() => { setNewZone({ zone: '', type: 'simple' }); setShowAddZone(true); }}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                 >
@@ -3519,7 +3519,7 @@
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('zone') || 'Zone'}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">MTU</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">Nodes</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('nodes')}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('vnets') || 'VNets'}</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
                                                         </tr>
@@ -3542,7 +3542,7 @@
                                                                     </span>
                                                                 </td>
                                                                 <td className="p-3 text-gray-400">{zone.mtu || '-'}</td>
-                                                                <td className="p-3 text-gray-400">{zone.nodes || 'all'}</td>
+                                                                <td className="p-3 text-gray-400">{zone.nodes || t('all')}</td>
                                                                 <td className="p-3 text-gray-400">
                                                                     {sdnData.vnets.filter(v => v.zone === zone.zone).length}
                                                                 </td>
@@ -3554,14 +3554,14 @@
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/zones/${zone.zone}`, { method: 'DELETE' });
                                                                                     if (res.ok) {
                                                                                         addToast(t('zoneDeleted') || 'Zone deleted', 'success');
-                                                                                        addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                                        addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                                         fetchAllData();
                                                                                     } else {
                                                                                         const err = await res.json();
-                                                                                        addToast(err.error || 'Failed to delete zone', 'error');
+                                                                                        addToast(err.error || t('failedDeleteZone'), 'error');
                                                                                     }
                                                                                 } catch (e) {
-                                                                                    addToast('Failed to delete zone', 'error');
+                                                                                    addToast(t('failedDeleteZone'), 'error');
                                                                                 }
                                                                             }
                                                                         }}
@@ -3585,10 +3585,10 @@
                                                     <Icons.Network className="w-5 h-5 text-purple-400" />
                                                     {t('sdnVnets') || 'VNets'}
                                                 </h3>
-                                                <button 
-                                                    onClick={() => { 
-                                                        setNewVnet({ vnet: '', zone: sdnData.zones[0]?.zone || '', tag: '', alias: '' }); 
-                                                        setShowAddVnet(true); 
+                                                <button
+                                                    onClick={() => {
+                                                        setNewVnet({ vnet: '', zone: sdnData.zones[0]?.zone || '', tag: '', alias: '' });
+                                                        setShowAddVnet(true);
                                                     }}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm"
                                                     disabled={sdnData.zones.length === 0}
@@ -3610,7 +3610,7 @@
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('vnet') || 'VNet'}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('zone') || 'Zone'}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('alias') || 'Alias'}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">VLAN Tag</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('vlanTag')}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('subnets') || 'Subnets'}</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
                                                         </tr>
@@ -3662,14 +3662,14 @@
                                                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/vnets/${vnet.vnet}`, { method: 'DELETE' });
                                                                                         if (res.ok) {
                                                                                             addToast(t('vnetDeleted') || 'VNet deleted', 'success');
-                                                                                            addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                                            addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                                             fetchAllData();
                                                                                         } else {
                                                                                             const err = await res.json();
-                                                                                            addToast(err.error || 'Failed to delete VNet', 'error');
+                                                                                            addToast(err.error || t('failedDeleteVnet'), 'error');
                                                                                         }
                                                                                     } catch (e) {
-                                                                                        addToast('Failed to delete VNet', 'error');
+                                                                                        addToast(t('failedDeleteVnet'), 'error');
                                                                                     }
                                                                                 }
                                                                             }}
@@ -3728,7 +3728,7 @@
                                                     <Icons.Cpu className="w-5 h-5 text-blue-400" />
                                                     {t('controllers') || 'Controllers'}
                                                 </h3>
-                                                <button 
+                                                <button
                                                     onClick={() => { setNewController({ controller: '', type: 'evpn' }); setShowAddController(true); }}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm"
                                                 >
@@ -3746,7 +3746,7 @@
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('name') || 'Name'}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">ASN</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">Peers</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('peers')}</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
                                                         </tr>
                                                     </thead>
@@ -3769,18 +3769,18 @@
                                                                 <td className="p-3 text-right">
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if (confirm(`Delete controller "${ctrl.controller}"?`)) {
+                                                                            if (confirm(`${t('confirmDeleteController')} "${ctrl.controller}"?`)) {
                                                                                 try {
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/controllers/${ctrl.controller}`, { method: 'DELETE' });
                                                                                     if (res.ok) {
-                                                                                        addToast('Controller deleted - Click Apply to activate', 'success');
-                                                                                        addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                                        addToast(t('controllerDeletedApply'), 'success');
+                                                                                        addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                                         fetchAllData();
                                                                                     } else {
                                                                                         const err = await res.json();
-                                                                                        addToast(err.error || 'Failed', 'error');
+                                                                                        addToast(err.error || t('failed'), 'error');
                                                                                     }
-                                                                                } catch (e) { addToast('Failed', 'error'); }
+                                                                                } catch (e) { addToast(t('failed'), 'error'); }
                                                                             }
                                                                         }}
                                                                         className="p-1.5 hover:bg-red-500/20 rounded text-red-400"
@@ -3802,7 +3802,7 @@
                                                     <Icons.Database className="w-5 h-5 text-green-400" />
                                                     IPAM
                                                 </h3>
-                                                <button 
+                                                <button
                                                     onClick={() => { setNewIpam({ ipam: '', type: 'pve' }); setShowAddIpam(true); }}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded-lg text-sm"
                                                 >
@@ -3841,18 +3841,18 @@
                                                                 <td className="p-3 text-right">
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if (confirm(`Delete IPAM "${ipam.ipam}"?`)) {
+                                                                            if (confirm(`${t('confirmDeleteIpam')} "${ipam.ipam}"?`)) {
                                                                                 try {
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/ipams/${ipam.ipam}`, { method: 'DELETE' });
                                                                                     if (res.ok) {
-                                                                                        addToast('IPAM deleted - Click Apply to activate', 'success');
-                                                                                        addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                                        addToast(t('ipamDeletedApply'), 'success');
+                                                                                        addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                                         fetchAllData();
                                                                                     } else {
                                                                                         const err = await res.json();
-                                                                                        addToast(err.error || 'Failed', 'error');
+                                                                                        addToast(err.error || t('failed'), 'error');
                                                                                     }
-                                                                                } catch (e) { addToast('Failed', 'error'); }
+                                                                                } catch (e) { addToast(t('failed'), 'error'); }
                                                                             }
                                                                         }}
                                                                         className="p-1.5 hover:bg-red-500/20 rounded text-red-400"
@@ -3874,7 +3874,7 @@
                                                     <Icons.Globe className="w-5 h-5 text-cyan-400" />
                                                     DNS
                                                 </h3>
-                                                <button 
+                                                <button
                                                     onClick={() => { setNewDns({ dns: '', type: 'powerdns', url: '', key: '', reversev6mask: 64 }); setShowAddDns(true); }}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-sm"
                                                 >
@@ -3908,18 +3908,18 @@
                                                                 <td className="p-3 text-right">
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if (confirm(`Delete DNS "${dns.dns}"?`)) {
+                                                                            if (confirm(`${t('confirmDeleteDns')} "${dns.dns}"?`)) {
                                                                                 try {
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/dns/${dns.dns}`, { method: 'DELETE' });
                                                                                     if (res.ok) {
-                                                                                        addToast('DNS deleted - Click Apply to activate', 'success');
-                                                                                        addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                                        addToast(t('dnsDeletedApply'), 'success');
+                                                                                        addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                                         fetchAllData();
                                                                                     } else {
                                                                                         const err = await res.json();
-                                                                                        addToast(err.error || 'Failed', 'error');
+                                                                                        addToast(err.error || t('failed'), 'error');
                                                                                     }
-                                                                                } catch (e) { addToast('Failed', 'error'); }
+                                                                                } catch (e) { addToast(t('failed'), 'error'); }
                                                                             }
                                                                         }}
                                                                         className="p-1.5 hover:bg-red-500/20 rounded text-red-400"
@@ -3961,7 +3961,7 @@
                                                             onChange={e => setNewZone({...newZone, type: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="simple">Simple</option>
+                                                            <option value="simple">{t('sdnZoneSimple')}</option>
                                                             <option value="vlan">VLAN</option>
                                                             <option value="qinq">QinQ</option>
                                                             <option value="vxlan">VXLAN</option>
@@ -3972,7 +3972,7 @@
                                                 <p className="text-xs text-gray-500 -mt-2">
                                                     {newZone.type === 'simple' && (t('simpleZoneDesc') || 'Isolated zone with simple bridging - each node has its own bridge')}
                                                     {newZone.type === 'vlan' && (t('vlanZoneDesc') || 'VLAN-based zone using 802.1q tagging on a shared bridge')}
-                                                    {newZone.type === 'qinq' && 'QinQ (802.1ad) - VLAN stacking for service provider networks'}
+                                                    {newZone.type === 'qinq' && t('qinqZoneDesc')}
                                                     {newZone.type === 'vxlan' && (t('vxlanZoneDesc') || 'VXLAN overlay network - Layer 2 over Layer 3 using UDP encapsulation')}
                                                     {newZone.type === 'evpn' && (t('evpnZoneDesc') || 'BGP EVPN with VXLAN - advanced datacenter fabric with BGP control plane')}
                                                 </p>
@@ -3980,7 +3980,7 @@
                                                 {/* Bridge (for VLAN/QinQ) */}
                                                 {(newZone.type === 'vlan' || newZone.type === 'qinq') && (
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Bridge *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('bridge')} *</label>
                                                         <input
                                                             type="text"
                                                             value={newZone.bridge || ''}
@@ -3988,7 +3988,7 @@
                                                             placeholder="vmbr0"
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         />
-                                                        <p className="text-xs text-gray-500 mt-1">Physical bridge to use for VLAN tagging</p>
+                                                        <p className="text-xs text-gray-500 mt-1">{t('bridgeVlanHint')}</p>
                                                     </div>
                                                 )}
 
@@ -3997,7 +3997,7 @@
                                                     <>
                                                         <div className="grid grid-cols-2 gap-4">
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-1">Peers (multicast/unicast)</label>
+                                                                <label className="block text-sm text-gray-400 mb-1">{t('peers')} (multicast/unicast)</label>
                                                                 <input
                                                                     type="text"
                                                                     value={newZone.peers || ''}
@@ -4008,13 +4008,13 @@
                                                             </div>
                                                             {newZone.type === 'evpn' && (
                                                                 <div>
-                                                                    <label className="block text-sm text-gray-400 mb-1">Controller</label>
+                                                                    <label className="block text-sm text-gray-400 mb-1">{t('controller')}</label>
                                                                     <select
                                                                         value={newZone.controller || ''}
                                                                         onChange={e => setNewZone({...newZone, controller: e.target.value})}
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                                     >
-                                                                        <option value="">-- Select --</option>
+                                                                        <option value="">— {t('selectOption')} —</option>
                                                                         {sdnData.controllers.map(c => (
                                                                             <option key={c.controller} value={c.controller}>{c.controller} ({c.type})</option>
                                                                         ))}
@@ -4030,12 +4030,12 @@
                                                                         type="number"
                                                                         value={newZone['vrf-vxlan'] || ''}
                                                                         onChange={e => setNewZone({...newZone, 'vrf-vxlan': e.target.value})}
-                                                                        placeholder="Auto"
+                                                                        placeholder={t('automatic')}
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                                     />
                                                                 </div>
                                                                 <div>
-                                                                    <label className="block text-sm text-gray-400 mb-1">Exit Nodes</label>
+                                                                    <label className="block text-sm text-gray-400 mb-1">{t('exitNodes')}</label>
                                                                     <input
                                                                         type="text"
                                                                         value={newZone['exitnodes'] || ''}
@@ -4057,17 +4057,17 @@
                                                             type="number"
                                                             value={newZone.mtu || ''}
                                                             onChange={e => setNewZone({...newZone, mtu: e.target.value})}
-                                                            placeholder="auto"
+                                                            placeholder={t('automatic')}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Nodes</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('nodes')}</label>
                                                         <input
                                                             type="text"
                                                             value={newZone.nodes || ''}
                                                             onChange={e => setNewZone({...newZone, nodes: e.target.value})}
-                                                            placeholder="all (or: node1,node2)"
+                                                            placeholder={t('allOrNodesPlaceholder')}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         />
                                                     </div>
@@ -4082,20 +4082,20 @@
                                                             onChange={e => setNewZone({...newZone, ipam: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="">-- None --</option>
+                                                            <option value="">— {t('none')} —</option>
                                                             {sdnData.ipams?.map(i => (
                                                                 <option key={i.ipam} value={i.ipam}>{i.ipam} ({i.type})</option>
                                                             ))}
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">DNS Server</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('dnsServer')}</label>
                                                         <select
                                                             value={newZone.dns || ''}
                                                             onChange={e => setNewZone({...newZone, dns: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="">-- None --</option>
+                                                            <option value="">— {t('none')} —</option>
                                                             {sdnData.dns?.map(d => (
                                                                 <option key={d.dns} value={d.dns}>{d.dns} ({d.type})</option>
                                                             ))}
@@ -4106,7 +4106,7 @@
                                                 {newZone.dns && (
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">DNS Zone</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('dnsZone')}</label>
                                                             <input
                                                                 type="text"
                                                                 value={newZone.dnszone || ''}
@@ -4116,7 +4116,7 @@
                                                             />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Reverse DNS Zone</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('reverseDnsZone')}</label>
                                                             <input
                                                                 type="text"
                                                                 value={newZone.reversedns || ''}
@@ -4142,7 +4142,7 @@
                                                             return;
                                                         }
                                                         if ((newZone.type === 'vlan' || newZone.type === 'qinq') && !newZone.bridge) {
-                                                            addToast('Bridge is required for VLAN/QinQ zones', 'error');
+                                                            addToast(t('bridgeRequiredForVlanZones'), 'error');
                                                             return;
                                                         }
                                                         try {
@@ -4152,7 +4152,7 @@
                                                                 if (newZone[key]) payload[key] = newZone[key];
                                                             });
                                                             if (payload.mtu) payload.mtu = parseInt(payload.mtu);
-                                                            
+
                                                             const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/zones`, {
                                                                 method: 'POST',
                                                                 headers: { 'Content-Type': 'application/json' },
@@ -4166,10 +4166,10 @@
                                                                 fetchAllData();
                                                             } else {
                                                                 const err = await res.json();
-                                                                addToast(err.error || 'Failed to create zone', 'error');
+                                                                addToast(err.error || t('failedCreateZone'), 'error');
                                                             }
                                                         } catch (e) {
-                                                            addToast('Failed to create zone', 'error');
+                                                            addToast(t('failedCreateZone'), 'error');
                                                         }
                                                     }}
                                                     className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg"
@@ -4215,12 +4215,12 @@
                                                         type="text"
                                                         value={newVnet.alias}
                                                         onChange={e => setNewVnet({...newVnet, alias: e.target.value})}
-                                                        placeholder="My Network"
+                                                        placeholder={t('myNetworkPlaceholder')}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">VLAN Tag ({t('optional')})</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('vlanTag')}</label>
                                                     <input
                                                         type="number"
                                                         value={newVnet.tag}
@@ -4249,7 +4249,7 @@
                                                             const payload = { vnet: newVnet.vnet, zone: newVnet.zone };
                                                             if (newVnet.alias) payload.alias = newVnet.alias;
                                                             if (newVnet.tag) payload.tag = parseInt(newVnet.tag);
-                                                            
+
                                                             const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/vnets`, {
                                                                 method: 'POST',
                                                                 headers: { 'Content-Type': 'application/json' },
@@ -4262,10 +4262,10 @@
                                                                 fetchAllData();
                                                             } else {
                                                                 const err = await res.json();
-                                                                addToast(err.error || 'Failed to create VNet', 'error');
+                                                                addToast(err.error || t('failedCreateVnet'), 'error');
                                                             }
                                                         } catch (e) {
-                                                            addToast('Failed to create VNet', 'error');
+                                                            addToast(t('failedCreateVnet'), 'error');
                                                         }
                                                     }}
                                                     className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg"
@@ -4284,7 +4284,7 @@
                                             <h3 className="text-lg font-semibold mb-4">{t('addSubnet') || 'Add Subnet'} - {showAddSubnet}</h3>
                                             <div className="space-y-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Subnet (CIDR) *</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('subnetCidr')} *</label>
                                                     <input
                                                         type="text"
                                                         value={newSubnet.subnet}
@@ -4305,7 +4305,7 @@
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">DNS Server</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('dnsServer')}</label>
                                                         <input
                                                             type="text"
                                                             value={newSubnet.dnszoneprefix || ''}
@@ -4316,7 +4316,7 @@
                                                     </div>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">DHCP Range</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('dhcpRange')}</label>
                                                     <input
                                                         type="text"
                                                         value={newSubnet['dhcp-range'] || ''}
@@ -4324,7 +4324,7 @@
                                                         placeholder="start-address=10.0.0.100,end-address=10.0.0.200"
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                     />
-                                                    <p className="text-xs text-gray-500 mt-1">Format: start-address=IP,end-address=IP</p>
+                                                    <p className="text-xs text-gray-500 mt-1">{t('dhcpRangeFormat')}</p>
                                                 </div>
                                                 <div className="flex flex-wrap gap-4">
                                                     <label className="flex items-center gap-2 cursor-pointer">
@@ -4357,7 +4357,7 @@
                                                             if (newSubnet.snat) payload.snat = 1;
                                                             if (newSubnet['dhcp-range']) payload['dhcp-range'] = newSubnet['dhcp-range'];
                                                             if (newSubnet.dnszoneprefix) payload.dnszoneprefix = newSubnet.dnszoneprefix;
-                                                            
+
                                                             const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/vnets/${showAddSubnet}/subnets`, {
                                                                 method: 'POST',
                                                                 headers: { 'Content-Type': 'application/json' },
@@ -4371,10 +4371,10 @@
                                                                 fetchAllData();
                                                             } else {
                                                                 const err = await res.json();
-                                                                addToast(err.error || 'Failed to create subnet', 'error');
+                                                                addToast(err.error || t('failedCreateSubnet'), 'error');
                                                             }
                                                         } catch (e) {
-                                                            addToast('Failed to create subnet', 'error');
+                                                            addToast(t('failedCreateSubnet'), 'error');
                                                         }
                                                     }}
                                                     className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg"
@@ -4430,7 +4430,7 @@
                                                                 />
                                                             </div>
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-1">Peers</label>
+                                                                <label className="block text-sm text-gray-400 mb-1">{t('peers')}</label>
                                                                 <input
                                                                     type="text"
                                                                     value={newController.peers}
@@ -4473,7 +4473,7 @@
                                                 )}
                                                 {newController.type === 'isis' && (
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">ISIS Domain</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('isisDomain')}</label>
                                                         <input
                                                             type="text"
                                                             value={newController['isis-domain'] || ''}
@@ -4491,7 +4491,7 @@
                                                 <button
                                                     onClick={async () => {
                                                         if (!newController.controller) {
-                                                            addToast('Controller name is required', 'error');
+                                                            addToast(t('controllerNameRequired'), 'error');
                                                             return;
                                                         }
                                                         try {
@@ -4502,22 +4502,22 @@
                                                             if (newController['ebgp-multihop']) payload['ebgp-multihop'] = 1;
                                                             if (newController['bgp-multipath-as-path-relax']) payload['bgp-multipath-as-path-relax'] = 1;
                                                             if (newController['isis-domain']) payload['isis-domain'] = newController['isis-domain'];
-                                                            
+
                                                             const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/controllers`, {
                                                                 method: 'POST',
                                                                 headers: { 'Content-Type': 'application/json' },
                                                                 body: JSON.stringify(payload)
                                                             });
                                                             if (res.ok) {
-                                                                addToast('Controller created - Click Apply to activate', 'success');
-                                                                addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                addToast(t('controllerCreatedApply'), 'success');
+                                                                addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                 setShowAddController(false);
                                                                 fetchAllData();
                                                             } else {
                                                                 const err = await res.json();
-                                                                addToast(err.error || 'Failed', 'error');
+                                                                addToast(err.error || t('failed'), 'error');
                                                             }
-                                                        } catch (e) { addToast('Failed to create controller', 'error'); }
+                                                        } catch (e) { addToast(t('failedCreateController'), 'error'); }
                                                     }}
                                                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg"
                                                 >
@@ -4552,7 +4552,7 @@
                                                             onChange={e => setNewIpam({...newIpam, type: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="pve">PVE (built-in)</option>
+                                                            <option value="pve">{t('pveBuiltIn')}</option>
                                                             <option value="netbox">Netbox</option>
                                                             <option value="phpipam">phpIPAM</option>
                                                         </select>
@@ -4571,18 +4571,18 @@
                                                             />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-sm text-gray-400 mb-1">Token / API Key</label>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('tokenApiKey')}</label>
                                                             <input
                                                                 type="password"
                                                                 value={newIpam.token}
                                                                 onChange={e => setNewIpam({...newIpam, token: e.target.value})}
-                                                                placeholder="API token"
+                                                                placeholder={t('apiToken')}
                                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                             />
                                                         </div>
                                                         {newIpam.type === 'phpipam' && (
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-1">Section</label>
+                                                                <label className="block text-sm text-gray-400 mb-1">{t('section')}</label>
                                                                 <input
                                                                     type="number"
                                                                     value={newIpam.section}
@@ -4595,9 +4595,9 @@
                                                     </>
                                                 )}
                                                 <p className="text-xs text-gray-500">
-                                                    {newIpam.type === 'pve' && 'Built-in PVE IPAM stores IP assignments locally in the cluster.'}
-                                                    {newIpam.type === 'netbox' && 'Netbox is an open source IPAM and DCIM tool.'}
-                                                    {newIpam.type === 'phpipam' && 'phpIPAM is an open source IP address management application.'}
+                                                    {newIpam.type === 'pve' && t('pveIpamDesc')}
+                                                    {newIpam.type === 'netbox' && t('netboxIpamDesc')}
+                                                    {newIpam.type === 'phpipam' && t('phpIpamDesc')}
                                                 </p>
                                             </div>
                                             <div className="flex justify-end gap-3 mt-6">
@@ -4607,7 +4607,7 @@
                                                 <button
                                                     onClick={async () => {
                                                         if (!newIpam.ipam) {
-                                                            addToast('IPAM name is required', 'error');
+                                                            addToast(t('ipamNameRequired'), 'error');
                                                             return;
                                                         }
                                                         try {
@@ -4615,22 +4615,22 @@
                                                             if (newIpam.url) payload.url = newIpam.url;
                                                             if (newIpam.token) payload.token = newIpam.token;
                                                             if (newIpam.section) payload.section = parseInt(newIpam.section);
-                                                            
+
                                                             const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/ipams`, {
                                                                 method: 'POST',
                                                                 headers: { 'Content-Type': 'application/json' },
                                                                 body: JSON.stringify(payload)
                                                             });
                                                             if (res.ok) {
-                                                                addToast('IPAM created - Click Apply to activate', 'success');
-                                                                addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                addToast(t('ipamCreatedApply'), 'success');
+                                                                addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                 setShowAddIpam(false);
                                                                 fetchAllData();
                                                             } else {
                                                                 const err = await res.json();
-                                                                addToast(err.error || 'Failed', 'error');
+                                                                addToast(err.error || t('failed'), 'error');
                                                             }
-                                                        } catch (e) { addToast('Failed to create IPAM', 'error'); }
+                                                        } catch (e) { addToast(t('failedCreateIpam'), 'error'); }
                                                     }}
                                                     className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg"
                                                 >
@@ -4680,12 +4680,12 @@
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">API Key</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('apiKey')}</label>
                                                     <input
                                                         type="password"
                                                         value={newDns.key}
                                                         onChange={e => setNewDns({...newDns, key: e.target.value})}
-                                                        placeholder="PowerDNS API key"
+                                                        placeholder={t('powerDnsApiKey')}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                     />
                                                 </div>
@@ -4701,7 +4701,7 @@
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Reverse IPv6 Mask</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('reverseIpv6Mask')}</label>
                                                         <input
                                                             type="number"
                                                             value={newDns.reversemaskv6}
@@ -4714,7 +4714,7 @@
                                                     </div>
                                                 </div>
                                                 <p className="text-xs text-gray-500">
-                                                    PowerDNS integration enables automatic DNS registration for VMs with static IPs.
+                                                    {t('powerDnsIntegrationDesc')}
                                                 </p>
                                             </div>
                                             <div className="flex justify-end gap-3 mt-6">
@@ -4724,34 +4724,34 @@
                                                 <button
                                                     onClick={async () => {
                                                         if (!newDns.dns || !newDns.url || !newDns.key) {
-                                                            addToast('DNS name, URL and API key are required', 'error');
+                                                            addToast(t('dnsFieldsRequired'), 'error');
                                                             return;
                                                         }
                                                         try {
-                                                            const payload = { 
-                                                                dns: newDns.dns, 
+                                                            const payload = {
+                                                                dns: newDns.dns,
                                                                 type: newDns.type,
                                                                 url: newDns.url,
                                                                 key: newDns.key
                                                             };
                                                             if (newDns.ttl) payload.ttl = parseInt(newDns.ttl);
                                                             if (newDns.reversemaskv6) payload.reversemaskv6 = parseInt(newDns.reversemaskv6);
-                                                            
+
                                                             const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/dns`, {
                                                                 method: 'POST',
                                                                 headers: { 'Content-Type': 'application/json' },
                                                                 body: JSON.stringify(payload)
                                                             });
                                                             if (res.ok) {
-                                                                addToast('DNS created - Click Apply to activate', 'success');
-                                                                addToast('💡 Click "Apply / Reload" to deploy', 'info');
+                                                                addToast(t('dnsCreatedApply'), 'success');
+                                                                addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                 setShowAddDns(false);
                                                                 fetchAllData();
                                                             } else {
                                                                 const err = await res.json();
-                                                                addToast(err.error || 'Failed', 'error');
+                                                                addToast(err.error || t('failed'), 'error');
                                                             }
-                                                        } catch (e) { addToast('Failed to create DNS', 'error'); }
+                                                        } catch (e) { addToast(t('failedCreateDns'), 'error'); }
                                                     }}
                                                     className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg"
                                                 >
@@ -4770,7 +4770,7 @@
                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold">{t('backupJobs')}</h3>
-                                        <button 
+                                        <button
                                             onClick={() => setShowAddBackupJob(true)}
                                             className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                         >
@@ -4781,11 +4781,11 @@
                                         <thead className="bg-proxmox-dark">
                                             <tr>
                                                 <th className="text-left p-3 text-sm text-gray-400">{t('enabled')}</th>
-                                                <th className="text-left p-3 text-sm text-gray-400">Node</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('node')}</th>
                                                 <th className="text-left p-3 text-sm text-gray-400">{t('schedule')}</th>
-                                                <th className="text-left p-3 text-sm text-gray-400">Storage</th>
-                                                <th className="text-left p-3 text-sm text-gray-400">Mode</th>
-                                                <th className="text-left p-3 text-sm text-gray-400">VMs</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('storage')}</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('mode')}</th>
+                                                <th className="text-left p-3 text-sm text-gray-400">{t('vms')}</th>
                                                 <th className="text-left p-3 text-sm text-gray-400"></th>
                                             </tr>
                                         </thead>
@@ -4804,7 +4804,13 @@
                                                             job.mode === 'suspend' ? 'bg-yellow-500/20 text-yellow-400' :
                                                             'bg-blue-500/20 text-blue-400'
                                                         }`}>
-                                                            {job.mode || 'snapshot'}
+                                                            {job.mode === 'snapshot'
+                                                                ? t('snapshot')
+                                                                : job.mode === 'suspend'
+                                                                    ? t('suspend')
+                                                                    : job.mode === 'stop'
+                                                                        ? t('stop')
+                                                                        : (job.mode || t('snapshot'))}
                                                         </span>
                                                     </td>
                                                     <td className="p-3 text-sm">{job.vmid || t('all')}</td>
@@ -4836,8 +4842,8 @@
                                                                 className="p-1 hover:bg-green-500/20 rounded text-green-400" title={t('runNow') || 'Run now'}>
                                                                 {Icons.Play ? <Icons.Play className="w-4 h-4" /> : <span>▶</span>}
                                                             </button>
-                                                            <button onClick={() => setEditBackupJob({...job})} className="p-1 hover:bg-blue-500/20 rounded text-blue-400" title="Edit"><Icons.Edit className="w-4 h-4" /></button>
-                                                            <button onClick={() => deleteBackupJob(job.id)} className="p-1 hover:bg-red-500/20 rounded text-red-400" title="Delete"><Icons.Trash /></button>
+                                                            <button onClick={() => setEditBackupJob({...job})} className="p-1 hover:bg-blue-500/20 rounded text-blue-400" title={t('edit')}><Icons.Edit className="w-4 h-4" /></button>
+                                                            <button onClick={() => deleteBackupJob(job.id)} className="p-1 hover:bg-red-500/20 rounded text-red-400" title={t('delete')}><Icons.Trash /></button>
                                                         </div>
                                                     </td>
                                                 </tr>
@@ -4847,7 +4853,7 @@
                                 </div>
 
                                 {/* Edit Backup Job Modal - #207 */}
-                                {editBackupJob && (<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={() => setEditBackupJob(null)}><div className="w-full max-w-2xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}><div className="p-4 border-b border-proxmox-border bg-proxmox-dark"><h3 className="font-semibold text-white flex items-center gap-2"><Icons.Edit className="w-4 h-4" />{t('editBackupJob') || 'Edit Backup Job'}</h3></div><div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">Storage *</label><select value={editBackupJob.storage || ''} onChange={e => setEditBackupJob({...editBackupJob, storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('selectStorage') || 'Select Storage'}</option>{(storage || []).filter(s => s.content?.includes('backup')).map(s => (<option key={s.storage} value={s.storage}>{s.storage}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('schedule')}</label><input type="text" value={editBackupJob.schedule || ''} onChange={e => setEditBackupJob({...editBackupJob, schedule: e.target.value})} placeholder="e.g. 02:00, sat 03:00" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">Node</label><select value={editBackupJob.node || ''} onChange={e => setEditBackupJob({...editBackupJob, node: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('allNodes') || 'All Nodes'}</option>{(clusterNodes || []).map(n => (<option key={n.node} value={n.node}>{n.node}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">Mode</label><select value={editBackupJob.mode || 'snapshot'} onChange={e => setEditBackupJob({...editBackupJob, mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="snapshot">Snapshot</option><option value="suspend">Suspend</option><option value="stop">Stop</option></select></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('compression') || 'Compression'}</label><select value={editBackupJob.compress || 'zstd'} onChange={e => setEditBackupJob({...editBackupJob, compress: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="0">None</option><option value="gzip">GZIP</option><option value="lzo">LZO</option><option value="zstd">ZSTD</option></select></div><div><label className="block text-sm text-gray-400 mb-1">VM IDs ({t('optional')})</label><input type="text" value={editBackupJob.vmid || ''} onChange={e => setEditBackupJob({...editBackupJob, vmid: e.target.value})} placeholder="100,101,102 or empty for all" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('notification') || 'Notification'}</label><select value={editBackupJob.mailnotification || 'always'} onChange={e => setEditBackupJob({...editBackupJob, mailnotification: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="always">{t('always') || 'Always'}</option><option value="failure">{t('onFailure') || 'On Failure'}</option><option value="never">{t('never') || 'Never'}</option></select></div><div><label className="block text-sm text-gray-400 mb-1">Email ({t('optional')})</label><input type="email" value={editBackupJob.mailto || ''} onChange={e => setEditBackupJob({...editBackupJob, mailto: e.target.value})} placeholder="admin@example.com" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="flex items-center gap-2"><input type="checkbox" checked={editBackupJob.enabled !== 0} onChange={e => setEditBackupJob({...editBackupJob, enabled: e.target.checked ? 1 : 0})} className="rounded" /><label className="text-sm text-gray-300">{t('enabled')}</label></div></div><div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-end gap-3"><button onClick={() => setEditBackupJob(null)} className="px-4 py-2 text-gray-400 hover:text-white">{t('cancel')}</button><button onClick={updateBackupJob} disabled={!editBackupJob.storage} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50">{t('save') || 'Save'}</button></div></div></div>)}
+                                {editBackupJob && (<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={() => setEditBackupJob(null)}><div className="w-full max-w-2xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}><div className="p-4 border-b border-proxmox-border bg-proxmox-dark"><h3 className="font-semibold text-white flex items-center gap-2"><Icons.Edit className="w-4 h-4" />{t('editBackupJob') || 'Edit Backup Job'}</h3></div><div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('storage')} *</label><select value={editBackupJob.storage || ''} onChange={e => setEditBackupJob({...editBackupJob, storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('selectStorage') || 'Select Storage'}</option>{(storage || []).filter(s => s.content?.includes('backup')).map(s => (<option key={s.storage} value={s.storage}>{s.storage}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('schedule')}</label><input type="text" value={editBackupJob.schedule || ''} onChange={e => setEditBackupJob({...editBackupJob, schedule: e.target.value})} placeholder={t('backupScheduleExampleShort')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('node')}</label><select value={editBackupJob.node || ''} onChange={e => setEditBackupJob({...editBackupJob, node: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('allNodes') || 'All Nodes'}</option>{(clusterNodes || []).map(n => (<option key={n.node} value={n.node}>{n.node}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('mode')}</label><select value={editBackupJob.mode || 'snapshot'} onChange={e => setEditBackupJob({...editBackupJob, mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="snapshot">{t('snapshot')}</option><option value="suspend">{t('suspend')}</option><option value="stop">{t('stop')}</option></select></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('compression') || 'Compression'}</label><select value={editBackupJob.compress || 'zstd'} onChange={e => setEditBackupJob({...editBackupJob, compress: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="0">{t('none')}</option><option value="gzip">GZIP</option><option value="lzo">LZO</option><option value="zstd">ZSTD</option></select></div><div><label className="block text-sm text-gray-400 mb-1">{t('vmIds')} ({t('optional')})</label><input type="text" value={editBackupJob.vmid || ''} onChange={e => setEditBackupJob({...editBackupJob, vmid: e.target.value})} placeholder={t('backupVmIdsPlaceholder')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('notification') || 'Notification'}</label><select value={editBackupJob.mailnotification || 'always'} onChange={e => setEditBackupJob({...editBackupJob, mailnotification: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="always">{t('always') || 'Always'}</option><option value="failure">{t('onFailure') || 'On Failure'}</option><option value="never">{t('never') || 'Never'}</option></select></div><div><label className="block text-sm text-gray-400 mb-1">{t('email')} ({t('optional')})</label><input type="email" value={editBackupJob.mailto || ''} onChange={e => setEditBackupJob({...editBackupJob, mailto: e.target.value})} placeholder="admin@example.com" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="flex items-center gap-2"><input type="checkbox" checked={editBackupJob.enabled !== 0} onChange={e => setEditBackupJob({...editBackupJob, enabled: e.target.checked ? 1 : 0})} className="rounded" /><label className="text-sm text-gray-300">{t('enabled')}</label></div></div><div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-end gap-3"><button onClick={() => setEditBackupJob(null)} className="px-4 py-2 text-gray-400 hover:text-white">{t('cancel')}</button><button onClick={updateBackupJob} disabled={!editBackupJob.storage} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50">{t('save') || 'Save'}</button></div></div></div>)}
 
                                 {/* Add Backup Job Modal */}
                                 {showAddBackupJob && (
@@ -4862,7 +4868,7 @@
                                             <div className="p-6 space-y-4">
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Storage *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('storage')} *</label>
                                                         <select
                                                             value={newBackupJob.storage}
                                                             onChange={e => setNewBackupJob({...newBackupJob, storage: e.target.value})}
@@ -4889,8 +4895,8 @@
                                                         >
                                                             <option value="hourly">{t('hourly') || 'Hourly'}</option>
                                                             <option value="daily">{t('daily') || 'Daily'} (02:00)</option>
-                                                            <option value="weekly">{t('weekly') || 'Weekly'} (Sun 02:00)</option>
-                                                            <option value="monthly">{t('monthly') || 'Monthly'} (1st 02:00)</option>
+                                                            <option value="weekly">{t('weekly')} ({t('backupWeeklySunday')})</option>
+                                                            <option value="monthly">{t('monthly')} ({t('backupMonthlyFirst')})</option>
                                                             <option value="custom">{t('custom') || 'Custom'}</option>
                                                         </select>
                                                         {!['hourly', 'daily', 'weekly', 'monthly'].includes(newBackupJob.schedule) && (
@@ -4898,7 +4904,7 @@
                                                                 type="text"
                                                                 value={newBackupJob.schedule}
                                                                 onChange={e => setNewBackupJob({...newBackupJob, schedule: e.target.value})}
-                                                                placeholder="e.g. 02:00, sat 03:00, *-*-01 04:00"
+                                                                placeholder={t('backupScheduleExampleLong')}
                                                                 className="w-full mt-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
                                                             />
                                                         )}
@@ -4906,7 +4912,7 @@
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Node</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('node')}</label>
                                                         <select
                                                             value={newBackupJob.node}
                                                             onChange={e => setNewBackupJob({...newBackupJob, node: e.target.value})}
@@ -4919,15 +4925,15 @@
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Mode</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('mode')}</label>
                                                         <select
                                                             value={newBackupJob.mode}
                                                             onChange={e => setNewBackupJob({...newBackupJob, mode: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="snapshot">Snapshot</option>
-                                                            <option value="suspend">Suspend</option>
-                                                            <option value="stop">Stop</option>
+                                                            <option value="snapshot">{t('snapshot')}</option>
+                                                            <option value="suspend">{t('suspend')}</option>
+                                                            <option value="stop">{t('stop')}</option>
                                                         </select>
                                                     </div>
                                                 </div>
@@ -4939,19 +4945,19 @@
                                                             onChange={e => setNewBackupJob({...newBackupJob, compress: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="0">None</option>
+                                                            <option value="0">{t('none')}</option>
                                                             <option value="gzip">GZIP</option>
                                                             <option value="lzo">LZO</option>
-                                                            <option value="zstd">ZSTD (recommended)</option>
+                                                            <option value="zstd">ZSTD ({t('recommended')})</option>
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">VM IDs ({t('optional')})</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('vmIds')} ({t('optional')})</label>
                                                         <input
                                                             type="text"
                                                             value={newBackupJob.vmid}
                                                             onChange={e => setNewBackupJob({...newBackupJob, vmid: e.target.value})}
-                                                            placeholder="100,101,102 or empty for all"
+                                                            placeholder={t('backupVmIdsPlaceholder')}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         />
                                                     </div>
@@ -4970,7 +4976,7 @@
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Email ({t('optional')})</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('email')} ({t('optional')})</label>
                                                         <input
                                                             type="email"
                                                             value={newBackupJob.mailto}
@@ -5016,8 +5022,8 @@
                                         <div className="flex items-center justify-between mb-3">
                                             <h3 className="text-sm font-medium text-white flex items-center gap-2">
                                                 <Icons.Layers className="w-4 h-4 text-orange-400" />
-                                                PVE 9.2 SDN extras
-                                                <span className="text-[10px] text-gray-500">(fabrics · route-maps · prefix-lists)</span>
+                                                {t('sdn92Extras')}
+                                                <span className="text-[10px] text-gray-500">({t('sdn92ExtrasTypes')})</span>
                                             </h3>
                                             <button
                                                 onClick={async () => {
@@ -5032,40 +5038,40 @@
                                                         setSdn92PrefixLists(plr.ok ? (await plr.json()) || [] : []);
                                                         setSdn92Loaded(true);
                                                     } catch (e) {
-                                                        addToast('Failed to load PVE 9.2 SDN extras: ' + e, 'error');
+                                                        addToast(t('failedLoadSdn92Extras') + ': ' + e, 'error');
                                                     }
                                                 }}
                                                 className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5">
                                                 <Icons.RefreshCw className="w-3 h-3" />
-                                                {sdn92Loaded ? 'Refresh' : 'Load'}
+                                                {sdn92Loaded ? t('refresh') : t('sdn92Load')}
                                             </button>
                                         </div>
 
                                         {!sdn92Loaded ? (
                                             <p className="text-xs text-gray-500">
-                                                Click Load to fetch fabrics + route-maps + prefix-lists. Pre-PVE-9.2 clusters will show empty lists (endpoints don't exist).
+                                                {t('sdn92LoadHint')}
                                             </p>
                                         ) : (
                                             <div className="grid grid-cols-3 gap-3">
                                                 {/* Fabrics */}
                                                 <div className="bg-proxmox-dark/50 rounded-lg p-3 border border-proxmox-border">
                                                     <div className="flex items-center justify-between mb-2">
-                                                        <div className="text-xs font-medium text-gray-300">Fabrics <span className="text-gray-500">({sdn92Fabrics.length})</span></div>
+                                                        <div className="text-xs font-medium text-gray-300">{t('sdn92Fabrics')} <span className="text-gray-500">({sdn92Fabrics.length})</span></div>
                                                         <button onClick={() => { setSdn92AddType('fabric'); setSdn92Form({ name: '', protocol: 'openfabric', comment: '' }); }}
-                                                            className="text-xs text-orange-400 hover:text-orange-300">+ add</button>
+                                                            className="text-xs text-orange-400 hover:text-orange-300">+ {t('add')}</button>
                                                     </div>
                                                     {sdn92Fabrics.length === 0 ? (
-                                                        <p className="text-[11px] text-gray-500">none</p>
+                                                        <p className="text-[11px] text-gray-500">{t('none')}</p>
                                                     ) : (
                                                         <ul className="space-y-1">
                                                             {sdn92Fabrics.map(f => (
                                                                 <li key={f.fabric} className="flex items-center justify-between text-xs">
                                                                     <span className="font-mono text-gray-300">{f.fabric} <span className="text-gray-500">[{f.protocol}]</span></span>
                                                                     <button onClick={async () => {
-                                                                        if (!confirm(`Delete fabric '${f.fabric}'?`)) return;
+                                                                        if (!confirm(`${t('confirmDeleteFabric')} '${f.fabric}'?`)) return;
                                                                         const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/fabrics/${f.fabric}`, {method:'DELETE'});
-                                                                        if (r.ok) { setSdn92Fabrics(sdn92Fabrics.filter(x => x.fabric !== f.fabric)); addToast('Fabric deleted', 'success'); }
-                                                                        else { addToast('Delete failed: ' + (await r.text()), 'error'); }
+                                                                        if (r.ok) { setSdn92Fabrics(sdn92Fabrics.filter(x => x.fabric !== f.fabric)); addToast(t('fabricDeleted'), 'success'); }
+                                                                        else { addToast(t('sdn92DeleteFailed') + ': ' + (await r.text()), 'error'); }
                                                                     }} className="text-red-400 hover:text-red-300">×</button>
                                                                 </li>
                                                             ))}
@@ -5075,12 +5081,12 @@
                                                 {/* Route-Maps */}
                                                 <div className="bg-proxmox-dark/50 rounded-lg p-3 border border-proxmox-border">
                                                     <div className="flex items-center justify-between mb-2">
-                                                        <div className="text-xs font-medium text-gray-300">Route-Maps <span className="text-gray-500">({sdn92RouteMaps.length})</span></div>
+                                                        <div className="text-xs font-medium text-gray-300">{t('sdn92RouteMaps')} <span className="text-gray-500">({sdn92RouteMaps.length})</span></div>
                                                         <button onClick={() => { setSdn92AddType('routemap'); setSdn92Form({ name: '', protocol: '', comment: '' }); }}
-                                                            className="text-xs text-orange-400 hover:text-orange-300">+ add</button>
+                                                            className="text-xs text-orange-400 hover:text-orange-300">+ {t('add')}</button>
                                                     </div>
                                                     {sdn92RouteMaps.length === 0 ? (
-                                                        <p className="text-[11px] text-gray-500">none</p>
+                                                        <p className="text-[11px] text-gray-500">{t('none')}</p>
                                                     ) : (
                                                         <ul className="space-y-1">
                                                             {sdn92RouteMaps.map(rm => {
@@ -5089,10 +5095,10 @@
                                                                     <li key={key} className="flex items-center justify-between text-xs">
                                                                         <span className="font-mono text-gray-300">{key}</span>
                                                                         <button onClick={async () => {
-                                                                            if (!confirm(`Delete route-map '${key}'?`)) return;
+                                                                            if (!confirm(`${t('confirmDeleteRouteMap')} '${key}'?`)) return;
                                                                             const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/routemaps/${key}`, {method:'DELETE'});
-                                                                            if (r.ok) { setSdn92RouteMaps(sdn92RouteMaps.filter(x => (x.routemap||x.name) !== key)); addToast('Route-map deleted','success'); }
-                                                                            else { addToast('Delete failed: ' + (await r.text()),'error'); }
+                                                                            if (r.ok) { setSdn92RouteMaps(sdn92RouteMaps.filter(x => (x.routemap||x.name) !== key)); addToast(t('routeMapDeleted'),'success'); }
+                                                                            else { addToast(t('sdn92DeleteFailed') + ': ' + (await r.text()),'error'); }
                                                                         }} className="text-red-400 hover:text-red-300">×</button>
                                                                     </li>
                                                                 );
@@ -5103,12 +5109,12 @@
                                                 {/* Prefix-Lists */}
                                                 <div className="bg-proxmox-dark/50 rounded-lg p-3 border border-proxmox-border">
                                                     <div className="flex items-center justify-between mb-2">
-                                                        <div className="text-xs font-medium text-gray-300">Prefix-Lists <span className="text-gray-500">({sdn92PrefixLists.length})</span></div>
+                                                        <div className="text-xs font-medium text-gray-300">{t('sdn92PrefixLists')} <span className="text-gray-500">({sdn92PrefixLists.length})</span></div>
                                                         <button onClick={() => { setSdn92AddType('prefixlist'); setSdn92Form({ name: '', protocol: '', comment: '' }); }}
-                                                            className="text-xs text-orange-400 hover:text-orange-300">+ add</button>
+                                                            className="text-xs text-orange-400 hover:text-orange-300">+ {t('add')}</button>
                                                     </div>
                                                     {sdn92PrefixLists.length === 0 ? (
-                                                        <p className="text-[11px] text-gray-500">none</p>
+                                                        <p className="text-[11px] text-gray-500">{t('none')}</p>
                                                     ) : (
                                                         <ul className="space-y-1">
                                                             {sdn92PrefixLists.map(pl => {
@@ -5117,10 +5123,10 @@
                                                                     <li key={key} className="flex items-center justify-between text-xs">
                                                                         <span className="font-mono text-gray-300">{key}</span>
                                                                         <button onClick={async () => {
-                                                                            if (!confirm(`Delete prefix-list '${key}'?`)) return;
+                                                                            if (!confirm(`${t('confirmDeletePrefixList')} '${key}'?`)) return;
                                                                             const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/prefixlists/${key}`, {method:'DELETE'});
-                                                                            if (r.ok) { setSdn92PrefixLists(sdn92PrefixLists.filter(x => (x.prefixlist||x.name) !== key)); addToast('Prefix-list deleted','success'); }
-                                                                            else { addToast('Delete failed: ' + (await r.text()),'error'); }
+                                                                            if (r.ok) { setSdn92PrefixLists(sdn92PrefixLists.filter(x => (x.prefixlist||x.name) !== key)); addToast(t('prefixListDeleted'),'success'); }
+                                                                            else { addToast(t('sdn92DeleteFailed') + ': ' + (await r.text()),'error'); }
                                                                         }} className="text-red-400 hover:text-red-300">×</button>
                                                                     </li>
                                                                 );
@@ -5136,11 +5142,15 @@
                                             <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 max-w-md w-full mx-4">
                                                     <h4 className="text-sm font-medium text-white mb-3">
-                                                        Add {sdn92AddType}
+                                                        {sdn92AddType === 'fabric'
+                                                            ? t('addFabric')
+                                                            : sdn92AddType === 'routemap'
+                                                                ? t('addRouteMap')
+                                                                : t('addPrefixList')}
                                                     </h4>
                                                     <div className="space-y-3">
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">Name</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('name')}</label>
                                                             <input type="text" value={sdn92Form.name}
                                                                 onChange={e => setSdn92Form({...sdn92Form, name: e.target.value})}
                                                                 placeholder={sdn92AddType === 'fabric' ? 'fabric1' : (sdn92AddType === 'routemap' ? 'rmap1' : 'plist1')}
@@ -5148,7 +5158,7 @@
                                                         </div>
                                                         {sdn92AddType === 'fabric' && (
                                                             <div>
-                                                                <label className="block text-xs text-gray-400 mb-1">Protocol</label>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('protocol')}</label>
                                                                 <select value={sdn92Form.protocol}
                                                                     onChange={e => setSdn92Form({...sdn92Form, protocol: e.target.value})}
                                                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
@@ -5160,18 +5170,18 @@
                                                             </div>
                                                         )}
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">Comment (optional)</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('comment')} ({t('optional')})</label>
                                                             <input type="text" value={sdn92Form.comment}
                                                                 onChange={e => setSdn92Form({...sdn92Form, comment: e.target.value})}
                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <p className="text-[11px] text-gray-500">
-                                                            Per-protocol details (wireguard endpoints, BGP ASN, OSPF area etc.) need to be set via the PVE web UI — PegaProx exposes the basic create here for inventory, you'll finish the config in PVE.
+                                                            {t('sdn92ProtocolDetailsHint')}
                                                         </p>
                                                     </div>
                                                     <div className="flex justify-end gap-2 mt-4">
                                                         <button onClick={() => setSdn92AddType(null)}
-                                                            className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border rounded text-xs">Cancel</button>
+                                                            className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border rounded text-xs">{t('cancel')}</button>
                                                         <button
                                                             disabled={!sdn92Form.name.trim()}
                                                             onClick={async () => {
@@ -5195,15 +5205,15 @@
                                                                     body: JSON.stringify(body),
                                                                 });
                                                                 if (r.ok) {
-                                                                    addToast('Created — reload list to see', 'success');
+                                                                    addToast(t('sdn92CreatedReload'), 'success');
                                                                     setSdn92AddType(null);
                                                                     setSdn92Loaded(false);
                                                                 } else {
-                                                                    addToast('Create failed: ' + (await r.text()), 'error');
+                                                                    addToast(t('sdn92CreateFailed') + ': ' + (await r.text()), 'error');
                                                                 }
                                                             }}
                                                             className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded text-xs">
-                                                            Create
+                                                            {t('create')}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -5227,8 +5237,8 @@
                                                 {t('replicationInfoDesc') || 'Keep VM data synchronized between nodes for failover and disaster recovery. Two modes available:'}
                                             </p>
                                             <ul className="text-sm text-gray-400 mt-2 space-y-1">
-                                                <li><span className="text-purple-400 font-medium">ZFS Native</span> — {t('zfsNativeDesc') || 'Incremental ZFS send/recv. Fast and efficient, requires ZFS on both nodes.'}</li>
-                                                <li><span className="text-blue-400 font-medium">Snapshot</span> — {t('snapshotDesc') || 'Clone + migrate approach. Works with any storage (LVM, dir, etc).'}</li>
+                                                <li><span className="text-purple-400 font-medium">{t('zfsNativeLabel')}</span> — {t('zfsNativeDesc') || 'Incremental ZFS send/recv. Fast and efficient, requires ZFS on both nodes.'}</li>
+                                                <li><span className="text-blue-400 font-medium">{t('snapshot')}</span> — {t('snapshotDesc') || 'Clone + migrate approach. Works with any storage (LVM, dir, etc).'}</li>
                                             </ul>
                                         </div>
                                     </div>
@@ -5240,7 +5250,7 @@
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.RefreshCw className="w-4 h-4 text-purple-400" />
                                             <span>ZFS {t('replication') || 'Replication'}</span>
-                                            <span className="text-xs text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">native</span>
+                                            <span className="text-xs text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">{t('native')}</span>
                                         </h3>
                                         <div className="flex items-center gap-2">
                                             <button onClick={refreshReplication} className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-proxmox-dark transition-colors" title={t('refresh')}>
@@ -5268,8 +5278,8 @@
                                             <thead className="bg-proxmox-dark">
                                                 <tr>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">VM/CT</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Job ID</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('vmCt')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('jobId')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('source') || 'Source'}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('target') || 'Target'}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule') || 'Schedule'}</th>
@@ -5331,9 +5341,9 @@
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.Copy className="w-4 h-4 text-blue-400" />
-                                            <span>Snapshot {t('replication') || 'Replication'}</span>
+                                            <span>{t('snapshot')} {t('replication')}</span>
                                             <span className="text-xs text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">{t('anyStorage') || 'any storage'}</span>
-                                            <span className="text-xs text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded">+ Cross-Cluster</span>
+                                            <span className="text-xs text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded">+ {t('crossCluster')}</span>
                                         </h3>
                                         <div className="flex items-center gap-2">
                                             <button onClick={refreshReplication} className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-proxmox-dark transition-colors" title={t('refresh')}>
@@ -5362,11 +5372,11 @@
                                                 <tr>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">VM/CT</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('vmCt')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('target') || 'Target'}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('storage') || 'Storage'}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule') || 'Schedule'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('lastSync') || 'Last Run'}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('lastRun')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                 </tr>
                                             </thead>
@@ -5395,7 +5405,7 @@
                                                             </td>
                                                             <td className="p-3">
                                                                 {isCrossCluster ? (
-                                                                    <span className="text-xs px-1.5 py-0.5 bg-orange-500/10 text-orange-400 rounded">Cross-Cluster</span>
+                                                                    <span className="text-xs px-1.5 py-0.5 bg-orange-500/10 text-orange-400 rounded">{t('crossCluster')}</span>
                                                                 ) : (
                                                                     <span className="text-xs px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">{t('local') || 'Local'}</span>
                                                                 )}
@@ -5441,7 +5451,7 @@
                                                     <Icons.RefreshCw className="w-4 h-4" />
                                                     {t('createReplicationJob') || 'Create Replication Job'}
                                                     <span className={`text-xs px-1.5 py-0.5 rounded ${replType === 'zfs' ? 'text-purple-400 bg-purple-500/10' : 'text-blue-400 bg-blue-500/10'}`}>
-                                                        {replType === 'zfs' ? 'ZFS Native' : 'Snapshot'}
+                                                        {replType === 'zfs' ? t('zfsNativeLabel') : t('snapshot')}
                                                     </span>
                                                 </h3>
                                             </div>
@@ -5457,7 +5467,7 @@
                                                 </div>
                                                 {/* VM select */}
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">VM / CT</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('vmCt')}</label>
                                                     <select
                                                         value={newReplication.vmid}
                                                         onChange={e => setNewReplication({...newReplication, vmid: e.target.value})}
@@ -5466,7 +5476,7 @@
                                                         <option value="">{t('selectVm') || '-- Select VM --'}</option>
                                                         {replVms.map(vm => (
                                                             <option key={vm.vmid} value={vm.vmid}>
-                                                                {vm.vmid} - {vm.name || 'unnamed'} ({vm.type === 'qemu' ? 'VM' : 'CT'}) [{vm.node}]
+                                                                {vm.vmid} - {vm.name || t('unnamed')} ({vm.type === 'qemu' ? 'VM' : 'CT'}) [{vm.node}]
                                                             </option>
                                                         ))}
                                                     </select>
@@ -5678,7 +5688,7 @@
                                             <p className="text-sm text-gray-400">{t('cpuCompatibilityDesc') || 'Ensure live migration compatibility across different CPU generations'}</p>
                                         </div>
                                     </div>
-                                    
+
                                     <div className="p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg mb-6">
                                         <h4 className="text-blue-400 font-medium mb-2 flex items-center gap-2">
                                             <Icons.AlertTriangle className="w-4 h-4" />
@@ -5694,7 +5704,7 @@
 
                                     <div className="space-y-4">
                                         <h4 className="font-medium text-white">{t('availableLevels') || 'Available Compatibility Levels'}</h4>
-                                        
+
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                             {[
                                                 { id: 'x86-64-v2-AES', label: 'x86-64-v2-AES', color: 'green', tag: t('safest') || 'Safest', desc: t('broadCompatibility') || 'Broad compatibility - works with most CPUs from 2008+' },
@@ -5702,12 +5712,12 @@
                                                 { id: 'x86-64-v4', label: 'x86-64-v4', color: 'yellow', tag: t('newest') || 'Newest', desc: t('skylakeAvx') || 'Skylake-X with AVX-512 (2017+)' },
                                                 { id: 'host', label: 'host', color: 'red', tag: t('noMigration') || 'No Migration', desc: t('hostDesc') || 'Pass-through host CPU - best performance, no migration' }
                                             ].map(level => (
-                                                <div 
+                                                <div
                                                     key={level.id}
                                                     onClick={() => navigator.clipboard.writeText(`cpu: ${level.label}`)}
                                                     className={`p-4 bg-proxmox-dark rounded-lg border transition-all cursor-pointer ${
-                                                        recommendedCpu === level.id 
-                                                            ? 'border-purple-500 ring-2 ring-purple-500/30' 
+                                                        recommendedCpu === level.id
+                                                            ? 'border-purple-500 ring-2 ring-purple-500/30'
                                                             : 'border-proxmox-border hover:border-purple-500/50'
                                                     }`}
                                                 >
@@ -5756,7 +5766,7 @@
                                                         </div>
                                                         <div className="mt-2 flex items-center justify-between text-sm">
                                                             <span className="text-gray-400 font-mono truncate max-w-md">{info.model}</span>
-                                                            <span className="text-gray-500">{info.generation} • {info.sockets}x{info.cores} Cores</span>
+                                                            <span className="text-gray-500">{info.generation} • {info.sockets}x{info.cores} {t('coresCount')}</span>
                                                         </div>
                                                     </div>
                                                 ))}
@@ -5818,7 +5828,7 @@
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.Activity />
-                                            Status
+                                            {t('status')}
                                         </h3>
                                         <button onClick={fetchAllData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">
                                             <Icons.RefreshCw className="w-4 h-4" />
@@ -5832,30 +5842,38 @@
                                                     <div className="flex items-center gap-3 p-3 bg-proxmox-dark/50 rounded-lg">
                                                         <div className={`w-3 h-3 rounded-full ${haManagerStatus.quorum.quorate === '1' || haManagerStatus.quorum.quorate === 1 ? 'bg-green-500' : 'bg-red-500'}`}></div>
                                                         <div>
-                                                            <div className="font-medium">Quorum</div>
+                                                            <div className="font-medium">{t('quorum')}</div>
                                                             <div className="text-sm text-gray-400">
-                                                                {haManagerStatus.quorum.quorate === '1' || haManagerStatus.quorum.quorate === 1 ? 'OK' : 'NOT OK'} 
-                                                                {haManagerStatus.quorum.node && ` - Node: ${haManagerStatus.quorum.node}`}
+                                                                {haManagerStatus.quorum.quorate === '1' || haManagerStatus.quorum.quorate === 1
+                                                                    ? t('quorumOk')
+                                                                    : t('quorumNotOk')}
+                                                                {haManagerStatus.quorum.node && ` - ${t('node')}: ${haManagerStatus.quorum.node}`}
                                                             </div>
                                                         </div>
                                                     </div>
                                                 )}
-                                                
+
                                                 {/* Manager Status */}
                                                 {haManagerStatus.manager_status && (
                                                     <div className="p-3 bg-proxmox-dark/50 rounded-lg">
-                                                        <div className="font-medium mb-2">Manager Status</div>
+                                                        <div className="font-medium mb-2">{t('managerStatus')}</div>
                                                         <div className="grid grid-cols-2 gap-2 text-sm">
-                                                            <div className="text-gray-400">Master Node:</div>
+                                                            <div className="text-gray-400">{t('masterNode')}:</div>
                                                             <div className="text-green-400 font-mono">{String(haManagerStatus.manager_status.master_node || '-')}</div>
                                                         </div>
                                                         {haManagerStatus.manager_status.node_status && (
                                                             <div className="mt-2">
-                                                                <div className="text-gray-400 text-sm mb-1">Node Status:</div>
+                                                                <div className="text-gray-400 text-sm mb-1">{t('nodeStatus')}:</div>
                                                                 <div className="flex flex-wrap gap-2">
                                                                     {Object.entries(haManagerStatus.manager_status.node_status).filter(([k]) => k !== '').map(([node, status]) => (
                                                                         <span key={node} className={`px-2 py-1 rounded text-xs ${status === 'online' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                                                                            {node}: {String(status)}
+                                                                            {node}: {
+                                                                                status === 'online'
+                                                                                    ? t('online')
+                                                                                    : status === 'offline'
+                                                                                        ? t('offline')
+                                                                                        : String(status)
+                                                                            }
                                                                         </span>
                                                                     ))}
                                                                 </div>
@@ -5863,17 +5881,25 @@
                                                         )}
                                                     </div>
                                                 )}
-                                                
+
                                                 {/* LRM Status */}
                                                 {haManagerStatus.lrm_status && (
                                                     <div className="p-3 bg-proxmox-dark/50 rounded-lg">
-                                                        <div className="font-medium mb-2">LRM Status (Local Resource Manager)</div>
+                                                        <div className="font-medium mb-2">{t('lrmStatus')}</div>
                                                         <div className="space-y-2">
                                                             {Object.entries(haManagerStatus.lrm_status).filter(([k]) => k !== '').map(([node, data]) => (
                                                                 <div key={node} className="flex items-center justify-between text-sm p-2 bg-proxmox-dark rounded">
                                                                     <span className="font-mono">{node}</span>
                                                                     <span className={`px-2 py-0.5 rounded text-xs ${data && data.mode === 'active' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                                                                        {data ? String(data.mode || 'unknown') : 'unknown'}
+                                                                        {data
+                                                                            ? (data.mode === 'active'
+                                                                                ? t('active')
+                                                                                : data.mode === 'inactive'
+                                                                                    ? t('inactive')
+                                                                                    : data.mode
+                                                                                        ? String(data.mode)
+                                                                                        : t('unknown'))
+                                                                            : t('unknown')}
                                                                     </span>
                                                                 </div>
                                                             ))}
@@ -5882,7 +5908,7 @@
                                                 )}
                                             </>
                                         ) : (
-                                            <p className="text-gray-500 text-center py-4">No HA status available</p>
+                                            <p className="text-gray-500 text-center py-4">{t('noHaStatusAvailable')}</p>
                                         )}
                                     </div>
                                 </div>
@@ -5892,7 +5918,7 @@
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.Server />
-                                            Resources
+                                            {t('resources')}
                                         </h3>
                                         <button onClick={async () => {
                                             // Fetch available VMs/CTs when opening modal
@@ -5912,7 +5938,7 @@
                                             setNewHaResource({ sid: '', state: 'started', group: '', max_restart: 1, max_relocate: 1, comment: '' });
                                             setShowAddHaResource(true);
                                         }} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm">
-                                            <Icons.Plus className="w-4 h-4" /> Add
+                                            <Icons.Plus className="w-4 h-4" /> {t('add')}
                                         </button>
                                     </div>
                                     <div className="overflow-x-auto">
@@ -5920,13 +5946,13 @@
                                             <thead>
                                                 <tr className="text-left text-gray-400 text-sm bg-proxmox-dark/50">
                                                     <th className="p-3">ID</th>
-                                                    <th className="p-3">State</th>
-                                                    <th className="p-3">Node</th>
-                                                    <th className="p-3">Max Restart</th>
-                                                    <th className="p-3">Max Relocate</th>
-                                                    <th className="p-3">Group</th>
-                                                    <th className="p-3">Comment</th>
-                                                    <th className="p-3">Actions</th>
+                                                    <th className="p-3">{t('state')}</th>
+                                                    <th className="p-3">{t('node')}</th>
+                                                    <th className="p-3">{t('maxRestart')}</th>
+                                                    <th className="p-3">{t('maxRelocate')}</th>
+                                                    <th className="p-3">{t('group')}</th>
+                                                    <th className="p-3">{t('comment')}</th>
+                                                    <th className="p-3">{t('actions')}</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -5941,7 +5967,19 @@
                                                                     res.state === 'error' ? 'bg-red-500/20 text-red-400' :
                                                                     'bg-yellow-500/20 text-yellow-400'
                                                                 }`}>
-                                                                    {String(res.state || 'unknown')}
+                                                                    {res.state === 'started'
+                                                                        ? t('started')
+                                                                        : res.state === 'stopped'
+                                                                            ? t('stopped')
+                                                                            : res.state === 'error'
+                                                                                ? t('error')
+                                                                                : res.state === 'ignored'
+                                                                                    ? t('ignored')
+                                                                                    : res.state === 'disabled'
+                                                                                        ? t('disabled')
+                                                                                        : res.state
+                                                                                            ? String(res.state)
+                                                                                            : t('unknown')}
                                                                 </span>
                                                             </td>
                                                             <td className="p-3">{String(res.node || '-')}</td>
@@ -5950,18 +5988,18 @@
                                                             <td className="p-3">{String(res.group || '-')}</td>
                                                             <td className="p-3 text-gray-400 text-sm max-w-xs truncate">{String(res.comment || '-')}</td>
                                                             <td className="p-3">
-                                                                <button 
+                                                                <button
                                                                     onClick={async () => {
-                                                                        if (confirm('Remove ' + res.sid + ' from HA?')) {
+                                                                        if (confirm(`${t('confirmRemoveResourceFromHa')}: ${res.sid}?`)) {
                                                                             try {
                                                                                 var r = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/resources/' + res.sid, { method: 'DELETE' });
-                                                                                if (r && r.ok) { addToast('Removed', 'success'); fetchAllData(); }
-                                                                                else { addToast('Failed', 'error'); }
-                                                                            } catch(e) { addToast('Error', 'error'); }
+                                                                                if (r && r.ok) { addToast(t('haResourceRemoved'), 'success'); fetchAllData(); }
+                                                                                else { addToast(t('failed'), 'error'); }
+                                                                            } catch(e) { addToast(t('error'), 'error'); }
                                                                         }
                                                                     }}
                                                                     className="p-1.5 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400"
-                                                                    title="Remove from HA"
+                                                                    title={t('removeFromHa')}
                                                                 >
                                                                     <Icons.Trash2 className="w-4 h-4" />
                                                                 </button>
@@ -5971,7 +6009,7 @@
                                                 ) : (
                                                     <tr>
                                                         <td colSpan="8" className="p-8 text-center text-gray-500">
-                                                            No HA resources configured
+                                                            {t('noHaResourcesConfigured')}
                                                         </td>
                                                     </tr>
                                                 )}
@@ -5985,21 +6023,21 @@
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.Users />
-                                            Groups
+                                            {t('groups')}
                                         </h3>
                                         <button onClick={() => setShowAddHaGroup(true)} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm">
-                                            <Icons.Plus className="w-4 h-4" /> Add
+                                            <Icons.Plus className="w-4 h-4" /> {t('add')}
                                         </button>
                                     </div>
                                     <div className="overflow-x-auto">
                                         <table className="w-full">
                                             <thead>
                                                 <tr className="text-left text-gray-400 text-sm bg-proxmox-dark/50">
-                                                    <th className="p-3">Group</th>
-                                                    <th className="p-3">Nodes</th>
-                                                    <th className="p-3">Restricted</th>
-                                                    <th className="p-3">No Failback</th>
-                                                    <th className="p-3">Actions</th>
+                                                    <th className="p-3">{t('group')}</th>
+                                                    <th className="p-3">{t('nodes')}</th>
+                                                    <th className="p-3">{t('restricted')}</th>
+                                                    <th className="p-3">{t('noFailback')}</th>
+                                                    <th className="p-3">{t('actions')}</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -6010,27 +6048,27 @@
                                                             <td className="p-3 font-mono text-sm">{String(grp.nodes || '-')}</td>
                                                             <td className="p-3">
                                                                 <span className={grp.restricted ? 'text-yellow-400' : 'text-gray-500'}>
-                                                                    {grp.restricted ? 'Yes' : 'No'}
+                                                                    {grp.restricted ? t('yes') : t('no')}
                                                                 </span>
                                                             </td>
                                                             <td className="p-3">
                                                                 <span className={grp.nofailback ? 'text-yellow-400' : 'text-gray-500'}>
-                                                                    {grp.nofailback ? 'Yes' : 'No'}
+                                                                    {grp.nofailback ? t('yes') : t('no')}
                                                                 </span>
                                                             </td>
                                                             <td className="p-3">
-                                                                <button 
+                                                                <button
                                                                     onClick={async () => {
-                                                                        if (confirm('Delete group ' + grp.group + '?')) {
+                                                                        if (confirm(`${t('confirmDeleteHaGroup')}: ${grp.group}?`)) {
                                                                             try {
                                                                                 var r = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/groups/' + grp.group, { method: 'DELETE' });
-                                                                                if (r && r.ok) { addToast('Deleted', 'success'); fetchAllData(); }
-                                                                                else { addToast('Failed', 'error'); }
-                                                                            } catch(e) { addToast('Error', 'error'); }
+                                                                                if (r && r.ok) { addToast(t('haGroupDeleted'), 'success'); fetchAllData(); }
+                                                                                else { addToast(t('failed'), 'error'); }
+                                                                            } catch(e) { addToast(t('error'), 'error'); }
                                                                         }
                                                                     }}
                                                                     className="p-1.5 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400"
-                                                                    title="Delete group"
+                                                                    title={t('deleteHaGroup')}
                                                                 >
                                                                     <Icons.Trash2 className="w-4 h-4" />
                                                                 </button>
@@ -6040,7 +6078,7 @@
                                                 ) : (
                                                     <tr>
                                                         <td colSpan="5" className="p-8 text-center text-gray-500">
-                                                            No HA groups configured
+                                                            {t('noHaGroupsConfigured')}
                                                         </td>
                                                     </tr>
                                                 )}
@@ -6053,75 +6091,75 @@
                                 {showAddHaResource && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setShowAddHaResource(false)}>
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                                            <h3 className="text-lg font-semibold mb-4">Add: Resource: Container/Virtual Machine</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addHaResourceTitle')}</h3>
                                             <div className="grid grid-cols-2 gap-4">
                                                 {/* Left Column */}
                                                 <div className="space-y-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">VM:</label>
-                                                        <select 
-                                                            value={newHaResource.sid || ''} 
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('vmCt')}:</label>
+                                                        <select
+                                                            value={newHaResource.sid || ''}
                                                             onChange={e => setNewHaResource({...newHaResource, sid: e.target.value})}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                         >
-                                                            <option value="">-- Select VM/CT --</option>
+                                                            <option value="">— {t('selectVmCt')} —</option>
                                                             {availableVmsForHa && availableVmsForHa.map(vm => (
                                                                 <option key={vm.vmid} value={(vm.type === 'qemu' ? 'vm:' : 'ct:') + vm.vmid}>
-                                                                    {vm.vmid} - {vm.name || 'unnamed'} ({vm.type === 'qemu' ? 'VM' : 'CT'})
+                                                                    {vm.vmid} - {vm.name || t('unnamed')} ({vm.type === 'qemu' ? 'VM' : 'CT'})
                                                                 </option>
                                                             ))}
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Max. Restart:</label>
-                                                        <input 
-                                                            type="number" 
-                                                            min="0" 
-                                                            max="10" 
-                                                            value={newHaResource.max_restart || 1} 
-                                                            onChange={e => setNewHaResource({...newHaResource, max_restart: parseInt(e.target.value) || 0})} 
-                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" 
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('maxRestart')}:</label>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            max="10"
+                                                            value={newHaResource.max_restart || 1}
+                                                            onChange={e => setNewHaResource({...newHaResource, max_restart: parseInt(e.target.value) || 0})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Max. Relocate:</label>
-                                                        <input 
-                                                            type="number" 
-                                                            min="0" 
-                                                            max="10" 
-                                                            value={newHaResource.max_relocate || 1} 
-                                                            onChange={e => setNewHaResource({...newHaResource, max_relocate: parseInt(e.target.value) || 0})} 
-                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" 
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('maxRelocate')}:</label>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            max="10"
+                                                            value={newHaResource.max_relocate || 1}
+                                                            onChange={e => setNewHaResource({...newHaResource, max_relocate: parseInt(e.target.value) || 0})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                         />
                                                     </div>
                                                 </div>
-                                                
+
                                                 {/* Right Column */}
                                                 <div className="space-y-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Group:</label>
-                                                        <select 
-                                                            value={newHaResource.group || ''} 
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('group')}:</label>
+                                                        <select
+                                                            value={newHaResource.group || ''}
                                                             onChange={e => setNewHaResource({...newHaResource, group: e.target.value})}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                         >
-                                                            <option value="">-- None --</option>
+                                                            <option value="">— {t('none')} —</option>
                                                             {haGroups && Array.isArray(haGroups) && haGroups.map(g => (
                                                                 <option key={g.group} value={g.group}>{g.group}</option>
                                                             ))}
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Request State:</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('requestState')}:</label>
                                                         <select
                                                             value={newHaResource.state || 'started'}
                                                             onChange={e => setNewHaResource({...newHaResource, state: e.target.value})}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                         >
-                                                            <option value="started">started</option>
-                                                            <option value="stopped">stopped</option>
-                                                            <option value="ignored">ignored</option>
-                                                            <option value="disabled">disabled</option>
+                                                            <option value="started">{t('started')}</option>
+                                                            <option value="stopped">{t('stopped')}</option>
+                                                            <option value="ignored">{t('ignored')}</option>
+                                                            <option value="disabled">{t('disabled')}</option>
                                                         </select>
                                                     </div>
                                                     {/* LW May 2026 — PVE 9.2 per-resource dynamic CRS opt-in/-out.
@@ -6148,35 +6186,35 @@
                                                         </select>
                                                     </div>
                                                 </div>
-                                                
+
                                                 {/* Comment - Full Width */}
                                                 <div className="col-span-2">
-                                                    <label className="block text-sm text-gray-400 mb-1">Comment:</label>
-                                                    <input 
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('comment')}:</label>
+                                                    <input
                                                         type="text"
-                                                        value={newHaResource.comment || ''} 
+                                                        value={newHaResource.comment || ''}
                                                         onChange={e => setNewHaResource({...newHaResource, comment: e.target.value})}
                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
-                                                        placeholder="Optional comment"
+                                                        placeholder={t('optionalComment')}
                                                     />
                                                 </div>
                                             </div>
-                                            
+
                                             <div className="flex justify-end gap-2 mt-6">
-                                                <button onClick={() => setShowAddHaResource(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">Cancel</button>
+                                                <button onClick={() => setShowAddHaResource(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">{t('cancel')}</button>
                                                 <button onClick={async function() {
                                                     var sidVal = (newHaResource.sid || '').trim();
-                                                    if (!sidVal) { 
-                                                        addToast('Please select a VM/CT', 'error'); 
-                                                        return; 
+                                                    if (!sidVal) {
+                                                        addToast(t('selectVmCtRequired'), 'error');
+                                                        return;
                                                     }
-                                                    
+
                                                     try {
-                                                        var payload = { 
-                                                            sid: sidVal, 
-                                                            state: newHaResource.state || 'started', 
-                                                            max_restart: newHaResource.max_restart || 1, 
-                                                            max_relocate: newHaResource.max_relocate || 1 
+                                                        var payload = {
+                                                            sid: sidVal,
+                                                            state: newHaResource.state || 'started',
+                                                            max_restart: newHaResource.max_restart || 1,
+                                                            max_relocate: newHaResource.max_relocate || 1
                                                         };
                                                         if (newHaResource.group) payload.group = newHaResource.group;
                                                         if (newHaResource.comment) payload.comment = newHaResource.comment;
@@ -6188,24 +6226,24 @@
                                                         }
 
                                                         var res = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/resources', {
-                                                            method: 'POST', 
-                                                            headers: { 'Content-Type': 'application/json' }, 
-                                                            body: JSON.stringify(payload) 
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json' },
+                                                            body: JSON.stringify(payload)
                                                         });
-                                                        
-                                                        if (res && res.ok) { 
-                                                            addToast('Resource added to HA', 'success'); 
-                                                            setShowAddHaResource(false); 
+
+                                                        if (res && res.ok) {
+                                                            addToast(t('haResourceAdded'), 'success');
+                                                            setShowAddHaResource(false);
                                                             setNewHaResource({ sid: '', state: 'started', group: '', max_restart: 1, max_relocate: 1, comment: '', auto_rebalance: null });
-                                                            fetchAllData(); 
-                                                        } else { 
-                                                            var errData = await res.json().catch(function() { return {}; }); 
-                                                            addToast(errData.error || 'Failed to add resource', 'error'); 
+                                                            fetchAllData();
+                                                        } else {
+                                                            var errData = await res.json().catch(function() { return {}; });
+                                                            addToast(errData.error || t('failedAddHaResource'), 'error');
                                                         }
-                                                    } catch(e) { 
-                                                        addToast('Error: ' + e.message, 'error'); 
+                                                    } catch(e) {
+                                                        addToast(`${t('error')}: ${e.message}`, 'error');
                                                     }
-                                                }} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm">Add</button>
+                                                }} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm">{t('add')}</button>
                                             </div>
                                         </div>
                                     </div>
@@ -6215,49 +6253,49 @@
                                 {showAddHaGroup && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setShowAddHaGroup(false)}>
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
-                                            <h3 className="text-lg font-semibold mb-4">Add HA Group</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addHaGroup')}</h3>
                                             <div className="space-y-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Group Name</label>
-                                                    <input value={newHaGroup.group || ''} onChange={e => setNewHaGroup({...newHaGroup, group: e.target.value})} placeholder="e.g. production" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('groupName')}</label>
+                                                    <input value={newHaGroup.group || ''} onChange={e => setNewHaGroup({...newHaGroup, group: e.target.value})} placeholder={t('exampleProduction')} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Nodes (with priority)</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('nodesWithPriority')}</label>
                                                     <input value={newHaGroup.nodes || ''} onChange={e => setNewHaGroup({...newHaGroup, nodes: e.target.value})} placeholder="node1:1,node2:2,node3:1" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
-                                                    <span className="text-xs text-gray-500">Lower priority = preferred</span>
+                                                    <span className="text-xs text-gray-500">{t('lowerPriorityPreferred')}</span>
                                                 </div>
                                                 <div className="flex gap-6">
                                                     <label className="flex items-center gap-2 cursor-pointer">
                                                         <input type="checkbox" checked={newHaGroup.restricted === 1} onChange={e => setNewHaGroup({...newHaGroup, restricted: e.target.checked ? 1 : 0})} className="rounded" />
-                                                        <span className="text-sm">Restricted</span>
+                                                        <span className="text-sm">{t('restricted')}</span>
                                                     </label>
                                                     <label className="flex items-center gap-2 cursor-pointer">
                                                         <input type="checkbox" checked={newHaGroup.nofailback === 1} onChange={e => setNewHaGroup({...newHaGroup, nofailback: e.target.checked ? 1 : 0})} className="rounded" />
-                                                        <span className="text-sm">No Failback</span>
+                                                        <span className="text-sm">{t('noFailback')}</span>
                                                     </label>
                                                 </div>
                                             </div>
                                             <div className="flex justify-end gap-2 mt-6">
-                                                <button onClick={() => setShowAddHaGroup(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">Cancel</button>
+                                                <button onClick={() => setShowAddHaGroup(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">{t('cancel')}</button>
                                                 <button onClick={async () => {
-                                                    if (!newHaGroup.group || !newHaGroup.nodes) { addToast('Enter group name and nodes', 'error'); return; }
+                                                    if (!newHaGroup.group || !newHaGroup.nodes) { addToast(t('enterGroupNameAndNodes'), 'error'); return; }
                                                     try {
-                                                        var res = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/groups', { 
-                                                            method: 'POST', 
-                                                            headers: { 'Content-Type': 'application/json' }, 
-                                                            body: JSON.stringify(newHaGroup) 
+                                                        var res = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/groups', {
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json' },
+                                                            body: JSON.stringify(newHaGroup)
                                                         });
-                                                        if (res && res.ok) { 
-                                                            addToast('Group created', 'success'); 
-                                                            setShowAddHaGroup(false); 
+                                                        if (res && res.ok) {
+                                                            addToast(t('haGroupCreated'), 'success');
+                                                            setShowAddHaGroup(false);
                                                             setNewHaGroup({ group: '', nodes: '', restricted: 0, nofailback: 0 });
-                                                            fetchAllData(); 
-                                                        } else { 
-                                                            var err = await res.json().catch(function() { return {}; }); 
-                                                            addToast(err.error || 'Failed to create group', 'error'); 
+                                                            fetchAllData();
+                                                        } else {
+                                                            var err = await res.json().catch(function() { return {}; });
+                                                            addToast(err.error || t('failedCreateHaGroup'), 'error');
                                                         }
-                                                    } catch(e) { addToast('Error: ' + e.message, 'error'); }
-                                                }} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm">Create</button>
+                                                    } catch(e) { addToast(`${t('error')}: ${e.message}`, 'error'); }
+                                                }} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm">{t('create')}</button>
                                             </div>
                                         </div>
                                     </div>
@@ -6293,8 +6331,8 @@
                                                 }
                                             }}
                                             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                                                firewallOptions.enable 
-                                                    ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' 
+                                                firewallOptions.enable
+                                                    ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
                                                     : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
                                             }`}
                                         >
@@ -6303,8 +6341,8 @@
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                         <div className="bg-proxmox-dark rounded-lg p-4">
-                                            <div className="text-sm text-gray-400 mb-1">Policy In</div>
-                                            <select 
+                                            <div className="text-sm text-gray-400 mb-1">{t('policyIn')}</div>
+                                            <select
                                                 value={firewallOptions.policy_in || 'DROP'}
                                                 onChange={async (e) => {
                                                     try {
@@ -6325,8 +6363,8 @@
                                             </select>
                                         </div>
                                         <div className="bg-proxmox-dark rounded-lg p-4">
-                                            <div className="text-sm text-gray-400 mb-1">Policy Out</div>
-                                            <select 
+                                            <div className="text-sm text-gray-400 mb-1">{t('policyOut')}</div>
+                                            <select
                                                 value={firewallOptions.policy_out || 'ACCEPT'}
                                                 onChange={async (e) => {
                                                     try {
@@ -6347,8 +6385,8 @@
                                             </select>
                                         </div>
                                         <div className="bg-proxmox-dark rounded-lg p-4">
-                                            <div className="text-sm text-gray-400 mb-1">Log Level</div>
-                                            <select 
+                                            <div className="text-sm text-gray-400 mb-1">{t('logLevel')}</div>
+                                            <select
                                                 value={firewallOptions.log_level_in || 'nolog'}
                                                 onChange={async (e) => {
                                                     try {
@@ -6363,15 +6401,15 @@
                                                 }}
                                                 className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                             >
-                                                <option value="nolog">No Log</option>
-                                                <option value="emerg">Emergency</option>
-                                                <option value="alert">Alert</option>
-                                                <option value="crit">Critical</option>
-                                                <option value="err">Error</option>
-                                                <option value="warning">Warning</option>
-                                                <option value="notice">Notice</option>
-                                                <option value="info">Info</option>
-                                                <option value="debug">Debug</option>
+                                                <option value="nolog">{t('noLog')}</option>
+                                                <option value="emerg">{t('emergency')}</option>
+                                                <option value="alert">{t('alert')}</option>
+                                                <option value="crit">{t('critical')}</option>
+                                                <option value="err">{t('error')}</option>
+                                                <option value="warning">{t('warning')}</option>
+                                                <option value="notice">{t('notice')}</option>
+                                                <option value="info">{t('info')}</option>
+                                                <option value="debug">{t('debug')}</option>
                                             </select>
                                         </div>
                                     </div>
@@ -6381,7 +6419,7 @@
                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold">{t('firewallRules')}</h3>
-                                        <button 
+                                        <button
                                             onClick={() => setShowAddRuleModal(true)}
                                             className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
                                         >
@@ -6395,11 +6433,11 @@
                                                     <th className="text-left p-3 text-sm text-gray-400">#</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('action')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Macro</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('macro')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('source')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Dest</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Proto</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Port</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('destination')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('protocol')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('port')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('enabled')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('comment')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400"></th>
@@ -6415,12 +6453,16 @@
                                                             <span className={`px-2 py-0.5 rounded text-xs ${
                                                                 rule.type === 'in' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
                                                             }`}>
-                                                                {rule.type || 'in'}
+                                                                {rule.type === 'in'
+                                                                    ? 'IN'
+                                                                    : rule.type === 'out'
+                                                                        ? 'OUT'
+                                                                        : (rule.type || 'IN')}
                                                             </span>
                                                         </td>
                                                         <td className="p-3">
                                                             <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                                                rule.action === 'ACCEPT' ? 'bg-green-500/20 text-green-400' : 
+                                                                rule.action === 'ACCEPT' ? 'bg-green-500/20 text-green-400' :
                                                                 rule.action === 'DROP' ? 'bg-red-500/20 text-red-400' :
                                                                 'bg-yellow-500/20 text-yellow-400'
                                                             }`}>
@@ -6443,7 +6485,7 @@
                                                                             body: JSON.stringify({ enable: rule.enable ? 0 : 1 })
                                                                         });
                                                                         if(res.ok) {
-                                                                            setFirewallRules(prev => prev.map(r => 
+                                                                            setFirewallRules(prev => prev.map(r =>
                                                                                 r.pos === rule.pos ? { ...r, enable: rule.enable ? 0 : 1 } : r
                                                                             ));
                                                                         }
@@ -6456,8 +6498,8 @@
                                                         </td>
                                                         <td className="p-3 text-gray-500 text-xs max-w-32 truncate">{rule.comment || ''}</td>
                                                         <td className="p-3">
-                                                            <button 
-                                                                onClick={() => deleteFirewallRule(rule.pos)} 
+                                                            <button
+                                                                onClick={() => deleteFirewallRule(rule.pos)}
                                                                 className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
                                                             >
                                                                 <Icons.Trash />
@@ -6475,13 +6517,13 @@
                                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowAddRuleModal(false)}>
                                         <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                             <div className="p-4 border-b border-proxmox-border">
-                                                <h3 className="font-semibold">Add Firewall Rule</h3>
+                                                <h3 className="font-semibold">{t('addFirewallRule')}</h3>
                                             </div>
                                             <div className="p-4 space-y-4">
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Direction</label>
-                                                        <select 
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('direction')}</label>
+                                                        <select
                                                             value={newRule.type || 'in'}
                                                             onChange={e => setNewRule(p => ({...p, type: e.target.value}))}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
@@ -6491,8 +6533,8 @@
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Action</label>
-                                                        <select 
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('action')}</label>
+                                                        <select
                                                             value={newRule.action || 'ACCEPT'}
                                                             onChange={e => setNewRule(p => ({...p, action: e.target.value}))}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
@@ -6505,13 +6547,13 @@
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Macro</label>
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('macro')}</label>
                                                         <select
                                                             value={newRule.macro || ''}
                                                             onChange={e => setNewRule(p => ({...p, macro: e.target.value || undefined}))}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                         >
-                                                            <option value="">None</option>
+                                                            <option value="">{t('none')}</option>
                                                             {['Amanda','Auth','BGP','BitTorrent','Ceph','CephMon','CephOSD','CephMGR','CephMDS',
                                                               'DHCPfwd','DHCPv6','DNS','Dropbox','FTP','GNUnet','GRE','HKP',
                                                               'HTTP','HTTPS','ICMP','ICMPv6','IMAP','IMAPS','IPsec-ah','IPsec-esp',
@@ -6527,81 +6569,81 @@
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Interface</label>
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('interface')}</label>
                                                         <input
                                                             type="text"
                                                             value={newRule.iface || ''}
                                                             onChange={e => setNewRule(p => ({...p, iface: e.target.value}))}
-                                                            placeholder="e.g. vmbr0"
+                                                            placeholder={`${t('exampleAbbr')} vmbr0`}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                         />
                                                     </div>
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Protocol</label>
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('protocol')}</label>
                                                         <select
                                                             value={newRule.proto || ''}
                                                             onChange={e => setNewRule(p => ({...p, proto: e.target.value}))}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                         >
-                                                            <option value="">Any</option>
+                                                            <option value="">{t('any')}</option>
                                                             <option value="tcp">TCP</option>
                                                             <option value="udp">UDP</option>
                                                             <option value="icmp">ICMP</option>
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Dest. Port</label>
-                                                        <input 
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('destinationPort')}</label>
+                                                        <input
                                                             type="text"
                                                             value={newRule.dport || ''}
                                                             onChange={e => setNewRule(p => ({...p, dport: e.target.value}))}
-                                                            placeholder="e.g. 22, 80, 443"
+                                                            placeholder={`${t('exampleAbbr')} 22, 80, 443`}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                         />
                                                     </div>
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Source</label>
-                                                        <input 
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('source')}</label>
+                                                        <input
                                                             type="text"
                                                             value={newRule.source || ''}
                                                             onChange={e => setNewRule(p => ({...p, source: e.target.value}))}
-                                                            placeholder="e.g. 10.0.0.0/24"
+                                                            placeholder={`${t('exampleAbbr')} 10.0.0.0/24`}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Destination</label>
-                                                        <input 
+                                                        <label className="text-sm text-gray-400 mb-1 block">{t('destination')}</label>
+                                                        <input
                                                             type="text"
                                                             value={newRule.dest || ''}
                                                             onChange={e => setNewRule(p => ({...p, dest: e.target.value}))}
-                                                            placeholder="e.g. 192.168.1.0/24"
+                                                            placeholder={`${t('exampleAbbr')} 192.168.1.0/24`}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                         />
                                                     </div>
                                                 </div>
                                                 <div>
-                                                    <label className="text-sm text-gray-400 mb-1 block">Comment</label>
-                                                    <input 
+                                                    <label className="text-sm text-gray-400 mb-1 block">{t('comment')}</label>
+                                                    <input
                                                         type="text"
                                                         value={newRule.comment || ''}
                                                         onChange={e => setNewRule(p => ({...p, comment: e.target.value}))}
-                                                        placeholder="Optional description"
+                                                        placeholder={t('optionalDescription')}
                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                     />
                                                 </div>
                                                 <label className="flex items-center gap-2">
-                                                    <input 
+                                                    <input
                                                         type="checkbox"
                                                         checked={newRule.enable !== 0}
                                                         onChange={e => setNewRule(p => ({...p, enable: e.target.checked ? 1 : 0}))}
                                                         className="w-4 h-4 rounded"
                                                     />
-                                                    <span>Enable rule</span>
+                                                    <span>{t('enableRule')}</span>
                                                 </label>
                                             </div>
                                             <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
@@ -6671,13 +6713,13 @@
                                         <table className="w-full">
                                             <thead className="bg-proxmox-dark">
                                                 <tr>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Node</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Status</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Server ID</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Subscription ID</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Next Due Date</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Product</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">Set Key</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('node')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('serverId')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('subscriptionId')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('nextDueDate')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('product')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('setKey')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400"></th>
                                                 </tr>
                                             </thead>
@@ -6685,7 +6727,7 @@
                                                 {subscriptionsLoading && (!subscriptions || subscriptions.length === 0) ? (
                                                     <tr><td colSpan="8" className="p-8 text-center text-gray-500">{t('loading') || 'Loading'}...</td></tr>
                                                 ) : (!subscriptions || subscriptions.length === 0) ? (
-                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">No subscription data available</td></tr>
+                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">{t('noSubscriptionDataAvailable')}</td></tr>
                                                 ) : subscriptions.map((sub) => {
                                                     const status = (sub.status || 'unknown').toLowerCase();
                                                     const isActive = status === 'active';
@@ -6699,7 +6741,13 @@
                                                                     status === 'notfound' || status === 'unknown' ? 'bg-gray-500/20 text-gray-400' :
                                                                     'bg-red-500/20 text-red-400'
                                                                 }`}>
-                                                                    {sub.status || '-'}
+                                                                    {status === 'active'
+                                                                        ? t('subscriptionStatusActive')
+                                                                        : status === 'notfound'
+                                                                            ? t('subscriptionStatusNotFound')
+                                                                            : status === 'unknown'
+                                                                                ? t('subscriptionStatusUnknown')
+                                                                                : (sub.status || '-')}
                                                                 </span>
                                                             </td>
                                                             <td className="p-3 font-mono text-xs text-gray-300">{sub.serverid || '-'}</td>
@@ -6720,7 +6768,7 @@
                                                                         onClick={() => saveSubscriptionKey(sub.node)}
                                                                         disabled={isBusy}
                                                                         className="p-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded text-white transition-colors"
-                                                                        title={t('activateLicense') || 'Set subscription key'}
+                                                                        title={t('setSubscriptionKey')}
                                                                     >
                                                                         <Icons.Check className="w-4 h-4" />
                                                                     </button>
@@ -6822,7 +6870,7 @@
                                                             ))}
                                                         </div>
                                                         <div className="bg-proxmox-dark rounded-lg p-4">
-                                                            <div className="text-sm text-gray-400 mb-1">PG Status</div>
+                                                            <div className="text-sm text-gray-400 mb-1">{t('pgStatus')}</div>
                                                             <div className="space-y-1 text-sm">
                                                                 {cephData.status?.pgmap ? (
                                                                     <>
@@ -6903,14 +6951,14 @@
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('host')}</th>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">In/Out</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Class</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('inOut')}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('deviceClass')}</th>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
                                                             {(!cephData.osd || cephData.osd.length === 0) ? (
-                                                                <tr><td colSpan="7" className="p-8 text-center text-gray-500">No OSDs found</td></tr>
+                                                                <tr><td colSpan="7" className="p-8 text-center text-gray-500">{t('noOsdsFound')}</td></tr>
                                                             ) : cephData.osd.map((osd) => (
                                                                 <tr key={osd.id} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                     <td className="p-3">{osd.id}</td>
@@ -6937,20 +6985,20 @@
                                                                                 onClick={async () => {
                                                                                     const action = osd.in ? 'out' : 'in';
                                                                                     const host = osd.host || cephNode;
-                                                                                    if (!confirm(`Mark OSD ${osd.id} as ${action.toUpperCase()}?`)) return;
+                                                                                    if (!confirm(`${t('markOsd')} ${osd.id} ${t('asState')} ${action.toUpperCase()}?`)) return;
                                                                                     // MK May 2026 (#408 family): destructive POST with silent
                                                                                     // catch — surface success/error.
                                                                                     try {
                                                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${host}/ceph/osd/${osd.id}/${action}`, { method: 'POST' });
                                                                                         if (res?.ok) {
-                                                                                            addToast(`OSD ${osd.id} marked ${action.toUpperCase()}`, 'success');
+                                                                                            addToast(`OSD ${osd.id} ${t('markedAs')} ${action.toUpperCase()}`, 'success');
                                                                                             fetchCephData();
                                                                                         } else {
                                                                                             const err = await res.json().catch(() => ({}));
-                                                                                            addToast(err.error || `Failed to mark OSD ${action} (HTTP ${res?.status || '?'})`, 'error');
+                                                                                            addToast(err.error || `${t('failedMarkOsdAs')} ${action.toUpperCase()} (HTTP ${res?.status || '?'})`, 'error');
                                                                                         }
                                                                                     } catch (e) {
-                                                                                        addToast(`Failed to mark OSD ${action}: ${e.message || e}`, 'error');
+                                                                                        addToast(`${t('failedMarkOsdAs')} ${action.toUpperCase()}: ${e.message || e}`, 'error');
                                                                                     }
                                                                                 }}
                                                                                 className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
@@ -6964,15 +7012,15 @@
                                                                                     try {
                                                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${host}/ceph/osd/${osd.id}/scrub`, { method: 'POST' });
                                                                                         if (res?.ok) {
-                                                                                            addToast('Scrub started', 'success');
+                                                                                            addToast(t('scrubStarted'), 'success');
                                                                                         } else {
                                                                                             const err = await res.json().catch(() => ({}));
-                                                                                            addToast(err.error || `Failed to start scrub (HTTP ${res?.status || '?'})`, 'error');
+                                                                                            addToast(err.error || `${t('failedStartScrub')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                         }
-                                                                                    } catch (e) { addToast(`Failed to start scrub: ${e.message || e}`, 'error'); }
+                                                                                    } catch (e) { addToast(`${t('failedStartScrub')}: ${e.message || e}`, 'error'); }
                                                                                 }}
                                                                                 className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
-                                                                                title="Scrub"
+                                                                                title={t('scrub')}
                                                                             >
                                                                                 Scrub
                                                                             </button>
@@ -8088,7 +8136,7 @@
 
                     {/* Node Join Wizard Modal */}
                     {showNodeJoinWizard && <NodeJoinWizard isOpen={showNodeJoinWizard} onClose={() => setShowNodeJoinWizard(false)} clusterId={clusterId} onSuccess={() => { fetchAllData(); }} addToast={addToast} />}
-                    
+
                     {/* Remove Node Modal */}
                     {showRemoveNodeModal && nodeToRemove && <RemoveNodeConfirmModal isOpen={showRemoveNodeModal} onClose={() => { setShowRemoveNodeModal(false); setNodeToRemove(null); }} node={nodeToRemove} clusterId={clusterId} onSuccess={() => { fetchAllData(); }} addToast={addToast} />}
                 </div>

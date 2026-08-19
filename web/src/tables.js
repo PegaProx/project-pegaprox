@@ -1411,6 +1411,18 @@
                 lxc: 'LXC'
             };
 
+            const itemsLabel = (count) => {
+                const base = t('items') || 'items';
+                if (base === 'elementy') {
+                    const mod10 = count % 10;
+                    const mod100 = count % 100;
+                    if (count === 1) return 'element';
+                    if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return 'elementy';
+                    return 'elementów';
+                }
+                return base;
+            };
+
             // NS #431: IP sorts by octet value, not as a string. Pull the IP from
             // the lazy guest-agent cache (qemu) or off the resource (lxc); blanks last.
             const getIp = (r) => {
@@ -1611,7 +1623,7 @@
                             ))}
                             <span className="corp-toolbar-divider" />
                             <span className="text-[11px]" style={{color: '#728b9a'}}>
-                                {filteredResources.length} {t('items') || 'items'}
+                                {filteredResources.length} {itemsLabel(filteredResources.length)}
                             </span>
                             <div style={{flex: 1}} />
                             {selectedVms.length > 0 && (
@@ -2644,7 +2656,15 @@
                             </div>
                         )}
                         
-                        <span className="text-gray-500">{Object.keys(groupedByNode).length} Nodes</span>
+                        <span className="text-gray-500">
+                            {Object.keys(groupedByNode).length} {
+                                Object.keys(groupedByNode).length === 1
+                                    ? (t('nodeSingular') || 'węzeł')
+                                    : (Object.keys(groupedByNode).length % 10 >= 2 && Object.keys(groupedByNode).length % 10 <= 4 && !(Object.keys(groupedByNode).length % 100 >= 12 && Object.keys(groupedByNode).length % 100 <= 14)
+                                        ? (t('nodePluralFew') || 'węzły')
+                                        : (t('nodePluralMany') || 'węzłów'))
+                            }
+                        </span>
                     </div>
 
                     {/* Delete Confirmation Modal */}

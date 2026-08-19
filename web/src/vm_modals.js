@@ -4498,7 +4498,7 @@
                                         </div>
                                     ) : (
                                         <div className="px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/30">
-                                            <span className="text-xs font-semibold text-red-400">Offline</span>
+                                            <span className="text-xs font-semibold text-red-400">{t('offline')}</span>
                                         </div>
                                     )}
                                 </div>
@@ -4788,7 +4788,7 @@
                                 </button>
                                 <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 border border-green-500/30 rounded-full">
                                     <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                                    <span className="text-xs text-green-400 font-medium">Live</span>
+                                    <span className="text-xs text-green-400 font-medium">{t('live')}</span>
                                 </div>
                             </div>
                         </div>
@@ -5281,7 +5281,7 @@
                                     )}
                                     {!cluster.connected && (
                                         <div className="px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/30">
-                                            <span className="text-xs font-semibold text-red-400">Offline</span>
+                                            <span className="text-xs font-semibold text-red-400">{t('offline')}</span>
                                         </div>
                                     )}
                                 </div>
@@ -5773,7 +5773,7 @@
                                 {/* Live indicator */}
                                 <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 border border-green-500/30 rounded-full">
                                     <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                                    <span className="text-xs text-green-400 font-medium">Live</span>
+                                    <span className="text-xs text-green-400 font-medium">{t('live')}</span>
                                 </div>
                             </div>
                         </div>

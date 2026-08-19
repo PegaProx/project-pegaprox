@@ -2246,10 +2246,10 @@
                             nodes: json.nodes
                         }));
                         if (json.summary?.total_updates > 0) {
-                            const failMsg = json.summary?.nodes_failed ? ` (${json.summary.nodes_failed} node(s) failed)` : '';
-                            addToast(`${json.summary.total_updates} ${t('updatesAvailable')}${failMsg}`, 'info');
+                            const failMsg = json.summary?.nodes_failed ? ` (${t('updateCheckFailures')}: ${json.summary.nodes_failed})` : '';
+                            addToast(`${t('updatesAvailable')}: ${json.summary.total_updates}${failMsg}`, 'info');
                         } else if (json.summary?.nodes_failed > 0) {
-                            addToast(`${json.summary.nodes_failed} node(s) failed update check`, 'warning');
+                            addToast(`${t('updateCheckFailures')}: ${json.summary.nodes_failed}`, 'warning');
                         } else {
                             addToast(t('noUpdatesAvailable'), 'success');
                         }
@@ -2502,6 +2502,23 @@
             const totalUpdates = updateStatus?.summary?.total_updates || 0;
             const nodesWithUpdates = updateStatus?.summary?.nodes_with_updates || 0;
             const nodesFailed = updateStatus?.summary?.nodes_failed || 0;
+
+            // i18n: plural forms for update counters.
+            // Polish: 1 aktualizacja, 2-4 aktualizacje,
+            // 5+, 12-14, 21, 25... aktualizacji.
+            const formatUpdateCount = (count) => {
+                const n = Math.abs(Number(count) || 0);
+                const mod10 = n % 10;
+                const mod100 = n % 100;
+
+                const key = n === 1
+                    ? 'updateCountOne'
+                    : (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14))
+                        ? 'updateCountFew'
+                        : 'updateCountMany';
+
+                return `${n} ${t(key)}`;
+            };
             
             // Check for kernel updates
             // NS: kernel updates require reboot, so we flag them seperately
@@ -2538,9 +2555,9 @@
                                 <h3 className="font-semibold text-white">{t('updateManager')}</h3>
                                 <p className="text-xs text-gray-400">
                                     {totalUpdates > 0 ? (
-                                        <span className="text-yellow-400">{totalUpdates} {t('updatesAvailable')}{nodesFailed > 0 ? ` (${nodesFailed} failed)` : ''}</span>
+                                        <span className="text-yellow-400">{t('updatesAvailable')}: {totalUpdates}{nodesFailed > 0 ? ` (${t('updateCheckFailures')}: ${nodesFailed})` : ''}</span>
                                     ) : nodesFailed > 0 ? (
-                                        <span className="text-red-400">{nodesFailed} node(s) failed check</span>
+                                        <span className="text-red-400">{t('updateCheckFailures')}: {nodesFailed}</span>
                                     ) : updateStatus ? (
                                         <span className="text-green-400">{t('noUpdatesAvailable')}</span>
                                     ) : (
@@ -2684,7 +2701,7 @@
                                                             !nodeData.success ? 'bg-red-500/20 text-red-400' :
                                                             nodeData.count > 0 ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'
                                                         }`}>
-                                                            {!nodeData.success ? `⚠ ${t('checkFailed') || 'Check failed'}` : `${nodeData.count || 0} ${t('updates') || 'updates'}`}
+                                                            {!nodeData.success ? `⚠ ${t('checkFailed') || 'Check failed'}` : formatUpdateCount(nodeData.count || 0)}
                                                         </span>
                                                         <Icons.ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                                                     </div>
@@ -2812,7 +2829,7 @@
                                                         !pbsData.success ? 'bg-red-500/20 text-red-400' :
                                                         pbsData.count > 0 ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'
                                                     }`}>
-                                                        {!pbsData.success ? '⚠ Check failed' : `${pbsData.count || 0} updates`}
+                                                        {!pbsData.success ? `⚠ ${t('checkFailed') || 'Check failed'}` : formatUpdateCount(pbsData.count || 0)}
                                                     </span>
                                                     <Icons.ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${selectedNode === pbsKey ? 'rotate-180' : ''}`} />
                                                 </div>

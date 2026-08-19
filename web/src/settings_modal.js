@@ -2596,7 +2596,7 @@
                                 }`}
                             >
                                 <Icons.Download className="w-4 h-4" />
-                                <span>Updates</span>
+                                <span>{t('updates') || 'Updates'}</span>
                                 {updateInfo?.update_available && (
                                     <span className="px-1.5 py-0.5 text-xs bg-green-500 text-white rounded-full">NEW</span>
                                 )}
@@ -6195,7 +6195,7 @@
                                                                         type="password"
                                                                         value={serverSettings.acme_dns_cloudflare_token || ''}
                                                                         onChange={e => setServerSettings({...serverSettings, acme_dns_cloudflare_token: e.target.value})}
-                                                                        placeholder="Cloudflare API token"
+                                                                        placeholder={t('acmeDnsCloudflareTokenPlaceholder') || 'Cloudflare API token'}
                                                                         autoComplete="off"
                                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                     />
@@ -6217,7 +6217,7 @@
                                                                         type="text"
                                                                         value={serverSettings.acme_dns_cloudflare_zone_id || ''}
                                                                         onChange={e => setServerSettings({...serverSettings, acme_dns_cloudflare_zone_id: e.target.value})}
-                                                                        placeholder="32-character zone id"
+                                                                        placeholder={t('acmeDnsCloudflareZoneIdPlaceholder') || '32-character zone id'}
                                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono"
                                                                     />
                                                                 </div>
@@ -6227,7 +6227,7 @@
                                                                         type="text"
                                                                         value={serverSettings.acme_dns_cloudflare_account_id || ''}
                                                                         onChange={e => setServerSettings({...serverSettings, acme_dns_cloudflare_account_id: e.target.value})}
-                                                                        placeholder="If auto-detect is ambiguous"
+                                                                        placeholder={t('acmeDnsCloudflareAccountIdPlaceholder') || 'If auto-detect is ambiguous'}
                                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono"
                                                                     />
                                                                 </div>
@@ -6997,14 +6997,14 @@
                                             <div>
                                                 <h3 className="text-lg font-semibold text-white flex items-center gap-2">
                                                     <Icons.Package />
-                                                    Current Version
+                                                    {t('currentVersion') || 'Current Version'}
                                                 </h3>
                                                 <div className="mt-2 space-y-1">
                                                     <p className="text-2xl font-bold text-proxmox-orange">
                                                         PegaProx {updateInfo?.current_version || PEGAPROX_VERSION}
                                                     </p>
                                                     <p className="text-sm text-gray-400">
-                                                        Build: {updateInfo?.current_build || '2026.01'}
+                                                        {t('buildLabel') || 'Build'}: {updateInfo?.current_build || '2026.01'}
                                                     </p>
                                                 </div>
                                             </div>
@@ -7018,7 +7018,7 @@
                                                 ) : (
                                                     <Icons.RefreshCw />
                                                 )}
-                                                Check for Updates
+                                                {t('checkForUpdates') || 'Check for Updates'}
                                             </button>
                                         </div>
                                     </div>
@@ -7041,7 +7041,7 @@
                                                         {t('updateAvailable') || 'Update Available!'}
                                                     </h3>
                                                     <p className="text-2xl font-bold text-white mt-2">
-                                                        Version {updateInfo.latest_version}
+                                                        {t('version') || 'Version'} {updateInfo.latest_version}
                                                     </p>
                                                     <p className="text-sm text-gray-400 mt-1">
                                                         {t('released') || 'Released'}: {updateInfo.release_date || 'Unknown'}
@@ -7151,9 +7151,9 @@
                                     {updateInfo && !updateInfo.update_available && !updateInfo.error && (
                                         <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 text-center">
                                             <Icons.CheckCircle className="w-12 h-12 text-green-400 mx-auto mb-3" />
-                                            <h3 className="text-lg font-semibold text-white">You're up to date!</h3>
+                                            <h3 className="text-lg font-semibold text-white">{t('alreadyUpToDate') || "You're up to date!"}</h3>
                                             <p className="text-gray-400 mt-1">
-                                                PegaProx {updateInfo.current_version} is the latest version.
+                                                PegaProx {updateInfo.current_version} {t('isLatestVersion') || 'is the latest version.'}
                                             </p>
                                         </div>
                                     )}
@@ -7186,7 +7186,7 @@
                                         <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-6">
                                             <h3 className="text-lg font-semibold text-blue-400 flex items-center gap-2 mb-4">
                                                 <Icons.FileText />
-                                                Update Instructions
+                                                {t('updateInstructions') || 'Update Instructions'}
                                             </h3>
                                             <div className="bg-proxmox-dark rounded-lg p-4 font-mono text-sm">
                                                 {updateInfo.instructions.map((line, idx) => (
@@ -7197,7 +7197,7 @@
                                             </div>
                                             {updateInfo.backup_path && (
                                                 <p className="text-sm text-gray-400 mt-3">
-                                                    ✓ Backup created: <code className="text-green-400">{updateInfo.backup_path}</code>
+                                                    ✓ {t('backupCreated') || 'Backup created'}: <code className="text-green-400">{updateInfo.backup_path}</code>
                                                 </p>
                                             )}
                                             {updateInfo.download_url && (
@@ -7208,7 +7208,7 @@
                                                     className="inline-flex items-center gap-2 mt-4 px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded-lg text-sm font-medium transition-colors"
                                                 >
                                                     <Icons.ExternalLink />
-                                                    Open GitHub Release
+                                                    {t('openGitHubRelease') || 'Open GitHub Release'}
                                                 </a>
                                             )}
                                         </div>
@@ -7223,7 +7223,7 @@
                                             className="hover:text-proxmox-orange transition-colors inline-flex items-center gap-1"
                                         >
                                             <Icons.Github />
-                                            View on GitHub
+                                            {t('viewOnGitHub') || 'View on GitHub'}
                                         </a>
                                     </div>
                                 </div>

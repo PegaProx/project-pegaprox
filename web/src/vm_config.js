@@ -39,7 +39,7 @@
                                     type="text"
                                     value={newCidr}
                                     onChange={e => setNewCidr(e.target.value)}
-                                    placeholder="e.g. 10.0.0.0/24"
+                                    placeholder={t('cidrPlaceholder')}
                                     className="flex-1 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm"
                                     onKeyDown={async (e) => {
                                         if (e.key === 'Enter' && newCidr) {
@@ -82,7 +82,7 @@
                                 </button>
                             </div>
                             {entries.length === 0 ? (
-                                <div className="text-center text-gray-500 py-4 text-sm">Empty set</div>
+                                <div className="text-center text-gray-500 py-4 text-sm">{t('emptySet')}</div>
                             ) : (
                                 <div className="space-y-1">
                                     {entries.map((entry, idx) => (
@@ -1523,7 +1523,11 @@
                                                 <>
                                                     <span className="corp-meta-sep">·</span>
                                                     <span className={`corp-badge corp-badge-${vm.status === 'running' ? 'running' : 'stopped'}`}>
-                                                        {vm.status}
+                                                        {vm.status === 'running'
+                                                            ? t('running')
+                                                            : vm.status === 'stopped'
+                                                                ? t('stopped')
+                                                                : vm.status}
                                                     </span>
                                                 </>
                                             )}
@@ -1849,6 +1853,7 @@
                                                     value={getValue('hardware', 'cores')}
                                                     onChange={(v) => handleChange('hardware', 'cores', v)}
                                                     needsRestart={vm.status === 'running'}
+                                                    t={t}
                                                 />
                                                 {isQemu && (
                                                     <ConfigInputField
@@ -1857,6 +1862,7 @@
                                                         value={getValue('hardware', 'sockets')}
                                                         onChange={(v) => handleChange('hardware', 'sockets', v)}
                                                         needsRestart={true}
+                                                        t={t}
                                                     />
                                                 )}
                                                 {!isQemu && (
@@ -1877,6 +1883,7 @@
                                                     minMB={128}
                                                     stepMB={128}
                                                     needsRestart={vm.status === 'running'}
+                                                    t={t}
                                                 />
                                                 {isQemu ? (
                                                     <MemoryInputField
@@ -1916,6 +1923,7 @@
                                                             }}
                                                             options={hardwareOptions?.cpu_types || ['host', 'kvm64', 'qemu64']}
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                         <ConfigInputField
                                                             label="VGA"
@@ -1931,6 +1939,7 @@
                                                                 { value: 'none', label: t('none') },
                                                             ]}
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                     </div>
                                                     {/* NS May 2026 — PVE 9.2 cpu sub-options. Splice in/out of the
@@ -1955,6 +1964,7 @@
                                                             }}
                                                             placeholder="(empty) e.g. Skylake-Client, host"
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                         <ConfigInputField
                                                             label="level"
@@ -1981,6 +1991,7 @@
                                                             }}
                                                             placeholder="(empty) 1-64"
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                     </div>
                                                     {/* MK Jul 2026 — Extra CPU Flags (#410). Tri-state per flag:
@@ -2041,6 +2052,7 @@
                                                                 { value: 'ovmf', label: 'OVMF (UEFI)' },
                                                             ]}
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                         <ConfigInputField
                                                             label={t('scsiController')}
@@ -2052,6 +2064,7 @@
                                                                 { value: 'lsi', label: 'LSI 53C895A' },
                                                             ]}
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                     </div>
                                                     <div className="grid grid-cols-2 gap-4">
@@ -2121,6 +2134,7 @@
                                                                 { value: 'pc-i440fx-2.10', label: 'i440fx 2.10' },
                                                             ]}
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                         {/* LW: vIOMMU for nested virt and GPU passthrough
                                                             MK: Appends to machine string like "q35,viommu=intel" */}
@@ -2142,6 +2156,7 @@
                                                                 { value: 'virtio', label: 'VirtIO' },
                                                             ]}
                                                             needsRestart={true}
+                                                            t={t}
                                                         />
                                                     </div>
                                                     <div className="grid grid-cols-2 gap-4">
@@ -2762,7 +2777,7 @@
                                     {activeTab === 'snapshots' && (
                                         <div className="space-y-6">
                                             <div className="flex items-center justify-between">
-                                                <h3 className="text-sm font-semibold text-gray-300">Snapshots</h3>
+                                                <h3 className="text-sm font-semibold text-gray-300">{t('snapshots')}</h3>
                                                 <button
                                                     onClick={() => setShowCreateSnapshot(true)}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700"
@@ -3527,7 +3542,7 @@
                                                 <button 
                                                     onClick={fetchHistory}
                                                     className="ml-auto p-2 hover:bg-proxmox-dark rounded-lg text-gray-400 hover:text-white"
-                                                    title="Refresh"
+                                                    title={t('refresh')}
                                                 >
                                                     <Icons.RefreshCw className={`w-4 h-4 ${historyLoading ? 'animate-spin' : ''}`} />
                                                 </button>
@@ -3542,17 +3557,17 @@
                                                     {/* Proxmox Tasks */}
                                                     {historySubTab === 'proxmox' && (
                                                         <div className="space-y-2">
-                                                            <h4 className="text-sm font-medium text-gray-400 mb-2">Proxmox Tasks for {isQemu ? 'VM' : 'CT'} {vm.vmid}</h4>
+                                                            <h4 className="text-sm font-medium text-gray-400 mb-2">{t('proxmoxTasks')} — {isQemu ? 'VM' : 'CT'} {vm.vmid}</h4>
                                                             {vmProxmoxTasks && vmProxmoxTasks.length > 0 ? (
                                                                 <div className="overflow-x-auto max-h-96 overflow-y-auto">
                                                                     <table className="w-full text-sm">
                                                                         <thead className="sticky top-0 bg-proxmox-dark">
                                                                             <tr className="text-left text-gray-400">
-                                                                                <th className="p-2">Time</th>
-                                                                                <th className="p-2">Type</th>
-                                                                                <th className="p-2">User</th>
-                                                                                <th className="p-2">Status</th>
-                                                                                <th className="p-2">Node</th>
+                                                                                <th className="p-2">{t('time')}</th>
+                                                                                <th className="p-2">{t('type')}</th>
+                                                                                <th className="p-2">{t('user')}</th>
+                                                                                <th className="p-2">{t('status')}</th>
+                                                                                <th className="p-2">{t('node')}</th>
                                                                             </tr>
                                                                         </thead>
                                                                         <tbody>
@@ -3573,7 +3588,7 @@
                                                                                             !task.endtime ? 'bg-yellow-500/20 text-yellow-400' :
                                                                                             'bg-gray-500/20 text-gray-400'
                                                                                         }`}>
-                                                                                            {task.status || task.exitstatus || (task.endtime ? 'completed' : 'running')}
+                                                                                            {task.status || task.exitstatus || (task.endtime ? t('completed') : t('running'))}
                                                                                         </span>
                                                                                     </td>
                                                                                     <td className="p-2 text-gray-400 font-mono text-xs">{task.node || vm.node}</td>
@@ -3585,7 +3600,7 @@
                                                             ) : (
                                                                 <div className="text-center py-8 text-gray-500">
                                                                     <Icons.List className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                                    <p>No Proxmox tasks found for this {isQemu ? 'VM' : 'Container'}</p>
+                                                                    <p>{t('noTasks')}</p>
                                                                 </div>
                                                             )}
                                                         </div>
@@ -3594,16 +3609,16 @@
                                                     {/* PegaProx Actions */}
                                                     {historySubTab === 'pegaprox' && (
                                                         <div className="space-y-2">
-                                                            <h4 className="text-sm font-medium text-gray-400 mb-2">PegaProx Actions for {isQemu ? 'VM' : 'CT'} {vm.vmid}</h4>
+                                                            <h4 className="text-sm font-medium text-gray-400 mb-2">{t('pegaproxActions')} — {isQemu ? 'VM' : 'CT'} {vm.vmid}</h4>
                                                             {vmPegaproxActions && vmPegaproxActions.length > 0 ? (
                                                                 <div className="overflow-x-auto max-h-96 overflow-y-auto">
                                                                     <table className="w-full text-sm">
                                                                         <thead className="sticky top-0 bg-proxmox-dark">
                                                                             <tr className="text-left text-gray-400">
-                                                                                <th className="p-2">Time</th>
-                                                                                <th className="p-2">Action</th>
-                                                                                <th className="p-2">User</th>
-                                                                                <th className="p-2">Details</th>
+                                                                                <th className="p-2">{t('time')}</th>
+                                                                                <th className="p-2">{t('action')}</th>
+                                                                                <th className="p-2">{t('user')}</th>
+                                                                                <th className="p-2">{t('details')}</th>
                                                                             </tr>
                                                                         </thead>
                                                                         <tbody>
@@ -3629,7 +3644,7 @@
                                                             ) : (
                                                                 <div className="text-center py-8 text-gray-500">
                                                                     <Icons.List className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                                    <p>No PegaProx actions found for this {isQemu ? 'VM' : 'Container'}</p>
+                                                                    <p>{t('noPegaproxActions')}</p>
                                                                 </div>
                                                             )}
                                                         </div>
@@ -3662,7 +3677,7 @@
                                                                 {st === 'rules' ? t('firewallRules') || 'Rules' :
                                                                  st === 'options' ? t('firewallOptions') || 'Options' :
                                                                  st === 'aliases' ? t('aliases') || 'Aliases' :
-                                                                 st === 'ipsets' ? 'IP Sets' :
+                                                                 st === 'ipsets' ? t('ipSets') :
                                                                  t('log') || 'Log'}
                                                             </button>
                                                         ))}
@@ -3687,11 +3702,11 @@
                                                                             <th className="text-left p-3 text-sm text-gray-400">#</th>
                                                                             <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
                                                                             <th className="text-left p-3 text-sm text-gray-400">{t('action')}</th>
-                                                                            <th className="text-left p-3 text-sm text-gray-400">Macro</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('macro')}</th>
                                                                             <th className="text-left p-3 text-sm text-gray-400">{t('source')}</th>
-                                                                            <th className="text-left p-3 text-sm text-gray-400">Dest</th>
-                                                                            <th className="text-left p-3 text-sm text-gray-400">Proto</th>
-                                                                            <th className="text-left p-3 text-sm text-gray-400">Port</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('destination')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('protocol')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('port')}</th>
                                                                             <th className="text-left p-3 text-sm text-gray-400">{t('enabled')}</th>
                                                                             <th className="text-left p-3 text-sm text-gray-400">{t('comment')}</th>
                                                                             <th className="text-left p-3 text-sm text-gray-400"></th>
@@ -3815,7 +3830,7 @@
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">Policy In</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('policyIn')}</div>
                                                                     <select
                                                                         value={fwOptions.policy_in || 'DROP'}
                                                                         onChange={async (e) => {
@@ -3841,7 +3856,7 @@
                                                                     </select>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">Policy Out</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('policyOut')}</div>
                                                                     <select
                                                                         value={fwOptions.policy_out || 'ACCEPT'}
                                                                         onChange={async (e) => {
@@ -3889,7 +3904,7 @@
                                                                             fwOptions.dhcp ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
                                                                         }`}
                                                                     >
-                                                                        {fwOptions.dhcp ? 'On' : 'Off'}
+                                                                        {fwOptions.dhcp ? t('enabled') : t('disabled')}
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
@@ -3915,7 +3930,7 @@
                                                                             fwOptions.ndp ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
                                                                         }`}
                                                                     >
-                                                                        {fwOptions.ndp ? 'On' : 'Off'}
+                                                                        {fwOptions.ndp ? t('enabled') : t('disabled')}
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
@@ -3941,7 +3956,7 @@
                                                                             fwOptions.radv ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
                                                                         }`}
                                                                     >
-                                                                        {fwOptions.radv ? 'On' : 'Off'}
+                                                                        {fwOptions.radv ? t('enabled') : t('disabled')}
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
@@ -3967,7 +3982,7 @@
                                                                             fwOptions.macfilter ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
                                                                         }`}
                                                                     >
-                                                                        {fwOptions.macfilter ? 'On' : 'Off'}
+                                                                        {fwOptions.macfilter ? t('enabled') : t('disabled')}
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
@@ -3991,15 +4006,15 @@
                                                                         }}
                                                                         className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                                                     >
-                                                                        <option value="nolog">No Log</option>
-                                                                        <option value="emerg">Emergency</option>
-                                                                        <option value="alert">Alert</option>
-                                                                        <option value="crit">Critical</option>
-                                                                        <option value="err">Error</option>
-                                                                        <option value="warning">Warning</option>
-                                                                        <option value="notice">Notice</option>
-                                                                        <option value="info">Info</option>
-                                                                        <option value="debug">Debug</option>
+                                                                        <option value="nolog">{t('logNoLog')}</option>
+                                                                        <option value="emerg">{t('logEmergency')}</option>
+                                                                        <option value="alert">{t('logAlert')}</option>
+                                                                        <option value="crit">{t('logCritical')}</option>
+                                                                        <option value="err">{t('logError')}</option>
+                                                                        <option value="warning">{t('logWarning')}</option>
+                                                                        <option value="notice">{t('logNotice')}</option>
+                                                                        <option value="info">{t('logInfo')}</option>
+                                                                        <option value="debug">{t('logDebug')}</option>
                                                                     </select>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
@@ -4023,15 +4038,15 @@
                                                                         }}
                                                                         className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                                                     >
-                                                                        <option value="nolog">No Log</option>
-                                                                        <option value="emerg">Emergency</option>
-                                                                        <option value="alert">Alert</option>
-                                                                        <option value="crit">Critical</option>
-                                                                        <option value="err">Error</option>
-                                                                        <option value="warning">Warning</option>
-                                                                        <option value="notice">Notice</option>
-                                                                        <option value="info">Info</option>
-                                                                        <option value="debug">Debug</option>
+                                                                        <option value="nolog">{t('logNoLog')}</option>
+                                                                        <option value="emerg">{t('logEmergency')}</option>
+                                                                        <option value="alert">{t('logAlert')}</option>
+                                                                        <option value="crit">{t('logCritical')}</option>
+                                                                        <option value="err">{t('logError')}</option>
+                                                                        <option value="warning">{t('logWarning')}</option>
+                                                                        <option value="notice">{t('logNotice')}</option>
+                                                                        <option value="info">{t('logInfo')}</option>
+                                                                        <option value="debug">{t('logDebug')}</option>
                                                                     </select>
                                                                 </div>
                                                             </div>
@@ -4099,7 +4114,7 @@
                                                     {fwSubTab === 'ipsets' && (
                                                         <div className="space-y-4">
                                                             <div className="flex justify-between items-center">
-                                                                <h3 className="font-semibold">IP Sets</h3>
+                                                                <h3 className="font-semibold">{t('ipSets')}</h3>
                                                                 <button
                                                                     onClick={() => setShowAddFwIpset(true)}
                                                                     className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
@@ -4196,7 +4211,7 @@
                                                                 <div className="p-4 space-y-4">
                                                                     <div className="grid grid-cols-2 gap-4">
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Direction</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('direction')}</label>
                                                                             <select
                                                                                 value={newFwRule.type || 'in'}
                                                                                 onChange={e => setNewFwRule(p => ({...p, type: e.target.value}))}
@@ -4208,7 +4223,7 @@
                                                                             </select>
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Action</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('action')}</label>
                                                                             <select
                                                                                 value={newFwRule.action || 'ACCEPT'}
                                                                                 onChange={e => setNewFwRule(p => ({...p, action: e.target.value}))}
@@ -4222,13 +4237,13 @@
                                                                     </div>
                                                                     <div className="grid grid-cols-2 gap-4">
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Macro</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('macro')}</label>
                                                                             <select
                                                                                 value={newFwRule.macro || ''}
                                                                                 onChange={e => setNewFwRule(p => ({...p, macro: e.target.value || undefined}))}
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                             >
-                                                                                <option value="">None</option>
+                                                                                <option value="">{t('none')}</option>
                                                                                 {(() => {
                                                                                     const dynamicMacros = (Array.isArray(fwRefs) ? fwRefs : []).filter(r => r.type === 'macro').map(r => r.name);
                                                                                     const allMacros = dynamicMacros.length > 0 ? dynamicMacros : [
@@ -4249,13 +4264,13 @@
                                                                             </select>
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Interface</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('interface')}</label>
                                                                             <select
                                                                                 value={newFwRule.iface || ''}
                                                                                 onChange={e => setNewFwRule(p => ({...p, iface: e.target.value}))}
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                             >
-                                                                                <option value="">Any</option>
+                                                                                <option value="">{t('any')}</option>
                                                                                 {(config?.networks || []).map(n => (
                                                                                     <option key={n.id} value={n.id}>{n.id}{n.bridge ? ` (${n.bridge})` : ''}</option>
                                                                                 ))}
@@ -4270,13 +4285,13 @@
                                                                     </div>
                                                                     <div className="grid grid-cols-2 gap-4">
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Protocol</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('protocol')}</label>
                                                                             <select
                                                                                 value={newFwRule.proto || ''}
                                                                                 onChange={e => setNewFwRule(p => ({...p, proto: e.target.value}))}
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                             >
-                                                                                <option value="">Any</option>
+                                                                                <option value="">{t('any')}</option>
                                                                                 <option value="tcp">TCP</option>
                                                                                 <option value="udp">UDP</option>
                                                                                 <option value="icmp">ICMP</option>
@@ -4284,45 +4299,45 @@
                                                                             </select>
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Dest. Port</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('destPort')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={newFwRule.dport || ''}
                                                                                 onChange={e => setNewFwRule(p => ({...p, dport: e.target.value}))}
-                                                                                placeholder="e.g. 22, 80, 443"
+                                                                                placeholder={t('fwPortPlaceholder')}
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                             />
                                                                         </div>
                                                                     </div>
                                                                     <div className="grid grid-cols-2 gap-4">
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Source</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('source')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={newFwRule.source || ''}
                                                                                 onChange={e => setNewFwRule(p => ({...p, source: e.target.value}))}
-                                                                                placeholder="10.0.0.0/24 or 10.0.0.1"
+                                                                                placeholder={t('fwSourcePlaceholder')}
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                             />
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Destination</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{t('destination')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={newFwRule.dest || ''}
                                                                                 onChange={e => setNewFwRule(p => ({...p, dest: e.target.value}))}
-                                                                                placeholder="192.168.1.0/24 or 192.168.1.1"
+                                                                                placeholder={t('fwDestinationPlaceholder')}
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                             />
                                                                         </div>
                                                                     </div>
                                                                     <div>
-                                                                        <label className="text-sm text-gray-400 mb-1 block">Comment</label>
+                                                                        <label className="text-sm text-gray-400 mb-1 block">{t('comment')}</label>
                                                                         <input
                                                                             type="text"
                                                                             value={newFwRule.comment || ''}
                                                                             onChange={e => setNewFwRule(p => ({...p, comment: e.target.value}))}
-                                                                            placeholder="Optional description"
+                                                                            placeholder={t('optionalDescription')}
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                         />
                                                                     </div>
@@ -4333,7 +4348,7 @@
                                                                             onChange={e => setNewFwRule(p => ({...p, enable: e.target.checked ? 1 : 0}))}
                                                                             className="w-4 h-4 rounded"
                                                                         />
-                                                                        <span>Enable rule</span>
+                                                                        <span>{t('enableRule')}</span>
                                                                     </label>
                                                                 </div>
                                                                 <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
@@ -4463,7 +4478,7 @@
                                                                             type="text"
                                                                             value={newFwIpset.name}
                                                                             onChange={e => setNewFwIpset(p => ({...p, name: e.target.value}))}
-                                                                            placeholder="e.g. allowed-hosts"
+                                                                            placeholder={t('ipsetNamePlaceholder')}
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                         />
                                                                     </div>
@@ -5958,7 +5973,7 @@
                             {isQemu && hardwareOptions && (
                                 <div className="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">Bus/Device</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('busDevice')}</label>
                                         <select
                                             value={currentBus}
                                             onChange={(e) => handleBusChange(e.target.value)}
@@ -5982,7 +5997,7 @@
                             )}
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Storage</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('storage')}</label>
                                     <select
                                         value={diskConfig.storage}
                                         onChange={(e) => setDiskConfig({...diskConfig, storage: e.target.value})}
@@ -6079,9 +6094,9 @@
                                     >
                                         {availableFormats.map(f => (
                                             <option key={f} value={f}>
-                                                {f === 'qcow2' ? 'qcow2 — supports snapshots, thin provisioning' :
-                                                 f === 'raw'   ? 'raw — best performance, fixed size' :
-                                                 f === 'vmdk'  ? 'vmdk — VMware compatibility' : f}
+                                                {f === 'qcow2' ? t('diskFormatQcow2') :
+                                                 f === 'raw'   ? t('diskFormatRaw') :
+                                                 f === 'vmdk'  ? t('diskFormatVmdk') : f}
                                             </option>
                                         ))}
                                     </select>
@@ -6095,15 +6110,27 @@
                             {isQemu && hardwareOptions && (
                                 <React.Fragment>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">Cache</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('cache')}</label>
                                         <select
                                             value={diskConfig.cache}
                                             onChange={(e) => setDiskConfig({...diskConfig, cache: e.target.value})}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
                                         >
-                                            {(hardwareOptions?.cache_modes || [{value: '', label: 'Default'}]).map(c => (
-                                                <option key={c.value} value={c.value}>{c.label}</option>
-                                            ))}
+                                            {(hardwareOptions?.cache_modes || [{value: '', label: 'Default'}]).map(c => {
+                                                const cacheLabelKeys = {
+                                                    '': 'defaultNoCache',
+                                                    none: 'noCache',
+                                                    writethrough: 'writeThrough',
+                                                    writeback: 'writeBack',
+                                                    unsafe: 'writeBackUnsafe',
+                                                    directsync: 'directSync',
+                                                };
+                                                return (
+                                                    <option key={c.value} value={c.value}>
+                                                        {cacheLabelKeys[c.value] ? t(cacheLabelKeys[c.value]) : c.label}
+                                                    </option>
+                                                );
+                                            })}
                                         </select>
                                     </div>
                                     <div className="flex flex-wrap gap-4">
@@ -6111,19 +6138,19 @@
                                         {supportsIothread && (
                                             <label className="flex items-center gap-2 text-sm text-gray-300">
                                                 <input type="checkbox" checked={diskConfig.iothread} onChange={(e) => setDiskConfig({...diskConfig, iothread: e.target.checked})} className="rounded" />
-                                                IO Thread
+                                                {t('ioThread')}
                                             </label>
                                         )}
                                         {/* MK: SSD Emulation for SCSI, VirtIO, SATA (not IDE) */}
                                         {supportsSsd && (
                                             <label className="flex items-center gap-2 text-sm text-gray-300">
                                                 <input type="checkbox" checked={diskConfig.ssd} onChange={(e) => setDiskConfig({...diskConfig, ssd: e.target.checked})} className="rounded" />
-                                                SSD Emulation
+                                                {t('ssdEmulation')}
                                             </label>
                                         )}
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={diskConfig.discard} onChange={(e) => setDiskConfig({...diskConfig, discard: e.target.checked})} className="rounded" />
-                                            Discard
+                                            {t('discard')}
                                         </label>
                                     </div>
                                 </React.Fragment>
@@ -6704,17 +6731,17 @@
                         <div className="space-y-4">
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Interface ID</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('interfaceId')}</label>
                                     <input type="text" value={netConfig.net_id} onChange={(e) => setNetConfig({...netConfig, net_id: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Bridge / VNet</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('bridgeVnet')}</label>
                                     <select value={netConfig.bridge} onChange={(e) => setNetConfig({...netConfig, bridge: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                         {/* Local bridges */}
                                         {bridgeList.filter(b => b.source !== 'sdn').length > 0 && (
-                                            <optgroup label="Local Bridges">
+                                            <optgroup label={t('localBridges')}>
                                                 {bridgeList.filter(b => b.source !== 'sdn').map(b => (
                                                     <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
                                                 ))}
@@ -6722,7 +6749,7 @@
                                         )}
                                         {/* SDN VNets */}
                                         {bridgeList.filter(b => b.source === 'sdn').length > 0 && (
-                                            <optgroup label="SDN VNets">
+                                            <optgroup label={t('sdnVnets')}>
                                                 {bridgeList.filter(b => b.source === 'sdn').map(b => (
                                                     <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
                                                 ))}
@@ -6736,10 +6763,14 @@
                             {isQemu && hardwareOptions && (
                                 <div className="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">Model</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('model')}</label>
                                         <select value={netConfig.model} onChange={(e) => setNetConfig({...netConfig, model: e.target.value})}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
-                                            {(hardwareOptions?.network_models || [{value: 'virtio', label: 'VirtIO'}]).map(m => (<option key={m.value} value={m.value}>{m.label}</option>))}
+                                            {(hardwareOptions?.network_models || [{value: 'virtio', label: 'VirtIO'}]).map(m => (
+                                                <option key={m.value} value={m.value}>
+                                                    {m.value === 'virtio' ? t('networkModelVirtio') : m.label}
+                                                </option>
+                                            ))}
                                         </select>
                                     </div>
                                     <div>
@@ -6759,7 +6790,7 @@
                                 <>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Interface Name</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('interfaceName')}</label>
                                             <input type="text" value={netConfig.name} onChange={(e) => setNetConfig({...netConfig, name: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
@@ -6779,10 +6810,10 @@
                                         <div>
                                             <label className="block text-xs text-gray-400 mb-1">IPv4</label>
                                             <input type="text" value={netConfig.ip} onChange={(e) => setNetConfig({...netConfig, ip: e.target.value})}
-                                                placeholder="dhcp or 10.0.0.10/24" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                placeholder={t('dhcpOrCidrPlaceholder')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('gateway')}</label>
                                             <input type="text" value={netConfig.gw} onChange={(e) => setNetConfig({...netConfig, gw: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
@@ -6791,12 +6822,12 @@
                             )}
                             <div className="grid grid-cols-3 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('vlanTag')}</label>
                                     <input type="text" value={netConfig.tag} onChange={(e) => setNetConfig({...netConfig, tag: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Rate (MB/s)</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('rateLimit')}</label>
                                     <input type="text" value={netConfig.rate} onChange={(e) => setNetConfig({...netConfig, rate: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
@@ -6864,16 +6895,16 @@
                             )}
                             
                             <div>
-                                <label className="block text-xs text-gray-400 mb-1">Bridge / VNet</label>
+                                <label className="block text-xs text-gray-400 mb-1">{t('bridgeVnet')}</label>
                                 <select value={editConfig.bridge} onChange={(e) => setEditConfig({...editConfig, bridge: e.target.value})}
                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                     {/* Include current bridge if not in list (important for SDN VNets) */}
                                     {editConfig.bridge && !bridgeList.find(b => b.iface === editConfig.bridge) && (
-                                        <option value={editConfig.bridge}>{editConfig.bridge} (current)</option>
+                                        <option value={editConfig.bridge}>{editConfig.bridge} ({t('current')})</option>
                                     )}
                                     {/* Local bridges */}
                                     {bridgeList.filter(b => b.source !== 'sdn').length > 0 && (
-                                        <optgroup label="Local Bridges">
+                                        <optgroup label={t('localBridges')}>
                                             {bridgeList.filter(b => b.source !== 'sdn').map(b => (
                                                 <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
                                             ))}
@@ -6881,7 +6912,7 @@
                                     )}
                                     {/* SDN VNets */}
                                     {bridgeList.filter(b => b.source === 'sdn').length > 0 && (
-                                        <optgroup label="SDN VNets">
+                                        <optgroup label={t('sdnVnets')}>
                                             {bridgeList.filter(b => b.source === 'sdn').map(b => (
                                                 <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
                                             ))}
@@ -6894,10 +6925,14 @@
                             {isQemu && hardwareOptions && (
                                 <div className="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">Model</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('model')}</label>
                                         <select value={editConfig.model} onChange={(e) => setEditConfig({...editConfig, model: e.target.value})}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
-                                            {(hardwareOptions?.network_models || [{value: 'virtio', label: 'VirtIO'}]).map(m => (<option key={m.value} value={m.value}>{m.label}</option>))}
+                                            {(hardwareOptions?.network_models || [{value: 'virtio', label: 'VirtIO'}]).map(m => (
+                                                <option key={m.value} value={m.value}>
+                                                    {m.value === 'virtio' ? t('networkModelVirtio') : m.label}
+                                                </option>
+                                            ))}
                                         </select>
                                     </div>
                                     <div>
@@ -6917,12 +6952,12 @@
                                 <React.Fragment>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Interface Name</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('interfaceName')}</label>
                                             <input type="text" value={editConfig.name} onChange={(e) => setEditConfig({...editConfig, name: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">MAC</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('macAddress')}</label>
                                             <div className="flex gap-2">
                                                 <input type="text" value={editConfig.hwaddr} onChange={(e) => setEditConfig({...editConfig, hwaddr: e.target.value})}
                                                     className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
@@ -6940,7 +6975,7 @@
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('gateway')}</label>
                                             <input type="text" value={editConfig.gw} onChange={(e) => setEditConfig({...editConfig, gw: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
@@ -6951,9 +6986,9 @@
                             {/* Network Settings Grid */}
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('vlanTag')}</label>
                                     <input type="text" value={editConfig.tag} onChange={(e) => setEditConfig({...editConfig, tag: e.target.value})}
-                                        placeholder="z.B. 100"
+                                        placeholder="100"
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
                                 <div>
@@ -6966,7 +7001,7 @@
                             
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-xs text-gray-400 mb-1">Rate Limit (MB/s)</label>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('rateLimit')}</label>
                                     <input type="number" value={editConfig.rate} onChange={(e) => setEditConfig({...editConfig, rate: e.target.value})}
                                         placeholder={t('unlimited')}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
@@ -6974,7 +7009,7 @@
                                 {/* Multiqueue - only for QEMU with virtio */}
                                 {isQemu && (
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">Multiqueue</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('multiqueue')}</label>
                                         <input type="number" value={editConfig.queues} onChange={(e) => setEditConfig({...editConfig, queues: e.target.value})}
                                             placeholder="1"
                                             min="1" max="64"
