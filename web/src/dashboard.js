@@ -21033,7 +21033,16 @@
                                                                             <option value="vmware">VMware SVGA (recommended)</option>
                                                                             <option value="std">Standard VGA</option>
                                                                             <option value="virtio">VirtIO GPU</option>
+                                                                            <option value="virtio-gl">VirtIO-GPU (virgl)</option>
                                                                             <option value="qxl">QXL (SPICE)</option>
+                                                                            <option value="qxl2">QXL 2 heads</option>
+                                                                            <option value="qxl3">QXL 3 heads</option>
+                                                                            <option value="qxl4">QXL 4 heads</option>
+                                                                            <option value="cirrus">Cirrus Logic</option>
+                                                                            <option value="serial0">Serial 0</option>
+                                                                            <option value="serial1">Serial 1</option>
+                                                                            <option value="serial2">Serial 2</option>
+                                                                            <option value="serial3">Serial 3</option>
                                                                             <option value="none">None (headless)</option>
                                                                         </select>
                                                                     </div>

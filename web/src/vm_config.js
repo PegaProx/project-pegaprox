@@ -1983,11 +1983,18 @@
                                                             onChange={(v) => handleChange('hardware', 'vga', v)}
                                                             options={[
                                                                 { value: 'std', label: 'Standard VGA' },
+                                                                { value: 'vmware', label: 'VMware compatible' },
+                                                                { value: 'qxl', label: 'SPICE (QXL)' },
+                                                                { value: 'qxl2', label: 'SPICE (QXL) 2 heads' },
+                                                                { value: 'qxl3', label: 'SPICE (QXL) 3 heads' },
+                                                                { value: 'qxl4', label: 'SPICE (QXL) 4 heads' },
                                                                 { value: 'virtio', label: 'VirtIO-GPU' },
                                                                 { value: 'virtio-gl', label: 'VirtIO-GPU (virgl)' },
-                                                                { value: 'qxl', label: 'SPICE (QXL)' },
-                                                                { value: 'vmware', label: 'VMware compatible' },
                                                                 { value: 'cirrus', label: 'Cirrus Logic' },
+                                                                { value: 'serial0', label: 'Serial 0' },
+                                                                { value: 'serial1', label: 'Serial 1' },
+                                                                { value: 'serial2', label: 'Serial 2' },
+                                                                { value: 'serial3', label: 'Serial 3' },
                                                                 { value: 'none', label: t('none') },
                                                             ]}
                                                             needsRestart={true}
