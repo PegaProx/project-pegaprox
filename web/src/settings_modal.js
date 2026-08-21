@@ -3,24 +3,24 @@
         // That's ~150 entries with no structure. Now: group by the dot-prefix, human-readable
         // group headers, per-group "select all", description tooltips, and a search box.
         const PERMISSION_CATEGORY_META = {
-            vm:            { order: 10, title: 'Virtual Machines',      icon: '🖥️' },
-            cluster:       { order: 20, title: 'Cluster',               icon: '🔗' },
-            node:          { order: 30, title: 'Nodes',                 icon: '🏠' },
-            storage:       { order: 40, title: 'Storage',               icon: '💾' },
-            backup:        { order: 50, title: 'Backup Jobs',           icon: '📦' },
-            ha:            { order: 60, title: 'High Availability',     icon: '⚡' },
-            firewall:      { order: 70, title: 'Firewall',              icon: '🛡️' },
-            pool:          { order: 80, title: 'Resource Pools',        icon: '🗂️' },
-            replication:   { order: 90, title: 'Replication',           icon: '🔁' },
-            ceph:          { order: 100, title: 'Ceph',                 icon: '🐙' },
-            sdn:           { order: 110, title: 'Software-Defined Net', icon: '🌐' },
-            alert:         { order: 120, title: 'Alerts',               icon: '🔔' },
-            site_recovery: { order: 130, title: 'Site Recovery',        icon: '🚨' },
-            pbs:           { order: 140, title: 'Proxmox Backup Server',icon: '🗄️' },
-            vmware:        { order: 150, title: 'ESXi',       icon: '📡' },
-            xapi:          { order: 160, title: 'XCP-ng',               icon: '🔶' },
-            plugins:       { order: 170, title: 'Plugins',              icon: '🧩' },
-            admin:         { order: 999, title: 'Administration',       icon: '⚙️' },
+            vm:            { order: 10, title: 'Virtual Machines',      titleKey: 'virtualMachines',        icon: '🖥️' },
+            cluster:       { order: 20, title: 'Cluster',               titleKey: 'cluster',                icon: '🔗' },
+            node:          { order: 30, title: 'Nodes',                 titleKey: 'nodes',                  icon: '🏠' },
+            storage:       { order: 40, title: 'Storage',               titleKey: 'storage',                icon: '💾' },
+            backup:        { order: 50, title: 'Backup Jobs',           titleKey: 'backupJobs',             icon: '📦' },
+            ha:            { order: 60, title: 'High Availability',     titleKey: 'highAvailability',       icon: '⚡' },
+            firewall:      { order: 70, title: 'Firewall',              titleKey: 'firewall',               icon: '🛡️' },
+            pool:          { order: 80, title: 'Resource Pools',        titleKey: 'resourcePools',          icon: '🗂️' },
+            replication:   { order: 90, title: 'Replication',           titleKey: 'replication',            icon: '🔁' },
+            ceph:          { order: 100, title: 'Ceph',                 titleKey: 'ceph',                   icon: '🐙' },
+            sdn:           { order: 110, title: 'Software-Defined Net', titleKey: 'softwareDefinedNetwork', icon: '🌐' },
+            alert:         { order: 120, title: 'Alerts',               titleKey: 'alerts',                 icon: '🔔' },
+            site_recovery: { order: 130, title: 'Site Recovery',        titleKey: 'siteRecovery',           icon: '🚨' },
+            pbs:           { order: 140, title: 'Proxmox Backup Server',titleKey: 'proxmoxBackupServer',    icon: '🗄️' },
+            vmware:        { order: 150, title: 'ESXi',                 titleKey: 'esxi',                   icon: '📡' },
+            xapi:          { order: 160, title: 'XCP-ng',               titleKey: 'xcpNg',                  icon: '🔶' },
+            plugins:       { order: 170, title: 'Plugins',              titleKey: 'plugins',                icon: '🧩' },
+            admin:         { order: 999, title: 'Administration',       titleKey: 'administration',         icon: '⚙️' },
         };
 
         function PermissionsGrid({ allPermissions, selected, onChange, t }) {
@@ -86,7 +86,7 @@
                                         onClick={() => setCollapsed(c => ({...c, [cat]: !c[cat]}))}>
                                         <Icons.ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
                                         <span className="text-base">{meta.icon}</span>
-                                        <span className="text-sm font-medium text-white flex-1">{meta.title}</span>
+                                        <span className="text-sm font-medium text-white flex-1">{meta.titleKey ? (t(meta.titleKey) || meta.title) : meta.title}</span>
                                         <span className={`text-xs ${allChecked ? 'text-green-400' : someChecked ? 'text-yellow-400' : 'text-gray-500'}`}>
                                             {checkedCount}/{perms.length}
                                         </span>
@@ -169,9 +169,9 @@
                         setEditing(null); load();
                     } else {
                         const e = await r.json().catch(() => ({}));
-                        addToast?.(e.error || 'Save failed', 'error');
+                        addToast?.(e.error || (t('saveFailed') || 'Save failed'), 'error');
                     }
-                } catch(e) { addToast?.(e.message || 'Save failed', 'error'); }
+                } catch(e) { addToast?.(e.message || (t('saveFailed') || 'Save failed'), 'error'); }
             };
 
             const del = async (ch) => {
@@ -180,7 +180,7 @@
                     method: 'DELETE', credentials: 'include', headers: getAuthHeaders()
                 });
                 if (r.ok) { addToast?.(t('channelDeleted') || 'Channel deleted', 'success'); load(); }
-                else addToast?.('Delete failed', 'error');
+                else addToast?.(t('deleteFailed') || 'Delete failed', 'error');
             };
 
             const test = async (ch) => {
@@ -191,12 +191,12 @@
                     });
                     const d = await r.json().catch(() => ({}));
                     if (d.success) addToast?.(`✓ ${ch.name}: ${d.detail || 'OK'}`, 'success');
-                    else addToast?.(`✗ ${ch.name}: ${d.detail || 'failed'}`, 'error');
-                } catch(e) { addToast?.(`Test failed: ${e.message}`, 'error'); }
+                    else addToast?.(`✗ ${ch.name}: ${d.detail || (t('failed') || 'Failed')}`, 'error');
+                } catch(e) { addToast?.(`${t('testFailed') || 'Test failed'}: ${e.message}`, 'error'); }
                 setTesting({...testing, [ch.id]: false});
             };
 
-            const typeLabel = (tp) => ({slack: 'Slack', discord: 'Discord', teams: 'Microsoft Teams', ntfy: 'ntfy', generic: 'Generic JSON'}[tp] || tp);
+            const typeLabel = (tp) => ({slack: 'Slack', discord: 'Discord', teams: 'Microsoft Teams', ntfy: 'ntfy', generic: t('genericJson') || 'Generic JSON'}[tp] || tp);
 
             return (
                 <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
@@ -265,12 +265,12 @@
                                         <option value="discord">Discord</option>
                                         <option value="teams">Microsoft Teams</option>
                                         <option value="ntfy">ntfy</option>
-                                        <option value="generic">Generic JSON</option>
+                                        <option value="generic">{t('genericJson') || 'Generic JSON'}</option>
                                     </select>
                                 </div>
                             </div>
                             <div>
-                                <label className="block text-xs text-gray-400 mb-1">Webhook URL</label>
+                                <label className="block text-xs text-gray-400 mb-1">{t('webhookUrl') || 'Webhook URL'}</label>
                                 <input type="text" value={editing.url}
                                     onChange={e => setEditing({...editing, url: e.target.value})}
                                     placeholder="https://hooks.slack.com/services/…"
@@ -883,15 +883,17 @@
                         body: JSON.stringify({ display_name: newName })
                     });
                     if (r.ok) {
-                        addToast(newName ? `Cluster renamed to "${newName}"` : 'Cluster name reset', 'success');
+                        addToast(newName
+                        ? `${t('clusterRenamedTo') || 'Cluster renamed to'} "${newName}"`
+                        : (t('clusterNameReset') || 'Cluster name reset'), 'success');
                         setRenamingCluster(null);
                         fetchClusters();
                         onGroupsChanged?.();
                     } else {
                         const err = await r.json().catch(() => ({}));
-                        addToast(err.error || 'Rename failed', 'error');
+                        addToast(err.error || (t('renameFailed') || 'Rename failed'), 'error');
                     }
-                } catch(e) { addToast('Rename failed', 'error'); }
+                } catch(e) { addToast(t('renameFailed') || 'Rename failed', 'error'); }
             };
 
             // fetch all roles (builtin + custom) - NS
@@ -915,7 +917,7 @@
                         setUpdateError(data.error);
                     }
                 } catch (e) {
-                    setUpdateError('Network error checking for updates');
+                    setUpdateError(t('networkErrorCheckingUpdates') || 'Network error checking for updates');
                 } finally {
                     setUpdateLoading(false);
                 }
@@ -1070,9 +1072,9 @@
                         addToast(t('roleCreated') || 'Role created', 'success');
                     } else {
                         const err = await r.json();
-                        addToast(err.error || 'Failed', 'error');
+                        addToast(err.error || (t('failed') || 'Failed'), 'error');
                     }
-                } catch(e) { addToast('Error creating role', 'error'); }
+                } catch(e) { addToast(t('errorCreatingRole') || 'Error creating role', 'error'); }
             };
             
             // update custom role
@@ -1093,11 +1095,11 @@
                     } else {
                         const err = await r.json().catch(() => ({}));
                         console.log('[ROLE] Error response:', err);
-                        addToast(err.error || `Failed to update role (${r.status})`, 'error');
+                        addToast(err.error || `${t('failedUpdateRole') || 'Failed to update role'} (${r.status})`, 'error');
                     }
                 } catch(e) {
                     console.error('[ROLE] Network error:', e);
-                    addToast('Network error: ' + e.message, 'error');
+                    addToast(`${t('networkError') || 'Network error'}: ${e.message}`, 'error');
                 }
             };
             
@@ -1148,9 +1150,9 @@
                         addToast(t('roleCreatedFromTemplate') || 'Role created from template', 'success');
                     } else {
                         const err = await r.json();
-                        addToast(err.error || 'Failed', 'error');
+                        addToast(err.error || (t('failed') || 'Failed'), 'error');
                     }
-                } catch(e) { addToast('Error', 'error'); }
+                } catch(e) { addToast(t('error') || 'Error', 'error'); }
             };
             
             // VM ACL state - NS: Dec 2025
@@ -1204,7 +1206,7 @@
                         fetchVmAcls(selectedClusterForAcl);
                         addToast(t('vmAclSaved') || 'VM permissions saved', 'success');
                     }
-                } catch(e) { addToast('Error', 'error'); }
+                } catch(e) { addToast(t('error') || 'Error', 'error'); }
             };
             
             // delete VM ACL
@@ -1274,10 +1276,10 @@
                         setPoolPermForm({ subject_type: 'user', subject_id: '', permissions: [] });
                     } else {
                         const err = await r.json();
-                        addToast(err.error || 'Error saving permission', 'error');
+                        addToast(err.error || (t('errorSavingPermission') || 'Error saving permission'), 'error');
                     }
                 } catch(e) {
-                    addToast('Error saving permission', 'error');
+                    addToast(t('errorSavingPermission') || 'Error saving permission', 'error');
                 }
             };
             
@@ -1308,14 +1310,14 @@
                     });
                     if (r.ok) {
                         const data = await r.json();
-                        addToast(data.message || 'Pool cache refreshed', 'success');
+                        addToast(data.message || (t('poolCacheRefreshed') || 'Pool cache refreshed'), 'success');
                         // Refresh pools list
                         fetchPools(clusterId);
                     } else {
-                        addToast('Failed to refresh pool cache', 'error');
+                        addToast(t('failedRefreshPoolCache') || 'Failed to refresh pool cache', 'error');
                     }
                 } catch(e) {
-                    addToast('Failed to refresh pool cache', 'error');
+                    addToast(t('failedRefreshPoolCache') || 'Failed to refresh pool cache', 'error');
                 }
             };
             
@@ -1349,10 +1351,10 @@
                         // Small delay to let Proxmox process the change
                         setTimeout(() => fetchPools(selectedPoolCluster), 300);
                     } else {
-                        addToast(data.error || 'Failed to create pool', 'error');
+                        addToast(data.error || (t('failedCreatePool') || 'Failed to create pool'), 'error');
                     }
                 } catch(e) {
-                    addToast('Failed to create pool', 'error');
+                    addToast(t('failedCreatePool') || 'Failed to create pool', 'error');
                 } finally {
                     setPoolManagerLoading(false);
                 }
@@ -1378,10 +1380,10 @@
                         setEditingPool(null);
                         setTimeout(() => fetchPools(selectedPoolCluster), 300);
                     } else {
-                        addToast(data.error || 'Failed to update pool', 'error');
+                        addToast(data.error || (t('failedUpdatePool') || 'Failed to update pool'), 'error');
                     }
                 } catch(e) {
-                    addToast('Failed to update pool', 'error');
+                    addToast(t('failedUpdatePool') || 'Failed to update pool', 'error');
                 } finally {
                     setPoolManagerLoading(false);
                 }
@@ -1408,10 +1410,10 @@
                         }
                         setTimeout(() => fetchPools(selectedPoolCluster), 300);
                     } else {
-                        addToast(data.error || 'Failed to delete pool', 'error');
+                        addToast(data.error || (t('failedDeletePool') || 'Failed to delete pool'), 'error');
                     }
                 } catch(e) {
-                    addToast('Failed to delete pool', 'error');
+                    addToast(t('failedDeletePool') || 'Failed to delete pool', 'error');
                 } finally {
                     setPoolManagerLoading(false);
                 }
@@ -1451,10 +1453,10 @@
                             fetchVmsWithoutPool(selectedPoolCluster);
                         }, 300);
                     } else {
-                        addToast(data.error || 'Failed to add VM to pool', 'error');
+                        addToast(data.error || (t('failedAddVmToPool') || 'Failed to add VM to pool'), 'error');
                     }
                 } catch(e) {
-                    addToast('Failed to add VM to pool', 'error');
+                    addToast(t('failedAddVmToPool') || 'Failed to add VM to pool', 'error');
                 } finally {
                     setPoolManagerLoading(false);
                 }
@@ -1477,10 +1479,10 @@
                         addToast(data.message || t('vmRemovedFromPool') || 'VM removed from pool', 'success');
                         setTimeout(() => fetchPools(selectedPoolCluster), 300);
                     } else {
-                        addToast(data.error || 'Failed to remove VM from pool', 'error');
+                        addToast(data.error || (t('failedRemoveVmFromPool') || 'Failed to remove VM from pool'), 'error');
                     }
                 } catch(e) {
-                    addToast('Failed to remove VM from pool', 'error');
+                    addToast(t('failedRemoveVmFromPool') || 'Failed to remove VM from pool', 'error');
                 } finally {
                     setPoolManagerLoading(false);
                 }
@@ -1663,13 +1665,17 @@
                     });
                     if (res && res.ok) {
                         const data = await res.json().catch(() => ({}));
-                        addToast(data.message || `Plugin ${action}d`, 'success');
+                        addToast(data.message || (enabled
+                            ? (t('pluginDisabled') || 'Plugin disabled')
+                            : (t('pluginEnabled') || 'Plugin enabled')), 'success');
                         fetchPlugins();
                     } else {
                         const err = await res.json().catch(() => ({}));
-                        addToast(err.error || `Failed to ${action} plugin`, 'error');
+                        addToast(err.error || (enabled
+                            ? (t('failedDisablePlugin') || 'Failed to disable plugin')
+                            : (t('failedEnablePlugin') || 'Failed to enable plugin')), 'error');
                     }
-                } catch (e) { addToast('Network error', 'error'); }
+                } catch (e) { addToast(t('networkError') || 'Network error', 'error'); }
             };
 
             // LW: Feb 2026 - LDAP save and test functions
@@ -1684,7 +1690,7 @@
                     });
                     if (res.ok) {
                         const result = await res.json();
-                        addToast('LDAP settings saved', 'success');
+                        addToast(t('ldapSettingsSaved') || 'LDAP settings saved', 'success');
                         // NS: Feb 2026 - Show warnings if LDAP config is incomplete
                         if (result.warnings && result.warnings.length > 0) {
                             result.warnings.forEach(w => addToast(`⚠️ ${w}`, 'warning'));
@@ -1692,9 +1698,9 @@
                         fetchServerSettings();
                     } else {
                         const err = await res.json();
-                        addToast(err.error || 'Failed to save', 'error');
+                        addToast(err.error || (t('failedToSave') || 'Failed to save'), 'error');
                     }
-                } catch (e) { addToast('Network error', 'error'); }
+                } catch (e) { addToast(t('networkError') || 'Network error', 'error'); }
                 finally { setLoading(false); }
             };
             
@@ -1710,9 +1716,9 @@
                     });
                     const data = await res.json();
                     setLdapTestResult(data);
-                    if (data.success) addToast('LDAP connection successful!', 'success');
-                    else addToast(data.error || 'Connection failed', 'error');
-                } catch (e) { addToast('Network error', 'error'); }
+                    if (data.success) addToast(t('ldapConnectionSuccessful') || 'LDAP connection successful!', 'success');
+                    else addToast(data.error || (t('connectionFailed') || 'Connection failed'), 'error');
+                } catch (e) { addToast(t('networkError') || 'Network error', 'error'); }
                 finally { setLdapTesting(false); }
             };
             
@@ -1734,9 +1740,9 @@
                         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
                         body: JSON.stringify(configToSave)
                     });
-                    if (res.ok) addToast('OIDC settings saved', 'success');
-                    else addToast('Failed to save OIDC settings', 'error');
-                } catch (e) { addToast('Network error', 'error'); }
+                    if (res.ok) addToast(t('oidcSettingsSaved') || 'OIDC settings saved', 'success');
+                    else addToast(t('failedSaveOidcSettings') || 'Failed to save OIDC settings', 'error');
+                } catch (e) { addToast(t('networkError') || 'Network error', 'error'); }
                 finally { setLoading(false); }
             };
             
@@ -1752,9 +1758,9 @@
                     });
                     const data = await res.json();
                     setOidcTestResult(data);
-                    if (data.success) addToast('OIDC endpoints reachable!', 'success');
-                    else addToast('Some checks failed', 'warning');
-                } catch (e) { addToast('Network error', 'error'); }
+                    if (data.success) addToast(t('oidcEndpointsReachable') || 'OIDC endpoints reachable!', 'success');
+                    else addToast(t('someChecksFailed') || 'Some checks failed', 'warning');
+                } catch (e) { addToast(t('networkError') || 'Network error', 'error'); }
                 finally { setOidcTesting(false); }
             };
             
@@ -1850,15 +1856,15 @@
             // MK: Mar 2026 - ACME cert request handler (#96)
             const handleAcmeRequest = async () => {
                 if (!serverSettings.domain) {
-                    addToast(t('domain') + ' required', 'error');
+                    addToast(t('domainRequired') || 'Domain is required', 'error');
                     return;
                 }
                 if (serverSettings.acme_provider === 'letsencrypt' && !serverSettings.acme_email) {
-                    addToast(t('acmeEmail') + ' required', 'error');
+                    addToast(t('acmeEmailRequired') || 'Email address is required', 'error');
                     return;
                 }
                 if (serverSettings.acme_provider === 'custom' && !serverSettings.acme_directory_url) {
-                    addToast('ACME Directory URL required', 'error');
+                    addToast(t('acmeDirectoryUrlRequired') || 'ACME Directory URL is required', 'error');
                     return;
                 }
                 setAcmeLoading(true);
@@ -1898,10 +1904,10 @@
                         addToast(t('acmeSuccess'), 'success');
                         fetchServerSettings();
                     } else {
-                        addToast(data.message || data.error || 'ACME failed', 'error');
+                        addToast(data.message || data.error || (t('acmeFailed') || 'ACME failed'), 'error');
                     }
                 } catch (err) {
-                    addToast('ACME request failed: ' + err.message, 'error');
+                    addToast(`${t('acmeRequestFailed') || 'ACME request failed'}: ${err.message}`, 'error');
                 }
                 setAcmeLoading(false);
             };
@@ -1921,10 +1927,10 @@
                         addToast(t('acmeSuccess'), 'success');
                         fetchServerSettings();
                     } else {
-                        addToast(data.message || data.error || 'DNS-01 validation failed', 'error');
+                        addToast(data.message || data.error || (t('dns01ValidationFailed') || 'DNS-01 validation failed'), 'error');
                     }
                 } catch (err) {
-                    addToast('DNS-01 validation failed: ' + err.message, 'error');
+                    addToast(`${t('dns01ValidationFailed') || 'DNS-01 validation failed'}: ${err.message}`, 'error');
                 }
                 setAcmeLoading(false);
             };
@@ -2146,7 +2152,7 @@
             };
             
             const deleteSnapshot = async (snap) => {
-                if (!window.confirm(`Delete snapshot "${snap.snapshot_name}" from VM ${snap.vmid}?`)) {
+                if (!window.confirm(`${t('confirmDeleteSnapshot') || 'Delete snapshot'} "${snap.snapshot_name}" ${t('fromVm') || 'from VM'} ${snap.vmid}?`)) {
                     return;
                 }
                 try {
@@ -2156,11 +2162,11 @@
                         credentials: 'include',
                         body: JSON.stringify({ snapshots: [snap] })
                     });
-                    addToast('Snapshot deleted', 'success');
+                    addToast(t('snapshotDeleted') || 'Snapshot deleted', 'success');
                     await fetchSnapshots(filterDate ? { date: filterDate, tab: snapshotsSubTab } : null);
                 } catch (err) {
                     console.error('Snapshot delete failed:', err);
-                    addToast('Failed to delete snapshot', 'error');
+                    addToast(t('failedDeleteSnapshot') || 'Failed to delete snapshot', 'error');
                 }
             };
             
@@ -2196,15 +2202,15 @@
                         }
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error resetting password', 'error');
+                        addToast(data.error || (t('errorResettingPassword') || 'Error resetting password'), 'error');
                     }
                 } catch (err) {
-                    addToast('Error resetting password', 'error');
+                    addToast(t('errorResettingPassword') || 'Error resetting password', 'error');
                 }
             };
             
             const handleDisable2FA = async (username) => {
-                if (!confirm(`${t('disable2FA')} für ${username}?`)) return;
+                if (!confirm(`${t('disable2FAForUser') || 'Disable 2FA for user'} "${username}"?`)) return;
                 
                 try {
                     const response = await fetch(`${API_URL}/users/${username}/2fa`, {
@@ -2219,10 +2225,10 @@
                         fetchAuditLogs();
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error disabling 2FA', 'error');
+                        addToast(data.error || (t('errorDisabling2FA') || 'Error disabling 2FA'), 'error');
                     }
                 } catch (err) {
-                    addToast('Error disabling 2FA', 'error');
+                    addToast(t('errorDisabling2FA') || 'Error disabling 2FA', 'error');
                 }
             };
             
@@ -2249,10 +2255,10 @@
                         fetchTenants(); // LW: refresh tenant user counts
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error creating user', 'error');
+                        addToast(data.error || (t('errorCreatingUser') || 'Error creating user'), 'error');
                     }
                 } catch (err) {
-                    addToast('Error creating user', 'error');
+                    addToast(t('errorCreatingUser') || 'Error creating user', 'error');
                 }
                 setLoading(false);
             };
@@ -2277,11 +2283,11 @@
                         fetchTenants(); // NS: refresh tenant user counts
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error updating user', 'error');
+                        addToast(data.error || (t('errorUpdatingUser') || 'Error updating user'), 'error');
                     }
                 } catch (err) {
                     console.error('Error updating user:', err);
-                    addToast('Error updating user', 'error');
+                    addToast(t('errorUpdatingUser') || 'Error updating user', 'error');
                 }
             };
             
@@ -2301,10 +2307,10 @@
                         fetchAuditLogs();
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error deleting user', 'error');
+                        addToast(data.error || (t('errorDeletingUser') || 'Error deleting user'), 'error');
                     }
                 } catch (err) {
-                    addToast('Error deleting user', 'error');
+                    addToast(t('errorDeletingUser') || 'Error deleting user', 'error');
                 }
             };
             
@@ -2517,7 +2523,7 @@
                                 }`}
                             >
                                 <Icons.Users className="w-4 h-4" />
-                                LDAP / AD
+                                {t('ldapAdTab') || 'LDAP / AD'}
                             </button>
                             <button
                                 onClick={() => setActiveTab('oidc')}
@@ -2528,7 +2534,7 @@
                                 }`}
                             >
                                 <Icons.Shield className="w-4 h-4" />
-                                OIDC / Entra ID
+                                {t('oidcEntraIdTab') || 'OIDC / Entra ID'}
                             </button>
                             <button
                                 onClick={() => setActiveTab('compliance')}
@@ -2574,7 +2580,7 @@
                             >
                                 <Icons.ClipboardList className="w-4 h-4" />
                                 <span className="hidden sm:inline">{t('auditLog')}</span>
-                                <span className="sm:hidden">Audit</span>
+                                <span className="sm:hidden">{t('auditShort') || 'Audit'}</span>
                             </button>
                             <button
                                 onClick={() => setActiveTab('siem')}
@@ -2598,7 +2604,7 @@
                                 <Icons.Download className="w-4 h-4" />
                                 <span>{t('updates') || 'Updates'}</span>
                                 {updateInfo?.update_available && (
-                                    <span className="px-1.5 py-0.5 text-xs bg-green-500 text-white rounded-full">NEW</span>
+                                    <span className="px-1.5 py-0.5 text-xs bg-green-500 text-white rounded-full">{t('newUpdateBadge') || 'NEW'}</span>
                                 )}
                             </button>
                             <button
@@ -2636,7 +2642,7 @@
                                             <button
                                                 onClick={() => setShowAddFolder(!showAddFolder)}
                                                 className="flex items-center gap-1.5 px-3 py-2 bg-proxmox-card border border-proxmox-border hover:border-gray-500 rounded-lg text-sm text-gray-400 hover:text-white transition-colors"
-                                                title="Manage Folders"
+                                                title={t('manageFolders') || 'Manage Folders'}
                                             >
                                                 <Icons.Folder className="w-4 h-4" />
                                                 {t('folders') || 'Folders'}
@@ -2687,11 +2693,11 @@
                                                             <div className="flex items-center gap-2">
                                                                 <div className="w-3 h-3 rounded" style={{background: f.color || '#6b7280'}} />
                                                                 <span className="text-sm text-gray-300">{f.name}</span>
-                                                                <span className="text-xs text-gray-600">{users.filter(u => u.user_folder === f.id).length} users</span>
+                                                                <span className="text-xs text-gray-600">{t('users') || 'Users'}: {users.filter(u => u.user_folder === f.id).length}</span>
                                                             </div>
                                                             <button
                                                                 onClick={() => {
-                                                                    if (!confirm(`Delete folder "${f.name}"?`)) return;
+                                                                    if (!confirm(`${t('deleteFolderConfirm') || 'Delete folder'} "${f.name}"?`)) return;
                                                                     fetch(`${API_URL}/user-folders/${f.id}`, { method: 'DELETE', credentials: 'include', headers: getAuthHeaders() })
                                                                         .then(r => r.json()).then(d => { if (d.success) fetchUsers(); });
                                                                 }}
@@ -2903,7 +2909,7 @@
                                                                             onChange={e => handleUpdateUser(user.username, { user_folder: e.target.value })}
                                                                             className="block mt-1 text-xs bg-proxmox-dark border border-proxmox-border rounded px-1.5 py-0.5 text-gray-400"
                                                                         >
-                                                                            <option value="">— No folder —</option>
+                                                                            <option value="">{t('noFolder') || '— No folder —'}</option>
                                                                             {userFolders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
                                                                         </select>
                                                                     ) : user.user_folder && userFolders.find(f => f.id === user.user_folder) ? (
@@ -3038,14 +3044,14 @@
                                                                         <button
                                                                             onClick={() => handleResetPassword(user.username)}
                                                                             className="p-1.5 rounded bg-green-500/20 text-green-400 hover:bg-green-500/30"
-                                                                            title="Save"
+                                                                            title={t('save') || 'Save'}
                                                                         >
                                                                             <Icons.Check />
                                                                         </button>
                                                                         <button
                                                                             onClick={() => { setPasswordResetUser(null); setNewPasswordValue(''); }}
                                                                             className="p-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30"
-                                                                            title="Cancel"
+                                                                            title={t('cancel') || 'Cancel'}
                                                                         >
                                                                             <Icons.X />
                                                                         </button>
@@ -3217,9 +3223,9 @@
                                                                     fetchTenants();
                                                                 } else {
                                                                     const err = await r.json();
-                                                                    addToast(err.error || 'Error', 'error');
+                                                                    addToast(err.error || (t('error') || 'Error'), 'error');
                                                                 }
-                                                            } catch(e) { addToast('Error', 'error'); }
+                                                            } catch(e) { addToast(t('error') || 'Error', 'error'); }
                                                         }}
                                                         className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium"
                                                     >
@@ -3301,7 +3307,7 @@
                                                                 {tenant.id !== 'default' && (
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if(!confirm(`Delete tenant "${tenant.name}"?`)) return;
+                                                                            if(!confirm(`${t('deleteTenantConfirm') || 'Delete tenant'} "${tenant.name}"?`)) return;
                                                                             try {
                                                                                 const r = await fetch(`${API_URL}/tenants/${tenant.id}`, {
                                                                                     method: 'DELETE',
@@ -3309,11 +3315,11 @@
                                                                                     headers: getAuthHeaders()
                                                                                 });
                                                                                 if(r.ok) {
-                                                                                    addToast('Tenant deleted', 'success');
+                                                                                    addToast(t('tenantDeleted') || 'Tenant deleted', 'success');
                                                                                     fetchTenants();
                                                                                 } else {
                                                                                     const err = await r.json();
-                                                                                    addToast(err.error || 'Error', 'error');
+                                                                                    addToast(err.error || (t('error') || 'Error'), 'error');
                                                                                 }
                                                                             } catch(e) {}
                                                                         }}
@@ -3434,9 +3440,9 @@
                                                                     fetchTenants();
                                                                 } else {
                                                                     const err = await r.json();
-                                                                    addToast(err.error || 'Error', 'error');
+                                                                    addToast(err.error || (t('error') || 'Error'), 'error');
                                                                 }
-                                                            } catch(e) { addToast('Error', 'error'); }
+                                                            } catch(e) { addToast(t('error') || 'Error', 'error'); }
                                                         }}
                                                         className="flex-1 px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium"
                                                     >
@@ -3547,10 +3553,10 @@
                                                             <div className="flex items-center gap-4">
                                                                 {tenant && (
                                                                     <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-xs">
-                                                                        Tenant: {tenant.name}
+                                                                        {t('tenantLabel') || 'Tenant'}: {tenant.name}
                                                                     </span>
                                                                 )}
-                                                                <span className="text-sm text-gray-400">{groupClusters.length} cluster(s)</span>
+                                                                <span className="text-sm text-gray-400">{t('clusters') || 'Clusters'}: {groupClusters.length}</span>
                                                                 <div className="flex items-center gap-1">
                                                                     <button
                                                                         onClick={() => setEditingGroup(group)}
@@ -3560,7 +3566,7 @@
                                                                     </button>
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if(!confirm(`Delete group "${group.name}"?`)) return;
+                                                                            if(!confirm(`${t('deleteGroupConfirm') || 'Delete group'} "${group.name}"?`)) return;
                                                                             try {
                                                                                 const r = await fetch(`${API_URL}/cluster-groups/${group.id}`, {
                                                                                     method: 'DELETE',
@@ -3568,12 +3574,12 @@
                                                                                     headers: getAuthHeaders()
                                                                                 });
                                                                                 if(r.ok) {
-                                                                                    addToast('Group deleted', 'success');
+                                                                                    addToast(t('groupDeleted') || 'Group deleted', 'success');
                                                                                     fetchClusterGroups();
                                                                                     onGroupsChanged?.();
                                                                                 } else {
                                                                                     const err = await r.json();
-                                                                                    addToast(err.error || 'Error', 'error');
+                                                                                    addToast(err.error || (t('error') || 'Error'), 'error');
                                                                                 }
                                                                             } catch(e) {}
                                                                         }}
@@ -3735,7 +3741,7 @@
                                                         onClick={() => { setShowAddGroup(false); setEditingGroup(null); setNewGroup({ name: '', description: '', color: '#E86F2D' }); }}
                                                         className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm"
                                                     >
-                                                        Cancel
+                                                        {t('cancel') || 'Cancel'}
                                                     </button>
                                                     <button
                                                         onClick={async () => {
@@ -3757,9 +3763,9 @@
                                                                     onGroupsChanged?.();
                                                                 } else {
                                                                     const err = await r.json();
-                                                                    addToast(err.error || 'Error', 'error');
+                                                                    addToast(err.error || (t('error') || 'Error'), 'error');
                                                                 }
-                                                            } catch(e) { addToast('Error', 'error'); }
+                                                            } catch(e) { addToast(t('error') || 'Error', 'error'); }
                                                         }}
                                                         className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                     >
@@ -3874,7 +3880,7 @@
                                                 <div className="space-y-4">
                                                     <div className="flex justify-between items-center">
                                                         <h4 className="font-medium text-white">
-                                                            Permissions for {selectedUser}
+                                                            {t('permissionsFor') || 'Permissions for'} {selectedUser}
                                                             <span className="ml-2 text-xs text-gray-400">({userPermissions.role})</span>
                                                         </h4>
                                                         <button
@@ -3890,7 +3896,7 @@
                                                                         })
                                                                     });
                                                                     if(r.ok) {
-                                                                        addToast('Permissions saved', 'success');
+                                                                        addToast(t('permissionsSaved') || 'Permissions saved', 'success');
                                                                         fetchUserPermissions(selectedUser);
                                                                     }
                                                                 } catch(e) {}
@@ -3902,7 +3908,7 @@
                                                     </div>
                                                     
                                                     <div className="text-xs text-gray-500 mb-2">
-                                                        ✓ = granted by role | + = extra permission | ✗ = denied
+                                                        {t('permissionLegend') || '✓ = granted by role | + = extra permission | ✗ = denied'}
                                                     </div>
                                                     
                                                     <div className="grid grid-cols-2 gap-4 max-h-80 overflow-y-auto">
@@ -4054,8 +4060,10 @@
                                                                                 <span className="ml-2 text-xs text-gray-500">({acl.vmid})</span>
                                                                             </div>
                                                                             <div className="text-xs text-gray-400 mt-1">
-                                                                                {acl.users?.length || 0} users • 
-                                                                                {acl.inherit_role ? ' Inherits role permissions' : ` ${acl.permissions?.length || 0} custom permissions`}
+                                                                                {t('users') || 'Users'}: {acl.users?.length || 0} •{' '}
+                                                                                {acl.inherit_role
+                                                                                    ? (t('inheritsRolePermissions') || 'Inherits role permissions')
+                                                                                    : `${t('customPermissions') || 'Custom permissions'}: ${acl.permissions?.length || 0}`}
                                                                             </div>
                                                                         </div>
                                                                         <div className="flex items-center gap-2">
@@ -4779,7 +4787,7 @@
                                                                     )}
                                                                     <div className="flex-1">
                                                                         <div className="font-medium text-white">{vm.vmid} - {vm.name}</div>
-                                                                        <div className="text-xs text-gray-500">{vm.node} • {vm.type === 'qemu' ? 'VM' : 'Container'}</div>
+                                                                        <div className="text-xs text-gray-500">{vm.node} • {vm.type === 'qemu' ? (t('vm') || 'VM') : (t('container') || 'Container')}</div>
                                                                     </div>
                                                                     <span className={`px-2 py-0.5 rounded text-xs ${
                                                                         vm.status === 'running' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
@@ -5084,10 +5092,10 @@
                                     <div className="flex items-center justify-between">
                                         <h3 className="text-lg font-semibold text-white flex items-center gap-2">
                                             <Icons.Users className="w-5 h-5 text-blue-400" />
-                                            LDAP / Active Directory
+                                            {t('ldapActiveDirectory') || 'LDAP / Active Directory'}
                                         </h3>
                                         <label className="flex items-center gap-2 cursor-pointer">
-                                            <span className="text-sm text-gray-400">Enable LDAP</span>
+                                            <span className="text-sm text-gray-400">{t('enableLdap') || 'Enable LDAP'}</span>
                                             <input type="checkbox" checked={ldapConfig.ldap_enabled} onChange={e => setLdapConfig(prev => ({...prev, ldap_enabled: e.target.checked}))}
                                                 className="w-4 h-4 rounded accent-proxmox-orange" />
                                         </label>
@@ -5095,30 +5103,30 @@
                                     
                                     {/* Connection Settings */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
-                                        <h4 className="text-white font-medium">Connection</h4>
+                                        <h4 className="text-white font-medium">{t('connection') || 'Connection'}</h4>
                                         <div className="grid grid-cols-3 gap-3">
                                             <div className="col-span-2">
-                                                <label className="block text-sm text-gray-400 mb-1">Server (hostname or IP)</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('serverHostnameIp') || 'Server (hostname or IP)'}</label>
                                                 <input type="text" value={ldapConfig.ldap_server} onChange={e => setLdapConfig(prev => ({...prev, ldap_server: e.target.value}))} placeholder="ldap.example.com" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Port</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('port') || 'Port'}</label>
                                                 <input type="number" value={ldapConfig.ldap_port} onChange={e => setLdapConfig(prev => ({...prev, ldap_port: parseInt(e.target.value) || 389}))} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                             </div>
                                         </div>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
                                                 <input type="checkbox" checked={ldapConfig.ldap_use_ssl} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_ssl: e.target.checked, ldap_port: e.target.checked ? 636 : 389}))} className="w-4 h-4 accent-proxmox-orange" />
-                                                <span className="text-sm text-gray-300">SSL (LDAPS, port 636)</span>
+                                                <span className="text-sm text-gray-300">{t('ldapSslLabel') || 'SSL (LDAPS, port 636)'}</span>
                                             </label>
                                             <label className="flex items-center gap-2 cursor-pointer">
                                                 <input type="checkbox" checked={ldapConfig.ldap_use_starttls} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_starttls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
-                                                <span className="text-sm text-gray-300">STARTTLS</span>
+                                                <span className="text-sm text-gray-300">{t('startTls') || 'STARTTLS'}</span>
                                             </label>
                                             {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && (
                                                 <label className="flex items-center gap-2 cursor-pointer">
                                                     <input type="checkbox" checked={ldapConfig.ldap_verify_tls} onChange={e => setLdapConfig(prev => ({...prev, ldap_verify_tls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
-                                                    <span className="text-sm text-gray-300">Verify TLS Certificate</span>
+                                                    <span className="text-sm text-gray-300">{t('verifyTlsCertificate') || 'Verify TLS Certificate'}</span>
                                                 </label>
                                             )}
                                         </div>
@@ -5126,39 +5134,39 @@
                                     
                                     {/* Bind Credentials */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
-                                        <h4 className="text-white font-medium">Service Account (Bind)</h4>
+                                        <h4 className="text-white font-medium">{t('serviceAccountBind') || 'Service Account (Bind)'}</h4>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Bind DN</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('bindDn') || 'Bind DN'}</label>
                                             <input type="text" value={ldapConfig.ldap_bind_dn} onChange={e => setLdapConfig(prev => ({...prev, ldap_bind_dn: e.target.value}))} placeholder="CN=svc-pegaprox,OU=Service Accounts,DC=example,DC=com" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Bind Password</label>
-                                            <input type="password" value={ldapConfig.ldap_bind_password} onChange={e => setLdapConfig(prev => ({...prev, ldap_bind_password: e.target.value}))} placeholder="Service account password" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
+                                            <label className="block text-sm text-gray-400 mb-1">{t('bindPassword') || 'Bind Password'}</label>
+                                            <input type="password" value={ldapConfig.ldap_bind_password} onChange={e => setLdapConfig(prev => ({...prev, ldap_bind_password: e.target.value}))} placeholder={t('serviceAccountPasswordPlaceholder') || 'Service account password'} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                     </div>
                                     
                                     {/* Search Settings */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
-                                        <h4 className="text-white font-medium">User Search</h4>
+                                        <h4 className="text-white font-medium">{t('userSearch') || 'User Search'}</h4>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Base DN</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('baseDn') || 'Base DN'}</label>
                                             <input type="text" value={ldapConfig.ldap_base_dn} onChange={e => setLdapConfig(prev => ({...prev, ldap_base_dn: e.target.value}))} placeholder="DC=example,DC=com" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">User Filter <span className="text-gray-600">({'{username}'} = login name)</span></label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('userFilter') || 'User Filter'} <span className="text-gray-600">({'{username}'} = {t('loginName') || 'login name'})</span></label>
                                             <input type="text" value={ldapConfig.ldap_user_filter} onChange={e => setLdapConfig(prev => ({...prev, ldap_user_filter: e.target.value}))} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                         </div>
                                         <div className="grid grid-cols-3 gap-3">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Username Attr</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('usernameAttribute') || 'Username Attr'}</label>
                                                 <input type="text" value={ldapConfig.ldap_username_attribute} onChange={e => setLdapConfig(prev => ({...prev, ldap_username_attribute: e.target.value}))} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Email Attr</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('emailAttribute') || 'Email Attr'}</label>
                                                 <input type="text" value={ldapConfig.ldap_email_attribute} onChange={e => setLdapConfig(prev => ({...prev, ldap_email_attribute: e.target.value}))} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Display Name Attr</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('displayNameAttribute') || 'Display Name Attr'}</label>
                                                 <input type="text" value={ldapConfig.ldap_display_name_attribute} onChange={e => setLdapConfig(prev => ({...prev, ldap_display_name_attribute: e.target.value}))} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                             </div>
                                         </div>
@@ -5167,16 +5175,16 @@
                                     {/* NS: Feb 2026 - Unified Group-Role Mapping */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
                                         <div className="flex items-center justify-between">
-                                            <h4 className="text-white font-medium">Group ↑ Role Mapping</h4>
+                                            <h4 className="text-white font-medium">{t('groupRoleMapping') || 'Group → Role Mapping'}</h4>
                                             <button onClick={() => setLdapConfig(prev => ({...prev, ldap_group_mappings: [...prev.ldap_group_mappings, {group_dn: '', role: 'viewer'}]}))}
                                                 className="px-2 py-1 bg-proxmox-secondary border border-proxmox-border rounded text-xs text-gray-300 hover:text-white hover:bg-proxmox-hover flex items-center gap-1">
-                                                <Icons.Plus className="w-3 h-3" /> Add Mapping
+                                                <Icons.Plus className="w-3 h-3" /> {t('addMappingLabel') || 'Add Mapping'}
                                             </button>
                                         </div>
-                                        <p className="text-xs text-gray-500">Map AD/LDAP groups to PegaProx roles (including custom roles). Use full Distinguished Name (DN).</p>
+                                        <p className="text-xs text-gray-500">{t('ldapGroupRoleMappingHint') || 'Map AD/LDAP groups to PegaProx roles (including custom roles). Use full Distinguished Name (DN).'}</p>
                                         
                                         {ldapConfig.ldap_group_mappings.length === 0 ? (
-                                            <p className="text-gray-600 text-sm text-center py-4 border border-dashed border-proxmox-border rounded-lg">No group mappings configured. Click "Add Mapping" to map an AD group to a role.</p>
+                                            <p className="text-gray-600 text-sm text-center py-4 border border-dashed border-proxmox-border rounded-lg">{t('ldapNoGroupMappings') || 'No group mappings configured. Click "Add Mapping" to map an AD group to a role.'}</p>
                                         ) : (
                                             <div className="space-y-2">
                                                 {ldapConfig.ldap_group_mappings.map((mapping, idx) => (
@@ -5191,13 +5199,13 @@
                                                             <select value={mapping.role || 'viewer'}
                                                                 onChange={e => { const m = [...ldapConfig.ldap_group_mappings]; m[idx] = {...m[idx], role: e.target.value}; setLdapConfig(prev => ({...prev, ldap_group_mappings: m})); }}
                                                                 className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
-                                                                <optgroup label="Built-in">
-                                                                    <option value="admin">Admin</option>
-                                                                    <option value="user">User</option>
-                                                                    <option value="viewer">Viewer</option>
+                                                                <optgroup label={t('builtInRoles') || 'Built-in'}>
+                                                                    <option value="admin">{t('roleAdmin') || 'Admin'}</option>
+                                                                    <option value="user">{t('roleUser') || 'User'}</option>
+                                                                    <option value="viewer">{t('roleViewer') || 'Viewer'}</option>
                                                                 </optgroup>
                                                                 {allRoles.filter(r => !r.builtin).length > 0 && (
-                                                                    <optgroup label="Custom Roles">
+                                                                    <optgroup label={t('customRoles') || 'Custom Roles'}>
                                                                         {allRoles.filter(r => !r.builtin).map(r => (
                                                                             <option key={r.id} value={r.id}>{r.name}</option>
                                                                         ))}
@@ -5214,11 +5222,11 @@
                                         
                                         <div className="grid grid-cols-2 gap-3 pt-2 border-t border-proxmox-border">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Default Role (no group match)</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('defaultRoleNoGroupMatch') || 'Default Role (no group match)'}</label>
                                                 <select value={ldapConfig.ldap_default_role} onChange={e => setLdapConfig(prev => ({...prev, ldap_default_role: e.target.value}))} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm">
-                                                    <option value="viewer">Viewer</option>
-                                                    <option value="user">User</option>
-                                                    <option value="admin">Admin</option>
+                                                    <option value="viewer">{t('roleViewer') || 'Viewer'}</option>
+                                                    <option value="user">{t('roleUser') || 'User'}</option>
+                                                    <option value="admin">{t('roleAdmin') || 'Admin'}</option>
                                                     {allRoles.filter(r => !r.builtin).map(r => (
                                                         <option key={r.id} value={r.id}>{r.name}</option>
                                                     ))}
@@ -5227,7 +5235,7 @@
                                             <div className="flex items-end pb-1">
                                                 <label className="flex items-center gap-2 cursor-pointer">
                                                     <input type="checkbox" checked={ldapConfig.ldap_auto_create_users} onChange={e => setLdapConfig(prev => ({...prev, ldap_auto_create_users: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
-                                                    <span className="text-sm text-gray-300">Auto-create users on first login</span>
+                                                    <span className="text-sm text-gray-300">{t('autoCreateUsersFirstLogin') || 'Auto-create users on first login'}</span>
                                                 </label>
                                             </div>
                                         </div>
@@ -5235,22 +5243,22 @@
                                     
                                     {/* Test Connection */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
-                                        <h4 className="text-white font-medium">Test Connection</h4>
+                                        <h4 className="text-white font-medium">{t('testConnection') || 'Test Connection'}</h4>
                                         <div className="flex items-end gap-3">
                                             <div className="flex-1">
-                                                <label className="block text-sm text-gray-400 mb-1">Test Username (optional)</label>
-                                                <input type="text" value={ldapTestUser} onChange={e => setLdapTestUser(e.target.value)} placeholder="e.g. jdoe" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
+                                                <label className="block text-sm text-gray-400 mb-1">{t('testUsernameOptional') || 'Test Username (optional)'}</label>
+                                                <input type="text" value={ldapTestUser} onChange={e => setLdapTestUser(e.target.value)} placeholder={t('exampleJdoe') || 'e.g. jdoe'} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                             </div>
                                             <button onClick={testLdapConnection} disabled={ldapTesting || !ldapConfig.ldap_server} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-white text-sm flex items-center gap-2 shrink-0">
                                                 {ldapTesting ? <Icons.Loader className="w-4 h-4 animate-spin" /> : <Icons.Zap className="w-4 h-4" />}
-                                                Test
+                                                {t('test') || 'Test'}
                                             </button>
                                         </div>
                                         
                                         {ldapTestResult && (
                                             <div className={`p-3 rounded-lg border ${ldapTestResult.success ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
                                                 <p className={`font-medium text-sm ${ldapTestResult.success ? 'text-green-400' : 'text-red-400'}`}>
-                                                    {ldapTestResult.success ? '✓ Connection Successful' : `✗ ${ldapTestResult.error}`}
+                                                    {ldapTestResult.success ? `✓ ${t('connectionSuccessful') || 'Connection Successful'}` : `✗ ${ldapTestResult.error}`}
                                                 </p>
                                                 {ldapTestResult.steps && (
                                                     <div className="mt-2 space-y-1">
@@ -5261,7 +5269,7 @@
                                                                 </span>
                                                                 <span className="text-gray-400">{step.step}</span>
                                                                 {step.detail && typeof step.detail === 'string' && <span className="text-gray-500 font-mono">{step.detail}</span>}
-                                                                {step.detail && typeof step.detail === 'object' && <span className="text-gray-500 font-mono">{step.detail.dn} ({step.detail.groups} groups)</span>}
+                                                                {step.detail && typeof step.detail === 'object' && <span className="text-gray-500 font-mono">{step.detail.dn} ({step.detail.groups} {t('groupsLabel') || 'groups'})</span>}
                                                             </div>
                                                         ))}
                                                     </div>
@@ -5274,7 +5282,7 @@
                                     <div className="flex justify-end gap-3">
                                         <button onClick={saveLdapSettings} disabled={loading} className="px-6 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded-lg text-white font-medium flex items-center gap-2">
                                             {loading ? <Icons.Loader className="w-4 h-4 animate-spin" /> : <Icons.Save className="w-4 h-4" />}
-                                            Save LDAP Settings
+                                            {t('saveLdapSettings') || 'Save LDAP Settings'}
                                         </button>
                                     </div>
                                 </div>
@@ -5285,42 +5293,42 @@
                                 <div className="space-y-4">
                                     <div className="flex items-center justify-between">
                                         <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-                                            <Icons.Shield className="w-5 h-5" /> OIDC / Entra ID Authentication
+                                            <Icons.Shield className="w-5 h-5" /> {t('oidcEntraAuthentication') || 'OIDC / Entra ID Authentication'}
                                         </h3>
                                     </div>
                                     <p className="text-sm text-gray-400">
-                                        Configure OpenID Connect authentication with Microsoft Entra ID (Azure AD), Okta, Auth0, Keycloak, or any OIDC provider.
+                                        {t('oidcConfigureDescription') || 'Configure OpenID Connect authentication with Microsoft Entra ID (Azure AD), Okta, Auth0, Keycloak, or any OIDC provider.'}
                                     </p>
                                     
                                     {/* Enable + Provider */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
                                         <div className="flex items-center justify-between">
-                                            <h4 className="text-white font-medium">Connection</h4>
+                                            <h4 className="text-white font-medium">{t('connection') || 'Connection'}</h4>
                                             <label className="flex items-center gap-2 cursor-pointer">
                                                 <input type="checkbox" checked={oidcConfig.oidc_enabled} onChange={e => setOidcConfig(prev => ({...prev, oidc_enabled: e.target.checked}))}
                                                     className="w-4 h-4 rounded bg-proxmox-secondary border-proxmox-border" />
-                                                <span className="text-sm text-gray-300">Enable OIDC</span>
+                                                <span className="text-sm text-gray-300">{t('enableOidc') || 'Enable OIDC'}</span>
                                             </label>
                                         </div>
                                         <div className="grid grid-cols-2 gap-3">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Provider</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('provider') || 'Provider'}</label>
                                                 <select value={oidcConfig.oidc_provider} onChange={e => setOidcConfig(prev => ({...prev, oidc_provider: e.target.value}))}
                                                     className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm">
                                                     <option value="entra">Microsoft Entra ID (Azure AD)</option>
                                                     <option value="okta">Okta</option>
-                                                    <option value="generic">Generic OIDC</option>
+                                                    <option value="generic">{t('genericOidc') || 'Generic OIDC'}</option>
                                                 </select>
                                             </div>
                                             {oidcConfig.oidc_provider === 'entra' ? (
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Tenant ID</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('tenantId') || 'Tenant ID'}</label>
                                                     <input type="text" value={oidcConfig.oidc_tenant_id} onChange={e => setOidcConfig(prev => ({...prev, oidc_tenant_id: e.target.value}))}
                                                         placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                                 </div>
                                             ) : (
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Authority / Issuer URL</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('authorityIssuerUrl') || 'Authority / Issuer URL'}</label>
                                                     <input type="text" value={oidcConfig.oidc_authority} onChange={e => setOidcConfig(prev => ({...prev, oidc_authority: e.target.value}))}
                                                         placeholder="https://login.example.com/realms/master" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                                 </div>
@@ -5328,48 +5336,48 @@
                                         </div>
                                         {oidcConfig.oidc_provider === 'entra' && (
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Cloud Environment</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('cloudEnvironment') || 'Cloud Environment'}</label>
                                                 <select value={oidcConfig.oidc_cloud_environment || 'commercial'} onChange={e => setOidcConfig(prev => ({...prev, oidc_cloud_environment: e.target.value}))}
                                                     className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm">
-                                                    <option value="commercial">Commercial (Global)</option>
-                                                    <option value="gcc">GCC (Government Community Cloud)</option>
-                                                    <option value="gcc_high">GCC High (US Government)</option>
-                                                    <option value="dod">DoD (Department of Defense)</option>
+                                                    <option value="commercial">{t('cloudCommercialGlobal') || 'Commercial (Global)'}</option>
+                                                    <option value="gcc">{t('cloudGcc') || 'GCC (Government Community Cloud)'}</option>
+                                                    <option value="gcc_high">{t('cloudGccHigh') || 'GCC High (US Government)'}</option>
+                                                    <option value="dod">{t('cloudDod') || 'DoD (Department of Defense)'}</option>
                                                 </select>
                                                 {oidcConfig.oidc_cloud_environment && oidcConfig.oidc_cloud_environment !== 'commercial' && oidcConfig.oidc_cloud_environment !== 'gcc' && (
-                                                    <p className="text-xs text-yellow-400 mt-1">⚠️ {oidcConfig.oidc_cloud_environment === 'gcc_high' ? 'GCC High' : 'DoD'} uses sovereign endpoints: login.microsoftonline.us / {oidcConfig.oidc_cloud_environment === 'dod' ? 'dod-graph.microsoft.us' : 'graph.microsoft.us'}</p>
+                                                    <p className="text-xs text-yellow-400 mt-1">⚠️ {oidcConfig.oidc_cloud_environment === 'gcc_high' ? 'GCC High' : 'DoD'} {t('usesSovereignEndpoints') || 'uses sovereign endpoints'}: login.microsoftonline.us / {oidcConfig.oidc_cloud_environment === 'dod' ? 'dod-graph.microsoft.us' : 'graph.microsoft.us'}</p>
                                                 )}
                                             </div>
                                         )}
                                         <div className="grid grid-cols-2 gap-3">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Client ID (Application ID)</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('clientIdApplicationId') || 'Client ID (Application ID)'}</label>
                                                 <input type="text" value={oidcConfig.oidc_client_id} onChange={e => setOidcConfig(prev => ({...prev, oidc_client_id: e.target.value}))}
                                                     placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Client Secret</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('clientSecret') || 'Client Secret'}</label>
                                                 <input type="password" value={oidcConfig.oidc_client_secret} onChange={e => setOidcConfig(prev => ({...prev, oidc_client_secret: e.target.value}))}
                                                     placeholder="••••••••" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                             </div>
                                         </div>
                                         <div className="grid grid-cols-2 gap-3">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Scopes</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('scopes') || 'Scopes'}</label>
                                                 <input type="text" value={oidcConfig.oidc_scopes} onChange={e => setOidcConfig(prev => ({...prev, oidc_scopes: e.target.value}))}
                                                     placeholder="openid profile email" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Redirect URI</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('redirectUri') || 'Redirect URI'}</label>
                                                 <input type="text" value={oidcConfig.oidc_redirect_uri || `${window.location.origin}/oidc/callback`} onChange={e => setOidcConfig(prev => ({...prev, oidc_redirect_uri: e.target.value}))}
                                                     className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
-                                                <p className="text-xs text-gray-600 mt-1">Register this URL in your identity provider</p>
+                                                <p className="text-xs text-gray-600 mt-1">{t('registerUrlIdentityProvider') || 'Register this URL in your identity provider'}</p>
                                             </div>
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Login Button Text</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('loginButtonText') || 'Login Button Text'}</label>
                                             <input type="text" value={oidcConfig.oidc_button_text} onChange={e => setOidcConfig(prev => ({...prev, oidc_button_text: e.target.value}))}
-                                                placeholder="Sign in with Microsoft" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
+                                                placeholder={t('signInWithMicrosoft') || 'Sign in with Microsoft'} className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                     </div>
 
@@ -5470,7 +5478,7 @@
                                         <input type="text"
                                             value={oidcConfig.oidc_audiences || ''}
                                             onChange={e => setOidcConfig(prev => ({...prev, oidc_audiences: e.target.value}))}
-                                            placeholder="comma-separated, e.g. pegaprox-prod, pegaprox-staging"
+                                            placeholder={t('oidcAudiencesPlaceholder') || 'comma-separated, e.g. pegaprox-prod, pegaprox-staging'}
                                             className="w-full bg-proxmox-darker border border-proxmox-border rounded p-2 text-sm font-mono text-white" />
                                         <p className="text-[11px] text-gray-500 leading-snug">
                                             {t('oidcAudiencesHint') || 'Additional audience values accepted on the JWT verify alongside the client_id. Useful when one logical audience is shared across multiple deployments.'}
@@ -5480,22 +5488,24 @@
                                     {/* NS: Feb 2026 - Unified Group-Role Mapping */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
                                         <div className="flex items-center justify-between">
-                                            <h4 className="text-white font-medium">Group ↑ Role Mapping</h4>
+                                            <h4 className="text-white font-medium">{t('groupRoleMapping') || 'Group → Role Mapping'}</h4>
                                             <button onClick={() => setOidcConfig(prev => ({...prev, oidc_group_mappings: [...prev.oidc_group_mappings, {group_id: '', role: 'viewer'}]}))}
                                                 className="px-2 py-1 bg-proxmox-secondary border border-proxmox-border rounded text-xs text-gray-300 hover:text-white hover:bg-proxmox-hover flex items-center gap-1">
-                                                <Icons.Plus className="w-3 h-3" /> Add Mapping
+                                                <Icons.Plus className="w-3 h-3" /> {t('addMappingLabel') || 'Add Mapping'}
                                             </button>
                                         </div>
-                                        <p className="text-xs text-gray-500">{oidcConfig.oidc_provider === 'entra' ? 'Map Entra groups to PegaProx roles. Use group Object IDs (Azure Portal ↑ Groups ↑ Overview).' : 'Map provider groups to PegaProx roles (including custom roles).'}</p>
+                                        <p className="text-xs text-gray-500">{oidcConfig.oidc_provider === 'entra'
+        ? (t('oidcEntraGroupMappingHint') || 'Map Entra groups to PegaProx roles. Use group Object IDs (Azure Portal → Groups → Overview).')
+        : (t('oidcGenericGroupMappingHint') || 'Map provider groups to PegaProx roles (including custom roles).')}</p>
                                         
                                         {oidcConfig.oidc_group_mappings.length === 0 ? (
-                                            <p className="text-gray-600 text-sm text-center py-4 border border-dashed border-proxmox-border rounded-lg">No group mappings configured. Click "Add Mapping" to map a group to a role.</p>
+                                            <p className="text-gray-600 text-sm text-center py-4 border border-dashed border-proxmox-border rounded-lg">{t('oidcNoGroupMappings') || 'No group mappings configured. Click "Add Mapping" to map a group to a role.'}</p>
                                         ) : (
                                             <div className="space-y-2">
                                                 {oidcConfig.oidc_group_mappings.map((mapping, idx) => (
                                                     <div key={idx} className="flex items-center gap-2 p-2 bg-proxmox-secondary rounded-lg border border-proxmox-border">
                                                         <div className="flex-1">
-                                                            <input type="text" value={mapping.group_id} placeholder={oidcConfig.oidc_provider === 'entra' ? 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' : 'GroupName'}
+                                                            <input type="text" value={mapping.group_id} placeholder={oidcConfig.oidc_provider === 'entra' ? 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' : (t('groupNamePlaceholder') || 'Group name')}
                                                                 onChange={e => { const m = [...oidcConfig.oidc_group_mappings]; m[idx] = {...m[idx], group_id: e.target.value}; setOidcConfig(prev => ({...prev, oidc_group_mappings: m})); }}
                                                                 className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm font-mono" />
                                                         </div>
@@ -5504,13 +5514,13 @@
                                                             <select value={mapping.role || 'viewer'}
                                                                 onChange={e => { const m = [...oidcConfig.oidc_group_mappings]; m[idx] = {...m[idx], role: e.target.value}; setOidcConfig(prev => ({...prev, oidc_group_mappings: m})); }}
                                                                 className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
-                                                                <optgroup label="Built-in">
-                                                                    <option value="admin">Admin</option>
-                                                                    <option value="user">User</option>
-                                                                    <option value="viewer">Viewer</option>
+                                                                <optgroup label={t('builtInRoles') || 'Built-in'}>
+                                                                    <option value="admin">{t('roleAdmin') || 'Admin'}</option>
+                                                                    <option value="user">{t('roleUser') || 'User'}</option>
+                                                                    <option value="viewer">{t('roleViewer') || 'Viewer'}</option>
                                                                 </optgroup>
                                                                 {allRoles.filter(r => !r.builtin).length > 0 && (
-                                                                    <optgroup label="Custom Roles">
+                                                                    <optgroup label={t('customRoles') || 'Custom Roles'}>
                                                                         {allRoles.filter(r => !r.builtin).map(r => (
                                                                             <option key={r.id} value={r.id}>{r.name}</option>
                                                                         ))}
@@ -5527,12 +5537,12 @@
                                         
                                         <div className="grid grid-cols-2 gap-3 pt-2 border-t border-proxmox-border">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Default Role (no group match)</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('defaultRoleNoGroupMatch') || 'Default Role (no group match)'}</label>
                                                 <select value={oidcConfig.oidc_default_role} onChange={e => setOidcConfig(prev => ({...prev, oidc_default_role: e.target.value}))}
                                                     className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm">
-                                                    <option value="viewer">Viewer</option>
-                                                    <option value="user">User</option>
-                                                    <option value="admin">Admin</option>
+                                                    <option value="viewer">{t('roleViewer') || 'Viewer'}</option>
+                                                    <option value="user">{t('roleUser') || 'User'}</option>
+                                                    <option value="admin">{t('roleAdmin') || 'Admin'}</option>
                                                     {allRoles.filter(r => !r.builtin).map(r => (
                                                         <option key={r.id} value={r.id}>{r.name}</option>
                                                     ))}
@@ -5542,7 +5552,7 @@
                                                 <label className="flex items-center gap-2 cursor-pointer">
                                                     <input type="checkbox" checked={oidcConfig.oidc_auto_create_users} onChange={e => setOidcConfig(prev => ({...prev, oidc_auto_create_users: e.target.checked}))}
                                                         className="w-4 h-4 rounded bg-proxmox-secondary border-proxmox-border" />
-                                                    <span className="text-sm text-gray-300">Auto-create users on first login</span>
+                                                    <span className="text-sm text-gray-300">{t('autoCreateUsersFirstLogin') || 'Auto-create users on first login'}</span>
                                                 </label>
                                             </div>
                                         </div>
@@ -5550,10 +5560,10 @@
                                     
                                     {/* Test Connection */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
-                                        <h4 className="text-white font-medium">Test Configuration</h4>
+                                        <h4 className="text-white font-medium">{t('testConfiguration') || 'Test Configuration'}</h4>
                                         <button onClick={testOidcConnection} disabled={oidcTesting || !oidcConfig.oidc_client_id} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-white text-sm flex items-center gap-2">
                                             {oidcTesting ? <Icons.Loader className="w-4 h-4 animate-spin" /> : <Icons.Zap className="w-4 h-4" />}
-                                            Test Endpoints
+                                            {t('testEndpoints') || 'Test Endpoints'}
                                         </button>
                                         {oidcTestResult && (
                                             <div className="space-y-1.5">
@@ -5570,15 +5580,15 @@
                                     {/* Entra Setup Guide */}
                                     {oidcConfig.oidc_provider === 'entra' && (
                                         <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 space-y-2">
-                                            <h4 className="text-blue-400 font-medium flex items-center gap-2"><Icons.Info className="w-4 h-4" /> Entra ID Setup Guide</h4>
+                                            <h4 className="text-blue-400 font-medium flex items-center gap-2"><Icons.Info className="w-4 h-4" /> {t('entraSetupGuide') || 'Entra ID Setup Guide'}</h4>
                                             <ol className="text-sm text-gray-400 space-y-1 list-decimal list-inside">
-                                                <li>Azure Portal ↑ Entra ID ↑ App registrations ↑ New registration</li>
-                                                <li>Set Redirect URI to: <code className="text-blue-300 bg-proxmox-dark px-1 rounded">{oidcConfig.oidc_redirect_uri || `${window.location.origin}/oidc/callback`}</code></li>
-                                                <li>Copy Application (client) ID ↑ paste as Client ID above</li>
-                                                <li>Certificates & secrets ↑ New client secret ↑ paste above</li>
-                                                <li>API permissions ↑ Add: <code className="text-blue-300 bg-proxmox-dark px-1 rounded">openid, profile, email, User.Read, GroupMember.Read.All</code></li>
-                                                <li>Token configuration ↑ Add groups claim (Security groups)</li>
-                                                <li>Copy Directory (tenant) ID ↑ paste as Tenant ID above</li>
+                                                <li>{t('entraGuideStep1') || 'Azure Portal → Entra ID → App registrations → New registration'}</li>
+                                                <li>{t('entraGuideStep2') || 'Set Redirect URI to:'} <code className="text-blue-300 bg-proxmox-dark px-1 rounded">{oidcConfig.oidc_redirect_uri || `${window.location.origin}/oidc/callback`}</code></li>
+                                                <li>{t('entraGuideStep3') || 'Copy Application (client) ID → paste as Client ID above'}</li>
+                                                <li>{t('entraGuideStep4') || 'Certificates & secrets → New client secret → paste above'}</li>
+                                                <li>{t('entraGuideStep5') || 'API permissions → Add:'} <code className="text-blue-300 bg-proxmox-dark px-1 rounded">openid, profile, email, User.Read, GroupMember.Read.All</code></li>
+                                                <li>{t('entraGuideStep6') || 'Token configuration → Add groups claim (Security groups)'}</li>
+                                                <li>{t('entraGuideStep7') || 'Copy Directory (tenant) ID → paste as Tenant ID above'}</li>
                                             </ol>
                                         </div>
                                     )}
@@ -5587,7 +5597,7 @@
                                     <div className="flex justify-end pt-2">
                                         <button onClick={saveOidcSettings} disabled={loading} className="px-6 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded-lg text-white font-medium flex items-center gap-2">
                                             {loading ? <Icons.Loader className="w-4 h-4 animate-spin" /> : <Icons.Save className="w-4 h-4" />}
-                                            Save OIDC Settings
+                                            {t('saveOidcSettings') || 'Save OIDC Settings'}
                                         </button>
                                     </div>
                                 </div>
@@ -5751,7 +5761,7 @@
 
                                         {serverSettings.login_background && (
                                             <div className="flex items-center gap-3">
-                                                <img src={serverSettings.login_background} alt="Login bg" className="h-16 rounded border border-proxmox-border object-cover" />
+                                                <img src={serverSettings.login_background} alt={t('loginBackground') || 'Login Background'} className="h-16 rounded border border-proxmox-border object-cover" />
                                                 <button
                                                     onClick={async () => {
                                                         try {
@@ -5760,7 +5770,7 @@
                                                                 addToast(t('loginBackgroundDeleted'), 'success');
                                                                 setServerSettings(prev => ({...prev, login_background: ''}));
                                                             }
-                                                        } catch(e) { addToast('Error', 'error'); }
+                                                        } catch(e) { addToast(t('error') || 'Error', 'error'); }
                                                     }}
                                                     className="px-3 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition-colors"
                                                 >
@@ -6133,7 +6143,7 @@
                                                                         type="text"
                                                                         value={serverSettings.acme_dns_rfc2136_key_name || ''}
                                                                         onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_key_name: e.target.value})}
-                                                                        placeholder="mein-certbot-key"
+                                                                        placeholder="certbot-key"
                                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                     />
                                                                 </div>
@@ -6158,7 +6168,7 @@
                                                                         type="password"
                                                                         value={serverSettings.acme_dns_rfc2136_secret || ''}
                                                                         onChange={e => setServerSettings({...serverSettings, acme_dns_rfc2136_secret: e.target.value})}
-                                                                        placeholder="IHR_GENERIERTER_BASE64_SECRET_STRING"
+                                                                        placeholder="BASE64_SECRET_STRING"
                                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                     />
                                                                 </div>
@@ -6526,7 +6536,7 @@
                                                 min="60"
                                                 className="w-32 px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                             />
-                                            <span className="text-xs text-gray-500 ml-2">(min 60s)</span>
+                                            <span className="text-xs text-gray-500 ml-2">({t('minimum60Seconds') || 'min. 60s'})</span>
                                         </div>
 
                                         {/* NS Apr 2026 (#331) — update-available email toggle.
@@ -6559,11 +6569,11 @@
                                                 try {
                                                     await fetch(`${API_URL}/plugins/rescan`, { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
                                                     fetchPlugins();
-                                                    addToast('Plugins rescanned', 'success');
+                                                    addToast(t('pluginsRescanned') || 'Plugins rescanned', 'success');
                                                 } catch (e) {}
                                             }} className="text-xs text-gray-400 hover:text-white flex items-center gap-1">
                                                 <Icons.RefreshCw className="w-3 h-3" />
-                                                Rescan
+                                                {t('rescan') || 'Rescan'}
                                             </button>
                                         </div>
                                         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
@@ -6598,20 +6608,20 @@
                                                                         setEditingPluginConfig({ id: plugin.id, name: plugin.name, config: cfgText });
                                                                     } else {
                                                                         const e = await r.json().catch(() => ({}));
-                                                                        addToast(e.error || 'No config found', 'info');
+                                                                        addToast(e.error || (t('noConfigFound') || 'No config found'), 'info');
                                                                     }
-                                                                } catch (e) { addToast('Error loading config', 'error'); }
-                                                            }} className="text-gray-400/50 hover:text-proxmox-orange transition-colors" title="Edit config.json">
+                                                                } catch (e) { addToast(t('errorLoadingConfig') || 'Error loading config', 'error'); }
+                                                            }} className="text-gray-400/50 hover:text-proxmox-orange transition-colors" title={t('editConfigJson') || 'Edit config.json'}>
                                                                 <Icons.Edit className="w-4 h-4" />
                                                             </button>
                                                             <button onClick={async () => {
-                                                                if (!confirm(`Delete plugin "${plugin.name}"? This removes all plugin files.`)) return;
+                                                                if (!confirm(`${t('confirmDeletePlugin') || 'Delete plugin'} "${plugin.name}"? ${t('deletePluginFilesWarning') || 'This removes all plugin files.'}`)) return;
                                                                 try {
                                                                     const r = await fetch(`${API_URL}/plugins/${plugin.id}`, { method: 'DELETE', credentials: 'include', headers: getAuthHeaders() });
-                                                                    if (r && r.ok) { addToast('Plugin deleted', 'success'); fetchPlugins(); }
-                                                                    else { const e = await r.json().catch(() => ({})); addToast(e.error || 'Failed', 'error'); }
-                                                                } catch (e) { addToast('Error', 'error'); }
-                                                            }} className="text-red-400/50 hover:text-red-400 transition-colors" title="Delete plugin">
+                                                                    if (r && r.ok) { addToast(t('pluginDeleted') || 'Plugin deleted', 'success'); fetchPlugins(); }
+                                                                    else { const e = await r.json().catch(() => ({})); addToast(e.error || (t('failed') || 'Failed'), 'error'); }
+                                                                } catch (e) { addToast(t('error') || 'Error', 'error'); }
+                                                            }} className="text-red-400/50 hover:text-red-400 transition-colors" title={t('deletePlugin') || 'Delete plugin'}>
                                                                 <Icons.Trash2 className="w-4 h-4" />
                                                             </button>
                                                         </div>
@@ -6628,7 +6638,7 @@
                                                 <div className="flex items-center justify-between p-4 border-b border-proxmox-border flex-shrink-0">
                                                     <div>
                                                         <h3 className="text-white font-semibold text-base">{editingPluginConfig.name} — config.json</h3>
-                                                        <p className="text-xs text-gray-500 mt-0.5">Edit plugin configuration (JSON)</p>
+                                                        <p className="text-xs text-gray-500 mt-0.5">{t('editPluginConfiguration') || 'Edit plugin configuration (JSON)'}</p>
                                                     </div>
                                                     <button onClick={() => setEditingPluginConfig(null)} className="p-2 hover:bg-proxmox-border rounded"><Icons.X /></button>
                                                 </div>
@@ -6646,9 +6656,9 @@
                                                         try {
                                                             const formatted = JSON.stringify(JSON.parse(editingPluginConfig.config), null, 4);
                                                             setEditingPluginConfig({...editingPluginConfig, config: formatted});
-                                                        } catch (e) { addToast('Invalid JSON — cannot format', 'error'); }
+                                                        } catch (e) { addToast(t('invalidJsonCannotFormat') || 'Invalid JSON — cannot format', 'error'); }
                                                     }} className="px-3 py-1.5 text-xs bg-proxmox-border hover:bg-gray-600 rounded-lg transition-colors">
-                                                        Format JSON
+                                                        {t('formatJson') || 'Format JSON'}
                                                     </button>
                                                     <div className="flex gap-2">
                                                         <button onClick={() => setEditingPluginConfig(null)} className="px-4 py-2 bg-proxmox-border hover:bg-gray-600 rounded-lg text-sm transition-colors">
@@ -6658,7 +6668,7 @@
                                                             try {
                                                                 JSON.parse(editingPluginConfig.config);
                                                             } catch (e) {
-                                                                addToast('Invalid JSON: ' + e.message, 'error');
+                                                                addToast(`${t('invalidJson') || 'Invalid JSON'}: ${e.message}`, 'error');
                                                                 return;
                                                             }
                                                             try {
@@ -6668,13 +6678,13 @@
                                                                     body: JSON.stringify({ config: editingPluginConfig.config })
                                                                 });
                                                                 if (r && r.ok) {
-                                                                    addToast('Config saved. Restart plugin to apply changes.', 'success');
+                                                                    addToast(t('configSavedRestartPlugin') || 'Config saved. Restart plugin to apply changes.', 'success');
                                                                     setEditingPluginConfig(null);
                                                                 } else {
                                                                     const e = await r.json().catch(() => ({}));
-                                                                    addToast(e.error || 'Save failed', 'error');
+                                                                    addToast(e.error || (t('saveFailed') || 'Save failed'), 'error');
                                                                 }
-                                                            } catch (e) { addToast('Error saving config', 'error'); }
+                                                            } catch (e) { addToast(t('errorSavingConfig') || 'Error saving config', 'error'); }
                                                         }} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium transition-colors">
                                                             {t('saveSettings')}
                                                         </button>
@@ -6833,7 +6843,7 @@
                                             <div className="flex gap-2">
                                                 <button onClick={() => { setAuditQuery(''); setAuditFrom(''); setAuditTo(''); setAuditSev(''); setAuditIp(''); setAuditClusterFilter(''); setAuditOffset(0); setTimeout(() => fetchAuditLogs(0), 0); }}
                                                     className="px-3 py-1 text-xs text-gray-400 hover:text-white">
-                                                    {t('clearFilters') || 'clear'}
+                                                    {t('clearFilters') || 'Clear'}
                                                 </button>
                                                 <button onClick={() => fetchAuditLogs(0)}
                                                     className="px-3 py-1 bg-proxmox-orange hover:bg-orange-600 text-white text-xs rounded">
@@ -7283,9 +7293,9 @@
                                                             // Try to parse JSON error, but handle text/HTML responses too
                                                             try {
                                                                 const err = await response.json();
-                                                                addToast(err.error || 'Failed to generate bundle', 'error');
+                                                                addToast(err.error || t('bundleError') || 'Failed to generate support bundle', 'error');
                                                             } catch {
-                                                                addToast(`Server error: ${response.status} ${response.statusText}`, 'error');
+                                                                addToast(`${t('serverError') || 'Server error'}: ${response.status} ${response.statusText}`, 'error');
                                                             }
                                                         }
                                                     } catch (e) {
@@ -7322,7 +7332,7 @@
                                                 </div>
                                                 <div>
                                                     <h4 className="font-medium text-white">{t('reportIssue') || 'Report an Issue'}</h4>
-                                                    <p className="text-sm text-gray-400">GitHub Issues</p>
+                                                    <p className="text-sm text-gray-400">{t('githubIssues') || 'GitHub Issues'}</p>
                                                 </div>
                                                 <Icons.ExternalLink className="w-4 h-4 text-gray-500 ml-auto" />
                                             </a>
@@ -7342,7 +7352,7 @@
                                                 </div>
                                                 <div>
                                                     <h4 className="font-medium text-white">{t('documentation') || 'Documentation'}</h4>
-                                                    <p className="text-sm text-gray-400">Wiki & Guides</p>
+                                                    <p className="text-sm text-gray-400">{t('wikiGuides') || 'Wiki & Guides'}</p>
                                                 </div>
                                                 <Icons.ExternalLink className="w-4 h-4 text-gray-500 ml-auto" />
                                             </a>
@@ -7357,7 +7367,7 @@
                                                 </div>
                                                 <div>
                                                     <h4 className="font-medium text-white">{t('releases') || 'Releases'}</h4>
-                                                    <p className="text-sm text-gray-400">Download & Changelog</p>
+                                                    <p className="text-sm text-gray-400">{t('downloadChangelog') || 'Download & Changelog'}</p>
                                                 </div>
                                                 <Icons.ExternalLink className="w-4 h-4 text-gray-500 ml-auto" />
                                             </a>
@@ -7389,7 +7399,7 @@
                                                     {navigator.userAgent.includes('Chrome') ? 'Chrome' : 
                                                      navigator.userAgent.includes('Firefox') ? 'Firefox' :
                                                      navigator.userAgent.includes('Safari') ? 'Safari' :
-                                                     navigator.userAgent.includes('Edge') ? 'Edge' : 'Other'}
+                                                     navigator.userAgent.includes('Edge') ? 'Edge' : (t('otherBrowser') || 'Other')}
                                                 </p>
                                             </div>
                                         </div>
@@ -7407,7 +7417,7 @@
                                         </div>
                                         <h2 className="text-3xl font-bold text-white">PegaProx</h2>
                                         <p className="text-xl text-proxmox-orange mt-1">{PEGAPROX_VERSION}</p>
-                                        <p className="text-sm text-gray-400 mt-2">Multi-Cluster Proxmox Management</p>
+                                        <p className="text-sm text-gray-400 mt-2">{t('multiClusterProxmoxManagement') || 'Multi-Cluster Proxmox Management'}</p>
                                         <p className="text-xs text-gray-500 mt-1">Build 2026.02 • © 2025-2026 PegaProx Team</p>
                                     </div>
                                     
@@ -7423,21 +7433,21 @@
                                                     <span className="text-proxmox-orange font-bold">NS</span>
                                                 </div>
                                                 <h4 className="font-medium text-white">Nico Schmidt</h4>
-                                                <p className="text-sm text-gray-400">Lead Developer & Founder</p>
+                                                <p className="text-sm text-gray-400">{t('leadDeveloperFounder') || 'Lead Developer & Founder'}</p>
                                             </div>
                                             <div className="bg-proxmox-darker rounded-lg p-4 text-center">
                                                 <div className="w-12 h-12 rounded-full bg-blue-500/20 flex items-center justify-center mx-auto mb-2">
                                                     <span className="text-blue-400 font-bold">MK</span>
                                                 </div>
                                                 <h4 className="font-medium text-white">Marcus Kellermann</h4>
-                                                <p className="text-sm text-gray-400">Backend Developer</p>
+                                                <p className="text-sm text-gray-400">{t('backendDeveloper') || 'Backend Developer'}</p>
                                             </div>
                                             <div className="bg-proxmox-darker rounded-lg p-4 text-center">
                                                 <div className="w-12 h-12 rounded-full bg-pink-500/20 flex items-center justify-center mx-auto mb-2">
                                                     <span className="text-pink-400 font-bold">LW</span>
                                                 </div>
                                                 <h4 className="font-medium text-white">Laura Weber</h4>
-                                                <p className="text-sm text-gray-400">Frontend Developer</p>
+                                                <p className="text-sm text-gray-400">{t('frontendDeveloper') || 'Frontend Developer'}</p>
                                             </div>
                                         </div>
                                     </div>
@@ -7483,8 +7493,7 @@
                                                     <div>
                                                         <h4 className="font-medium text-white">ProxSnap by gyptazy</h4>
                                                         <p className="text-sm text-gray-400 mt-1">
-                                                            The snapshot overview feature was inspired by ProxSnap - a powerful CLI tool 
-                                                            for managing Proxmox snapshots. Thanks to gyptazy for the great contribution!
+                                                            {t('proxsnapCreditDesc') || 'The snapshot overview feature was inspired by ProxSnap - a powerful CLI tool for managing Proxmox snapshots. Thanks to gyptazy for the great contribution!'}
                                                         </p>
                                                         <a 
                                                             href="https://github.com/gyptazy/ProxSnap" 
@@ -7507,25 +7516,25 @@
                                                         <Icons.Globe className="w-6 h-6 text-yellow-400" />
                                                     </div>
                                                     <div>
-                                                        <h4 className="font-medium text-white">Community Translations</h4>
+                                                        <h4 className="font-medium text-white">{t('communityTranslations') || 'Community Translations'}</h4>
                                                         <p className="text-sm text-gray-400 mt-1">
-                                                            Thanks to community contributors for helping translate PegaProx into multiple languages.
+                                                            {t('communityTranslationsDesc') || 'Thanks to community contributors for helping translate PegaProx into multiple languages.'}
                                                         </p>
                                                         <div className="flex flex-wrap gap-2 mt-2 text-[12px]">
                                                             <a href="https://github.com/ColombianJoker" target="_blank" rel="noopener noreferrer"
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-proxmox-dark text-gray-300 hover:text-white transition-colors">
                                                                 <Icons.Github className="w-3 h-3" />
-                                                                <strong>ColombianJoker</strong> — Spanish (Latin America)
+                                                                <strong>ColombianJoker</strong> — {t('spanishLatinAmerica') || 'Spanish (Latin America)'}
                                                             </a>
                                                             <a href="https://github.com/IMNotMax" target="_blank" rel="noopener noreferrer"
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-proxmox-dark text-gray-300 hover:text-white transition-colors">
                                                                 <Icons.Github className="w-3 h-3" />
-                                                                <strong>IMNotMax</strong> — French
+                                                                <strong>IMNotMax</strong> — {t('french') || 'French'}
                                                             </a>
                                                             <a href="https://github.com/FernandoRD" target="_blank" rel="noopener noreferrer"
                                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-proxmox-dark text-gray-300 hover:text-white transition-colors">
                                                                 <Icons.Github className="w-3 h-3" />
-                                                                <strong>FernandoRD</strong> — Portuguese
+                                                                <strong>FernandoRD</strong> — {t('portuguese') || 'Portuguese'}
                                                             </a>
                                                         </div>
                                                     </div>
@@ -7536,19 +7545,19 @@
                                             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center text-sm">
                                                 <div className="bg-proxmox-darker rounded-lg p-3">
                                                     <p className="text-gray-400">Proxmox VE</p>
-                                                    <p className="text-white font-medium">API Integration</p>
+                                                    <p className="text-white font-medium">{t('apiIntegration') || 'API Integration'}</p>
                                                 </div>
                                                 <div className="bg-proxmox-darker rounded-lg p-3">
                                                     <p className="text-gray-400">noVNC</p>
-                                                    <p className="text-white font-medium">Console Access</p>
+                                                    <p className="text-white font-medium">{t('consoleAccess') || 'Console Access'}</p>
                                                 </div>
                                                 <div className="bg-proxmox-darker rounded-lg p-3">
                                                     <p className="text-gray-400">xterm.js</p>
-                                                    <p className="text-white font-medium">Terminal Emulator</p>
+                                                    <p className="text-white font-medium">{t('terminalEmulator') || 'Terminal Emulator'}</p>
                                                 </div>
                                                 <div className="bg-proxmox-darker rounded-lg p-3">
                                                     <p className="text-gray-400">React</p>
-                                                    <p className="text-white font-medium">UI Framework</p>
+                                                    <p className="text-white font-medium">{t('uiFramework') || 'UI Framework'}</p>
                                                 </div>
                                             </div>
                                         </div>
@@ -7574,12 +7583,12 @@
                                             <a href="https://docs.pegaprox.com" target="_blank" rel="noopener noreferrer"
                                                 className="flex items-center gap-2 p-3 bg-proxmox-darker rounded-lg hover:bg-proxmox-hover transition-colors">
                                                 <Icons.Book className="text-blue-400" />
-                                                <span className="text-sm text-gray-300">Documentation</span>
+                                                <span className="text-sm text-gray-300">{t('documentation') || 'Documentation'}</span>
                                             </a>
                                             <a href="mailto:sponsor@pegaprox.com"
                                                 className="flex items-center gap-2 p-3 bg-proxmox-darker rounded-lg hover:bg-proxmox-hover transition-colors">
                                                 <Icons.Heart className="text-pink-400" />
-                                                <span className="text-sm text-gray-300">Sponsor</span>
+                                                <span className="text-sm text-gray-300">{t('sponsor') || 'Sponsor'}</span>
                                             </a>
                                         </div>
                                         {/* LW Apr 2026: OpenCollective contribute button — prefer this over the mailto for recurring support */}
@@ -7587,9 +7596,9 @@
                                             <a href="https://opencollective.com/pegaprox"
                                                 target="_blank"
                                                 rel="noopener noreferrer"
-                                                title="Contribute on Open Collective">
+                                                title={t('contributeOpenCollective') || 'Contribute on Open Collective'}>
                                                 <img src="/images/oc_contribute_button.png"
-                                                    alt="Contribute to our Collective"
+                                                    alt={t('contributeCollectiveAlt') || 'Contribute to our Collective'}
                                                     className="h-9 w-auto hover:opacity-90 transition-opacity" />
                                             </a>
                                         </div>
@@ -7597,8 +7606,8 @@
 
                                     {/* License */}
                                     <div className="text-center text-sm text-gray-500 space-y-1">
-                                        <p>PegaProx is open source software licensed under the AGPL-3.0 License.</p>
-                                        <p>Made with ❤️ in Austria and Germany</p>
+                                        <p>{t('openSourceLicense') || 'PegaProx is open source software licensed under the AGPL-3.0 License.'}</p>
+                                        <p>{t('madeWithIn') || 'Made with ❤️ in Austria and Germany'}</p>
                                         <p>© 2025-2026 PegaProx Team</p>
                                     </div>
                                 </div>
