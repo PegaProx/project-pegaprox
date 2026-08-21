@@ -87,9 +87,9 @@
                         if (r?.ok) {
                             const d = await r.json();
                             if (d.filename === filename && d.results) {
-                                if (d.failed > 0) addToast(`Sync ${filename}: ${d.ok} ok, ${d.failed} failed`, 'error');
-                                else if (d.ok > 0) addToast(`Sync complete: ${filename} → ${d.ok} node(s)`, 'success');
-                                else addToast(`Sync ${filename}: already on all nodes`, 'success');
+                                if (d.failed > 0) addToast(`${t('syncLabel') || 'Sync'} ${filename}: OK: ${d.ok}, ${t('syncResultFailed') || 'failed'}: ${d.failed}`, 'error');
+                                else if (d.ok > 0) addToast(`${t('syncComplete') || 'Sync complete'}: ${filename} (${t('nodes') || 'Nodes'}: ${d.ok})`, 'success');
+                                else addToast(`${t('syncLabel') || 'Sync'} ${filename}: ${t('alreadyOnAllNodes') || 'already on all nodes'}`, 'success');
                                 setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
                                 refreshSyncStatus();
                                 return;
@@ -108,15 +108,15 @@
                         body: JSON.stringify({ source_node: sourceNode, storage, filename, content_type: syncContentType })
                     });
                     if (r?.ok) {
-                        addToast(`Syncing ${filename}...`, 'success');
+                        addToast(`${t('syncing') || 'Syncing'} ${filename}...`, 'success');
                         _pollSyncResult(filename);
                     } else {
                         const d = await r?.json().catch(() => ({}));
-                        addToast(d.error || `Sync failed for ${filename}`, 'error');
+                        addToast(d.error || `${t('syncFailed') || 'Sync failed for'} ${filename}`, 'error');
                         setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
                     }
                 } catch(e) {
-                    addToast(`Sync error: ${e.message}`, 'error');
+                    addToast(`${t('syncError') || 'Sync error'}: ${e.message}`, 'error');
                     setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
                 }
             };
@@ -133,10 +133,10 @@
                         setTimeout(refreshSyncStatus, 10000);
                     } else {
                         const d = await r?.json().catch(() => ({}));
-                        addToast(d.error || 'Sync all failed', 'error');
+                        addToast(d.error || t('syncAllFailed') || 'Sync all failed', 'error');
                     }
                 } catch(e) {
-                    addToast(`Sync error: ${e.message}`, 'error');
+                    addToast(`${t('syncError') || 'Sync error'}: ${e.message}`, 'error');
                 }
                 setTimeout(() => setSyncingFiles({}), 5000);
             };
