@@ -6968,14 +6968,14 @@
                                                                         <span className={`px-2 py-0.5 rounded text-xs ${
                                                                             osd.status === 'up' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                                                                         }`}>
-                                                                            {osd.status || 'unknown'}
+                                                                            {osd.status || t('unknown')}
                                                                         </span>
                                                                     </td>
                                                                     <td className="p-3">
                                                                         <span className={`px-2 py-0.5 rounded text-xs ${
                                                                             osd.in ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400'
                                                                         }`}>
-                                                                            {osd.in ? 'In' : 'Out'}
+                                                                            {osd.in ? t('cephOsdIn') : t('cephOsdOut')}
                                                                         </span>
                                                                     </td>
                                                                     <td className="p-3 text-gray-300">{osd.device_class || osd.class || '-'}</td>
@@ -7002,9 +7002,9 @@
                                                                                     }
                                                                                 }}
                                                                                 className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
-                                                                                title={osd.in ? 'Mark Out' : 'Mark In'}
+                                                                                title={osd.in ? t('cephMarkOsdOut') : t('cephMarkOsdIn')}
                                                                             >
-                                                                                {osd.in ? 'Out' : 'In'}
+                                                                                {osd.in ? t('cephOsdOut') : t('cephOsdIn')}
                                                                             </button>
                                                                             <button
                                                                                 onClick={async () => {
@@ -7022,7 +7022,7 @@
                                                                                 className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
                                                                                 title={t('scrub')}
                                                                             >
-                                                                                Scrub
+                                                                                {t('scrub')}
                                                                             </button>
                                                                         </div>
                                                                     </td>
@@ -7059,13 +7059,13 @@
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('host')}</th>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Address</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('address')}</th>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
                                                             {(!cephData.mon || cephData.mon.length === 0) ? (
-                                                                <tr><td colSpan="5" className="p-8 text-center text-gray-500">No monitors found</td></tr>
+                                                                <tr><td colSpan="5" className="p-8 text-center text-gray-500">{t('noCephMonitorsFound')}</td></tr>
                                                             ) : cephData.mon.map((mon, idx) => (
                                                                 <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                     <td className="p-3 font-medium">{mon.name}</td>
@@ -7074,14 +7074,14 @@
                                                                         <span className={`px-2 py-0.5 rounded text-xs ${
                                                                             mon.quorum !== false ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                                                                         }`}>
-                                                                            {mon.quorum !== false ? 'In Quorum' : 'Not in Quorum'}
+                                                                            {mon.quorum !== false ? t('inQuorum') : t('notInQuorum')}
                                                                         </span>
                                                                     </td>
                                                                     <td className="p-3 font-mono text-xs text-gray-300">{mon.addr || '-'}</td>
                                                                     <td className="p-3">
                                                                         <button
                                                                             onClick={async () => {
-                                                                                if (!confirm(`Delete monitor "${mon.name}"?`)) return;
+                                                                                if (!confirm(`${t('confirmDeleteCephMonitor')} "${mon.name}"?`)) return;
                                                                                 const host = mon.host || mon.name;
                                                                                 // MK May 2026 (#408 sibling): same silent-catch
                                                                                 // pattern as the pool-delete; surface outcome.
@@ -7092,10 +7092,10 @@
                                                                                         fetchCephData();
                                                                                     } else {
                                                                                         const err = await res.json().catch(() => ({}));
-                                                                                        addToast(err.error || `Failed to delete monitor (HTTP ${res?.status || '?'})`, 'error');
+                                                                                        addToast(err.error || `${t('failedDeleteCephMonitor')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                     }
                                                                                 } catch (e) {
-                                                                                    addToast(`Failed to delete monitor: ${e.message || e}`, 'error');
+                                                                                    addToast(`${t('failedDeleteCephMonitor')}: ${e.message || e}`, 'error');
                                                                                 }
                                                                             }}
                                                                             className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
@@ -7130,7 +7130,7 @@
                                                                     <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
                                                                     <th className="text-left p-3 text-sm text-gray-400">{t('host')}</th>
                                                                     <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
-                                                                    <th className="text-left p-3 text-sm text-gray-400">Address</th>
+                                                                    <th className="text-left p-3 text-sm text-gray-400">{t('address')}</th>
                                                                     <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                                 </tr>
                                                             </thead>
@@ -7141,14 +7141,18 @@
                                                                         <td className="p-3 text-gray-300">{mgr.host || mgr.name}</td>
                                                                         <td className="p-3">
                                                                             <span className={`px-2 py-0.5 rounded text-xs ${(mgr.state === 'active' || mgr.status === 'active') ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/20 text-gray-400'}`}>
-                                                                                {mgr.state || mgr.status || 'standby'}
+                                                                                {(mgr.state || mgr.status) === 'active'
+                                                                                    ? t('active')
+                                                                                    : (mgr.state || mgr.status) === 'standby'
+                                                                                        ? t('standby')
+                                                                                        : (mgr.state || mgr.status || t('standby'))}
                                                                             </span>
                                                                         </td>
                                                                         <td className="p-3 font-mono text-xs text-gray-300">{mgr.addr || '-'}</td>
                                                                         <td className="p-3">
                                                                             <button
                                                                                 onClick={async () => {
-                                                                                    if (!confirm(`Delete manager "${mgr.name}"?`)) return;
+                                                                                    if (!confirm(`${t('confirmDeleteCephManager')} "${mgr.name}"?`)) return;
                                                                                     const host = mgr.host || mgr.name;
                                                                                     try {
                                                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${host}/ceph/mgr/${mgr.name}`, { method: 'DELETE' });
@@ -7157,9 +7161,9 @@
                                                                                             fetchCephData();
                                                                                         } else {
                                                                                             const err = await res.json().catch(() => ({}));
-                                                                                            addToast(err.error || `Failed to delete manager (HTTP ${res?.status || '?'})`, 'error');
+                                                                                            addToast(err.error || `${t('failedDeleteCephManager')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                         }
-                                                                                    } catch (e) { addToast(`Failed to delete manager: ${e.message || e}`, 'error'); }
+                                                                                    } catch (e) { addToast(`${t('failedDeleteCephManager')}: ${e.message || e}`, 'error'); }
                                                                                 }}
                                                                                 className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
                                                                             >
@@ -7198,16 +7202,16 @@
                                                         <thead className="bg-proxmox-dark">
                                                             <tr>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Size</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Min Size</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">PGs</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">CRUSH Rule</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('size')}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('minSize')}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('pgs')}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('crushRule')}</th>
                                                                 <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
                                                             {(!cephData.pools || cephData.pools.length === 0) ? (
-                                                                <tr><td colSpan="6" className="p-8 text-center text-gray-500">No pools</td></tr>
+                                                                <tr><td colSpan="6" className="p-8 text-center text-gray-500">{t('cephNoPools')}</td></tr>
                                                             ) : cephData.pools.map((pool, idx) => (
                                                                 <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                     <td className="p-3 font-medium">{pool.pool_name || pool.name}</td>
@@ -7219,7 +7223,7 @@
                                                                         <button
                                                                             onClick={async () => {
                                                                                 const name = pool.pool_name || pool.name;
-                                                                                if (!confirm(`Delete pool "${name}"? This cannot be undone!`)) return;
+                                                                                if (!confirm(`${t('confirmDeleteCephPool')} "${name}"? ${t('cannotBeUndone')}`)) return;
                                                                                 // MK May 2026 (#408): silent catch swallowed PVE
                                                                                 // permission errors / 404s — reporter saw "no
                                                                                 // effect". Now surfaces the actual outcome.
@@ -7236,10 +7240,10 @@
                                                                                         fetchCephData();
                                                                                     } else {
                                                                                         const err = await res.json().catch(() => ({}));
-                                                                                        addToast(err.error || `Failed to delete pool (HTTP ${res?.status || '?'})`, 'error');
+                                                                                        addToast(err.error || `${t('failedDeleteCephPool')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                     }
                                                                                 } catch (e) {
-                                                                                    addToast(`Failed to delete pool: ${e.message || e}`, 'error');
+                                                                                    addToast(`${t('failedDeleteCephPool')}: ${e.message || e}`, 'error');
                                                                                 }
                                                                             }}
                                                                             className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
@@ -7280,7 +7284,7 @@
                                                     </div>
                                                 </div>
                                                 {(!cephData.fs || cephData.fs.length === 0) ? (
-                                                    <div className="p-8 text-center text-gray-500">No CephFS filesystems configured</div>
+                                                    <div className="p-8 text-center text-gray-500">{t('cephNoFilesystems')}</div>
                                                 ) : (
                                                     <div className="divide-y divide-proxmox-border">
                                                         {cephData.fs.map((fs, idx) => (
@@ -7289,17 +7293,17 @@
                                                                     <div>
                                                                         <div className="font-medium">{fs.name}</div>
                                                                         <div className="text-sm text-gray-400 mt-1">
-                                                                            Metadata Pool: {fs.metadata_pool || '-'} | Data Pools: {(fs.data_pools || []).join(', ') || '-'}
+                                                                            {t('metadataPool')}: {fs.metadata_pool || '-'} | {t('dataPools')}: {(fs.data_pools || []).join(', ') || '-'}
                                                                         </div>
                                                                     </div>
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if (!confirm(`Delete CephFS "${fs.name}"? This will destroy all data!`)) return;
+                                                                            if (!confirm(`${t('confirmDeleteCephFs')} "${fs.name}"? ${t('cephFsDestroyDataWarning')}`)) return;
                                                                             // MK May 2026 (#408 family): destructive DELETE with silent catch.
                                                                             // NS 2026-07-17: send confirm_name (empty DELETE 400'd) + always
                                                                             // remove the storage entry; ask separately before nuking the
                                                                             // underlying data/metadata pools (otherwise they orphan).
-                                                                            const rmPools = confirm(`Also delete the underlying data + metadata pools for "${fs.name}"?\n\nOK = permanently delete all pool data.\nCancel = keep the pools (you can remove them later).`);
+                                                                            const rmPools = confirm(`${t('cephFsDeletePoolsPrompt')} "${fs.name}"?\n\n${t('cephFsDeletePoolsOk')}\n${t('cephFsDeletePoolsCancel')}`);
                                                                             const q = rmPools ? '?remove_storages=1&remove_pools=1' : '?remove_storages=1';
                                                                             try {
                                                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/fs/${fs.name}${q}`, {
@@ -7308,14 +7312,14 @@
                                                                                     body: JSON.stringify({ confirm_name: fs.name })
                                                                                 });
                                                                                 if (res?.ok) {
-                                                                                    addToast(`CephFS "${fs.name}" deleted`, 'success');
+                                                                                    addToast(`${t('cephFsDeleted')} "${fs.name}"`, 'success');
                                                                                     fetchCephData();
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to delete CephFS (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('failedDeleteCephFs')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
                                                                             } catch (e) {
-                                                                                addToast(`Failed to delete CephFS: ${e.message || e}`, 'error');
+                                                                                addToast(`${t('failedDeleteCephFs')}: ${e.message || e}`, 'error');
                                                                             }
                                                                         }}
                                                                         className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
@@ -7339,19 +7343,19 @@
                                                                 <div key={idx} className="p-4 flex justify-between items-center">
                                                                     <div>
                                                                         <span className="font-medium">{mds.name}</span>
-                                                                        <span className="text-gray-400 ml-2">on {mds.host || '-'}</span>
+                                                                        <span className="text-gray-400 ml-2">{t('onHost')} {mds.host || '-'}</span>
                                                                     </div>
                                                                     <span className={`px-2 py-0.5 rounded text-xs ${
                                                                         mds.state === 'up:active' ? 'bg-green-500/20 text-green-400' :
                                                                         mds.state?.includes('up') ? 'bg-yellow-500/20 text-yellow-400' :
                                                                         'bg-gray-600/20 text-gray-400'
                                                                     }`}>
-                                                                        {mds.state || mds.status || 'unknown'}
+                                                                        {mds.state || mds.status || t('unknown')}
                                                                     </span>
                                                                 </div>
                                                             ))}
                                                             {(!cephData.mds?.data || cephData.mds.data.length === 0) && (
-                                                                <div className="p-4 text-center text-gray-500 text-sm">No MDS daemons</div>
+                                                                <div className="p-4 text-center text-gray-500 text-sm">{t('cephNoMdsDaemons')}</div>
                                                             )}
                                                         </div>
                                                     </div>
@@ -7381,12 +7385,12 @@
 
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             {mirrorImages.length === 0 ? (
-                                                                <div className="p-8 text-center text-gray-500">No images in this pool</div>
+                                                                <div className="p-8 text-center text-gray-500">{t('cephMirrorNoImages')}</div>
                                                             ) : (
                                                                 <table className="w-full text-sm">
                                                                     <thead>
                                                                         <tr className="border-b border-proxmox-border text-left text-gray-400">
-                                                                            <th className="p-3">Image</th>
+                                                                            <th className="p-3">{t('cephMirrorImage')}</th>
                                                                             <th className="p-3">{t('status')}</th>
                                                                             <th className="p-3">{t('cephMirrorMode') || 'Mode'}</th>
                                                                             <th className="p-3">{t('cephMirrorSyncStatus') || 'Sync'}</th>
@@ -7409,7 +7413,7 @@
                                                                                     <td className="p-3 font-medium">{img.name}</td>
                                                                                     <td className="p-3">
                                                                                         <span className={`px-2 py-0.5 rounded text-xs ${isPrimary ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-600/20 text-gray-400'}`}>
-                                                                                            {isPrimary ? 'primary' : state}
+                                                                                            {isPrimary ? t('primary') : (state === 'unknown' ? t('unknown') : state)}
                                                                                         </span>
                                                                                     </td>
                                                                                     <td className="p-3 text-gray-400">{m.mode || '-'}</td>
@@ -7438,7 +7442,7 @@
                                                                                                     >{t('cephMirrorPromote') || 'Promote'}</button>
                                                                                                     <button
                                                                                                         onClick={async () => {
-                                                                                                            if (!confirm(`Demote ${img.name}?`)) return;
+                                                                                                            if (!confirm(`${t('cephMirrorConfirmDemote')} ${img.name}?`)) return;
                                                                                                             try {
                                                                                                                 await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/demote`, { method: 'POST' });
                                                                                                                 fetchMirrorImages(mirrorPoolDetail);
@@ -7448,7 +7452,7 @@
                                                                                                     >{t('cephMirrorDemote') || 'Demote'}</button>
                                                                                                     <button
                                                                                                         onClick={async () => {
-                                                                                                            if (!confirm(`Resync ${img.name}? This will re-mirror from remote.`)) return;
+                                                                                                            if (!confirm(`${t('cephMirrorConfirmResync')} ${img.name}? ${t('cephMirrorResyncWarning')}`)) return;
                                                                                                             try {
                                                                                                                 await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/resync`, { method: 'POST' });
                                                                                                                 fetchMirrorImages(mirrorPoolDetail);
@@ -7458,7 +7462,7 @@
                                                                                                     >{t('cephMirrorResync') || 'Resync'}</button>
                                                                                                     <button
                                                                                                         onClick={async () => {
-                                                                                                            if (!confirm(`Disable mirroring for ${img.name}?`)) return;
+                                                                                                            if (!confirm(`${t('cephMirrorConfirmDisableImage')} ${img.name}?`)) return;
                                                                                                             try {
                                                                                                                 await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/disable`, { method: 'POST' });
                                                                                                                 fetchMirrorImages(mirrorPoolDetail);
@@ -7492,7 +7496,7 @@
                                                                         </button>
                                                                     </div>
                                                                     <div className="p-4 text-sm text-gray-400">
-                                                                        Schedules are managed per pool. Use the button above to add a snapshot schedule.
+                                                                        {t('cephMirrorSchedulesHint')}
                                                                     </div>
                                                                 </div>
                                                             );
@@ -7552,7 +7556,7 @@
                                                                                                     <span className="text-xs">{peer.site_name || peer.uuid?.slice(0,8) || '?'}</span>
                                                                                                     {pool.mode !== 'disabled' && (
                                                                                                         <button onClick={async () => {
-                                                                                                            if (!confirm(`Remove peer ${peer.site_name || peer.uuid}?`)) return;
+                                                                                                            if (!confirm(`${t('cephMirrorConfirmRemovePeer')} ${peer.site_name || peer.uuid}?`)) return;
                                                                                                             try {
                                                                                                                 await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool.name}/peer/${peer.uuid}`, { method: 'DELETE' });
                                                                                                                 fetchMirrorData();
@@ -7594,7 +7598,7 @@
                                                                                                     {t('cephMirrorAddPeer') || 'Add Peer'}
                                                                                                 </button>
                                                                                                 <button onClick={async () => {
-                                                                                                    if (!confirm(`Disable mirroring on pool "${pool.name}"?`)) return;
+                                                                                                    if (!confirm(`${t('cephMirrorConfirmDisablePool')} "${pool.name}"?`)) return;
                                                                                                     try {
                                                                                                         await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool.name}/disable`, { method: 'POST' });
                                                                                                         fetchMirrorData();
@@ -7636,7 +7640,7 @@
                                                                         </label>
                                                                     </div>
                                                                     <p className="text-xs text-gray-500 mt-2">
-                                                                        {mirrorForm.mode === 'pool' ? 'All images in the pool will be mirrored automatically.' : 'You can enable mirroring per image after enabling pool-level image mode.'}
+                                                                        {mirrorForm.mode === 'pool' ? t('cephMirrorModePoolHint') : t('cephMirrorModeImageHint')}
                                                                     </p>
                                                                 </div>
                                                             </div>
@@ -7667,7 +7671,7 @@
                                                             </div>
                                                             <div className="p-4 space-y-4">
                                                                 <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">Client</label>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorClient')}</label>
                                                                     <input type="text" value={mirrorForm.client} onChange={e => setMirrorForm(f => ({...f, client: e.target.value}))}
                                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="client.admin" />
                                                                 </div>
@@ -7677,10 +7681,10 @@
                                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="remote-site" />
                                                                 </div>
                                                                 <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">Monitor Hosts</label>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorMonitorHosts')}</label>
                                                                     <input type="text" value={mirrorForm.mon_host} onChange={e => setMirrorForm(f => ({...f, mon_host: e.target.value}))}
-                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="10.0.0.1,10.0.0.2 (optional)" />
-                                                                    <p className="text-xs text-gray-500 mt-1">Comma-separated list of monitor addresses</p>
+                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder={t('cephMirrorMonitorHostsPlaceholder')} />
+                                                                    <p className="text-xs text-gray-500 mt-1">{t('cephMirrorMonitorHostsHint')}</p>
                                                                 </div>
                                                             </div>
                                                             <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
@@ -7714,11 +7718,11 @@
                                                                     <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorInterval') || 'Interval'}</label>
                                                                     <select value={mirrorForm.interval} onChange={e => setMirrorForm(f => ({...f, interval: e.target.value}))}
                                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm">
-                                                                        <option value="5m">5 minutes</option>
-                                                                        <option value="15m">15 minutes</option>
-                                                                        <option value="1h">1 hour</option>
-                                                                        <option value="4h">4 hours</option>
-                                                                        <option value="1d">1 day</option>
+                                                                        <option value="5m">{t('cephMirrorSchedule5m')}</option>
+                                                                        <option value="15m">{t('cephMirrorSchedule15m')}</option>
+                                                                        <option value="1h">{t('cephMirrorSchedule1h')}</option>
+                                                                        <option value="4h">{t('cephMirrorSchedule4h')}</option>
+                                                                        <option value="1d">{t('cephMirrorSchedule1d')}</option>
                                                                     </select>
                                                                 </div>
                                                             </div>
@@ -7748,7 +7752,7 @@
                                                                 <h3 className="font-semibold">{t('cephMirrorPromote') || 'Promote'}: {mirrorForm.image}</h3>
                                                             </div>
                                                             <div className="p-4 space-y-4">
-                                                                <p className="text-sm text-yellow-400">Promoting makes this the primary copy. The remote will need to be demoted first (or use force).</p>
+                                                                <p className="text-sm text-yellow-400">{t('cephMirrorPromoteHint')}</p>
                                                                 <label className="flex items-center gap-2 cursor-pointer">
                                                                     <input type="checkbox" checked={mirrorForm.force} onChange={e => setMirrorForm(f => ({...f, force: e.target.checked}))} className="rounded" />
                                                                     <span className="text-sm text-red-400">{t('cephMirrorForcePromote') || 'Force promote (may cause data loss!)'}</span>
@@ -7784,25 +7788,25 @@
                                                     <div className="p-4 space-y-4">
                                                         <div>
                                                             <label className="text-sm text-gray-400 mb-1 block">{t('name')}</label>
-                                                            <input type="text" value={newPool.name} onChange={e => setNewPool(p => ({...p, name: e.target.value}))} placeholder="e.g. mypool" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2" />
+                                                            <input type="text" value={newPool.name} onChange={e => setNewPool(p => ({...p, name: e.target.value}))} placeholder={t('cephPoolNamePlaceholder')} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2" />
                                                         </div>
                                                         <div className="grid grid-cols-3 gap-4">
                                                             <div>
-                                                                <label className="text-sm text-gray-400 mb-1 block">Size</label>
+                                                                <label className="text-sm text-gray-400 mb-1 block">{t('size')}</label>
                                                                 <input type="number" min="1" max="7" value={newPool.size} onChange={e => setNewPool(p => ({...p, size: parseInt(e.target.value)}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2" />
                                                             </div>
                                                             <div>
-                                                                <label className="text-sm text-gray-400 mb-1 block">Min Size</label>
+                                                                <label className="text-sm text-gray-400 mb-1 block">{t('minSize')}</label>
                                                                 <input type="number" min="1" max="7" value={newPool.min_size} onChange={e => setNewPool(p => ({...p, min_size: parseInt(e.target.value)}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2" />
                                                             </div>
                                                             <div>
-                                                                <label className="text-sm text-gray-400 mb-1 block">PGs</label>
+                                                                <label className="text-sm text-gray-400 mb-1 block">{t('pgs')}</label>
                                                                 <select value={newPool.pg_num} onChange={e => setNewPool(p => ({...p, pg_num: parseInt(e.target.value)}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
                                                                     {[8,16,32,64,128,256,512,1024].map(n => <option key={n} value={n}>{n}</option>)}
                                                                 </select>
                                                             </div>
                                                         </div>
-                                                        {cephNode && <div className="text-xs text-gray-500">Creating on node: {cephNode}</div>}
+                                                        {cephNode && <div className="text-xs text-gray-500">{t('cephCreatingOnNode')}: {cephNode}</div>}
                                                     </div>
                                                     <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
                                                         <button onClick={() => setShowCreatePool(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
@@ -7816,17 +7820,17 @@
                                                                         body: JSON.stringify(newPool)
                                                                     });
                                                                     if (res?.ok) {
-                                                                        addToast(`Pool "${newPool.name}" created`, 'success');
+                                                                        addToast(`${t('cephPoolCreated')} "${newPool.name}"`, 'success');
                                                                         setShowCreatePool(false);
                                                                         setNewPool({ name: '', size: 3, min_size: 2, pg_num: 128 });
                                                                         fetchCephData();
                                                                     } else {
                                                                         const err = await res.json().catch(() => ({}));
-                                                                        addToast(err.error || `Failed to create pool (HTTP ${res?.status || '?'})`, 'error');
+                                                                        addToast(err.error || `${t('failedCreateCephPool')} (HTTP ${res?.status || '?'})`, 'error');
                                                                     }
                                                                     // MK May 2026 (#408 family): was silent on error.
                                                                 } catch (e) {
-                                                                    addToast(`Failed to create pool: ${e.message || e}`, 'error');
+                                                                    addToast(`${t('failedCreateCephPool')}: ${e.message || e}`, 'error');
                                                                 }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
@@ -7875,10 +7879,10 @@
                                                                         fetchCephData();
                                                                     } else {
                                                                         const err = await res.json().catch(() => ({}));
-                                                                        addToast(err.error || `Failed to create monitor (HTTP ${res?.status || '?'})`, 'error');
+                                                                        addToast(err.error || `${t('failedCreateCephMonitor')} (HTTP ${res?.status || '?'})`, 'error');
                                                                     }
                                                                 } catch (e) {
-                                                                    addToast(`Failed to create monitor: ${e.message || e}`, 'error');
+                                                                    addToast(`${t('failedCreateCephMonitor')}: ${e.message || e}`, 'error');
                                                                 }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
@@ -7913,7 +7917,7 @@
                                                                     <option value="">{t('cephSelectDisk') || 'Select a disk…'}</option>
                                                                     {(nodeDisks || []).map(d => {
                                                                         const gb = d.size ? `${(d.size / 1e9).toFixed(0)} GB` : '';
-                                                                        const busy = d.used ? ` — in use: ${d.used}` : (d.osdid >= 0 ? ` — osd.${d.osdid}` : '');
+                                                                        const busy = d.used ? ` — ${t('inUse')}: ${d.used}` : (d.osdid >= 0 ? ` — osd.${d.osdid}` : '');
                                                                         return <option key={d.devpath} value={d.devpath} disabled={!!d.used || d.osdid >= 0}>{d.devpath} {gb} {d.type || ''}{busy}</option>;
                                                                     })}
                                                                 </select>
@@ -7925,16 +7929,16 @@
                                                         <button onClick={() => setShowCreateOsd(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
                                                         <button
                                                             onClick={async () => {
-                                                                if (!osdForm.node || !osdForm.dev) { addToast(t('cephSelectDisk') || 'Select a node and disk', 'error'); return; }
-                                                                if (!confirm(`Create OSD on ${osdForm.node}:${osdForm.dev}? This ERASES the disk.`)) return;
+                                                                if (!osdForm.node || !osdForm.dev) { addToast(t('cephSelectNodeAndDisk'), 'error'); return; }
+                                                                if (!confirm(`${t('confirmCreateCephOsd')} ${osdForm.node}:${osdForm.dev}? ${t('cephOsdEraseWarning')}`)) return;
                                                                 try {
                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${osdForm.node}/ceph/osd`, {
                                                                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                                                                         body: JSON.stringify({ dev: osdForm.dev })
                                                                     });
                                                                     if (res?.ok) { addToast(t('cephOsdCreated') || `OSD created on ${osdForm.dev}`, 'success'); setShowCreateOsd(false); fetchCephData(); }
-                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create OSD (HTTP ${res?.status || '?'})`, 'error'); }
-                                                                } catch (e) { addToast(`Failed to create OSD: ${e.message || e}`, 'error'); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephOsd')} (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`${t('failedCreateCephOsd')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                         >{t('create') || 'Create'}</button>
@@ -7966,8 +7970,8 @@
                                                                 try {
                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/mgr/${cephNode}`, { method: 'POST' });
                                                                     if (res?.ok) { addToast(t('cephMgrCreated') || `Manager created on ${cephNode}`, 'success'); setShowCreateMgr(false); fetchCephData(); }
-                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create manager (HTTP ${res?.status || '?'})`, 'error'); }
-                                                                } catch (e) { addToast(`Failed to create manager: ${e.message || e}`, 'error'); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephManager')} (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`${t('failedCreateCephManager')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                         >{t('create') || 'Create'}</button>
@@ -8000,8 +8004,8 @@
                                                                 try {
                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/mds/${cephNode}`, { method: 'POST' });
                                                                     if (res?.ok) { addToast(t('cephMdsCreated') || `MDS created on ${cephNode}`, 'success'); setShowCreateMds(false); fetchCephData(); }
-                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create MDS (HTTP ${res?.status || '?'})`, 'error'); }
-                                                                } catch (e) { addToast(`Failed to create MDS: ${e.message || e}`, 'error'); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephMds')} (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`${t('failedCreateCephMds')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                         >{t('create') || 'Create'}</button>
@@ -8020,10 +8024,10 @@
                                                     <div className="p-4 space-y-4">
                                                         <div>
                                                             <label className="text-sm text-gray-400 mb-1 block">{t('name')}</label>
-                                                            <input type="text" value={newFs.name} onChange={e => setNewFs(f => ({ ...f, name: e.target.value }))} placeholder="e.g. cephfs" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2" />
+                                                            <input type="text" value={newFs.name} onChange={e => setNewFs(f => ({ ...f, name: e.target.value }))} placeholder={t('cephFsNamePlaceholder')} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2" />
                                                         </div>
                                                         <div>
-                                                            <label className="text-sm text-gray-400 mb-1 block">PGs</label>
+                                                            <label className="text-sm text-gray-400 mb-1 block">{t('pgs')}</label>
                                                             <select value={newFs.pg_num} onChange={e => setNewFs(f => ({ ...f, pg_num: parseInt(e.target.value) }))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
                                                                 {[8, 16, 32, 64, 128, 256].map(n => <option key={n} value={n}>{n}</option>)}
                                                             </select>
@@ -8045,8 +8049,8 @@
                                                                         body: JSON.stringify({ name: newFs.name, 'add-storage': newFs.add_storage ? 1 : 0, pg_num: newFs.pg_num })
                                                                     });
                                                                     if (res?.ok) { addToast(t('cephFsCreated') || `CephFS "${newFs.name}" created`, 'success'); setShowCreateFs(false); fetchCephData(); }
-                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `Failed to create CephFS (HTTP ${res?.status || '?'})`, 'error'); }
-                                                                } catch (e) { addToast(`Failed to create CephFS: ${e.message || e}`, 'error'); }
+                                                                    else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephFs')} (HTTP ${res?.status || '?'})`, 'error'); }
+                                                                } catch (e) { addToast(`${t('failedCreateCephFs')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                         >{t('create') || 'Create'}</button>

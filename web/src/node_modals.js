@@ -65,7 +65,7 @@
                 if (!_flushAuth(authData)) {
                     pendingCredsRef.current = authData;
                     if (termRef.current) {
-                        termRef.current.write('\r\n\x1b[33mWarte auf WebSocket-Verbindung...\x1b[0m\r\n');
+                        termRef.current.write(`\r\n\x1b[33m${t('waitingForWebSocket') || 'Waiting for WebSocket connection...'}\x1b[0m\r\n`);
                     }
                     setStatus('connecting');
                     setShowLogin(false);
@@ -273,7 +273,7 @@
                                             setStatus('login');
                                             return;
                                         } else if (msg.status === 'connecting') {
-                                            term.write('SSH Verbindung wird aufgebaut...\r\n');
+                                            term.write(`${t('sshConnecting') || 'Establishing SSH connection...'}\r\n`);
                                             return;
                                         } else if (msg.status === 'connected') {
                                             setStatus('connected');
@@ -346,9 +346,9 @@
                                 // Different messages based on close code
                                 let msg = t('connectionClosed') || 'Connection closed';
                                 if (event.code === 1006) {
-                                    msg = 'Verbindung unerwartet getrennt';
+                                    msg = t('connectionUnexpectedlyClosed') || 'Connection unexpectedly closed';
                                 } else if (event.code === 1011) {
-                                    msg = 'Server-Fehler';
+                                    msg = t('serverError') || 'Server error';
                                 } else if (event.reason) {
                                     msg = event.reason;
                                 }
@@ -431,7 +431,7 @@
                                         value={credentials.host || nodeInfo.ip || ''}
                                         onChange={(e) => setCredentials({...credentials, host: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:border-proxmox-orange focus:outline-none font-mono"
-                                        placeholder="192.168.1.100 oder hostname"
+                                        placeholder={t('hostIpPlaceholder') || '192.168.1.100 or hostname'}
                                     />
                                 </div>
                                 
@@ -489,8 +489,8 @@
                                         <>
                                             <div>
                                                 <label className="block text-gray-400 text-sm mb-1">
-                                                    Private Key
-                                                    <span className="text-gray-500 ml-1 text-xs">(id_rsa, id_ed25519, etc.)</span>
+                                                    {t('privateKey') || 'Private Key'}
+                                                    <span className="text-gray-500 ml-1 text-xs">{t('privateKeyExamples') || '(id_rsa, id_ed25519, etc.)'}</span>
                                                 </label>
                                                 
                                                 {/* File upload area */}
@@ -699,9 +699,9 @@
                                 throw new Error(e.error || `HTTP ${r.status}`);
                             }
                             termInfo = await r.json();
-                            if (!termInfo.success) throw new Error(termInfo.error || 'termproxy failed');
+                            if (!termInfo.success) throw new Error(termInfo.error || (t('termproxyFailed') || 'termproxy failed'));
                         } catch (e) {
-                            term.write(`\r\n\x1b[31mFailed to get termproxy ticket: ${e.message}\x1b[0m\r\n`);
+                            term.write(`\r\n\x1b[31m${t('termproxyTicketFailed') || 'Failed to get termproxy ticket'}: ${e.message}\x1b[0m\r\n`);
                             setStatus('error');
                             return;
                         }
@@ -761,7 +761,7 @@
                                         return;
                                     }
                                     if (msg.status === 'error') {
-                                        term.write(`\r\n\x1b[31m${msg.message || 'Error'}\x1b[0m\r\n`);
+                                        term.write(`\r\n\x1b[31m${msg.message || (t('error') || 'Error')}\x1b[0m\r\n`);
                                         setStatus('error');
                                         return;
                                     }
@@ -775,7 +775,7 @@
                         ws.onerror = (ev) => {
                             if (cleanup) return;
                             console.error('[term] ws error:', ev);
-                            term.write('\r\n\x1b[31mWebSocket error\x1b[0m\r\n');
+                            term.write(`\r\n\x1b[31m${t('webSocketError') || 'WebSocket error'}\x1b[0m\r\n`);
                             setStatus('error');
                         };
                         ws.onclose = (ev) => {
@@ -785,9 +785,9 @@
                             // require pulling browser devtools open every time.
                             const code = ev && ev.code ? ev.code : '?';
                             const reason = ev && ev.reason ? ` — ${ev.reason}` : '';
-                            term.write(`\r\n\x1b[33mSession ended (code ${code}${reason})\x1b[0m\r\n`);
+                            term.write(`\r\n\x1b[33m${t('sessionEnded') || 'Session ended'} (code ${code}${reason})\x1b[0m\r\n`);
                             if (code === 1006) {
-                                term.write('\x1b[90m  → 1006 = abnormal closure. Likely route mismatch, untrusted cert, or backend exception.\x1b[0m\r\n');
+                                term.write(`\x1b[90m  → ${t('abnormalClosureHint') || '1006 = abnormal closure. Likely route mismatch, untrusted cert, or backend exception.'}\x1b[0m\r\n`);
                             }
                             setStatus('disconnected');
                         };
@@ -921,7 +921,7 @@
                                     SMART — {disk.devpath}
                                 </h3>
                                 <div className="text-xs text-gray-500 mt-1">
-                                    {disk.model || 'Unknown model'}{disk.size ? ` · ${formatBytes(disk.size)}` : ''}{disk.serial ? ` · S/N ${disk.serial}` : ''}
+                                    {disk.model || (t('unknownModel') || 'Unknown model')}{disk.size ? ` · ${formatBytes(disk.size)}` : ''}{disk.serial ? ` · S/N ${disk.serial}` : ''}
                                 </div>
                             </div>
                             <button onClick={onClose} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
@@ -955,25 +955,25 @@
                                         <table className="w-full text-sm">
                                             <tbody>
                                                 {data.critical_warning !== undefined && (
-                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400 w-1/3">Critical warning</td><td className="p-2 font-mono">{data.critical_warning}</td></tr>
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400 w-1/3">{t('criticalWarning') || 'Critical warning'}</td><td className="p-2 font-mono">{data.critical_warning}</td></tr>
                                                 )}
                                                 {data.temperature !== undefined && (
-                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Temperature</td><td className="p-2 font-mono">{data.temperature} °C</td></tr>
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">{t('temperature') || 'Temperature'}</td><td className="p-2 font-mono">{data.temperature} °C</td></tr>
                                                 )}
                                                 {data.percentage_used !== undefined && (
-                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Wear used</td><td className="p-2 font-mono">{data.percentage_used}%</td></tr>
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">{t('wearUsed') || 'Wear used'}</td><td className="p-2 font-mono">{data.percentage_used}%</td></tr>
                                                 )}
                                                 {data.power_on_hours !== undefined && (
-                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Power-on hours</td><td className="p-2 font-mono">{data.power_on_hours} h</td></tr>
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">{t('powerOnHours') || 'Power-on hours'}</td><td className="p-2 font-mono">{data.power_on_hours} h</td></tr>
                                                 )}
                                                 {data.power_cycles !== undefined && (
-                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Power cycles</td><td className="p-2 font-mono">{data.power_cycles}</td></tr>
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">{t('powerCycles') || 'Power cycles'}</td><td className="p-2 font-mono">{data.power_cycles}</td></tr>
                                                 )}
                                                 {data.unsafe_shutdowns !== undefined && (
-                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Unsafe shutdowns</td><td className="p-2 font-mono">{data.unsafe_shutdowns}</td></tr>
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">{t('unsafeShutdowns') || 'Unsafe shutdowns'}</td><td className="p-2 font-mono">{data.unsafe_shutdowns}</td></tr>
                                                 )}
                                                 {data.media_errors !== undefined && (
-                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Media errors</td><td className="p-2 font-mono" style={{color: data.media_errors > 0 ? '#f87171' : ''}}>{data.media_errors}</td></tr>
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">{t('mediaErrors') || 'Media errors'}</td><td className="p-2 font-mono" style={{color: data.media_errors > 0 ? '#f87171' : ''}}>{data.media_errors}</td></tr>
                                                 )}
                                             </tbody>
                                         </table>
@@ -1000,7 +1000,7 @@
                                     )}
 
                                     <details className="text-xs">
-                                        <summary className="cursor-pointer text-gray-500 hover:text-gray-300">Raw JSON</summary>
+                                        <summary className="cursor-pointer text-gray-500 hover:text-gray-300">{t('rawJson') || 'Raw JSON'}</summary>
                                         <pre className="mt-2 bg-proxmox-dark p-3 rounded overflow-x-auto text-gray-400">{JSON.stringify(data, null, 2)}</pre>
                                     </details>
                                 </>
@@ -1017,12 +1017,12 @@
                     <thead className="bg-proxmox-dark text-xs text-gray-400">
                         <tr>
                             <th className="text-left p-2">ID</th>
-                            <th className="text-left p-2">Attribute</th>
-                            <th className="text-right p-2">Value</th>
-                            <th className="text-right p-2">Worst</th>
-                            <th className="text-right p-2">Thresh</th>
-                            <th className="text-left p-2">Raw</th>
-                            <th className="text-left p-2">Flag</th>
+                            <th className="text-left p-2">{t('attribute') || 'Attribute'}</th>
+                            <th className="text-right p-2">{t('value') || 'Value'}</th>
+                            <th className="text-right p-2">{t('worst') || 'Worst'}</th>
+                            <th className="text-right p-2">{t('threshold') || 'Thresh'}</th>
+                            <th className="text-left p-2">{t('raw') || 'Raw'}</th>
+                            <th className="text-left p-2">{t('flag') || 'Flag'}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1081,25 +1081,25 @@
 
             // LW: XCP-ng doesn't have Ceph, repos differ, subscription not applicable
             const tabs = isXcpng ? [
-                { id: 'summary', label: 'Summary', icon: Icons.Activity },
-                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
-                { id: 'shell', label: 'Shell', icon: Icons.Terminal },
-                { id: 'network', label: 'Network', icon: Icons.Network },
-                { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'summary', label: t('summary') || 'Summary', icon: Icons.Activity },
+                { id: 'performance', label: t('performance') || 'Performance', icon: Icons.BarChart },
+                { id: 'shell', label: t('shell') || 'Shell', icon: Icons.Terminal },
+                { id: 'network', label: t('network') || 'Network', icon: Icons.Network },
+                { id: 'system', label: t('system') || 'System', icon: Icons.Cog },
                 { id: 'disks', label: t('storageRepos') || 'Storage', icon: Icons.HardDrive },
-                { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                { id: 'tasks', label: t('tasks') || 'Tasks', icon: Icons.Play },
             ] : [
-                { id: 'summary', label: 'Summary', icon: Icons.Activity },
-                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
-                { id: 'shell', label: 'Shell', icon: Icons.Terminal },
-                { id: 'network', label: 'Network', icon: Icons.Network },
-                { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'summary', label: t('summary') || 'Summary', icon: Icons.Activity },
+                { id: 'performance', label: t('performance') || 'Performance', icon: Icons.BarChart },
+                { id: 'shell', label: t('shell') || 'Shell', icon: Icons.Terminal },
+                { id: 'network', label: t('network') || 'Network', icon: Icons.Network },
+                { id: 'system', label: t('system') || 'System', icon: Icons.Cog },
                 { id: 'hardware', label: t('hardware') || 'Hardware', icon: Icons.Cpu },
-                { id: 'disks', label: 'Disks', icon: Icons.HardDrive },
-                { id: 'repos', label: 'Repositories', icon: Icons.Package },
-                { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                { id: 'disks', label: t('disks') || 'Disks', icon: Icons.HardDrive },
+                { id: 'repos', label: t('repositories') || 'Repositories', icon: Icons.Package },
+                { id: 'tasks', label: t('tasks') || 'Tasks', icon: Icons.Play },
                 { id: 'subscription', label: t('subscription') || 'Subscription', icon: Icons.Shield },
-                { id: 'ceph', label: 'Ceph', icon: Icons.Database },
+                { id: 'ceph', label: t('ceph') || 'Ceph', icon: Icons.Database },
             ];
 
             useEffect(() => { loadTabData(activeTab); }, [activeTab, perfTimeframe]);
@@ -1228,7 +1228,7 @@
                 
                 if (type === 'lvm') {
                     if (!diskForm.device || !diskForm.name) {
-                        addToast('Device and name required', 'error');
+                        addToast(t('deviceAndNameRequired') || 'Device and name required', 'error');
                         return;
                     }
                     endpoint = 'disks/lvm';
@@ -1236,14 +1236,14 @@
                 } else if (type === 'lvmthin') {
                     // NS: For LVM-thin, device = VG name where thin pool is created
                     if (!diskForm.vgname || !diskForm.name) {
-                        addToast('Volume group and pool name required', 'error');
+                        addToast(t('volumeGroupAndPoolNameRequired') || 'Volume group and pool name required', 'error');
                         return;
                     }
                     endpoint = 'disks/lvmthin';
                     body = { device: diskForm.vgname, name: diskForm.name, add_storage: diskForm.add_storage };
                 } else if (type === 'zfs') {
                     if (diskForm.devices.length === 0 || !diskForm.name) {
-                        addToast('Device(s) and name required', 'error');
+                        addToast(t('devicesAndNameRequired') || 'Device(s) and name required', 'error');
                         return;
                     }
                     endpoint = 'disks/zfs';
@@ -1257,7 +1257,7 @@
                     };
                 } else if (type === 'directory') {
                     if (!diskForm.device || !diskForm.name) {
-                        addToast('Device and name required', 'error');
+                        addToast(t('deviceAndNameRequired') || 'Device and name required', 'error');
                         return;
                     }
                     endpoint = 'disks/directory';
@@ -1265,31 +1265,31 @@
                 } else if (type === 'sr') {
                     // XCP-ng SR creation
                     if (!diskForm.name) {
-                        addToast('Name required', 'error');
+                        addToast(t('nameRequired') || 'Name required', 'error');
                         return;
                     }
                     endpoint = 'sr/create';
                     body = { type: diskForm.sr_type, name: diskForm.name };
                     if (diskForm.sr_type === 'nfs') {
-                        if (!diskForm.server || !diskForm.path) { addToast('NFS server and path required', 'error'); return; }
+                        if (!diskForm.server || !diskForm.path) { addToast(t('nfsServerPathRequired') || 'NFS server and path required', 'error'); return; }
                         body.server = diskForm.server;
                         body.path = diskForm.path;
                         body.nfsversion = diskForm.nfsversion;
                     } else if (diskForm.sr_type === 'iscsi') {
-                        if (!diskForm.target || !diskForm.iqn || !diskForm.scsi_id) { addToast('Target, IQN and SCSI ID required', 'error'); return; }
+                        if (!diskForm.target || !diskForm.iqn || !diskForm.scsi_id) { addToast(t('targetIqnScsiRequired') || 'Target, IQN and SCSI ID required', 'error'); return; }
                         body.target = diskForm.target;
                         body.iqn = diskForm.iqn;
                         body.scsi_id = diskForm.scsi_id;
                         body.port = diskForm.port || 3260;
                         if (diskForm.chap_user) { body.chap_user = diskForm.chap_user; body.chap_pass = diskForm.chap_pass; }
                     } else if (diskForm.sr_type === 'lvm' || diskForm.sr_type === 'ext') {
-                        if (!diskForm.device) { addToast('Device required', 'error'); return; }
+                        if (!diskForm.device) { addToast(t('deviceRequired') || 'Device required', 'error'); return; }
                         body.device = diskForm.device;
                     }
                 }
 
                 if (!endpoint) {
-                    addToast('Unknown storage type', 'error');
+                    addToast(t('unknownStorageType') || 'Unknown storage type', 'error');
                     return;
                 }
                 
@@ -1306,15 +1306,15 @@
                     console.log('Create disk response:', res.status, result);
                     
                     if (res.ok) {
-                        addToast(`${type.toUpperCase()} created successfully`, 'success');
+                        addToast(`${type.toUpperCase()}: ${t('createdSuccessfully') || 'created successfully'}`, 'success');
                         setDiskModal({ open: false, type: null });
                         await loadTabData('disks');
                     } else {
-                        addToast(result.error || 'Failed to create', 'error');
+                        addToast(result.error || t('failedToCreate') || 'Failed to create', 'error');
                     }
                 } catch (e) {
                     console.error('Error creating storage:', e);
-                    addToast('Error creating storage', 'error');
+                    addToast(t('errorCreatingStorage') || 'Error creating storage', 'error');
                 } finally {
                     setDiskCreating(false);
                 }
@@ -1336,10 +1336,10 @@
                             <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                 <h3 className="font-semibold text-white">
                                     {type === 'sr' && (t('createSr') || 'Create Storage Repository')}
-                                    {type === 'lvm' && 'Create LVM Volume Group'}
-                                    {type === 'lvmthin' && 'Create LVM-Thin Pool'}
-                                    {type === 'zfs' && 'Create ZFS Pool'}
-                                    {type === 'directory' && 'Create Directory Storage'}
+                                    {type === 'lvm' && (t('createLvmVolumeGroup') || 'Create LVM Volume Group')}
+                                    {type === 'lvmthin' && (t('createLvmThinPool') || 'Create LVM-Thin Pool')}
+                                    {type === 'zfs' && (t('createZfsPool') || 'Create ZFS Pool')}
+                                    {type === 'directory' && (t('createDirectoryStorage') || 'Create Directory Storage')}
                                 </h3>
                                 <button onClick={() => setDiskModal({ open: false, type: null })} className="p-1 hover:bg-proxmox-dark rounded"><Icons.X /></button>
                             </div>
@@ -1367,7 +1367,7 @@
                                             <>
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">NFS Server *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('nfsServer') || 'NFS Server'} *</label>
                                                         <input type="text" value={diskForm.server} onChange={e => setDiskForm({...diskForm, server: e.target.value})}
                                                             placeholder="192.168.1.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                     </div>
@@ -1392,12 +1392,12 @@
                                             <>
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Target *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('target') || 'Target'} *</label>
                                                         <input type="text" value={diskForm.target} onChange={e => setDiskForm({...diskForm, target: e.target.value})}
                                                             placeholder="192.168.1.200" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">Port</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('port') || 'Port'}</label>
                                                         <input type="number" value={diskForm.port} onChange={e => setDiskForm({...diskForm, port: e.target.value})}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                     </div>
@@ -1413,15 +1413,15 @@
                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <details className="group">
-                                                    <summary className="text-sm text-gray-400 cursor-pointer">CHAP Authentication</summary>
+                                                    <summary className="text-sm text-gray-400 cursor-pointer">{t('chapAuthentication') || 'CHAP Authentication'}</summary>
                                                     <div className="mt-2 grid grid-cols-2 gap-3">
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">CHAP User</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('chapUser') || 'CHAP User'}</label>
                                                             <input type="text" value={diskForm.chap_user} onChange={e => setDiskForm({...diskForm, chap_user: e.target.value})}
                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">CHAP Password</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('chapPassword') || 'CHAP Password'}</label>
                                                             <input type="password" value={diskForm.chap_pass} onChange={e => setDiskForm({...diskForm, chap_pass: e.target.value})}
                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
@@ -1431,10 +1431,10 @@
                                         )}
                                         {(diskForm.sr_type === 'lvm' || diskForm.sr_type === 'ext') && (
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Device *</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('device') || 'Device'} *</label>
                                                 <select value={diskForm.device} onChange={e => setDiskForm({...diskForm, device: e.target.value})}
                                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                                    <option value="">Select disk...</option>
+                                                    <option value="">{t('selectDisk') || 'Select disk...'}</option>
                                                     {(data.disks||[]).filter(d => !d.used).map(d => (
                                                         <option key={d.devpath} value={d.devpath}>{d.devpath} - {formatBytes(d.size)} ({d.type})</option>
                                                     ))}
@@ -1447,13 +1447,13 @@
                                 {/* Device Selection - for LVM, LVM-Thin (vg), Directory */}
                                 {(type === 'lvm' || type === 'directory') && (
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Device *</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('device') || 'Device'} *</label>
                                         <select 
                                             value={diskForm.device} 
                                             onChange={e => setDiskForm({...diskForm, device: e.target.value})}
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                         >
-                                            <option value="">Select disk...</option>
+                                            <option value="">{t('selectDisk') || 'Select disk...'}</option>
                                             {unusedDisks.map(d => (
                                                 <option key={d.devpath} value={d.devpath}>
                                                     {d.devpath} - {formatBytes(d.size)} ({d.type || 'hdd'})
@@ -1461,7 +1461,7 @@
                                             ))}
                                         </select>
                                         {unusedDisks.length === 0 && (
-                                            <p className="text-xs text-yellow-400 mt-1">No unused disks available</p>
+                                            <p className="text-xs text-yellow-400 mt-1">{t('noUnusedDisks') || 'No unused disks available'}</p>
                                         )}
                                     </div>
                                 )}
@@ -1469,22 +1469,22 @@
                                 {/* VG Selection for LVM-Thin */}
                                 {type === 'lvmthin' && (
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Volume Group *</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('volumeGroup') || 'Volume Group'} *</label>
                                         <select 
                                             value={diskForm.vgname} 
                                             onChange={e => setDiskForm({...diskForm, vgname: e.target.value})}
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                         >
-                                            <option value="">Select VG...</option>
+                                            <option value="">{t('selectVolumeGroup') || 'Select VG...'}</option>
                                             {Array.isArray(data.lvm) && data.lvm.map(v => (
                                                 <option key={v.vg} value={v.vg}>
-                                                    {v.vg} - {formatBytes(v.free)} free of {formatBytes(v.size)}
+                                                    {v.vg} - {t('free') || 'Free'}: {formatBytes(v.free)} / {formatBytes(v.size)}
                                                 </option>
                                             ))}
                                         </select>
                                         {(!Array.isArray(data.lvm) || data.lvm.length === 0) && (
                                             <p className="text-xs text-yellow-400 mt-1">
-                                                ⚠️ No LVM Volume Groups found. Create an LVM VG first before creating a thin pool.
+                                                {t('noLvmForThinPool') || '⚠️ No LVM Volume Groups found. Create an LVM VG first before creating a thin pool.'}
                                             </p>
                                         )}
                                     </div>
@@ -1493,7 +1493,7 @@
                                 {/* Multi-device Selection for ZFS */}
                                 {type === 'zfs' && (
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Devices *</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('devices') || 'Devices'} *</label>
                                         <div className="space-y-1 max-h-32 overflow-y-auto bg-proxmox-dark border border-proxmox-border rounded p-2">
                                             {unusedDisks.length > 0 ? unusedDisks.map(d => (
                                                 <label key={d.devpath} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-proxmox-hover p-1 rounded">
@@ -1512,10 +1512,10 @@
                                                     <span className="font-mono">{d.devpath}</span>
                                                     <span className="text-gray-500">({formatBytes(d.size)}, {d.type || 'hdd'})</span>
                                                 </label>
-                                            )) : <p className="text-xs text-yellow-400">No unused disks available</p>}
+                                            )) : <p className="text-xs text-yellow-400">{t('noUnusedDisks') || 'No unused disks available'}</p>}
                                         </div>
                                         {diskForm.devices.length > 0 && (
-                                            <p className="text-xs text-gray-500 mt-1">{diskForm.devices.length} disk(s) selected</p>
+                                            <p className="text-xs text-gray-500 mt-1">{t('selectedDisks') || 'Selected disks'}: {diskForm.devices.length}</p>
                                         )}
                                     </div>
                                 )}
@@ -1523,7 +1523,9 @@
                                 {/* Name */}
                                 <div>
                                     <label className="block text-sm text-gray-400 mb-1">
-                                        {type === 'lvmthin' ? 'Pool Name *' : type === 'zfs' ? 'Pool Name *' : 'Name *'}
+                                        {type === 'lvmthin' || type === 'zfs'
+                                            ? `${t('poolName') || 'Pool Name'} *`
+                                            : `${t('name') || 'Name'} *`}
                                     </label>
                                     <input 
                                         value={diskForm.name}
@@ -1538,14 +1540,14 @@
                                     <>
                                         <div className="grid grid-cols-3 gap-3">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">RAID Level</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('raidLevel') || 'RAID Level'}</label>
                                                 <select 
                                                     value={diskForm.raidlevel}
                                                     onChange={e => setDiskForm({...diskForm, raidlevel: e.target.value})}
                                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                 >
-                                                    <option value="single">Single</option>
-                                                    <option value="mirror">Mirror</option>
+                                                    <option value="single">{t('single') || 'Single'}</option>
+                                                    <option value="mirror">{t('mirror') || 'Mirror'}</option>
                                                     <option value="raid10">RAID10</option>
                                                     <option value="raidz">RAIDZ</option>
                                                     <option value="raidz2">RAIDZ2</option>
@@ -1553,14 +1555,14 @@
                                                 </select>
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Compression</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('compression') || 'Compression'}</label>
                                                 <select 
                                                     value={diskForm.compression}
                                                     onChange={e => setDiskForm({...diskForm, compression: e.target.value})}
                                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                 >
-                                                    <option value="on">On (LZ4)</option>
-                                                    <option value="off">Off</option>
+                                                    <option value="on">{t('compressionOnLz4') || 'On (LZ4)'}</option>
+                                                    <option value="off">{t('compressionOff') || 'Off'}</option>
                                                     <option value="lz4">LZ4</option>
                                                     <option value="zstd">ZSTD</option>
                                                     <option value="gzip">GZIP</option>
@@ -1581,7 +1583,7 @@
                                             </div>
                                         </div>
                                         <p className="text-xs text-gray-500">
-                                            ℹ️ Use ashift=12 for modern drives (4K sectors). Mirror needs 2+ disks, RAIDZ needs 3+, RAIDZ2 needs 4+.
+                                            {t('ashiftHint') || 'ℹ️ Use ashift=12 for modern drives (4K sectors). Mirror needs 2+ disks, RAIDZ needs 3+, RAIDZ2 needs 4+.'}
                                         </p>
                                     </>
                                 )}
@@ -1589,13 +1591,13 @@
                                 {/* Directory Options */}
                                 {type === 'directory' && (
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Filesystem</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('filesystem') || 'Filesystem'}</label>
                                         <select 
                                             value={diskForm.filesystem}
                                             onChange={e => setDiskForm({...diskForm, filesystem: e.target.value})}
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                         >
-                                            <option value="ext4">ext4 (recommended)</option>
+                                            <option value="ext4">ext4 ({t('recommended') || 'recommended'})</option>
                                             <option value="xfs">XFS</option>
                                         </select>
                                     </div>
@@ -1609,7 +1611,7 @@
                                         onChange={e => setDiskForm({...diskForm, add_storage: e.target.checked})}
                                         className="rounded"
                                     />
-                                    Add to Proxmox VE storage configuration
+                                    {t('addToPveStorage') || 'Add to Proxmox VE storage configuration'}
                                 </label>
                             </div>
                             
@@ -1619,7 +1621,7 @@
                                     disabled={diskCreating}
                                     className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover disabled:opacity-50 rounded-lg text-sm"
                                 >
-                                    Cancel
+                                    {t('cancel') || 'Cancel'}
                                 </button>
                                 <button 
                                     onClick={createDisk}
@@ -1634,7 +1636,7 @@
                                     className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm text-white flex items-center gap-2"
                                 >
                                     {diskCreating && <span className="animate-spin">⏳</span>}
-                                    {diskCreating ? 'Creating...' : 'Create'}
+                                    {diskCreating ? (t('creating') || 'Creating...') : (t('create') || 'Create')}
                                 </button>
                             </div>
                         </div>
@@ -1657,7 +1659,7 @@
                                 <Icons.Server className="w-5 h-5" style={{color: isXcpng ? '#f97316' : '#60b515'}} />
                                 <div className="min-w-0">
                                     <div className="corp-vm-modal-title truncate">{node}</div>
-                                    <div className="corp-vm-modal-meta">{isXcpng ? 'XCP-ng Host' : 'Proxmox Node'}</div>
+                                    <div className="corp-vm-modal-meta">{isXcpng ? (t('xcpngHost') || 'XCP-ng Host') : (t('proxmoxNode') || 'Proxmox Node')}</div>
                                 </div>
                             </div>
                             <div className="corp-vm-modal-actions">
@@ -1670,7 +1672,7 @@
                         <div className="flex items-center justify-between px-6 py-4 border-b border-proxmox-border bg-proxmox-dark">
                             <div className="flex items-center gap-3">
                                 <div className="p-2 rounded-lg bg-green-500/10"><Icons.Server /></div>
-                                <div><h2 className="font-semibold text-white">{node}</h2><p className="text-xs text-gray-400">Proxmox Node</p></div>
+                                <div><h2 className="font-semibold text-white">{node}</h2><p className="text-xs text-gray-400">{isXcpng ? (t('xcpngHost') || 'XCP-ng Host') : (t('proxmoxNode') || 'Proxmox Node')}</p></div>
                             </div>
                             <button onClick={onClose} className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400"><Icons.X /></button>
                         </div>
@@ -1705,10 +1707,10 @@
                                         <div className="space-y-6">
                                             <div className="grid grid-cols-4 gap-4">
                                                 {[
-                                                    { label: 'Status', value: data.summary.status, color: 'text-green-400' },
-                                                    { label: 'Uptime', value: formatUptime(data.summary.uptime), color: 'text-white' },
-                                                    { label: 'CPU', value: `${((data.summary.cpu||0)*100).toFixed(1)}%`, color: 'text-proxmox-orange' },
-                                                    { label: 'Load', value: (data.summary.loadavg||[]).join(', '), color: 'text-white' },
+                                                    { label: t('status') || 'Status', value: data.summary.status === 'online' ? (t('online') || 'Online') : data.summary.status === 'offline' ? (t('offline') || 'Offline') : data.summary.status, color: 'text-green-400' },
+                                                    { label: t('uptime') || 'Uptime', value: formatUptime(data.summary.uptime), color: 'text-white' },
+                                                    { label: t('cpu') || 'CPU', value: `${((data.summary.cpu||0)*100).toFixed(1)}%`, color: 'text-proxmox-orange' },
+                                                    { label: t('load') || 'Load', value: (data.summary.loadavg||[]).join(', '), color: 'text-white' },
                                                 ].map((item, i) => (
                                                     <div key={i} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                         <div className="text-xs text-gray-500 mb-1">{item.label}</div>
@@ -1718,15 +1720,15 @@
                                             </div>
                                             <div className="grid grid-cols-3 gap-4">
                                                 {[
-                                                    { label: 'Memory', used: data.summary.memory?.used, total: data.summary.memory?.total, color: 'bg-proxmox-orange', ksm: data.summary.ksm?.shared },
-                                                    { label: 'Swap', used: data.summary.swap?.used, total: data.summary.swap?.total, color: 'bg-blue-500' },
+                                                    { label: t('memory') || 'Memory', used: data.summary.memory?.used, total: data.summary.memory?.total, color: 'bg-proxmox-orange', ksm: data.summary.ksm?.shared },
+                                                    { label: t('swap') || 'Swap', used: data.summary.swap?.used, total: data.summary.swap?.total, color: 'bg-blue-500' },
                                                     { label: t('rootFs') || 'Root FS', used: data.summary.rootfs?.used, total: data.summary.rootfs?.total, color: 'bg-green-500' },
                                                 ].map((item, i) => (
                                                     <div key={i} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                         <div className="text-sm font-medium text-white mb-3">{item.label}</div>
                                                         <div className="space-y-2">
-                                                            <div className="flex justify-between text-sm"><span className="text-gray-400">Used</span><span className="text-white">{formatBytes(item.used)}</span></div>
-                                                            <div className="flex justify-between text-sm"><span className="text-gray-400">Total</span><span className="text-white">{formatBytes(item.total)}</span></div>
+                                                            <div className="flex justify-between text-sm"><span className="text-gray-400">{t('used') || 'Used'}</span><span className="text-white">{formatBytes(item.used)}</span></div>
+                                                            <div className="flex justify-between text-sm"><span className="text-gray-400">{t('total') || 'Total'}</span><span className="text-white">{formatBytes(item.total)}</span></div>
                                                             <div className="w-full bg-proxmox-hover rounded-full h-2">
                                                                 <div className={`${item.color} h-2 rounded-full`} style={{ width: `${((item.used||0)/(item.total||1))*100}%` }}></div>
                                                             </div>
@@ -1734,7 +1736,7 @@
                                                                 on PVE (matches native UI); hidden on XCP-ng where backend
                                                                 returns no ksm field */}
                                                             {typeof item.ksm === 'number' && (
-                                                                <div className="flex justify-between text-sm pt-1" title="Kernel Same-page Merging: dedup across VM RAM (only active under memory pressure)">
+                                                                <div className="flex justify-between text-sm pt-1" title={t('ksmSharingHint') || 'Kernel Same-page Merging: dedup across VM RAM (only active under memory pressure)'}>
                                                                     <span className="text-gray-400">{t('ksmSharing') || 'KSM Sharing'}</span>
                                                                     <span className={item.ksm > 0 ? 'text-purple-400 font-mono' : 'text-gray-500 font-mono'}>{formatBytes(item.ksm || 0)}</span>
                                                                 </div>
@@ -1744,12 +1746,12 @@
                                                 ))}
                                             </div>
                                             <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
-                                                <div className="text-sm font-medium text-white mb-3">System Info</div>
+                                                <div className="text-sm font-medium text-white mb-3">{t('systemInfo') || 'System Info'}</div>
                                                 <div className="grid grid-cols-2 gap-4 text-sm">
-                                                    <div><span className="text-gray-400">Kernel:</span><span className="ml-2 text-white font-mono">{data.summary.kversion}</span></div>
+                                                    <div><span className="text-gray-400">{t('kernel') || 'Kernel'}:</span><span className="ml-2 text-white font-mono">{data.summary.kversion}</span></div>
                                                     <div><span className="text-gray-400">PVE:</span><span className="ml-2 text-white">{data.summary.pveversion}</span></div>
-                                                    <div><span className="text-gray-400">CPU:</span><span className="ml-2 text-white">{data.summary.cpuinfo?.model}</span></div>
-                                                    <div><span className="text-gray-400">Cores:</span><span className="ml-2 text-white">{data.summary.cpuinfo?.cores} ({data.summary.cpuinfo?.cpus} CPUs)</span></div>
+                                                    <div><span className="text-gray-400">{t('cpu') || 'CPU'}:</span><span className="ml-2 text-white">{data.summary.cpuinfo?.model}</span></div>
+                                                    <div><span className="text-gray-400">{t('cores') || 'Cores'}:</span><span className="ml-2 text-white">{data.summary.cpuinfo?.cores} ({data.summary.cpuinfo?.cpus} CPUs)</span></div>
                                                 </div>
                                             </div>
                                         </div>
@@ -1784,7 +1786,7 @@
                                                         <LineChart
                                                             data={data.performance.metrics.cpu}
                                                             timestamps={data.performance.timestamps}
-                                                            label="CPU Usage"
+                                                            label={t('cpuUsage') || 'CPU Usage'}
                                                             color="#f97316"
                                                             unit="%"
                                                             yMin={0}
@@ -1827,7 +1829,7 @@
                                                         <LineChart
                                                             data={data.performance.metrics.swap}
                                                             timestamps={data.performance.timestamps}
-                                                            label="Swap Usage"
+                                                            label={t('swapUsage') || 'Swap Usage'}
                                                             color="#ec4899"
                                                             unit="%"
                                                             yMin={0}
@@ -1847,11 +1849,11 @@
                                                     {data.performance.metrics.pressurecpusome && (
                                                         <LineChart
                                                             datasets={[
-                                                                { label: 'Some', data: data.performance.metrics.pressurecpusome, color: '#3b82f6' },
-                                                                { label: 'Full', data: data.performance.metrics.pressurecpufull, color: '#ef4444' }
+                                                                { label: t('psiSome') || 'Some', data: data.performance.metrics.pressurecpusome, color: '#3b82f6' },
+                                                                { label: t('psiFull') || 'Full', data: data.performance.metrics.pressurecpufull, color: '#ef4444' }
                                                             ]}
                                                             timestamps={data.performance.timestamps}
-                                                            label="CPU Pressure Stall"
+                                                            label={t('cpuPressureStall') || 'CPU Pressure Stall'}
                                                             unit="%"
                                                             yMin={0}
                                                             yMax={100}
@@ -1860,11 +1862,11 @@
                                                     {data.performance.metrics.pressurememorysome && (
                                                         <LineChart
                                                             datasets={[
-                                                                { label: 'Some', data: data.performance.metrics.pressurememorysome, color: '#22c55e' },
-                                                                { label: 'Full', data: data.performance.metrics.pressurememoryfull, color: '#ef4444' }
+                                                                { label: t('psiSome') || 'Some', data: data.performance.metrics.pressurememorysome, color: '#22c55e' },
+                                                                { label: t('psiFull') || 'Full', data: data.performance.metrics.pressurememoryfull, color: '#ef4444' }
                                                             ]}
                                                             timestamps={data.performance.timestamps}
-                                                            label="Memory Pressure Stall"
+                                                            label={t('memoryPressureStall') || 'Memory Pressure Stall'}
                                                             unit="%"
                                                             yMin={0}
                                                             yMax={100}
@@ -1873,11 +1875,11 @@
                                                     {data.performance.metrics.pressureiosome && (
                                                         <LineChart
                                                             datasets={[
-                                                                { label: 'Some', data: data.performance.metrics.pressureiosome, color: '#eab308' },
-                                                                { label: 'Full', data: data.performance.metrics.pressureiofull, color: '#ef4444' }
+                                                                { label: t('psiSome') || 'Some', data: data.performance.metrics.pressureiosome, color: '#eab308' },
+                                                                { label: t('psiFull') || 'Full', data: data.performance.metrics.pressureiofull, color: '#ef4444' }
                                                             ]}
                                                             timestamps={data.performance.timestamps}
-                                                            label="IO Pressure Stall"
+                                                            label={t('ioPressureStall') || 'IO Pressure Stall'}
                                                             unit="%"
                                                             yMin={0}
                                                             yMax={100}
@@ -1894,7 +1896,7 @@
                                                 <div className="text-center text-gray-500 py-12">
                                                     <Icons.BarChart className="mx-auto mb-3 w-12 h-12 opacity-50" />
                                                     <p>{t('noPerformanceData') || 'No performance data available'}</p>
-                                                    <p className="text-sm mt-1">Try refreshing or selecting a different timeframe</p>
+                                                    <p className="text-sm mt-1">{t('tryDifferentTimeframe') || 'Try refreshing or selecting a different timeframe'}</p>
                                                 </div>
                                             )}
                                         </div>
@@ -1905,14 +1907,14 @@
                                             <div className="flex items-center justify-between mb-4">
                                                 <div className="flex items-center gap-3">
                                                     <Icons.Terminal />
-                                                    <span className="text-white font-medium">Node Shell</span>
+                                                    <span className="text-white font-medium">{t('nodeShell') || 'Node Shell'}</span>
                                                 </div>
                                                 <button
                                                     onClick={() => setData({...data, shellFullscreen: true})}
                                                     className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-300 hover:text-white text-sm"
                                                 >
                                                     <Icons.Maximize />
-                                                    Fullscreen
+                                                    {t('fullscreen') || 'Fullscreen'}
                                                 </button>
                                             </div>
                                             <div className="flex-1 bg-black rounded-lg border border-proxmox-border overflow-hidden min-h-[400px]">
@@ -1969,7 +1971,7 @@
                                                         if (!confirm(t('discardUnappliedChanges'))) return;
                                                         try {
                                                             const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE', credentials: 'include', headers: authHeaders });
-                                                            if (res.ok) { addToast(t('changesReverted') || 'Cofnięto zmiany'); loadTabData('network'); }
+                                                            if (res.ok) { addToast(t('changesReverted') || 'Changes reverted'); loadTabData('network'); }
                                                             else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
                                                         } catch (e) { addToast(t('error') || 'Error', 'error'); }
                                                     }}
@@ -1988,13 +1990,13 @@
                                                                 <Icons.Network />
                                                                 <span className="font-medium text-white">{iface.iface}</span>
                                                                 <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded">{iface.type}</span>
-                                                                {iface.active && <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">Active</span>}
+                                                                {iface.active && <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">{t('active') || 'Active'}</span>}
                                                             </div>
                                                             <div className="flex items-center gap-2">
                                                                 <button 
                                                                     onClick={() => setData({...data, editIface: {...iface, isNew: false}})}
                                                                     className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-white"
-                                                                    title="Edit"
+                                                                    title={t('edit') || 'Edit'}
                                                                 >
                                                                     <Icons.Cog />
                                                                 </button>
@@ -2008,7 +2010,7 @@
                                                                         } catch (e) { addToast(t('error') || 'Error', 'error'); }
                                                                     }}
                                                                     className="p-1.5 rounded hover:bg-red-500/20 text-gray-400 hover:text-red-400"
-                                                                    title="Delete"
+                                                                    title={t('delete') || 'Delete'}
                                                                 >
                                                                     <Icons.Trash />
                                                                 </button>
@@ -2016,13 +2018,13 @@
                                                         </div>
                                                         <div className="grid grid-cols-4 gap-4 text-sm">
                                                             {iface.address && <div><span className="text-gray-500">IP:</span><span className="ml-2 text-white font-mono">{iface.address}/{iface.netmask || iface.cidr?.split('/')[1] || ''}</span></div>}
-                                                            {iface.gateway && <div><span className="text-gray-500">Gateway:</span><span className="ml-2 text-white font-mono">{iface.gateway}</span></div>}
-                                                            {iface.bridge_ports && <div><span className="text-gray-500">Ports:</span><span className="ml-2 text-white">{iface.bridge_ports}</span></div>}
-                                                            {iface.slaves && <div><span className="text-gray-500">Slaves:</span><span className="ml-2 text-white">{iface.slaves}</span></div>}
-                                                            {iface['vlan-raw-device'] && <div><span className="text-gray-500">VLAN Device:</span><span className="ml-2 text-white">{iface['vlan-raw-device']}</span></div>}
-                                                            {iface['vlan-id'] && <div><span className="text-gray-500">VLAN ID:</span><span className="ml-2 text-white">{iface['vlan-id']}</span></div>}
-                                                            {iface.bond_mode && <div><span className="text-gray-500">Bond Mode:</span><span className="ml-2 text-white">{iface.bond_mode}</span></div>}
-                                                            {iface.comments && <div className="col-span-4"><span className="text-gray-500">Comment:</span><span className="ml-2 text-gray-400">{iface.comments}</span></div>}
+                                                            {iface.gateway && <div><span className="text-gray-500">{t('gateway') || 'Gateway'}:</span><span className="ml-2 text-white font-mono">{iface.gateway}</span></div>}
+                                                            {iface.bridge_ports && <div><span className="text-gray-500">{t('ports') || 'Ports'}:</span><span className="ml-2 text-white">{iface.bridge_ports}</span></div>}
+                                                            {iface.slaves && <div><span className="text-gray-500">{t('slaves') || 'Slaves'}:</span><span className="ml-2 text-white">{iface.slaves}</span></div>}
+                                                            {iface['vlan-raw-device'] && <div><span className="text-gray-500">{t('vlanRawDevice') || 'VLAN Device'}:</span><span className="ml-2 text-white">{iface['vlan-raw-device']}</span></div>}
+                                                            {iface['vlan-id'] && <div><span className="text-gray-500">{t('vlanId') || 'VLAN ID'}:</span><span className="ml-2 text-white">{iface['vlan-id']}</span></div>}
+                                                            {iface.bond_mode && <div><span className="text-gray-500">{t('bondMode') || 'Bond Mode'}:</span><span className="ml-2 text-white">{iface.bond_mode}</span></div>}
+                                                            {iface.comments && <div className="col-span-4"><span className="text-gray-500">{t('comment') || 'Comment'}:</span><span className="ml-2 text-gray-400">{iface.comments}</span></div>}
                                                         </div>
                                                     </div>
                                                 ))}
@@ -2043,16 +2045,16 @@
                                                         <table className="w-full text-sm">
                                                             <thead className="bg-proxmox-dark text-xs text-gray-400">
                                                                 <tr>
-                                                                    <th className="text-left p-3">Iface</th>
-                                                                    <th className="text-right p-3">RX bytes</th>
-                                                                    <th className="text-right p-3">RX pkts</th>
-                                                                    <th className="text-right p-3">RX errs</th>
-                                                                    <th className="text-right p-3">RX drop</th>
-                                                                    <th className="text-right p-3">TX bytes</th>
-                                                                    <th className="text-right p-3">TX pkts</th>
-                                                                    <th className="text-right p-3">TX errs</th>
-                                                                    <th className="text-right p-3">TX drop</th>
-                                                                    <th className="text-right p-3">Coll</th>
+                                                                    <th className="text-left p-3">>{t('interface') || 'Interface'}</th>
+                                                                    <th className="text-right p-3">>{t('rxBytes') || 'RX bytes'}</th>
+                                                                    <th className="text-right p-3">>{t('rxPackets') || 'RX pkts'}</th>
+                                                                    <th className="text-right p-3">>{t('rxErrors') || 'RX errs'}</th>
+                                                                    <th className="text-right p-3">>{t('rxDropped') || 'RX drop'}</th>
+                                                                    <th className="text-right p-3">>{t('txBytes') || 'TX bytes'}</th>
+                                                                    <th className="text-right p-3">>{t('txPackets') || 'TX pkts'}</th>
+                                                                    <th className="text-right p-3">>{t('txErrors') || 'TX errs'}</th>
+                                                                    <th className="text-right p-3">>{t('txDropped') || 'TX drop'}</th>
+                                                                    <th className="text-right p-3">>{t('collisions') || 'Coll'}</th>
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
@@ -2092,7 +2094,7 @@
                                                         <div className="space-y-4">
                                                             <div className="grid grid-cols-2 gap-4">
                                                                 <div>
-                                                                    <label className="block text-xs text-gray-400 mb-1">Name</label>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('name') || 'Name'}</label>
                                                                     <input type="text" value={data.editIface.iface || ''} 
                                                                         onChange={(e) => setData({...data, editIface: {...data.editIface, iface: e.target.value}})}
                                                                         disabled={!data.editIface.isNew}
@@ -2100,7 +2102,7 @@
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50" />
                                                                 </div>
                                                                 <div>
-                                                                    <label className="block text-xs text-gray-400 mb-1">IPv4/CIDR</label>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('ipv4Cidr') || 'IPv4/CIDR'}</label>
                                                                     <input type="text" value={data.editIface.cidr || ''} 
                                                                         onChange={(e) => setData({...data, editIface: {...data.editIface, cidr: e.target.value}})}
                                                                         placeholder="192.168.1.1/24"
@@ -2114,7 +2116,7 @@
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                                 </div>
                                                                 <div>
-                                                                    <label className="block text-xs text-gray-400 mb-1">IPv6/CIDR</label>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('ipv6Cidr') || 'IPv6/CIDR'}</label>
                                                                     <input type="text" value={data.editIface.cidr6 || ''} 
                                                                         onChange={(e) => setData({...data, editIface: {...data.editIface, cidr6: e.target.value}})}
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
@@ -2138,7 +2140,7 @@
                                                             {data.editIface.type === 'bridge' && (
                                                                 <div className="grid grid-cols-2 gap-4">
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">Bridge Ports</label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">{t('bridgePorts') || 'Bridge Ports'}</label>
                                                                         <input type="text" value={data.editIface.bridge_ports || ''} 
                                                                             onChange={(e) => setData({...data, editIface: {...data.editIface, bridge_ports: e.target.value}})}
                                                                             placeholder="ens18"
@@ -2158,14 +2160,14 @@
                                                             {data.editIface.type === 'bond' && (
                                                                 <div className="grid grid-cols-2 gap-4">
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">Slaves</label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">{t('slaves') || 'Slaves'}</label>
                                                                         <input type="text" value={data.editIface.slaves || ''} 
                                                                             onChange={(e) => setData({...data, editIface: {...data.editIface, slaves: e.target.value}})}
                                                                             placeholder="ens18 ens19"
                                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                                     </div>
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">Mode</label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">{t('bondMode') || 'Mode'}</label>
                                                                         <select value={data.editIface.bond_mode || 'balance-rr'} 
                                                                             onChange={(e) => setData({...data, editIface: {...data.editIface, bond_mode: e.target.value}})}
                                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -2179,18 +2181,18 @@
                                                                         </select>
                                                                     </div>
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">Hash Policy</label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">{t('hashPolicy') || 'Hash Policy'}</label>
                                                                         <select value={data.editIface.bond_xmit_hash_policy || ''} 
                                                                             onChange={(e) => setData({...data, editIface: {...data.editIface, bond_xmit_hash_policy: e.target.value}})}
                                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
-                                                                            <option value="">Default</option>
+                                                                            <option value="">{t('defaultOption') || 'Default'}</option>
                                                                             <option value="layer2">layer2</option>
                                                                             <option value="layer2+3">layer2+3</option>
                                                                             <option value="layer3+4">layer3+4</option>
                                                                         </select>
                                                                     </div>
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">Bond Primary</label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">{t('bondPrimary') || 'Bond Primary'}</label>
                                                                         <input type="text" value={data.editIface['bond-primary'] || ''} 
                                                                             onChange={(e) => setData({...data, editIface: {...data.editIface, 'bond-primary': e.target.value}})}
                                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
@@ -2202,14 +2204,14 @@
                                                             {data.editIface.type === 'vlan' && (
                                                                 <div className="grid grid-cols-2 gap-4">
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">VLAN raw device</label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">{t('vlanRawDevice') || 'VLAN raw device'}</label>
                                                                         <input type="text" value={data.editIface['vlan-raw-device'] || ''} 
                                                                             onChange={(e) => setData({...data, editIface: {...data.editIface, 'vlan-raw-device': e.target.value}})}
                                                                             placeholder="vmbr0"
                                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                                     </div>
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">{t('vlanTagLabel') || 'VLAN Tag'}</label>
                                                                         <input type="number" value={data.editIface['vlan-id'] || ''} 
                                                                             onChange={(e) => setData({...data, editIface: {...data.editIface, 'vlan-id': e.target.value}})}
                                                                             placeholder="100"
@@ -2222,10 +2224,10 @@
                                                                 <div className="flex items-center gap-2">
                                                                     <input type="checkbox" checked={data.editIface.autostart !== 0} 
                                                                         onChange={(e) => setData({...data, editIface: {...data.editIface, autostart: e.target.checked ? 1 : 0}})} />
-                                                                    <span className="text-sm text-gray-300">Autostart</span>
+                                                                    <span className="text-sm text-gray-300">{t('autostart') || 'Autostart'}</span>
                                                                 </div>
                                                                 <div>
-                                                                    <label className="block text-xs text-gray-400 mb-1">Comment</label>
+                                                                    <label className="block text-xs text-gray-400 mb-1">{t('comment') || 'Comment'}</label>
                                                                     <input type="text" value={data.editIface.comments || ''} 
                                                                         onChange={(e) => setData({...data, editIface: {...data.editIface, comments: e.target.value}})}
                                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
@@ -2300,12 +2302,12 @@
                                                         <table className="w-full text-sm">
                                                             <thead className="text-xs text-gray-400">
                                                                 <tr>
-                                                                    <th className="text-left p-2">Chip</th>
+                                                                    <th className="text-left p-2">{t('sensorChip') || 'Chip'}</th>
                                                                     <th className="text-left p-2">{t('sensor') || 'Sensor'}</th>
                                                                     <th className="text-right p-2">{t('value') || 'Value'}</th>
-                                                                    <th className="text-right p-2">Max</th>
-                                                                    <th className="text-right p-2">Crit</th>
-                                                                    <th className="text-center p-2">Alarm</th>
+                                                                    <th className="text-right p-2">{t('max') || 'Max'}</th>
+                                                                    <th className="text-right p-2">{t('critical') || 'Critical'}</th>
+                                                                    <th className="text-center p-2">{t('alarm') || 'Alarm'}</th>
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
@@ -2325,7 +2327,7 @@
                                                                             </td>
                                                                             <td className="p-2 text-right font-mono text-gray-500">{s.max != null ? `${typeof s.max === 'number' ? s.max.toFixed(0) : s.max} ${unit}` : '-'}</td>
                                                                             <td className="p-2 text-right font-mono text-gray-500">{s.crit != null ? `${typeof s.crit === 'number' ? s.crit.toFixed(0) : s.crit} ${unit}` : '-'}</td>
-                                                                            <td className="p-2 text-center">{s.alarm ? <span style={{color: '#f54f47'}}>!</span> : <span style={{color: '#60b515'}}>ok</span>}</td>
+                                                                            <td className="p-2 text-center">{s.alarm ? <span style={{color: '#f54f47'}}>!</span> : <span style={{color: '#60b515'}}>{t('ok') || 'OK'}</span>}</td>
                                                                         </tr>
                                                                     );
                                                                 })}
@@ -2413,7 +2415,7 @@
                                                         <div className="mb-3">
                                                             <div className="text-xs text-gray-400 mb-1">{t('corosyncRings') || 'Corosync Rings'}</div>
                                                             <table className="w-full text-sm">
-                                                                <thead className="text-xs text-gray-500"><tr><th className="text-left p-1">Ring</th><th className="text-left p-1">{t('address') || 'Address'}</th><th className="text-left p-1">{t('status') || 'Status'}</th><th className="text-right p-1">{t('nodes') || 'Nodes'}</th></tr></thead>
+                                                                <thead className="text-xs text-gray-500"><tr><th className="text-left p-1">{t('ring') || 'Ring'}</th><th className="text-left p-1">{t('address') || 'Address'}</th><th className="text-left p-1">{t('status') || 'Status'}</th><th className="text-right p-1">{t('nodes') || 'Nodes'}</th></tr></thead>
                                                                 <tbody>
                                                                     {data.clusterHealth.corosync.rings.map((r, idx) => {
                                                                         const ok = (r.status || '').toLowerCase().includes('active') || (r.status || '').toLowerCase().includes('connected');
@@ -2526,7 +2528,7 @@
                                                     {(data.certificates||[]).length > 0 ? (data.certificates||[]).map((c, i) => (
                                                         <div key={i} className="flex justify-between items-center py-3 px-4 bg-proxmox-card rounded-lg">
                                                             <div>
-                                                                <div className="text-white font-medium">{c.filename || 'Certificate'}</div>
+                                                                <div className="text-white font-medium">{c.filename || (t('certificate') || 'Certificate')}</div>
                                                                 <div className="text-xs text-gray-500">{c.subject || 'N/A'}</div>
                                                                 <div className="text-xs text-gray-500">{t('issuer') || 'Issuer'}: {c.issuer || 'N/A'}</div>
                                                             </div>
@@ -2670,7 +2672,7 @@
                                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                                     <h3 className="font-medium text-white flex items-center gap-2">
                                                         <Icons.HardDrive />
-                                                        Physical Disks
+                                                        {t('physicalDisks') || 'Physical Disks'}
                                                     </h3>
                                                     <button 
                                                         onClick={() => loadTabData('disks')}
@@ -2683,23 +2685,23 @@
                                                     <table className="w-full">
                                                         <thead className="bg-proxmox-dark">
                                                             <tr>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Device</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Model</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Size</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Type</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Usage</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Health</th>
-                                                                <th className="text-left p-3 text-sm text-gray-400">Actions</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('device') || 'Device'}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('model') || 'Model'}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('size') || 'Size'}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('usage') || 'Usage'}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('health') || 'Health'}</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">{t('actions') || 'Actions'}</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
                                                             {(data.disks||[]).length > 0 ? (data.disks||[]).map((d, idx) => (
                                                                 <tr key={d.devpath || idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                     <td className="p-3">
-                                                                        <span className="font-mono text-white">{d.devpath || 'Unknown'}</span>
+                                                                        <span className="font-mono text-white">{d.devpath || (t('unknown') || 'Unknown')}</span>
                                                                         {d.serial && <div className="text-xs text-gray-500 font-mono">{d.serial}</div>}
                                                                     </td>
-                                                                    <td className="p-3 text-gray-400 text-sm max-w-48 truncate">{d.model || 'Unknown'}</td>
+                                                                    <td className="p-3 text-gray-400 text-sm max-w-48 truncate">{d.model || (t('unknown') || 'Unknown')}</td>
                                                                     <td className="p-3 text-proxmox-orange font-medium">{formatBytes(d.size)}</td>
                                                                     <td className="p-3">
                                                                         <span className={`px-2 py-0.5 rounded text-xs ${
@@ -2712,7 +2714,7 @@
                                                                     </td>
                                                                     <td className="p-3">
                                                                         {d.used === 'unused' || !d.used ? (
-                                                                            <span className="text-green-400 text-sm">✓ Unused</span>
+                                                                            <span className="text-green-400 text-sm">✓ {t('unused') || 'Unused'}</span>
                                                                         ) : (
                                                                             <span className="text-yellow-400 text-sm">{d.used}</span>
                                                                         )}
@@ -2747,7 +2749,7 @@
                                                                                     }
                                                                                 }}
                                                                                 className="p-1.5 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400"
-                                                                                title="SMART Data"
+                                                                                title={t('smartData') || 'SMART Data'}
                                                                             >
                                                                                 <Icons.Activity />
                                                                             </button>
@@ -2755,7 +2757,7 @@
                                                                                 <>
                                                                                     <button 
                                                                                         onClick={async () => {
-                                                                                            if (!confirm(`Initialize ${d.devpath} with GPT partition table?\n\nThis will ERASE all data on the disk!`)) return;
+                                                                                            if (!confirm(`${t('initializeGptConfirm') || 'Initialize the following disk with a GPT partition table?'}\n\n${d.devpath}\n\n${t('eraseAllDataWarning') || 'This will ERASE all data on the disk!'}`)) return;
                                                                                             try {
                                                                                                 const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/initgpt`, {
                                                                                                     method: 'POST',
@@ -2764,23 +2766,23 @@
                                                                                                     body: JSON.stringify({ disk: d.devpath })
                                                                                                 });
                                                                                                 if (res.ok) {
-                                                                                                    addToast('GPT partition table initialized', 'success');
+                                                                                                    addToast(t('gptInitialized') || 'GPT partition table initialized', 'success');
                                                                                                     loadTabData('disks');
                                                                                                 } else {
                                                                                                     const err = await res.json();
-                                                                                                    addToast(err.error || 'Failed to initialize', 'error');
+                                                                                                    addToast(err.error || t('failedInitializeDisk') || 'Failed to initialize disk', 'error');
                                                                                                 }
-                                                                                            } catch(e) { addToast('Error initializing disk', 'error'); }
+                                                                                            } catch(e) { addToast(t('errorInitializingDisk') || 'Error initializing disk', 'error'); }
                                                                                         }}
                                                                                         className="p-1.5 hover:bg-green-500/20 rounded text-gray-400 hover:text-green-400"
-                                                                                        title="Initialize GPT"
+                                                                                        title={t('initializeGpt') || 'Initialize GPT'}
                                                                                     >
                                                                                         <Icons.Plus />
                                                                                     </button>
                                                                                     <button 
                                                                                         onClick={async () => {
-                                                                                            if (!confirm(`⚠️ DANGER: Wipe disk ${d.devpath}?\n\nThis will DESTROY ALL DATA on the disk!`)) return;
-                                                                                            if (!confirm(`Are you ABSOLUTELY SURE?\n\nThis action cannot be undone!`)) return;
+                                                                                            if (!confirm(`${t('wipeDiskConfirm') || '⚠️ DANGER: Wipe the following disk?'}\n\n${d.devpath}\n\n${t('destroyAllDataWarning') || 'This will DESTROY ALL DATA on the disk!'}`)) return;
+                                                                                            if (!confirm(`${t('absolutelySure') || 'Are you ABSOLUTELY SURE?'}\n\n${t('cannotBeUndone') || 'This action cannot be undone!'}`)) return;
                                                                                             try {
                                                                                                 const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/wipe`, {
                                                                                                     method: 'POST',
@@ -2789,16 +2791,16 @@
                                                                                                     body: JSON.stringify({ disk: d.devpath })
                                                                                                 });
                                                                                                 if(res.ok) {
-                                                                                                    addToast('Disk wiped successfully', 'success');
+                                                                                                    addToast(t('diskWiped') || 'Disk wiped successfully', 'success');
                                                                                                     loadTabData('disks');
                                                                                                 } else {
                                                                                                     const err = await res.json();
-                                                                                                    addToast(err.error || 'Failed to wipe', 'error');
+                                                                                                    addToast(err.error || t('failedWipeDisk') || 'Failed to wipe disk', 'error');
                                                                                                 }
-                                                                                            } catch(e) { addToast('Error wiping disk', 'error'); }
+                                                                                            } catch(e) { addToast(t('errorWipingDisk') || 'Error wiping disk', 'error'); }
                                                                                         }}
                                                                                         className="p-1.5 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400"
-                                                                                        title="Wipe Disk"
+                                                                                        title={t('wipeDisk') || 'Wipe Disk'}
                                                                                     >
                                                                                         <Icons.Trash />
                                                                                     </button>
@@ -2808,7 +2810,7 @@
                                                                     </td>
                                                                 </tr>
                                                             )) : (
-                                                                <tr><td colSpan="7" className="p-8 text-center text-gray-500">No physical disks found</td></tr>
+                                                                <tr><td colSpan="7" className="p-8 text-center text-gray-500">{t('noPhysicalDisks') || 'No physical disks found'}</td></tr>
                                                             )}
                                                         </tbody>
                                                     </table>
@@ -2841,13 +2843,13 @@
                                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                                     <h3 className="font-medium text-white flex items-center gap-2">
                                                         <Icons.Database />
-                                                        LVM Volume Groups
+                                                        {t('lvmVolumeGroups') || 'LVM Volume Groups'}
                                                     </h3>
                                                     <button
                                                         onClick={() => openDiskModal('lvm')}
                                                         className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                     >
-                                                        <Icons.Plus className="inline mr-1" /> Create LVM
+                                                        <Icons.Plus className="inline mr-1" /> {t('createLvm') || 'Create LVM'}
                                                     </button>
                                                 </div>
                                                 <div className="p-4">
@@ -2856,7 +2858,7 @@
                                                             {data.lvm.map((v, idx) => (
                                                                 <div key={v.vg || idx} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                                     <div className="flex justify-between items-center mb-2">
-                                                                        <span className="font-medium text-white">{v.vg || 'Unknown'}</span>
+                                                                        <span className="font-medium text-white">{v.vg || (t('unknown') || 'Unknown')}</span>
                                                                         <span className="text-proxmox-orange font-medium">{formatBytes(v.size)}</span>
                                                                     </div>
                                                                     {v.free && v.size && (
@@ -2868,14 +2870,14 @@
                                                                                 />
                                                                             </div>
                                                                             <div className="text-xs text-gray-500 mt-1">
-                                                                                {formatBytes(v.free)} free
+                                                                                {formatBytes(v.free)} {t('free') || 'free'}
                                                                             </div>
                                                                         </>
                                                                     )}
                                                                 </div>
                                                             ))}
                                                         </div>
-                                                    ) : <div className="text-gray-500 text-sm text-center py-4">No LVM Volume Groups</div>}
+                                                    ) : <div className="text-gray-500 text-sm text-center py-4">{t('noLvmVolumeGroups') || 'No LVM Volume Groups'}</div>}
                                                 </div>
                                             </div>
 
@@ -2884,13 +2886,13 @@
                                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                                     <h3 className="font-medium text-white flex items-center gap-2">
                                                         <Icons.Database />
-                                                        LVM-Thin Pools
+                                                        {t('lvmThinPools') || 'LVM-Thin Pools'}
                                                     </h3>
                                                     <button
                                                         onClick={() => openDiskModal('lvmthin')}
                                                         className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                     >
-                                                        <Icons.Plus className="inline mr-1" /> Create LVM-Thin
+                                                        <Icons.Plus className="inline mr-1" /> {t('createLvmThin') || 'Create LVM-Thin'}
                                                     </button>
                                                 </div>
                                                 <div className="p-4">
@@ -2899,7 +2901,7 @@
                                                             {data.lvmthin.map((p, idx) => (
                                                                 <div key={p.lv || idx} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                                     <div className="flex justify-between items-center mb-2">
-                                                                        <span className="font-medium text-white">{p.lv || 'Unknown'}</span>
+                                                                        <span className="font-medium text-white">{p.lv || (t('unknown') || 'Unknown')}</span>
                                                                         <span className="text-proxmox-orange font-medium">{formatBytes(p.lv_size)}</span>
                                                                     </div>
                                                                     <div className="text-xs text-gray-500 mb-2">VG: {p.vg || '?'}</div>
@@ -2909,11 +2911,11 @@
                                                                             style={{ width: `${p.usage || 0}%` }}
                                                                         />
                                                                     </div>
-                                                                    <div className="text-xs text-gray-500 mt-1">{p.usage || 0}% used</div>
+                                                                    <div className="text-xs text-gray-500 mt-1">{p.usage || 0}% {t('used') || 'used'}</div>
                                                                 </div>
                                                             ))}
                                                         </div>
-                                                    ) : <div className="text-gray-500 text-sm text-center py-4">No LVM-Thin Pools</div>}
+                                                    ) : <div className="text-gray-500 text-sm text-center py-4">{t('noLvmThinPools') || 'No LVM-Thin Pools'}</div>}
                                                 </div>
                                             </div>
 
@@ -2922,20 +2924,20 @@
                                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                                     <h3 className="font-medium text-white flex items-center gap-2">
                                                         <Icons.Database />
-                                                        ZFS Pools
+                                                        {t('zfsPools') || 'ZFS Pools'}
                                                     </h3>
                                                     <div className="flex gap-2">
                                                         <button
                                                             onClick={() => openDiskModal('directory')}
                                                             className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg text-sm"
                                                         >
-                                                            <Icons.Folder className="inline mr-1" /> Directory
+                                                            <Icons.Folder className="inline mr-1" /> {t('directory') || 'Directory'}
                                                         </button>
                                                         <button
                                                             onClick={() => openDiskModal('zfs')}
                                                             className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                         >
-                                                            <Icons.Plus className="inline mr-1" /> Create ZFS
+                                                            <Icons.Plus className="inline mr-1" /> {t('createZfs') || 'Create ZFS'}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -2946,7 +2948,7 @@
                                                                 <div key={z.name || idx} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                                     <div className="flex justify-between items-center mb-2">
                                                                         <div className="flex items-center gap-2">
-                                                                            <span className="font-medium text-white">{z.name || 'Unknown'}</span>
+                                                                            <span className="font-medium text-white">{z.name || (t('unknown') || 'Unknown')}</span>
                                                                             <span className={`text-xs px-2 py-0.5 rounded ${
                                                                                 z.health === 'ONLINE' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                                                                             }`}>
@@ -2964,14 +2966,14 @@
                                                                                 />
                                                                             </div>
                                                                             <div className="text-xs text-gray-500 mt-1">
-                                                                                {formatBytes(z.free || (z.size - z.alloc))} free
+                                                                                {formatBytes(z.free || (z.size - z.alloc))} {t('free') || 'free'}
                                                                             </div>
                                                                         </>
                                                                     )}
                                                                 </div>
                                                             ))}
                                                         </div>
-                                                    ) : <div className="text-gray-500 text-sm text-center py-4">No ZFS Pools</div>}
+                                                    ) : <div className="text-gray-500 text-sm text-center py-4">{t('noZfsPools') || 'No ZFS Pools'}</div>}
                                                 </div>
                                             </div>
                                                 </>
@@ -3100,7 +3102,7 @@
                                                                                         body: JSON.stringify(bodyData)
                                                                                     });
                                                                                     if (r.ok) {
-                                                                                        addToast(`${repo.name} ${!repo.enabled ? 'enabled' : 'disabled'}`, 'success');
+                                                                                        addToast(`${repo.name}: ${!repo.enabled ? (t('enabled') || 'Enabled') : (t('disabled') || 'Disabled')}`, 'success');
                                                                                         loadTabData('repos');
                                                                                     } else {
                                                                                         const err = await r.json();
@@ -3152,18 +3154,18 @@
 
                                     {activeTab === 'tasks' && (
                                         <div className="space-y-2">
-                                            {(data.tasks||[]).length > 0 ? (data.tasks||[]).map((t, idx) => (
-                                                <div key={t.upid || idx} className="p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                            {(data.tasks||[]).length > 0 ? (data.tasks||[]).map((task, idx) => (
+                                                <div key={task.upid || idx} className="p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                     <div className="flex justify-between items-center">
                                                         <div>
-                                                            <span className="text-white">{t.type || 'Unknown'}</span>
-                                                            <span className={`ml-2 text-xs px-2 py-0.5 rounded ${t.status==='OK'?'text-green-400 bg-green-500/10':t.status?'text-red-400 bg-red-500/10':'text-yellow-400 bg-yellow-500/10'}`}>
-                                                                {t.status || 'running'}
+                                                            <span className="text-white">{task.type || (t('unknown') || 'Unknown')}</span>
+                                                            <span className={`ml-2 text-xs px-2 py-0.5 rounded ${task.status==='OK'?'text-green-400 bg-green-500/10':task.status?'text-red-400 bg-red-500/10':'text-yellow-400 bg-yellow-500/10'}`}>
+                                                                {task.status || (t('running') || 'Running')}
                                                             </span>
                                                         </div>
-                                                        <span className="text-xs text-gray-500">{t.starttime ? new Date(t.starttime*1000).toLocaleString() : 'N/A'}</span>
+                                                        <span className="text-xs text-gray-500">{task.starttime ? new Date(task.starttime*1000).toLocaleString() : 'N/A'}</span>
                                                     </div>
-                                                    <div className="text-xs text-gray-500 mt-1">{t.user || 'unknown'} - {t.id || 'N/A'}</div>
+                                                    <div className="text-xs text-gray-500 mt-1">{task.user || (t('unknown') || 'Unknown')} - {task.id || 'N/A'}</div>
                                                 </div>
                                             )) : <div className="text-center py-8 text-gray-500">{t('noTasks') || 'No tasks'}</div>}
                                         </div>
@@ -3244,7 +3246,7 @@
                                                             className="w-full px-4 py-3 bg-proxmox-card border border-proxmox-border rounded-lg text-white font-mono focus:outline-none focus:border-proxmox-orange"
                                                         />
                                                         <p className="text-xs text-gray-500 mt-2">
-                                                            Format: pve1c-xxxxxxxxxx, pve2c-xxxxxxxxxx, pve4c-xxxxxxxxxx, etc.
+                                                            {t('format') || 'Format'}: pve1c-xxxxxxxxxx, pve2c-xxxxxxxxxx, pve4c-xxxxxxxxxx, etc.
                                                         </p>
                                                     </div>
                                                     <div className="flex gap-3">
@@ -3320,7 +3322,7 @@
                                                     <p className="text-gray-400 mb-4">{t('cephNotInstalledOnNode') || 'Ceph is not configured on this node.'}</p>
                                                     <button
                                                         onClick={async () => {
-                                                            if (!confirm('Initialize Ceph on this node? This will install and configure Ceph.')) return;
+                                                            if (!confirm(t('cephInitializeConfirm') || 'Initialize Ceph on this node? This will install and configure Ceph.')) return;
                                                             try {
                                                                 const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/init`, {
                                                                     method: 'POST',
@@ -3328,14 +3330,14 @@
                                                                     headers: { 'Content-Type': 'application/json', ...authHeaders }
                                                                 });
                                                                 if (res.ok) {
-                                                                    addToast('Ceph initialization started', 'success');
+                                                                    addToast(t('cephInitializationStarted') || 'Ceph initialization started', 'success');
                                                                     loadTabData('ceph');
                                                                 } else {
                                                                     const err = await res.json().catch(() => ({}));
-                                                                    addToast(err.error || 'Failed to initialize Ceph', 'error');
+                                                                    addToast(err.error || t('cephInitializationFailed') || 'Failed to initialize Ceph', 'error');
                                                                 }
                                                             } catch (e) {
-                                                                addToast('Connection error', 'error');
+                                                                addToast(t('connectionError') || 'Connection error', 'error');
                                                             }
                                                         }}
                                                         className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-white font-medium transition-colors"
@@ -3357,16 +3359,34 @@
                                                                     <button
                                                                         key={action}
                                                                         onClick={async () => {
-                                                                            if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} Ceph services on ${node}?`)) return;
+                                                                            const confirmMessage =
+                                                                                action === 'start'
+                                                                                    ? (t('cephStartServicesConfirm') || 'Start Ceph services on this node?')
+                                                                                    : action === 'stop'
+                                                                                        ? (t('cephStopServicesConfirm') || 'Stop Ceph services on this node?')
+                                                                                        : (t('cephRestartServicesConfirm') || 'Restart Ceph services on this node?');
+                                                                            if (!confirm(`${confirmMessage}\n\n${node}`)) return;
                                                                             try {
                                                                                 const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/${action}`, {
                                                                                     method: 'POST',
                                                                                     credentials: 'include',
                                                                                     headers: authHeaders
                                                                                 });
-                                                                                addToast(res.ok ? `Ceph ${action} initiated` : `Failed to ${action}`, res.ok ? 'success' : 'error');
+                                                                                const successMessage =
+                                                                                    action === 'start'
+                                                                                        ? (t('cephStartInitiated') || 'Ceph start initiated')
+                                                                                        : action === 'stop'
+                                                                                            ? (t('cephStopInitiated') || 'Ceph stop initiated')
+                                                                                            : (t('cephRestartInitiated') || 'Ceph restart initiated');
+                                                                                const errorMessage =
+                                                                                    action === 'start'
+                                                                                        ? (t('cephStartFailed') || 'Failed to start Ceph')
+                                                                                        : action === 'stop'
+                                                                                            ? (t('cephStopFailed') || 'Failed to stop Ceph')
+                                                                                            : (t('cephRestartFailed') || 'Failed to restart Ceph');
+                                                                                addToast(res.ok ? successMessage : errorMessage, res.ok ? 'success' : 'error');
                                                                                 if (res.ok) setTimeout(() => loadTabData('ceph'), 2000);
-                                                                            } catch (e) { addToast('Error', 'error'); }
+                                                                            } catch (e) { addToast(t('error') || 'Error', 'error'); }
                                                                         }}
                                                                         className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
                                                                             action === 'stop' ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' :
@@ -3374,7 +3394,11 @@
                                                                             'bg-green-500/20 text-green-400 hover:bg-green-500/30'
                                                                         }`}
                                                                     >
-                                                                        {action.charAt(0).toUpperCase() + action.slice(1)}
+                                                                        {action === 'start'
+                                                                            ? (t('start') || 'Start')
+                                                                            : action === 'stop'
+                                                                                ? (t('stop') || 'Stop')
+                                                                                : (t('restart') || 'Restart')}
                                                                     </button>
                                                                 ))}
                                                             </div>
@@ -3387,7 +3411,7 @@
                                                                     data.ceph?.status?.health?.status === 'HEALTH_WARN' ? 'text-yellow-400' :
                                                                     'text-red-400'
                                                                 }`}>
-                                                                    {data.ceph?.status?.health?.status || 'Unknown'}
+                                                                    {data.ceph?.status?.health?.status || (t('unknown') || 'Unknown')}
                                                                 </div>
                                                             </div>
                                                             <div className="bg-proxmox-dark rounded-lg p-4">
@@ -3417,13 +3441,13 @@
                                                                         <th className="text-left p-3 text-sm text-gray-400">{t('name') || 'Name'}</th>
                                                                         <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
                                                                         <th className="text-left p-3 text-sm text-gray-400">In/Out</th>
-                                                                        <th className="text-left p-3 text-sm text-gray-400">Class</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">{t('deviceClass') || 'Class'}</th>
                                                                         <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody>
                                                                     {(!data.ceph?.osd || data.ceph.osd.length === 0) ? (
-                                                                        <tr><td colSpan="6" className="p-8 text-center text-gray-500">No OSDs on this node</td></tr>
+                                                                        <tr><td colSpan="6" className="p-8 text-center text-gray-500">{t('noOsdsOnNode') || 'No OSDs on this node'}</td></tr>
                                                                     ) : data.ceph.osd.map((osd) => (
                                                                         <tr key={osd.id} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                             <td className="p-3">{osd.id}</td>
@@ -3431,7 +3455,7 @@
                                                                             <td className="p-3">
                                                                                 <span className={`px-2 py-0.5 rounded text-xs ${
                                                                                     osd.status === 'up' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-                                                                                }`}>{osd.status || 'unknown'}</span>
+                                                                                }`}>{osd.status || (t('unknown') || 'Unknown')}</span>
                                                                             </td>
                                                                             <td className="p-3">
                                                                                 <span className={`px-2 py-0.5 rounded text-xs ${
@@ -3444,21 +3468,21 @@
                                                                                     <button
                                                                                         onClick={async () => {
                                                                                             const action = osd.in ? 'out' : 'in';
-                                                                                            if (!confirm(`Mark OSD ${osd.id} as ${action.toUpperCase()}?`)) return;
+                                                                                            if (!confirm(`${t('markOsdAs') || 'Mark OSD as'} ${action.toUpperCase()}?\n\nOSD ${osd.id}`)) return;
                                                                                             // MK May 2026 (#408 family): destructive POST with silent catch.
                                                                                             try {
                                                                                                 const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/osd/${osd.id}/${action}`, {
                                                                                                     method: 'POST', credentials: 'include', headers: authHeaders
                                                                                                 });
                                                                                                 if (res?.ok) {
-                                                                                                    addToast(`OSD ${osd.id} marked ${action.toUpperCase()}`, 'success');
+                                                                                                    addToast(`${t('osdMarkedAs') || 'OSD marked as'} ${action.toUpperCase()}: ${osd.id}`, 'success');
                                                                                                     loadTabData('ceph');
                                                                                                 } else {
                                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                                    addToast(err.error || `Failed to mark OSD ${action} (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                    addToast(err.error || `${t('failedMarkOsd') || 'Failed to mark OSD as'} ${action.toUpperCase()} (HTTP ${res?.status || '?'})`, 'error');
                                                                                                 }
                                                                                             } catch (e) {
-                                                                                                addToast(`Failed to mark OSD ${action}: ${e.message || e}`, 'error');
+                                                                                                addToast(`${t('failedMarkOsd') || 'Failed to mark OSD as'} ${action.toUpperCase()}: ${e.message || e}`, 'error');
                                                                                             }
                                                                                         }}
                                                                                         className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
@@ -3472,12 +3496,12 @@
                                                                                                     method: 'POST', credentials: 'include', headers: authHeaders
                                                                                                 });
                                                                                                 if (res?.ok) {
-                                                                                                    addToast('Scrub started', 'success');
+                                                                                                    addToast(t('scrubStarted') || 'Scrub started', 'success');
                                                                                                 } else {
                                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                                    addToast(err.error || `Failed to start scrub (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                    addToast(err.error || `${t('failedStartScrub') || 'Failed to start scrub'} (HTTP ${res?.status || '?'})`, 'error');
                                                                                                 }
-                                                                                            } catch (e) { addToast(`Failed to start scrub: ${e.message || e}`, 'error'); }
+                                                                                            } catch (e) { addToast(`${t('failedStartScrub') || 'Failed to start scrub'}: ${e.message || e}`, 'error'); }
                                                                                         }}
                                                                                         className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
                                                                                     >
@@ -3507,12 +3531,14 @@
                                                                     <span className={`px-2 py-0.5 rounded text-xs ${
                                                                         mon.quorum !== false ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                                                                     }`}>
-                                                                        {mon.quorum !== false ? 'In Quorum' : 'Not in Quorum'}
+                                                                        {mon.quorum !== false
+                                                                            ? (t('inQuorum') || 'In Quorum')
+                                                                            : (t('notInQuorum') || 'Not in Quorum')}
                                                                     </span>
                                                                 </div>
                                                             ))}
                                                             {(!data.ceph?.mon || data.ceph.mon.length === 0) && (
-                                                                <div className="p-8 text-center text-gray-500">No monitors</div>
+                                                                <div className="p-8 text-center text-gray-500">{t('noCephMonitorsFound') || 'No Ceph monitors found'}</div>
                                                             )}
                                                         </div>
                                                     </div>
@@ -3527,13 +3553,13 @@
                                                                 <thead className="bg-proxmox-dark">
                                                                     <tr>
                                                                         <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
-                                                                        <th className="text-left p-3 text-sm text-gray-400">Size</th>
-                                                                        <th className="text-left p-3 text-sm text-gray-400">PGs</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">{t('size') || 'Size'}</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">{t('pgs') || 'PGs'}</th>
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody>
                                                                     {(!data.ceph?.pools || data.ceph.pools.length === 0) ? (
-                                                                        <tr><td colSpan="3" className="p-8 text-center text-gray-500">No pools</td></tr>
+                                                                        <tr><td colSpan="3" className="p-8 text-center text-gray-500">{t('cephNoPools') || 'No Ceph pools found'}</td></tr>
                                                                     ) : data.ceph.pools.map((pool, idx) => (
                                                                         <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                             <td className="p-3 font-medium">{pool.pool_name || pool.name}</td>
@@ -3560,7 +3586,7 @@
                             <div className="flex items-center justify-between px-4 py-2 bg-proxmox-dark border-b border-proxmox-border">
                                 <div className="flex items-center gap-3">
                                     <Icons.Terminal />
-                                    <span className="text-white font-medium">{node} - Shell</span>
+                                    <span className="text-white font-medium">{node} - {t('shell') || 'Shell'}</span>
                                 </div>
                                 <button
                                     onClick={() => setData({...data, shellFullscreen: false})}
@@ -4126,14 +4152,14 @@
                                         <button
                                             onClick={() => setMode('vnc')}
                                             className={'px-3 py-1.5 text-xs flex items-center gap-1 ' + (viewMode === 'vnc' ? 'bg-blue-500/20 text-blue-400' : 'bg-proxmox-dark text-gray-400 hover:text-white')}
-                                            title="VNC console"
+                                            title={t('consoleVnc') || 'VNC graphical console'}
                                         >
                                             <Icons.Monitor className="w-3.5 h-3.5" />VNC
                                         </button>
                                         <button
                                             onClick={() => setMode('term')}
                                             className={'px-3 py-1.5 text-xs flex items-center gap-1 ' + (viewMode === 'term' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-proxmox-dark text-gray-400 hover:text-white')}
-                                            title="xterm terminal"
+                                            title={t('consolePct') || 'xterm terminal (PVE termproxy)'}
                                         >
                                             <Icons.Terminal className="w-3.5 h-3.5" />{t('term') || 'Terminal'}
                                         </button>
@@ -4404,7 +4430,11 @@
                 const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint/test`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bmcForm)
                 });
-                setBmcTest(r ? await r.json().catch(() => ({ available: false, reason: 'error' })) : { available: false, reason: 'no response' });
+                setBmcTest(
+                    r
+                        ? await r.json().catch(() => ({ available: false, reason: t('error') || 'Error' }))
+                        : { available: false, reason: t('connectionError') || 'Connection error' }
+                );
                 setBmcTesting(false);
             };
             const removeBmc = async () => {
@@ -4473,7 +4503,11 @@
                                         {hw.health_reasons.map((r, i) => (
                                             <span key={i}>
                                                 <span style={{color: statusColor(r.severity)}}>{r.label}</span>
-                                                {r.source === 'event' ? ' (SEL)' : r.source === 'system' ? ' (system health)' : ''}
+                                                {r.source === 'event'
+                                                    ? ' (SEL)'
+                                                    : r.source === 'system'
+                                                        ? ` (${t('hwSystemHealthSource') || 'system health'})`
+                                                        : ''}
                                                 {i < hw.health_reasons.length - 1 ? ', ' : ''}
                                             </span>
                                         ))}
@@ -4735,9 +4769,9 @@
                         else if (endpoint.includes('network')) loadTabData('network');
                     } else {
                         const err = res ? await res.json().catch(() => ({})) : {};
-                        addToast(err.error || 'Error', 'error');
+                        addToast(err.error || t('error') || 'Error', 'error');
                     }
-                } catch (e) { addToast('Error', 'error'); }
+                } catch (e) { addToast(t('error') || 'Error', 'error'); }
                 setSaving(false);
             };
 
@@ -4755,9 +4789,9 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ certificates: certForm.cert, key: certForm.key, restart: certForm.restart, force: true })
                     });
-                    if (res && res.ok) { addToast('Certificate uploaded', 'success'); setShowCertUpload(false); setCertForm({ cert: '', key: '', restart: true }); loadTabData('system'); }
-                    else { const err = res ? await res.json().catch(() => ({})) : {}; addToast(err.error || 'Upload failed', 'error'); }
-                } catch (e) { addToast('Upload failed', 'error'); }
+                    if (res && res.ok) { addToast(t('certificateUploaded') || 'Certificate uploaded', 'success'); setShowCertUpload(false); setCertForm({ cert: '', key: '', restart: true }); loadTabData('system'); }
+                    else { const err = res ? await res.json().catch(() => ({})) : {}; addToast(err.error || t('uploadFailed') || 'Upload failed', 'error'); }
+                } catch (e) { addToast(t('uploadFailed') || 'Upload failed', 'error'); }
                 setSaving(false);
             };
 
@@ -4947,13 +4981,13 @@
                                 </button>
                                 {showActionsMenu && (
                                     <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
-                                        <button onClick={() => { if(!confirm(`${isMaint ? 'Disable' : 'Enable'} maintenance mode on "${node}"?`)) return; onMaintenanceToggle(node, !isMaint); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.Wrench className="w-3.5 h-3.5" /> {isMaint ? t('disableMaintenance') || 'Disable Maintenance' : t('maintenance')}
+                                        <button onClick={() => { if(!confirm(`${isMaint ? (t('disableMaintenanceConfirm') || 'Disable maintenance mode on node') : (t('enableMaintenanceConfirm') || 'Enable maintenance mode on node')} "${node}"?`)) return; onMaintenanceToggle(node, !isMaint); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                            <Icons.Wrench className="w-3.5 h-3.5" /> {isMaint ? (t('disableMaintenance') || 'Disable Maintenance') : (t('enableMaintenance') || 'Enable Maintenance')}
                                         </button>
-                                        <button onClick={() => { if(!confirm(`Reboot node "${node}"?`)) return; onNodeAction(node, 'reboot'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                        <button onClick={() => { if(!confirm(`${t('rebootNodeConfirm') || 'Reboot node'} "${node}"?`)) return; onNodeAction(node, 'reboot'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.RefreshCw className="w-3.5 h-3.5" /> {t('rebootNode')}
                                         </button>
-                                        <button onClick={() => { if(!confirm(`Shutdown node "${node}"?`)) return; onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                        <button onClick={() => { if(!confirm(`${t('shutdownNodeConfirm') || 'Shut down node'} "${node}"?`)) return; onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
                                             <Icons.Power className="w-3.5 h-3.5" /> {t('shutdownNode')}
                                         </button>
                                         <button onClick={() => { onStartUpdate(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
@@ -4987,7 +5021,7 @@
                     <div className="corp-tab-strip px-4">
                         {['summary', 'monitor', 'configure', 'hardware', 'vms', 'shell', 'subscription'].map(tab => (
                             <button key={tab} className={activeDetailTab === tab ? 'active' : ''} onClick={() => setActiveDetailTab(tab)}>
-                                {tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'hardware' ? (t('hardware') || 'Hardware') : tab === 'vms' ? 'VMs' : tab === 'shell' ? 'Shell' : t('subscriptionInfo')}
+                                {tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'hardware' ? (t('hardware') || 'Hardware') : tab === 'vms' ? (t('vms') || 'VMs') : tab === 'shell' ? (t('shell') || 'Shell') : t('subscriptionInfo')}
                             </button>
                         ))}
                     </div>
@@ -5016,7 +5050,7 @@
                                             <tr><td>{t('cpuModel')}</td><td>{data.summary?.cpuinfo?.model || '-'}</td></tr>
                                             <tr><td>{t('cores')}</td><td>{data.summary?.cpuinfo?.cores || '-'} ({data.summary?.cpuinfo?.cpus || '-'} {t('logicalProcessors')})</td></tr>
                                             <tr><td>{t('cpuSockets')}</td><td>{data.summary?.cpuinfo?.sockets || '-'}</td></tr>
-                                            <tr><td>VMs</td><td>{nodeVms.length} ({runningVms} {t('running').toLowerCase()})</td></tr>
+                                            <tr><td>{t('vms') || 'VMs'}</td><td>{nodeVms.length} ({runningVms} {t('running').toLowerCase()})</td></tr>
                                             <tr><td>{t('uptime')}</td><td>{formatUptime(data.summary?.uptime || metrics.uptime)}</td></tr>
                                         </tbody>
                                     </table>
@@ -5063,7 +5097,7 @@
                                     </div>
                                     <table className="corp-property-grid">
                                         <tbody>
-                                            <tr><td>CPU</td><td>{data.summary?.cpuinfo?.model || '-'}</td></tr>
+                                            <tr><td>{t('cpu') || 'CPU'}</td><td>{data.summary?.cpuinfo?.model || '-'}</td></tr>
                                             <tr><td>{t('totalRam')}</td><td>{formatBytes(ramTotal)}</td></tr>
                                             <tr><td>{t('networkInterfaces')}</td><td>{data.network ? (Array.isArray(data.network) ? data.network.length : '-') : '-'}</td></tr>
                                             <tr><td>{t('rootFilesystem')}</td><td>{formatBytes(rootTotal)}</td></tr>
@@ -5078,8 +5112,8 @@
                                     </div>
                                     <table className="corp-property-grid">
                                         <tbody>
-                                            <tr><td>QEMU VMs</td><td>{nodeVms.filter(v => v.type === 'qemu').length}</td></tr>
-                                            <tr><td>LXC CTs</td><td>{nodeVms.filter(v => v.type === 'lxc').length}</td></tr>
+                                            <tr><td>{t('qemuVms') || 'QEMU VMs'}</td><td>{nodeVms.filter(v => v.type === 'qemu').length}</td></tr>
+                                            <tr><td>{t('lxcCts') || 'LXC CTs'}</td><td>{nodeVms.filter(v => v.type === 'lxc').length}</td></tr>
                                             <tr><td>{t('running')}</td><td>{runningVms}</td></tr>
                                             <tr><td>{t('stopped')}</td><td>{nodeVms.length - runningVms}</td></tr>
                                         </tbody>
@@ -5147,7 +5181,7 @@
                                                                 <td>{task.starttime ? new Date(task.starttime * 1000).toLocaleString() : '-'}</td>
                                                             </tr>
                                                         ))}
-                                                        {(!data.tasks || data.tasks.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No tasks</td></tr>}
+                                                        {(!data.tasks || data.tasks.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>{t('noTasks') || 'No tasks'}</td></tr>}
                                                     </tbody>
                                                 </table>
                                             )}
@@ -5205,9 +5239,9 @@
                                                                     </div>
                                                                 )}
                                                             </div>
-                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT' }); addToast(res && res.ok ? 'Konfiguracja sieci została zastosowana' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
+                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT' }); addToast(res && res.ok ? (t('networkConfigurationApplied') || 'Network configuration applied') : (t('error') || 'Error'), res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
                                                                 className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>{t('apply') || 'Apply'}</button>
-                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE' }); addToast(res && res.ok ? 'Cofnięto zmiany' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
+                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE' }); addToast(res && res.ok ? (t('changesReverted') || 'Changes reverted') : (t('error') || 'Error'), res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
                                                                 className="px-2 py-1 text-[11px]" style={{color: '#efc006', border: '1px solid rgba(239,192,6,0.3)'}}>{t('revert') || 'Revert'}</button>
                                                         </div>
                                                     </div>
@@ -5224,15 +5258,15 @@
                                                                     <td>
                                                                         <div className="flex gap-1">
                                                                             <button onClick={() => setData(prev => ({...prev, editIface: {...iface, isNew: false}}))}
-                                                                                className="p-1 hover:bg-[#324f61]" title="Edit" style={{color: '#49afd9'}}>
+                                                                                className="p-1 hover:bg-[#324f61]" title={t('edit') || 'Edit'} style={{color: '#49afd9'}}>
                                                                                 <Icons.Cog className="w-3 h-3" />
                                                                             </button>
                                                                             <button onClick={async () => {
                                                                                     if (!confirm(`${t('delete')} ${iface.iface}?`)) return;
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE' });
-                                                                                    addToast(res && res.ok ? `${iface.iface} ${t('deleted')}` : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network');
+                                                                                    addToast(res && res.ok ? `${iface.iface} ${t('deleted')}` : (t('error') || 'Error'), res && res.ok ? 'success' : 'error'); loadTabData('network');
                                                                                 }}
-                                                                                className="p-1 hover:bg-[#324f61]" title="Delete" style={{color: '#e57373'}}>
+                                                                                className="p-1 hover:bg-[#324f61]" title={t('delete') || 'Delete'} style={{color: '#e57373'}}>
                                                                                 <Icons.Trash className="w-3 h-3" />
                                                                             </button>
                                                                         </div>
@@ -5262,7 +5296,7 @@
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white disabled:opacity-50" />
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>IPv4/CIDR</label>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('ipv4Cidr') || 'IPv4/CIDR'}</label>
                                                                             <input type="text" value={data.editIface.cidr || ''}
                                                                                 onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, cidr: e.target.value}}))}
                                                                                 placeholder="192.168.1.1/24"
@@ -5276,7 +5310,7 @@
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>IPv6/CIDR</label>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('ipv6Cidr') || 'IPv6/CIDR'}</label>
                                                                             <input type="text" value={data.editIface.cidr6 || ''}
                                                                                 onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, cidr6: e.target.value}}))}
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
@@ -5288,7 +5322,7 @@
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>MTU</label>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('mtu') || 'MTU'}</label>
                                                                             <input type="number" value={data.editIface.mtu || ''}
                                                                                 onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, mtu: e.target.value}}))}
                                                                                 placeholder="1500"
@@ -5298,7 +5332,7 @@
                                                                     {data.editIface.type === 'bridge' && (
                                                                         <div className="grid grid-cols-2 gap-3">
                                                                             <div>
-                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Bridge Ports</label>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('ports') || 'Bridge Ports'}</label>
                                                                                 <input type="text" value={data.editIface.bridge_ports || ''}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bridge_ports: e.target.value}}))}
                                                                                     placeholder="ens18"
@@ -5308,7 +5342,7 @@
                                                                                 <label className="flex items-center gap-2 text-[12px]" style={{color: '#adbbc4'}}>
                                                                                     <input type="checkbox" checked={data.editIface.bridge_vlan_aware || false}
                                                                                         onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bridge_vlan_aware: e.target.checked}}))} />
-                                                                                    VLAN aware
+                                                                                    {t('vlanAware') || 'VLAN aware'}
                                                                                 </label>
                                                                             </div>
                                                                         </div>
@@ -5316,14 +5350,14 @@
                                                                     {data.editIface.type === 'bond' && (
                                                                         <div className="grid grid-cols-2 gap-3">
                                                                             <div>
-                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Slaves</label>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('slaves') || 'Slaves'}</label>
                                                                                 <input type="text" value={data.editIface.slaves || ''}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, slaves: e.target.value}}))}
                                                                                     placeholder="ens18 ens19"
                                                                                     className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
                                                                             </div>
                                                                             <div>
-                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Mode</label>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('bondMode') || 'Mode'}</label>
                                                                                 <select value={data.editIface.bond_mode || 'balance-rr'}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bond_mode: e.target.value}}))}
                                                                                     className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white">
@@ -5337,18 +5371,18 @@
                                                                                 </select>
                                                                             </div>
                                                                             <div>
-                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Hash Policy</label>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('hashPolicy') || 'Hash Policy'}</label>
                                                                                 <select value={data.editIface.bond_xmit_hash_policy || ''}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bond_xmit_hash_policy: e.target.value}}))}
                                                                                     className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white">
-                                                                                    <option value="">Default</option>
+                                                                                    <option value="">{t('defaultOption') || 'Default'}</option>
                                                                                     <option value="layer2">layer2</option>
                                                                                     <option value="layer2+3">layer2+3</option>
                                                                                     <option value="layer3+4">layer3+4</option>
                                                                                 </select>
                                                                             </div>
                                                                             <div>
-                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Bond Primary</label>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('bondPrimary') || 'Bond Primary'}</label>
                                                                                 <input type="text" value={data.editIface['bond-primary'] || ''}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, 'bond-primary': e.target.value}}))}
                                                                                     className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
@@ -5358,14 +5392,14 @@
                                                                     {data.editIface.type === 'vlan' && (
                                                                         <div className="grid grid-cols-2 gap-3">
                                                                             <div>
-                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>VLAN raw device</label>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('vlanRawDevice') || 'VLAN raw device'}</label>
                                                                                 <input type="text" value={data.editIface['vlan-raw-device'] || ''}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, 'vlan-raw-device': e.target.value}}))}
                                                                                     placeholder="vmbr0"
                                                                                     className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
                                                                             </div>
                                                                             <div>
-                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>VLAN Tag</label>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('vlanTagLabel') || 'VLAN Tag'}</label>
                                                                                 <input type="number" value={data.editIface['vlan-id'] || ''}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, 'vlan-id': e.target.value}}))}
                                                                                     placeholder="100"
@@ -5378,11 +5412,11 @@
                                                                             <label className="flex items-center gap-2 text-[12px]" style={{color: '#adbbc4'}}>
                                                                                 <input type="checkbox" checked={data.editIface.autostart !== 0}
                                                                                     onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, autostart: e.target.checked ? 1 : 0}}))} />
-                                                                                Autostart
+                                                                                {t('autostart') || 'Autostart'}
                                                                             </label>
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Comment</label>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('comment') || 'Comment'}</label>
                                                                             <input type="text" value={data.editIface.comments || ''}
                                                                                 onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, comments: e.target.value}}))}
                                                                                 className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
@@ -5404,7 +5438,7 @@
                                                                             addToast(iface.isNew ? (t('interfaceCreated') || 'Interface created') : (t('interfaceUpdated') || 'Interface updated'), 'success');
                                                                             setData(prev => ({...prev, editIface: null}));
                                                                             loadTabData('network');
-                                                                        } else { addToast('Error', 'error'); }
+                                                                        } else { addToast(t('error') || 'Error', 'error'); }
                                                                     }} className="px-3 py-1.5 text-[12px]" style={{color: '#fff', background: '#49afd9', border: 'none'}}>
                                                                         {data.editIface.isNew ? (t('create') || 'Create') : t('save')}
                                                                     </button>
@@ -5424,25 +5458,25 @@
                                                         ) : (
                                                             <div className="flex gap-1">
                                                                 <button onClick={() => setEditingDns(false)} className="px-2 py-1 text-[11px]" style={{color: '#adbbc4', border: '1px solid #485764'}}>{t('cancel')}</button>
-                                                                <button onClick={() => { handleSave('dns', dnsForm, 'DNS saved'); setEditingDns(false); }} disabled={saving}
+                                                                <button onClick={() => { handleSave('dns', dnsForm, t('dnsSaved') || 'DNS saved'); setEditingDns(false); }} disabled={saving}
                                                                     className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>{saving ? '...' : t('save')}</button>
                                                             </div>
                                                         )}
                                                     </div>
                                                     {editingDns ? (
                                                         <div className="space-y-2">
-                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Search Domain</label><input value={dnsForm.search} onChange={e => setDnsForm({...dnsForm, search: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white" /></div>
-                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 1</label><input value={dnsForm.dns1} onChange={e => setDnsForm({...dnsForm, dns1: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
-                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 2</label><input value={dnsForm.dns2} onChange={e => setDnsForm({...dnsForm, dns2: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
-                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 3</label><input value={dnsForm.dns3} onChange={e => setDnsForm({...dnsForm, dns3: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('searchDomain') || 'Search Domain'}</label><input value={dnsForm.search} onChange={e => setDnsForm({...dnsForm, search: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('dnsServer1') || 'DNS 1'}</label><input value={dnsForm.dns1} onChange={e => setDnsForm({...dnsForm, dns1: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('dnsServer2') || 'DNS 2'}</label><input value={dnsForm.dns2} onChange={e => setDnsForm({...dnsForm, dns2: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('dnsServer3') || 'DNS 3'}</label><input value={dnsForm.dns3} onChange={e => setDnsForm({...dnsForm, dns3: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
                                                         </div>
                                                     ) : (
                                                         <table className="corp-property-grid">
                                                             <tbody>
-                                                                <tr><td>Search Domain</td><td>{data.dns?.search || '-'}</td></tr>
-                                                                <tr><td>DNS 1</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns1 || '-'}</td></tr>
-                                                                <tr><td>DNS 2</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns2 || '-'}</td></tr>
-                                                                <tr><td>DNS 3</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns3 || '-'}</td></tr>
+                                                                <tr><td>{t('searchDomain') || 'Search Domain'}</td><td>{data.dns?.search || '-'}</td></tr>
+                                                                <tr><td>{t('dnsServer1') || 'DNS 1'}</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns1 || '-'}</td></tr>
+                                                                <tr><td>{t('dnsServer2') || 'DNS 2'}</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns2 || '-'}</td></tr>
+                                                                <tr><td>{t('dnsServer3') || 'DNS 3'}</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns3 || '-'}</td></tr>
                                                             </tbody>
                                                         </table>
                                                     )}
@@ -5458,7 +5492,7 @@
                                                         ) : (
                                                             <div className="flex gap-1">
                                                                 <button onClick={() => setEditingHosts(false)} className="px-2 py-1 text-[11px]" style={{color: '#adbbc4', border: '1px solid #485764'}}>{t('cancel')}</button>
-                                                                <button onClick={() => { handleSave('hosts', { data: hostsForm }, 'Hosts saved', 'POST'); setEditingHosts(false); }} disabled={saving}
+                                                                <button onClick={() => { handleSave('hosts', { data: hostsForm }, t('hostsSaved') || 'Hosts saved', 'POST'); setEditingHosts(false); }} disabled={saving}
                                                                     className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>{saving ? '...' : t('save')}</button>
                                                             </div>
                                                         )}
@@ -5467,7 +5501,7 @@
                                                         <textarea value={hostsForm} onChange={e => setHostsForm(e.target.value)} rows={8}
                                                             className="w-full px-3 py-2 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" style={{resize: 'vertical'}} />
                                                     ) : (
-                                                        <pre className="text-[12px] p-3 overflow-auto" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)', fontFamily: 'monospace', maxHeight: '300px'}}>{data.hosts || 'No data'}</pre>
+                                                        <pre className="text-[12px] p-3 overflow-auto" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)', fontFamily: 'monospace', maxHeight: '300px'}}>{data.hosts || (t('noData') || 'No data')}</pre>
                                                     )}
                                                 </div>
                                             )}
@@ -5477,7 +5511,7 @@
                                                     <table className="corp-property-grid">
                                                         <tbody>
                                                             <tr>
-                                                                <td>Timezone</td>
+                                                                <td>{t('timezone') || 'Timezone'}</td>
                                                                 <td>
                                                                     <select
                                                                         value={data.time?.timezone || 'UTC'}
@@ -5492,8 +5526,8 @@
                                                                     </select>
                                                                 </td>
                                                             </tr>
-                                                            <tr><td>Local Time</td><td>{data.time?.localtime ? new Date(data.time.localtime * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
-                                                            <tr><td>UTC Time</td><td>{data.time?.time ? new Date(data.time.time * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
+                                                            <tr><td>{t('localTime') || 'Local Time'}</td><td>{data.time?.localtime ? new Date(data.time.localtime * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
+                                                            <tr><td>{t('utcTime') || 'UTC Time'}</td><td>{data.time?.time ? new Date(data.time.time * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -5507,15 +5541,15 @@
                                                     </div>
                                                     {showCertUpload && (
                                                         <div className="mb-3 p-3 space-y-2" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
-                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Certificate (PEM)</label><textarea value={certForm.cert} onChange={e => setCertForm({...certForm, cert: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN CERTIFICATE-----" /></div>
-                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Private Key (PEM)</label><textarea value={certForm.key} onChange={e => setCertForm({...certForm, key: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN PRIVATE KEY-----" /></div>
-                                                            <label className="flex items-center gap-2 text-[12px]" style={{color: 'var(--corp-text-secondary)'}}><input type="checkbox" checked={certForm.restart} onChange={e => setCertForm({...certForm, restart: e.target.checked})} /> Restart pveproxy after upload</label>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('certificate') || 'Certificate'} (PEM)</label><textarea value={certForm.cert} onChange={e => setCertForm({...certForm, cert: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN CERTIFICATE-----" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('privateKey') || 'Private Key'} (PEM)</label><textarea value={certForm.key} onChange={e => setCertForm({...certForm, key: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN PRIVATE KEY-----" /></div>
+                                                            <label className="flex items-center gap-2 text-[12px]" style={{color: 'var(--corp-text-secondary)'}}><input type="checkbox" checked={certForm.restart} onChange={e => setCertForm({...certForm, restart: e.target.checked})} /> {t('restartPveproxyAfterUpload') || 'Restart pveproxy after upload'}</label>
                                                             <button onClick={handleCertUpload} disabled={saving || !certForm.cert || !certForm.key}
                                                                 className="px-3 py-1.5 text-[12px] disabled:opacity-40" style={{color: '#fff', background: '#49afd9', border: 'none'}}>{saving ? '...' : 'Upload Certificate'}</button>
                                                         </div>
                                                     )}
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>Filename</th><th>Subject</th><th>Issuer</th><th>Expires</th></tr></thead>
+                                                        <thead><tr><th>{t('filename') || 'Filename'}</th><th>{t('subject') || 'Subject'}</th><th>{t('issuer') || 'Issuer'}</th><th>{t('expires') || 'Expires'}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.certificates) ? data.certificates : []).map((cert, i) => (
                                                                 <tr key={i}>
@@ -5525,7 +5559,7 @@
                                                                     <td>{cert.notafter ? new Date(cert.notafter * 1000).toLocaleDateString() : '-'}</td>
                                                                 </tr>
                                                             ))}
-                                                            {(!data.certificates || data.certificates.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No certificates</td></tr>}
+                                                            {(!data.certificates || data.certificates.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>{t('noCertificates') || 'No certificates'}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -5539,7 +5573,7 @@
                                                         </button>
                                                     </div>
                                                     <pre className="text-[11px] p-3 overflow-auto" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)', fontFamily: 'monospace', maxHeight: '400px'}}>
-                                                        {Array.isArray(data.syslog) ? data.syslog.map(l => l.t || l.n || l).join('\n') : (data.syslog || 'No data')}
+                                                        {Array.isArray(data.syslog) ? data.syslog.map(l => l.t || l.n || l).join('\n') : (data.syslog || (t('noData') || 'No data'))}
                                                     </pre>
                                                 </div>
                                             )}
@@ -5547,7 +5581,7 @@
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('disks')}</span>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>Device</th><th>{t('type')}</th><th>Size</th><th>{t('status')}</th></tr></thead>
+                                                        <thead><tr><th>{t('device') || 'Device'}</th><th>{t('type')}</th><th>{t('size') || 'Size'}</th><th>{t('status')}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.disks) ? data.disks : []).map((disk, i) => (
                                                                 <tr key={i}>
@@ -5557,7 +5591,7 @@
                                                                     <td>{disk.health || disk.used || '-'}</td>
                                                                 </tr>
                                                             ))}
-                                                            {(!data.disks || data.disks.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No disks</td></tr>}
+                                                            {(!data.disks || data.disks.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>{t('noDisks') || 'No disks'}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -5566,12 +5600,12 @@
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmStorage')}</span>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>VG</th><th>Size</th><th>Free</th></tr></thead>
+                                                        <thead><tr><th>VG</th><th>{t('size') || 'Size'}</th><th>{t('free') || 'Free'}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.lvm) ? data.lvm : []).map((vg, i) => (
                                                                 <tr key={i}><td>{vg.vg || '-'}</td><td>{formatBytes(vg.size)}</td><td>{formatBytes(vg.free)}</td></tr>
                                                             ))}
-                                                            {(!data.lvm || data.lvm.length === 0) && <tr><td colSpan={3} className="text-center py-4" style={{color: '#728b9a'}}>No LVM volumes</td></tr>}
+                                                            {(!data.lvm || data.lvm.length === 0) && <tr><td colSpan={3} className="text-center py-4" style={{color: '#728b9a'}}>{t('noLvmVolumes') || 'No LVM volumes'}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -5580,12 +5614,12 @@
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmThinStorage')}</span>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>Pool</th><th>VG</th><th>Size</th><th>Used</th></tr></thead>
+                                                        <thead><tr><th>{t('pool') || 'Pool'}</th><th>VG</th><th>{t('size') || 'Size'}</th><th>{t('used') || 'Used'}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.lvmthin) ? data.lvmthin : []).map((tp, i) => (
                                                                 <tr key={i}><td>{tp.lv || '-'}</td><td>{tp.vg || '-'}</td><td>{formatBytes(tp.lv_size)}</td><td>{tp.metadata_usage ? `${(tp.metadata_usage * 100).toFixed(1)}%` : '-'}</td></tr>
                                                             ))}
-                                                            {(!data.lvmthin || data.lvmthin.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No LVM-Thin pools</td></tr>}
+                                                            {(!data.lvmthin || data.lvmthin.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>{t('noLvmThinPools') || 'No LVM-Thin pools'}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -5594,12 +5628,12 @@
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('zfsStorage')}</span>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>{t('name')}</th><th>Size</th><th>Free</th><th>Health</th></tr></thead>
+                                                        <thead><tr><th>{t('name')}</th><th>{t('size') || 'Size'}</th><th>{t('free') || 'Free'}</th><th>{t('health') || 'Health'}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.zfs) ? data.zfs : []).map((pool, i) => (
                                                                 <tr key={i}><td>{pool.name || '-'}</td><td>{formatBytes(pool.size)}</td><td>{formatBytes(pool.free)}</td><td>{pool.health || '-'}</td></tr>
                                                             ))}
-                                                            {(!data.zfs || data.zfs.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No ZFS pools</td></tr>}
+                                                            {(!data.zfs || data.zfs.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>{t('noZfsPools') || 'No ZFS pools'}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -5608,7 +5642,7 @@
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('repositories')}</span>
-                                                        <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, { method: 'POST' }); addToast(res && res.ok ? 'apt update started' : 'Error', res && res.ok ? 'success' : 'error'); }}
+                                                        <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, { method: 'POST' }); addToast(res && res.ok ? (t('aptUpdateStarted') || 'apt update started') : (t('error') || 'Error'), res && res.ok ? 'success' : 'error'); }}
                                                             className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
                                                             <Icons.RefreshCw className="w-3 h-3" /> apt update
                                                         </button>
@@ -5630,25 +5664,25 @@
                                                                     </td>
                                                                 </tr>
                                                             ))}
-                                                            {(!data.repos || data.repos.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No repositories</td></tr>}
+                                                            {(!data.repos || data.repos.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>{t('noRepositories') || 'No repositories'}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                 </div>
                                             )}
                                             {configSubTab === 'ceph' && (
                                                 <div>
-                                                    <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>Ceph</span>
+                                                    <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('ceph') || 'Ceph'}</span>
                                                     {data.ceph && !data.ceph.available ? (
-                                                        <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.Database className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">Ceph not configured on this node</p></div>
+                                                        <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.Database className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">{t('cephNotConfiguredOnNode') || 'Ceph not configured on this node'}</p></div>
                                                     ) : (
                                                         <div className="space-y-3">
                                                             {data.ceph?.status && (
                                                                 <table className="corp-property-grid">
                                                                     <tbody>
-                                                                        <tr><td>Health</td><td style={{color: data.ceph.status.health?.status === 'HEALTH_OK' ? '#60b515' : '#efc006'}}>{data.ceph.status.health?.status || '-'}</td></tr>
+                                                                        <tr><td>{t('health') || 'Health'}</td><td style={{color: data.ceph.status.health?.status === 'HEALTH_OK' ? '#60b515' : '#efc006'}}>{data.ceph.status.health?.status || '-'}</td></tr>
                                                                         <tr><td>OSDs</td><td>{data.ceph.osd?.length || 0}</td></tr>
                                                                         <tr><td>MONs</td><td>{data.ceph.mon?.length || 0}</td></tr>
-                                                                        <tr><td>Pools</td><td>{data.ceph.pools?.length || 0}</td></tr>
+                                                                        <tr><td>{t('pools') || 'Pools'}</td><td>{data.ceph.pools?.length || 0}</td></tr>
                                                                     </tbody>
                                                                 </table>
                                                             )}
@@ -5685,7 +5719,7 @@
                                                 <td>{vm.maxmem ? `${formatBytes(vm.mem)} / ${formatBytes(vm.maxmem)}` : '-'}</td>
                                             </tr>
                                         ))}
-                                        {nodeVms.length === 0 && <tr><td colSpan={6} className="text-center py-4" style={{color: '#728b9a'}}>No VMs on this node</td></tr>}
+                                        {nodeVms.length === 0 && <tr><td colSpan={6} className="text-center py-4" style={{color: '#728b9a'}}>{t('noVmsOnNode') || 'No VMs on this node'}</td></tr>}
                                     </tbody>
                                 </table>
                             </div>
@@ -5712,12 +5746,12 @@
                                             <table className="w-full text-sm">
                                                 <thead className="text-xs text-gray-400">
                                                     <tr>
-                                                        <th className="text-left p-2">Chip</th>
+                                                        <th className="text-left p-2">{t('sensorChip') || 'Chip'}</th>
                                                         <th className="text-left p-2">{t('sensor') || 'Sensor'}</th>
                                                         <th className="text-right p-2">{t('value') || 'Value'}</th>
-                                                        <th className="text-right p-2">Max</th>
-                                                        <th className="text-right p-2">Crit</th>
-                                                        <th className="text-center p-2">Alarm</th>
+                                                        <th className="text-right p-2">{t('max') || 'Max'}</th>
+                                                        <th className="text-right p-2">{t('crit') || 'Crit'}</th>
+                                                        <th className="text-center p-2">{t('alarm') || 'Alarm'}</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
@@ -5734,7 +5768,7 @@
                                                                 <td className="p-2 text-right font-mono" style={{color: clr || '#e6edf3'}}>{s.value != null ? `${typeof s.value === 'number' ? s.value.toFixed(1) : s.value} ${unit}` : '-'}</td>
                                                                 <td className="p-2 text-right font-mono text-gray-500">{s.max != null ? `${typeof s.max === 'number' ? s.max.toFixed(0) : s.max} ${unit}` : '-'}</td>
                                                                 <td className="p-2 text-right font-mono text-gray-500">{s.crit != null ? `${typeof s.crit === 'number' ? s.crit.toFixed(0) : s.crit} ${unit}` : '-'}</td>
-                                                                <td className="p-2 text-center">{s.alarm ? <span style={{color: '#f54f47'}}>!</span> : <span style={{color: '#60b515'}}>ok</span>}</td>
+                                                                <td className="p-2 text-center">{s.alarm ? <span style={{color: '#f54f47'}}>!</span> : <span style={{color: '#60b515'}}>{t('ok') || 'OK'}</span>}</td>
                                                             </tr>
                                                         );
                                                     })}
