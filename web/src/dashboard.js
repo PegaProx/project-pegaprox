@@ -23947,7 +23947,7 @@
                                             </div>
                                             <div>
                                                 <h4 className="font-medium text-white">{showScriptRunModal.name}</h4>
-                                                <p className="text-xs text-gray-500">{showScriptRunModal.description || 'No description'}</p>
+                                                <p className="text-xs text-gray-500">{showScriptRunModal.description || (t('noDescription') || 'No description')}</p>
                                             </div>
                                         </div>
                                     </div>

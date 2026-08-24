@@ -1770,7 +1770,7 @@
                                                         dangerouslySetInnerHTML={{
                                                             __html: (() => {
                                                                 const raw = getValue('general', 'description');
-                                                                if (!raw) return '<span style="color:#6b7280">No description</span>';
+                                                                if (!raw) return `<span style="color:#6b7280">${t('noDescription') || 'No description'}</span>`;
                                                                 if (!window.marked) return (window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'));
                                                                 // MK: security audit — if DOMPurify not loaded, render as escaped plain text, NEVER unsanitized HTML
                                                                 const html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(raw)) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
