@@ -255,7 +255,7 @@
                         }, 2000);
                     } else {
                         const err = await res.json();
-                        addToast(`${t('downloadFailed') || 'Download failed'}: ${err.error || 'Unknown error'}`, 'error');
+                        addToast(`${t('downloadFailed') || 'Download failed'}: ${err.error || t('unknownError') || 'Unknown error'}`, 'error');
                     }
                 } catch (e) {
                     console.error('Error downloading template:', e);
@@ -588,7 +588,12 @@
             };
             
             const executeMigration = async (rec) => {
-                if (!confirm(`Move ${rec.disk} of ${rec.vm_name} from ${rec.source} to ${rec.target}?`)) return;
+                const confirmText = (t('confirmMigration') || 'Move {disk} of {vm} from {source} to {target}?')
+                    .replace('{disk}', rec.disk)
+                    .replace('{vm}', rec.vm_name)
+                    .replace('{source}', rec.source)
+                    .replace('{target}', rec.target);
+                if (!confirm(confirmText)) return;
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-balancing/migrate`, {
                         method: 'POST',
@@ -604,7 +609,7 @@
                         if (selectedCluster) loadClusterStatus(selectedCluster);
                     } else {
                         const err = await response.json();
-                        alert(err.error || 'Migration failed');
+                        alert(err.error || t('migrationFailed') || 'Migration failed');
                     }
                 } catch (error) {
                     console.error('executing migration:', error);
@@ -1552,7 +1557,7 @@
                                                             onClick={() => { setShowTemplateModal(true); loadAvailableTemplates(); }}
                                                             className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm"
                                                         >
-                                                            <Icons.Download /> Templates
+                                                            <Icons.Download /> {t('templates') || 'Templates'}
                                                         </button>
                                                     )}
                                                     {/* NS: Download from URL - for ISO storage (like Proxmox) */}
@@ -1652,7 +1657,7 @@
                                                                     LVM or thick qcow2 where computing the real size is expensive. */}
                                                                 {item.size_is_approx && <span className="text-gray-500">~</span>}
                                                                 {item.size_human || formatSize(item.size)}
-                                                                {item.size_is_approx && <span className="text-[10px] text-gray-500 ml-1" title="Approximate — PVE 9.2 reported approximate-size, not exact size">≈</span>}
+                                                                {item.size_is_approx && <span className="text-[10px] text-gray-500 ml-1" title={t('approximateSizeHint') || 'Approximate — PVE 9.2 reported approximate-size, not exact size'}>≈</span>}
                                                             </td>
                                                             {hasPerm('storage.delete') && (
                                                                 <td className="p-2">
@@ -1696,7 +1701,7 @@
                                 <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center">
                                     <h3 className="font-semibold flex items-center gap-2">
                                         <Icons.Zap className="text-yellow-400" />
-                                        Storage Clusters
+                                        {t('storageClusters') || 'Storage Clusters'}
                                     </h3>
                                     {hasPerm('storage.config') && (
                                         <button
@@ -2053,7 +2058,7 @@
                                     {templatesLoading ? (
                                         <div className="flex items-center justify-center py-12">
                                             <Icons.RotateCw className="animate-spin mr-2" />
-                                            Loading templates...
+                                            {t('loadingTemplates') || 'Loading templates...'}
                                         </div>
                                     ) : availableTemplates.length === 0 ? (
                                         <div className="text-center py-12 text-gray-500">
@@ -2070,10 +2075,10 @@
                                                         t.headline?.toLowerCase().includes(templateFilter.toLowerCase()) ||
                                                         t.os?.toLowerCase().includes(templateFilter.toLowerCase())
                                                     )
-                                                    .reduce((acc, t) => {
-                                                        const section = t.section || 'Other';
+                                                    .reduce((acc, tmpl) => {
+                                                        const section = tmpl.section || t('otherTemplatesSection') || 'Other';
                                                         if (!acc[section]) acc[section] = [];
-                                                        acc[section].push(t);
+                                                        acc[section].push(tmpl);
                                                         return acc;
                                                     }, {})
                                             ).map(([section, templates]) => (
@@ -2110,7 +2115,7 @@
                                                                                 rel="noopener noreferrer"
                                                                                 className="text-blue-400 hover:underline"
                                                                             >
-                                                                                Info
+                                                                                {t('info') || 'Info'}
                                                                             </a>
                                                                         )}
                                                                     </div>
@@ -2123,7 +2128,7 @@
                                                                     {downloadingTemplate === tmpl.template ? (
                                                                         <><Icons.RotateCw className="animate-spin w-4 h-4" /> ...</>
                                                                     ) : (
-                                                                        <><Icons.Download className="w-4 h-4" /> Download</>
+                                                                        <><Icons.Download className="w-4 h-4" /> {t('download') || 'Download'}</>
                                                                     )}
                                                                 </button>
                                                             </div>
@@ -2183,11 +2188,11 @@
                                                 });
                                                 const data = await res.json();
                                                 if (res.ok && data.success) {
-                                                    addToast(t('storageRescanSuccess') || `Rescan completed on ${data.nodes_successful}/${data.nodes_scanned} nodes`, 'success');
+                                                    addToast(`${t('storageRescanSuccess') || 'Storage rescan completed'}: ${data.nodes_successful}/${data.nodes_scanned}`, 'success');
                                                     fetchDatastores();
                                                     loadStorageContent(selectedStorage.name, selectedStorage.node);
                                                 } else {
-                                                    addToast(data.error || 'Rescan failed', 'error');
+                                                    addToast(data.error || t('storageRescanError') || 'Failed to rescan storage', 'error');
                                                 }
                                             } catch (e) {
                                                 console.error('Rescan error:', e);
@@ -2226,11 +2231,11 @@
                                                 });
                                                 const data = await res.json();
                                                 if (res.ok && data.success) {
-                                                    addToast(`Deep scan completed on ${data.nodes_successful}/${data.nodes_scanned} nodes`, 'success');
+                                                    addToast(`${t('deepScanCompleted') || 'Deep scan completed'}: ${data.nodes_successful}/${data.nodes_scanned}`, 'success');
                                                     fetchDatastores();
                                                     loadStorageContent(selectedStorage.name, selectedStorage.node);
                                                 } else {
-                                                    addToast(data.error || 'Deep scan failed', 'error');
+                                                    addToast(data.error || t('deepScanFailed') || 'Deep scan failed', 'error');
                                                 }
                                             } catch (e) {
                                                 console.error('Deep scan error:', e);
@@ -2310,7 +2315,9 @@
                                         <div className="space-y-2">
                                             <div className="flex justify-between text-sm">
                                                 <span className="text-gray-400">
-                                                    {uploadProgress < 100 ? 'Uploading...' : 'Processing...'}
+                                                    {uploadProgress < 100
+                                                        ? (t('uploading') || 'Uploading...')
+                                                        : (t('processing') || 'Processing...')}
                                                 </span>
                                                 <span className="text-proxmox-orange font-mono">
                                                     {uploadProgress}%
@@ -2408,7 +2415,7 @@
                                         <div className="space-y-2">
                                             <div className="flex justify-between text-sm">
                                                 <span className="text-gray-400">
-                                                    {urlDownloadProgress.message || 'Downloading...'}
+                                                    {urlDownloadProgress.message || t('downloading') || 'Downloading...'}
                                                 </span>
                                                 {urlDownloadProgress.percent !== undefined && (
                                                     <span className="text-green-400 font-mono">
@@ -2511,7 +2518,7 @@
                                             type="text"
                                             value={esxiForm.host}
                                             onChange={e => setEsxiForm({...esxiForm, host: e.target.value})}
-                                            placeholder="192.168.1.100 oder esxi.local"
+                                            placeholder="192.168.1.100 / esxi.local"
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                         />
                                     </div>
