@@ -88,30 +88,89 @@
             });
             
             const formatTaskType = (type) => {
-                if (!type) return 'Task';
+                if (!type) return t('taskLabel') || 'Task';
+
+                const op = (key, fallback) => t(key) || fallback;
                 const types = {
-                    'qmigrate': 'VM Migration', 'vzmigrate': 'CT Migration',
-                    'qmstart': 'VM Start', 'vzstart': 'CT Start',
-                    'qmstop': 'VM Stop', 'vzstop': 'CT Stop',
-                    'qmshutdown': 'VM Shutdown', 'vzshutdown': 'CT Shutdown',
-                    'qmreboot': 'VM Reboot', 'vzreboot': 'CT Reboot',
-                    'qmcreate': 'VM Create', 'vzcreate': 'CT Create',
-                    'qmdestroy': 'VM Delete', 'vzdestroy': 'CT Delete',
-                    'qmclone': 'VM Clone', 'vzclone': 'CT Clone',
-                    'qmsnapshot': 'Snapshot', 'vzsnapshot': 'Snapshot',
-                    'imgcopy': 'Disk Copy', 'move_volume': 'Disk Move',
-                    'resize': 'Disk Resize', 'download': 'Download',
-                    'vzdump': 'Backup', 'qmrestore': 'Restore', 'vzrestore': 'Restore',
-                    'vncproxy': 'VNC Console',
+                    'qmigrate': `VM: ${op('taskOpMigration', 'Migration')}`,
+                    'vzmigrate': `CT: ${op('taskOpMigration', 'Migration')}`,
+                    'qmstart': `VM: ${op('taskOpStart', 'Start')}`,
+                    'vzstart': `CT: ${op('taskOpStart', 'Start')}`,
+                    'qmstop': `VM: ${op('taskOpStop', 'Stop')}`,
+                    'vzstop': `CT: ${op('taskOpStop', 'Stop')}`,
+                    'qmshutdown': `VM: ${op('taskOpShutdown', 'Shutdown')}`,
+                    'vzshutdown': `CT: ${op('taskOpShutdown', 'Shutdown')}`,
+                    'qmreboot': `VM: ${op('taskOpReboot', 'Reboot')}`,
+                    'vzreboot': `CT: ${op('taskOpReboot', 'Reboot')}`,
+                    'qmcreate': `VM: ${op('taskOpCreate', 'Create')}`,
+                    'vzcreate': `CT: ${op('taskOpCreate', 'Create')}`,
+                    'qmdestroy': `VM: ${op('taskOpDelete', 'Delete')}`,
+                    'vzdestroy': `CT: ${op('taskOpDelete', 'Delete')}`,
+                    'qmclone': `VM: ${op('taskOpClone', 'Clone')}`,
+                    'vzclone': `CT: ${op('taskOpClone', 'Clone')}`,
+                    'qmsnapshot': op('taskOpSnapshot', 'Snapshot'),
+                    'vzsnapshot': op('taskOpSnapshot', 'Snapshot'),
+                    'imgcopy': op('taskOpDiskCopy', 'Disk Copy'),
+                    'move_volume': op('taskOpDiskMove', 'Disk Move'),
+                    'resize': op('taskOpDiskResize', 'Disk Resize'),
+                    'download': op('taskOpDownload', 'Download'),
+                    'vzdump': op('taskOpBackup', 'Backup'),
+                    'qmrestore': op('taskOpRestore', 'Restore'),
+                    'vzrestore': op('taskOpRestore', 'Restore'),
+                    'vncproxy': op('taskOpVncConsole', 'VNC Console'),
                     // portal actions
-                    'portalstart': 'Portal: Start',
-                    'portalstop': 'Portal: Stop', 'portalshutdown': 'Portal: Shutdown',
-                    'portalreboot': 'Portal: Reboot', 'portalsnapshot': 'Portal: Snapshot',
-                    'portalrollback': 'Portal: Rollback', 'portalpassword': 'Portal: Password',
+                    'portalstart': `Portal: ${op('taskOpStart', 'Start')}`,
+                    'portalstop': `Portal: ${op('taskOpStop', 'Stop')}`,
+                    'portalshutdown': `Portal: ${op('taskOpShutdown', 'Shutdown')}`,
+                    'portalreboot': `Portal: ${op('taskOpReboot', 'Reboot')}`,
+                    'portalsnapshot': `Portal: ${op('taskOpSnapshot', 'Snapshot')}`,
+                    'portalrollback': `Portal: ${op('taskOpRollback', 'Rollback')}`,
+                    'portalpassword': `Portal: ${op('taskOpPasswordChange', 'Password Change')}`,
                 };
                 return types[type] || type;
             };
             
+            const formatTaskStatus = (task) => {
+                if (!task) return { kind: 'unknown', label: '-' };
+
+                const status = task.status || '';
+                const exitStatus = task.exitstatus || '';
+
+                if (status === 'running') {
+                    return {
+                        kind: 'running',
+                        label: t('taskStatusRunning') || 'In progress'
+                    };
+                }
+
+                // Preserve the existing PVE task semantics:
+                // a finished/non-running task with non-OK exitstatus is failed.
+                if (
+                    status === 'failed' ||
+                    status === 'error' ||
+                    (status !== 'running' && exitStatus && exitStatus !== 'OK')
+                ) {
+                    return {
+                        kind: 'failed',
+                        label: status === 'error'
+                            ? (t('error') || 'Error')
+                            : (t('taskStatusFailed') || 'Failed')
+                    };
+                }
+
+                if (status === 'stopped' || status === 'completed') {
+                    return {
+                        kind: 'completed',
+                        label: t('taskStatusCompleted') || 'Completed'
+                    };
+                }
+
+                return {
+                    kind: 'unknown',
+                    label: status || '-'
+                };
+            };
+
             const formatDuration = (start, end) => {
                 if (!start) return '-';
                 const endTime = end || Math.floor(Date.now() / 1000);
@@ -160,6 +219,10 @@
                 setSelectedTask(task);
                 fetchTaskLog(task);
             };
+
+            const selectedTaskDisplay = selectedTask
+                ? formatTaskStatus(selectedTask)
+                : null;
             
             return (
                 <div 
@@ -188,8 +251,8 @@
                                 <div className="flex items-center justify-between p-4 border-b border-proxmox-border bg-proxmox-dark">
                                     <div className="flex items-center gap-3">
                                         <span className={`w-3 h-3 rounded-full ${
-                                            selectedTask.status === 'running' ? 'bg-blue-500 animate-pulse' :
-                                            selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'bg-red-500' :
+                                            selectedTaskDisplay?.kind === 'running' ? 'bg-blue-500 animate-pulse' :
+                                            selectedTaskDisplay?.kind === 'failed' ? 'bg-red-500' :
                                             'bg-green-500'
                                         }`} />
                                         <div>
@@ -211,10 +274,10 @@
                                     <div>
                                         <span className="text-gray-500 block">{t('status')}</span>
                                         <span className={`font-medium ${
-                                            selectedTask.status === 'running' ? 'text-blue-400' :
-                                            selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'text-red-400' :
+                                            selectedTaskDisplay?.kind === 'running' ? 'text-blue-400' :
+                                            selectedTaskDisplay?.kind === 'failed' ? 'text-red-400' :
                                             'text-green-400'
-                                        }`}>{selectedTask.status || '-'}</span>
+                                        }`}>{selectedTaskDisplay?.label || '-'}</span>
                                     </div>
                                     <div>
                                         <span className="text-gray-500 block">{t('startTime')}</span>
@@ -246,7 +309,7 @@
                                         </button>
                                     </div>
                                     <div className={`h-64 overflow-auto rounded-lg font-mono text-xs p-3 ${
-                                        selectedTask.status === 'failed' || selectedTask.status === 'error'
+                                        selectedTaskDisplay?.kind === 'failed'
                                             ? 'bg-red-500/5 border border-red-500/20 text-red-300'
                                             : 'bg-proxmox-darker border border-proxmox-border text-gray-300'
                                     }`}>
@@ -373,12 +436,12 @@
                                                 </tr>
                                             ) : filteredTasks.map((task, idx) => {
                                                 if (!task) return null;
-                                                const isRunning = task.status === 'running';
                                                 // NS: a finished PVE task is 'stopped' with the real result in exitstatus
                                                 // ('OK' = success, anything else = failure). #590: failed backups came back
                                                 // as 'stopped' + a non-OK exitstatus and slipped through to the green bucket.
-                                                const _ex = task.exitstatus || '';
-                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK');
+                                                const displayStatus = formatTaskStatus(task);
+                                                const isRunning = displayStatus.kind === 'running';
+                                                const isFailed = displayStatus.kind === 'failed';
                                                 
                                                 return (
                                                     <tr 
@@ -414,7 +477,7 @@
                                                                 isFailed ? 'bg-red-500/20 text-red-400' : 
                                                                 'bg-green-500/20 text-green-400'
                                                             }`}>
-                                                                {task.status || '-'}
+                                                                {displayStatus.label}
                                                             </span>
                                                         </td>
                                                     </tr>
@@ -720,14 +783,14 @@
                             <div>
                                 <span className={`font-medium ${expired ? 'text-red-400' : 'text-yellow-400'}`}>
                                     {expired 
-                                        ? (t('passwordExpired') || 'Ihr Passwort ist abgelaufen!')
-                                        : (t('passwordExpiresIn') || `Ihr Passwort läuft in ${days_until_expiry} Tagen ab`).replace('{days}', days_until_expiry)
+                                        ? (t('passwordExpired') || 'Your password has expired!')
+                                        : (t('passwordExpiresIn') || 'Your password expires in {days} days').replace('{days}', days_until_expiry)
                                     }
                                 </span>
                                 <span className="text-gray-400 ml-2 text-sm">
                                     {expired
-                                        ? (t('pleaseChangeNow') || 'Bitte ändern Sie es jetzt.')
-                                        : (t('pleaseChangeSoon') || 'Bitte ändern Sie es rechtzeitig.')
+                                        ? (t('pleaseChangeNow') || 'Please change it now.')
+                                        : (t('pleaseChangeSoon') || 'Please change it soon.')
                                     }
                                 </span>
                             </div>
@@ -741,7 +804,7 @@
                                         : 'bg-yellow-500 hover:bg-yellow-600 text-black'
                                 }`}
                             >
-                                {t('changePassword') || 'Passwort ändern'}
+                                {t('changePassword') || 'Change Password'}
                             </button>
                             {!expired && (
                                 <button
@@ -1572,7 +1635,7 @@
                 // NS: Apr 2026 - use the standardized PDF template now
                 const aspect = ch / cw;
                 generatePegaProxPDF({
-                    title: 'Cluster Topology',
+                    title: t('clusterTopology') || 'Cluster Topology',
                     clusterName: clusterName,
                     filename: filename,
                     orientation: cw > ch ? 'landscape' : 'portrait',
@@ -1822,8 +1885,8 @@
                                 if (!lost && !atRisk) return null;
                                 return (
                                     <span title={atRisk
-                                        ? 'Cluster has lost quorum with current offline nodes.'
-                                        : 'One or more nodes offline — quorum still held.'}
+                                        ? (t('quorumLostOfflineNodes') || 'Cluster has lost quorum with current offline nodes.')
+                                        : (t('quorumHeldWithOfflineNodes') || 'One or more nodes offline — quorum still held.')}
                                         style={{
                                             display: 'inline-flex', alignItems: 'center', gap: 4,
                                             fontSize: 11, padding: '2px 6px', borderRadius: 3, marginRight: 4,
@@ -1831,7 +1894,7 @@
                                             color: atRisk ? '#f54f47' : '#efc006',
                                             border: `1px solid ${atRisk ? 'rgba(245,79,71,0.35)' : 'rgba(239,192,6,0.3)'}`,
                                         }}>
-                                        ⚠ {atRisk ? (t('quorumAtRisk') || 'quorum at risk') : (t('nodesOffline') || `${lost}/${total} offline`)}
+                                        ⚠ {atRisk ? (t('quorumAtRisk') || 'quorum at risk') : `${lost}/${total} ${t('nodesOffline') || 'nodes offline'}`}
                                     </span>
                                 );
                             })()}
@@ -1839,15 +1902,15 @@
                                 <>
                                     <div className="w-px h-4 mx-2" style={{background: isCorporate ? 'var(--corp-border-medium)' : '#374151'}} />
                                     <button onClick={() => setZoom(z => Math.min(3, z * 1.2))}
-                                        className="p-1 text-gray-400 hover:text-white" title="Zoom in">
+                                        className="p-1 text-gray-400 hover:text-white" title={t('zoomIn') || 'Zoom in'}>
                                         <Icons.ZoomIn />
                                     </button>
                                     <button onClick={() => setZoom(z => Math.max(0.3, z * 0.8))}
-                                        className="p-1 text-gray-400 hover:text-white" title="Zoom out">
+                                        className="p-1 text-gray-400 hover:text-white" title={t('zoomOut') || 'Zoom out'}>
                                         <Icons.ZoomOut />
                                     </button>
                                     <button onClick={resetView}
-                                        className="p-1 text-gray-400 hover:text-white" title="Fit">
+                                        className="p-1 text-gray-400 hover:text-white" title={t('fitToView') || 'Fit to view'}>
                                         <Icons.Maximize />
                                     </button>
                                     <button onClick={refreshTopology}
@@ -1972,7 +2035,7 @@
                                 onMouseUp={handleMouseUp}
                                 onMouseLeave={() => { handleMouseUp(); hideTooltip(); }}
                             >
-                                <title>{isMultiCluster ? 'Multi-Cluster Topology' : `Cluster Topology: ${clusterName}`}</title>
+                                <title>{isMultiCluster ? (t('multiClusterTopology') || 'Multi-Cluster Topology') : `${t('clusterTopology') || 'Cluster Topology'}: ${clusterName}`}</title>
                                 <desc>Interactive cluster topology. Drag to pan, scroll to zoom, hover over nodes or guests for details.</desc>
                                 {/* ── Multi-cluster unified diagram ── */}
                                 {isMultiCluster && mcLayout && (
@@ -2003,7 +2066,7 @@
                                         ) : (
                                             <React.Fragment>
                                                 <text x={mcLayout.mcW / 2} y={MC_TIER.brand} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">PegaProx</text>
-                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 14} textAnchor="middle" fill={topoColor.muted} fontSize="9">Multi-Cluster Topology</text>
+                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 14} textAnchor="middle" fill={topoColor.muted} fontSize="9">{t('multiClusterTopology') || 'Multi-Cluster Topology'}</text>
                                             </React.Fragment>
                                         )}
 
@@ -2242,7 +2305,7 @@
                                 ) : (
                                     <React.Fragment>
                                         <text x={clusterX} y={28} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">PegaProx</text>
-                                        <text x={clusterX} y={42} textAnchor="middle" fill={topoColor.muted} fontSize="9">Cluster Topology</text>
+                                        <text x={clusterX} y={42} textAnchor="middle" fill={topoColor.muted} fontSize="9">{t('clusterTopology') || 'Cluster Topology'}</text>
                                     </React.Fragment>
                                 )}
 
@@ -3026,6 +3089,13 @@
                 'failed': 'bg-red-500/15 text-red-400',
             }[s] || 'bg-gray-500/15 text-gray-400');
 
+            const formatRunStatus = (status) => ({
+                'running': t('taskStatusRunning') || 'In progress',
+                'completed': t('taskStatusCompleted') || 'Completed',
+                'partial': t('snapRunStatusPartial') || 'Partial',
+                'failed': t('taskStatusFailed') || 'Failed',
+            }[status] || status || '-');
+
             return (
                 <div className="space-y-4">
                     <div className="flex items-center justify-between flex-wrap gap-2">
@@ -3082,7 +3152,7 @@
                                         <div className="flex items-center gap-1.5">
                                             {p.last_run_at && (
                                                 <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusColor(p.last_run_status)}`}>
-                                                    {p.last_run_status} · {(p.last_run_at || '').replace('T', ' ').slice(11, 16)}
+                                                    {formatRunStatus(p.last_run_status)} · {(p.last_run_at || '').replace('T', ' ').slice(11, 16)}
                                                 </span>
                                             )}
                                             {canSnapshot && (
@@ -3111,7 +3181,7 @@
                                         <div className="mt-2 pl-3 border-l-2 border-proxmox-border space-y-0.5 text-[11px]">
                                             {runs[p.id].slice(0, 5).map(r => (
                                                 <div key={r.id} className="flex items-center gap-2">
-                                                    <span className={`px-1 rounded ${statusColor(r.status)}`}>{r.status}</span>
+                                                    <span className={`px-1 rounded ${statusColor(r.status)}`}>{formatRunStatus(r.status)}</span>
                                                     <span className="text-gray-500">{(r.started_at || '').replace('T', ' ').slice(0, 16)}</span>
                                                     <span className="text-gray-300">{r.summary}</span>
                                                 </div>
@@ -3361,22 +3431,22 @@
             const exportPdf = async () => {
                 if (typeof generatePegaProxPDF !== 'function') { addToast(t('pdfNotLoaded') || 'PDF library not loaded', 'error'); return; }
                 const fmt = (r) => [String(r.vmid ?? ''), `${r.from} -> ${r.to}`, r.schedule || '',
-                                    (r.last ? ago(r.last) + ' ago' : 'never'), stLabel(r.status)];
+                                    (r.last ? `${ago(r.last)} ${t('ago') || 'ago'}` : (t('replStateNever') || 'Never run')), stLabel(r.status)];
                 const localRows = allRows.filter(r => r.kind === 'local');
                 const xRows = allRows.filter(r => r.kind === 'xcluster');
                 const blocks = [{ type: 'stats', data: [
                     { value: String(counts.total), label: t('replTotal') || 'Total jobs', color: '#3b82f6' },
-                    { value: String(counts.ok), label: 'OK', color: '#16a34a' },
+                    { value: String(counts.ok), label: t('replStateOk') || 'OK', color: '#16a34a' },
                     { value: String(counts.failed), label: t('replStateFailed') || 'Failed', color: '#dc2626' },
                     { value: String(counts.never), label: t('replStateNever') || 'Never run', color: '#6b7280' },
                 ] }];
                 if (localRows.length) blocks.push({ type: 'spacer', height: 4 }, { type: 'table', title: t('replLocal') || 'Local replication',
-                    columns: ['VMID', 'Source -> Target', 'Schedule', 'Last sync', 'Status'], rows: localRows.map(fmt) });
+                    columns: ['VMID', t('replFromTo') || 'Source → Target', t('snapSchedule') || 'Schedule', t('replLastSync') || 'Last sync', t('status') || 'Status'], rows: localRows.map(fmt) });
                 if (xRows.length) blocks.push({ type: 'spacer', height: 4 }, { type: 'table', title: t('replCross') || 'Cross-cluster replication',
-                    columns: ['VMID', 'Source -> Target', 'Schedule', 'Last run', 'Status'], rows: xRows.map(fmt) });
+                    columns: ['VMID', t('replFromTo') || 'Source → Target', t('snapSchedule') || 'Schedule', t('replLastRun') || 'Last run', t('status') || 'Status'], rows: xRows.map(fmt) });
                 try {
                     await generatePegaProxPDF({ title: t('replicationOverview') || 'Replication Status',
-                        subtitle: `${counts.total} jobs · ${counts.failed} failed`, content: blocks,
+                        subtitle: `${t('replTotal') || 'Total'}: ${counts.total} · ${t('replStateFailed') || 'Failed'}: ${counts.failed}`, content: blocks,
                         filename: 'replication-status.pdf', orientation: 'landscape' });
                 } catch (e) { addToast(t('pdfFailed') || 'PDF export failed', 'error'); }
             };
@@ -3941,7 +4011,7 @@
 
             const exportPdf = async () => {
                 if (typeof generatePegaProxPDF !== 'function') {
-                    addToast('PDF library not loaded', 'error');
+                    addToast(t('pdfLibraryNotLoaded') || 'PDF library not loaded', 'error');
                     return;
                 }
                 if (!summary || !summary.enough_data) {
@@ -3966,11 +4036,14 @@
                 blocks.push({ type: 'spacer', height: 4 });
                 blocks.push({
                     type: 'text',
-                    value: safe(`Window: ${summary.days} days * ${summary.snapshots_count} snapshots * `
-                                + `Rates: ${summary.rates.node_idle_w}W idle, ${summary.rates.node_max_w}W max, `
-                                + `${summary.rates.mem_w_per_gb} W/GB, PUE ${summary.rates.pue}, `
-                                + `${summary.rates.kwh_price.toFixed(2)} ${cur}/kWh, `
-                                + `${summary.rates.kg_co2_per_kwh.toFixed(2)} kg CO2/kWh`),
+                    value: safe(`${t('reportingPeriod') || 'Reporting period'}: ${summary.days}d · ${t('snapshots') || 'snapshots'}: ${summary.snapshots_count} · `
+                                + `${t('powerRates') || 'Rates'}: `
+                                + `${t('powerNodeIdleW') || 'Node idle (W)'}: ${summary.rates.node_idle_w}, `
+                                + `${t('powerNodeMaxW') || 'Node max (W)'}: ${summary.rates.node_max_w}, `
+                                + `${t('powerMemWPerGb') || 'Memory W per GB'}: ${summary.rates.mem_w_per_gb}, `
+                                + `PUE: ${summary.rates.pue}, `
+                                + `${t('powerKwhPrice') || 'Price per kWh'}: ${summary.rates.kwh_price.toFixed(2)} ${cur}/kWh, `
+                                + `${t('powerCo2PerKwh') || 'kg CO₂ / kWh (grid)'}: ${summary.rates.kg_co2_per_kwh.toFixed(2)}`),
                 });
 
                 if (summary.by_node && Object.keys(summary.by_node).length) {
@@ -4029,7 +4102,7 @@
                     });
                 } catch (e) {
                     console.error('[Power PDF]', e);
-                    addToast('PDF export failed', 'error');
+                    addToast(t('pdfExportFailed') || 'PDF export failed', 'error');
                 }
             };
 
@@ -4335,7 +4408,7 @@
 
             const exportPdf = async () => {
                 if (typeof generatePegaProxPDF !== 'function') {
-                    addToast('PDF library not loaded', 'error');
+                    addToast(t('pdfLibraryNotLoaded') || 'PDF library not loaded', 'error');
                     return;
                 }
                 if (!summary || !summary.enough_data) {
@@ -4362,10 +4435,11 @@
                 blocks.push({ type: 'spacer', height: 4 });
                 blocks.push({
                     type: 'text',
-                    value: safe(`Window: ${summary.days} days · ${summary.snapshots_count} snapshots · ` +
-                                `Rates: ${summary.rates.cpu_per_core_h.toFixed(4)} ${cur}/core*h, ` +
-                                `${summary.rates.mem_per_gb_h.toFixed(4)} ${cur}/GB*h, ` +
-                                `${summary.rates.storage_per_gb_month.toFixed(2)} ${cur}/GB*month`),
+                    value: safe(`${t('reportingPeriod') || 'Reporting period'}: ${summary.days}d · ${t('snapshots') || 'snapshots'}: ${summary.snapshots_count} · ` +
+                                `${t('costRates') || 'Rates'}: ` +
+                                `${t('costCpuRate') || 'CPU per core·hour'}: ${summary.rates.cpu_per_core_h.toFixed(4)} ${cur}, ` +
+                                `${t('costMemRate') || 'Memory per GB·hour'}: ${summary.rates.mem_per_gb_h.toFixed(4)} ${cur}, ` +
+                                `${t('costStorageRate') || 'Storage per GB·month'}: ${summary.rates.storage_per_gb_month.toFixed(2)} ${cur}`),
                 });
 
                 // by-node table
@@ -4415,7 +4489,7 @@
                     });
                 } catch (e) {
                     console.error('[Costs PDF]', e);
-                    addToast('PDF export failed', 'error');
+                    addToast(t('pdfExportFailed') || 'PDF export failed', 'error');
                 }
             };
 
@@ -4707,6 +4781,12 @@
                 'info': 'bg-blue-500/15 text-blue-400',
             }[s] || 'bg-gray-500/15 text-gray-400');
 
+            const severityLabel = (s) => ({
+                'critical': t('statusCritical') || 'Critical',
+                'warning': t('statusWarning') || 'Warning',
+                'info': t('info') || 'Info',
+            }[s] || s);
+
             const kindLabel = (k) => ({
                 'vm_config': t('driftKindVm') || 'VM Config',
                 'storage': t('driftKindStorage') || 'Storage',
@@ -4813,7 +4893,7 @@
                                         <div className="flex items-start justify-between gap-2 cursor-pointer"
                                              onClick={() => setExpanded({ ...expanded, [ev.id]: !open })}>
                                             <div className="flex items-center gap-2 min-w-0">
-                                                <span className={`px-1.5 py-0.5 text-[10px] rounded ${sevColor(ev.severity)} flex-shrink-0`}>{ev.severity}</span>
+                                                <span className={`px-1.5 py-0.5 text-[10px] rounded ${sevColor(ev.severity)} flex-shrink-0`}>{severityLabel(ev.severity)}</span>
                                                 <span className="text-xs text-gray-300 truncate">
                                                     <span className="text-gray-400">{kindLabel(ev.kind)}:</span> {ev.scope}
                                                 </span>
@@ -4932,7 +5012,7 @@
                     const reg = await navigator.serviceWorker.ready;
                     const k = await authFetch(`${API_URL}/push/vapid-key`).then(r => r.json());
                     if (!k?.public_key) {
-                        addToast('VAPID key missing', 'error'); return;
+                        addToast(t('pushVapidKeyMissing') || 'VAPID key missing', 'error'); return;
                     }
                     const sub = await reg.pushManager.subscribe({
                         userVisibleOnly: true,
@@ -4948,11 +5028,15 @@
                         setSubscribed(true);
                         addToast(t('pushEnabled') || 'Browser push enabled', 'success');
                     } else {
-                        addToast('Failed to register subscription', 'error');
+                        addToast(t('pushSubscribeFailed') || 'Failed to register subscription', 'error');
                     }
                 } catch (e) {
                     console.error('[push] enable failed', e);
-                    addToast('Push setup failed: ' + (e.message || e), 'error');
+                    addToast(
+                    (t('pushSetupFailed') || 'Push setup failed: {error}')
+                        .replace('{error}', e.message || e),
+                    'error'
+                );
                 } finally { setBusy(false); }
             };
 
@@ -4972,7 +5056,11 @@
                     setSubscribed(false);
                     addToast(t('pushDisabled') || 'Browser push disabled', 'info');
                 } catch (e) {
-                    addToast('Disable failed: ' + (e.message || e), 'error');
+                    addToast(
+                    (t('pushDisableFailed') || 'Failed to disable browser push: {error}')
+                        .replace('{error}', e.message || e),
+                    'error'
+                );
                 } finally { setBusy(false); }
             };
 
@@ -4984,7 +5072,7 @@
                         addToast(t('pushTestSent') || 'Test push sent', 'success');
                         setTimeout(refreshInbox, 1500);
                     } else {
-                        addToast('Test failed', 'error');
+                        addToast(t('pushTestFailed') || 'Push test failed', 'error');
                     }
                 } finally { setBusy(false); }
             };
@@ -5215,6 +5303,13 @@
                 'failed': 'bg-red-500/15 text-red-400',
             }[s] || 'bg-gray-500/15 text-gray-400');
 
+            const formatDeploymentStatus = (status) => ({
+                'queued': t('queued') || 'Queued',
+                'running': t('taskStatusRunning') || 'In progress',
+                'completed': t('taskStatusCompleted') || 'Completed',
+                'failed': t('taskStatusFailed') || 'Failed',
+            }[status] || status || '-');
+
             const distroColor = (d) => ({
                 'ubuntu': 'border-orange-500/40',
                 'debian': 'border-red-500/40',
@@ -5273,9 +5368,9 @@
                         await load();
                     } else {
                         const d = r ? await r.json().catch(() => ({})) : {};
-                        addToast(d.error || 'Delete failed', 'error');
+                        addToast(d.error || (t('deleteFailed') || 'Delete failed'), 'error');
                     }
-                } catch (e) { addToast('Delete failed', 'error'); }
+                } catch (e) { addToast(t('deleteFailed') || 'Delete failed', 'error'); }
             };
 
             return (
@@ -5345,7 +5440,7 @@
                                         ))}
                                     </div>
                                     <div className="text-xs text-gray-500 mb-3">
-                                        {tpl.cores} cores · {Math.round(tpl.memory / 1024)} GB RAM · ~{tpl.disk_gb} GB disk · user <code className="text-gray-300">{tpl.default_user}</code>
+                                        {t('templateCores') || 'Cores'}: {tpl.cores} · RAM: {Math.round(tpl.memory / 1024)} GB · {t('templateDiskGb') || 'Disk (GB)'}: ~{tpl.disk_gb} · {t('templateDefaultUser') || 'Default user'}: <code className="text-gray-300">{tpl.default_user}</code>
                                     </div>
                                     <div className="mt-auto flex items-center gap-2">
                                         <button
@@ -5370,7 +5465,7 @@
                                 {deployments.slice(0, 10).map(d => (
                                     <div key={d.id} className="flex items-center justify-between text-xs gap-2 bg-proxmox-dark border border-proxmox-border rounded px-3 py-2">
                                         <div className="flex items-center gap-2 min-w-0 flex-1">
-                                            <span className={`px-1.5 py-0.5 rounded ${statusColor(d.status)} flex-shrink-0`}>{d.status}</span>
+                                            <span className={`px-1.5 py-0.5 rounded ${statusColor(d.status)} flex-shrink-0`}>{formatDeploymentStatus(d.status)}</span>
                                             <span className="text-gray-300 truncate">{d.template_name}</span>
                                             <span className="text-gray-500 flex-shrink-0">vmid {d.vmid} · {d.node}</span>
                                             {d.started_by && (
@@ -5410,7 +5505,7 @@
                                         <label className="text-xs text-gray-400 block mb-1">{t('name') || 'Name'} *</label>
                                         <input type="text" value={addForm.name}
                                             onChange={e => setAddForm({...addForm, name: e.target.value})}
-                                            placeholder="e.g. Ubuntu 23.10 minimal"
+                                            placeholder={t('templateNamePlaceholder') || 'e.g. Ubuntu 23.10 minimal'}
                                             className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
                                     </div>
                                     <div>
@@ -5442,7 +5537,7 @@
                                             <label className="text-xs text-gray-400 block mb-1">{t('version') || 'Version'}</label>
                                             <input type="text" value={addForm.version}
                                                 onChange={e => setAddForm({...addForm, version: e.target.value})}
-                                                placeholder="e.g. 23.10"
+                                                placeholder={t('templateVersionPlaceholder') || 'e.g. 23.10'}
                                                 className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
                                         </div>
                                     </div>
@@ -5690,7 +5785,7 @@
             };
             const exportPdf = async () => {
                 if (typeof generatePegaProxPDF !== 'function') {
-                    addToast('PDF library not loaded', 'error');
+                    addToast(t('pdfLibraryNotLoaded') || 'PDF library not loaded', 'error');
                     return;
                 }
                 setExporting(true);
@@ -5758,7 +5853,7 @@
                         rs.recommendations.forEach(r => {
                             const flagsTxt = (r.flags || []).map(f => {
                                 let s = flagLabel(f.kind);
-                                if (f.recommended != null) s += ` (${f.current} -> ${f.recommended} cores)`;
+                                if (f.recommended != null) s += ` (${f.current} -> ${f.recommended} ${t('cores') || 'Cores'})`;
                                 if (f.recommended_gb != null) s += ` (${f.current_gb} -> ${f.recommended_gb} GB)`;
                                 return s;
                             }).join(', ');
@@ -5886,7 +5981,7 @@
                     });
                 } catch (e) {
                     console.error('[Insights PDF]', e);
-                    addToast('PDF export failed', 'error');
+                    addToast(t('pdfExportFailed') || 'PDF export failed', 'error');
                 } finally {
                     setExporting(false);
                 }
@@ -6156,7 +6251,7 @@
                                                     <span className={`px-1.5 py-0.5 rounded ${flagClr(f.kind)}`}>{flagLabel(f.kind)}</span>
                                                     <span className="text-gray-400">{f.detail}</span>
                                                     {f.recommended != null && (
-                                                        <span className="text-proxmox-orange ml-auto">→ {f.current} → {f.recommended} cores</span>
+                                                        <span className="text-proxmox-orange ml-auto">→ {f.current} → {f.recommended} {t('cores') || 'Cores'}</span>
                                                     )}
                                                     {f.recommended_gb != null && (
                                                         <span className="text-proxmox-orange ml-auto">→ {f.current_gb} → {f.recommended_gb} GB</span>
@@ -6365,7 +6460,7 @@
 
             const downloadFrameworkReport = async (fw) => {
                 if (typeof window.jspdf === 'undefined' || typeof generatePegaProxPDF !== 'function') {
-                    addToast('PDF library not loaded', 'error');
+                    addToast(t('pdfLibraryNotLoaded') || 'PDF library not loaded', 'error');
                     return;
                 }
                 const c = selectedCluster;
@@ -6387,11 +6482,36 @@
                 const remediation    = mappingData.remediation || {};
                 const severityMap    = mappingData.severity || {};
                 const timelineMap    = mappingData.recommended_timeline || {};
+
+                const formatComplianceTimeline = (severity, rawLabel) => ({
+                    high: t('complianceTimelineHigh') || 'Within 30 days',
+                    medium: t('complianceTimelineMedium') || 'Within 90 days',
+                    low: t('complianceTimelineLow') || 'Within 180 days',
+                    informational: t('complianceTimelineInformational') || 'Operator decision, document outcome',
+                }[severity] || rawLabel || '—');
+
                 const priorityMap    = mappingData.priority_level || {};
                 const fwMeta         = (mappingData.framework_meta || {})[fwMapKey]
                                      || (mappingData.framework_meta || {})[fw.id]
                                      || {};
                 const postureLevels  = mappingData.posture_levels || [];
+
+                const formatPostureLabel = (posture) => ({
+                    substantial: t('compliancePostureSubstantial') || 'Substantially Compliant',
+                    largely: t('compliancePostureLargely') || 'Largely Compliant',
+                    partial: t('compliancePosturePartial') || 'Partially Compliant',
+                    marginal: t('compliancePostureMarginal') || 'Marginally Compliant',
+                    noncompliant: t('compliancePostureNoncompliant') || 'Non-Compliant',
+                }[posture?.id] || posture?.label || '-');
+
+                const formatPostureDescription = (posture) => ({
+                    substantial: t('compliancePostureSubstantialDesc') || 'Coverage is materially complete with all high-severity controls satisfied. Suitable to enter formal audit with focus on documentation and process evidence.',
+                    largely: t('compliancePostureLargelyDesc') || 'Most controls are satisfied; remaining gaps include at most a small number of medium-severity items. Closeable in a single remediation cycle.',
+                    partial: t('compliancePosturePartialDesc') || 'Significant control gaps remain, including high-severity items. Coverage is below the level expected to enter a formal certification audit.',
+                    marginal: t('compliancePostureMarginalDesc') || 'Substantial remediation required across multiple control families before any audit deliverable can be produced.',
+                    noncompliant: t('compliancePostureNoncompliantDesc') || 'Comprehensive remediation required. Recommend a structured hardening project before re-running the assessment.',
+                }[posture?.id] || posture?.description || '');
+
                 const glossary       = mappingData.glossary || {};
                 const methodology    = mappingData.methodology || {};
 
@@ -6505,13 +6625,18 @@
                 const topFindings = failedControls.slice(0, 5);
 
                 // Helper — uppercase severity badge text
-                const sevBadge = (s) => (s || 'medium').toUpperCase();
+                const sevBadge = (s) => ({
+                    high: t('complianceSeverityHigh') || 'HIGH',
+                    medium: t('complianceSeverityMedium') || 'MEDIUM',
+                    low: t('complianceSeverityLow') || 'LOW',
+                    informational: t('complianceSeverityInformational') || 'INFORMATIONAL',
+                }[s] || (s || 'medium').toUpperCase());
 
                 // ── Build PDF blocks ──
                 const blocks = [];
                 const now = new Date();
                 const isoTime = now.toISOString();
-                const reportingPeriod = `Snapshot at ${isoTime}`;
+                const reportingPeriod = (t('complianceSnapshotAt') || 'Snapshot at {time}').replace('{time}', isoTime);
                 const profileLabel = profile === 'vs-nfd' ? 'VS-NfD' : profile.toUpperCase();
 
                 // ──────────────────────────────────────────────────────────
@@ -6560,8 +6685,8 @@
                     title: t('executiveSummary') || 'Executive Summary',
                     columns: [t('property') || 'Property', t('value') || 'Value'],
                     rows: [
-                        [t('compliancePosture') || 'Compliance posture', `${posture.label} (${overallCoverage}%)`],
-                        [t('postureNarrative') || 'Posture narrative',   posture.description || ''],
+                        [t('compliancePosture') || 'Compliance posture', `${formatPostureLabel(posture)} (${overallCoverage}%)`],
+                        [t('postureNarrative') || 'Posture narrative',   formatPostureDescription(posture)],
                         [t('totalControlsEvaluated') || 'Total controls evaluated', String(overallChecked)],
                         [t('passed') || 'Passed', `${overallPassed} (${overallChecked ? Math.round(overallPassed*100/overallChecked) : 0}%)`],
                         [t('failedCompliance') || 'Failed', `${overallFailed} (${overallChecked ? Math.round(overallFailed*100/overallChecked) : 0}%)`],
@@ -6631,7 +6756,7 @@
                     columns: [t('property') || 'Property', t('value') || 'Value'],
                     rows: [
                         [t('inScopeCluster') || 'In-scope cluster', c.name || c.id],
-                        [t('inScopeNodes') || 'In-scope nodes',     nodes.length ? nodes.join(', ') : '(none reachable)'],
+                        [t('inScopeNodes') || 'In-scope nodes',     nodes.length ? nodes.join(', ') : (t('complianceNoReachableNodes') || '(none reachable)')],
                         [t('frameworkSource') || 'Framework source', fwMeta.source_url || '—'],
                         [t('frameworkNote') || 'Framework note',     fwMeta.note || '—'],
                         [t('hardeningProfile') || 'Hardening profile', profileLabel],
@@ -6717,10 +6842,10 @@
                     title: t('findingsBySeverity') || 'Findings Summary — by Severity',
                     columns: [t('severity') || 'Severity', t('checked') || 'Checked', t('passed') || 'Passed', t('failedCompliance') || 'Failed', t('coverage') || 'Coverage'],
                     rows: [
-                        ['HIGH',          String(sevBuckets.high.checked),          String(sevBuckets.high.passed),          String(sevBuckets.high.checked - sevBuckets.high.passed),          sevBuckets.high.checked          ? `${Math.round(sevBuckets.high.passed*100/sevBuckets.high.checked)}%`                   : '—'],
-                        ['MEDIUM',        String(sevBuckets.medium.checked),        String(sevBuckets.medium.passed),        String(sevBuckets.medium.checked - sevBuckets.medium.passed),        sevBuckets.medium.checked        ? `${Math.round(sevBuckets.medium.passed*100/sevBuckets.medium.checked)}%`               : '—'],
-                        ['LOW',           String(sevBuckets.low.checked),           String(sevBuckets.low.passed),           String(sevBuckets.low.checked - sevBuckets.low.passed),           sevBuckets.low.checked           ? `${Math.round(sevBuckets.low.passed*100/sevBuckets.low.checked)}%`                     : '—'],
-                        ['INFORMATIONAL', String(sevBuckets.informational.checked), String(sevBuckets.informational.passed), String(sevBuckets.informational.checked - sevBuckets.informational.passed), sevBuckets.informational.checked ? `${Math.round(sevBuckets.informational.passed*100/sevBuckets.informational.checked)}%` : '—'],
+                        [t('complianceSeverityHigh') || 'HIGH',          String(sevBuckets.high.checked),          String(sevBuckets.high.passed),          String(sevBuckets.high.checked - sevBuckets.high.passed),          sevBuckets.high.checked          ? `${Math.round(sevBuckets.high.passed*100/sevBuckets.high.checked)}%`                   : '—'],
+                        [t('complianceSeverityMedium') || 'MEDIUM',        String(sevBuckets.medium.checked),        String(sevBuckets.medium.passed),        String(sevBuckets.medium.checked - sevBuckets.medium.passed),        sevBuckets.medium.checked        ? `${Math.round(sevBuckets.medium.passed*100/sevBuckets.medium.checked)}%`               : '—'],
+                        [t('complianceSeverityLow') || 'LOW',           String(sevBuckets.low.checked),           String(sevBuckets.low.passed),           String(sevBuckets.low.checked - sevBuckets.low.passed),           sevBuckets.low.checked           ? `${Math.round(sevBuckets.low.passed*100/sevBuckets.low.checked)}%`                     : '—'],
+                        [t('complianceSeverityInformational') || 'INFORMATIONAL', String(sevBuckets.informational.checked), String(sevBuckets.informational.passed), String(sevBuckets.informational.checked - sevBuckets.informational.passed), sevBuckets.informational.checked ? `${Math.round(sevBuckets.informational.passed*100/sevBuckets.informational.checked)}%` : '—'],
                     ],
                 });
                 blocks.push({ type: 'spacer', height: 4 });
@@ -6773,7 +6898,10 @@
                             const refsStr = ctrl.refs.length ? ctrl.refs.map(r => r.ref).join(', ') : ctrl.cid;
                             const titleStr2 = ctrl.refs.length ? ctrl.refs[0].title : ctrl.title;
                             const failNodes = Object.entries(ctrl.results).filter(([_, s]) => s === 'FAIL').map(([n]) => n).join(', ') || '—';
-                            const tl = (timelineMap[ctrl.severity] || {}).label || '—';
+                            const tl = formatComplianceTimeline(
+                                ctrl.severity,
+                                (timelineMap[ctrl.severity] || {}).label
+                            );
                             const rem = remediation[ctrl.cid];
                             const remStr = rem
                                 ? `${rem.summary}\n\n${t('howToFix') || 'How to fix'}: ${rem.how_to_fix}`
@@ -6889,7 +7017,7 @@
                                 value={profile}
                                 onChange={e => setProfile(e.target.value)}
                                 className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
-                                <option value="cis-l1">CIS Level 1 (default)</option>
+                                <option value="cis-l1">CIS Level 1 ({t('complianceDefaultProfile') || 'default'})</option>
                                 <option value="cis-l2">CIS Level 2</option>
                                 <option value="vs-nfd">VS-NfD (BSI Grundschutz)</option>
                                 <option value="dr">Diffusion Restreinte (ANSSI II 901)</option>
@@ -6930,7 +7058,7 @@
                                             <div className="flex items-start justify-between gap-2">
                                                 <p className="text-xs text-gray-400 leading-tight">{fw.name}</p>
                                                 {fw.informational && (
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30" title={fw.note || ''}>info</span>
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30" title={fw.note || ''}>{t('info') || 'Info'}</span>
                                                 )}
                                             </div>
                                             <p className={`text-3xl font-bold ${scoreColor(s.score)}`}>{s.score == null ? '—' : `${s.score}%`}</p>
@@ -7070,6 +7198,37 @@
                 testing: 'bg-yellow-500/20 text-yellow-400', failed: 'bg-red-500/20 text-red-400',
                 completed: 'bg-purple-500/20 text-purple-400',
             };
+
+            const formatPlanStatus = (status) => ({
+                ready: t('planReady') || 'Ready',
+                running: t('planRunning') || 'Running',
+                testing: t('planTesting') || 'Testing',
+                failed: t('planFailed') || 'Failed',
+                completed: t('planCompleted') || 'Completed',
+            }[status] || status || '-');
+
+            const formatRecoveryEventStatus = (status) => ({
+                running: t('taskStatusRunning') || 'In progress',
+                completed: t('taskStatusCompleted') || 'Completed',
+                failed: t('taskStatusFailed') || 'Failed',
+                partial: t('snapRunStatusPartial') || 'Partial',
+                aborted: t('siteRecoveryEventAborted') || 'Aborted',
+            }[status] || status || '-');
+
+            const formatRecoveryEventType = (type) => ({
+                planned: t('plannedFailover') || 'Planned Failover',
+                emergency: t('emergencyFailover') || 'Emergency Failover',
+                test: t('testFailover') || 'Test Failover',
+                failback: t('failback') || 'Failback',
+                readiness: t('readinessCheck') || 'Readiness Check',
+            }[type] || type || '-');
+
+            const formatDrDrillStatus = (status) => ({
+                running: t('taskStatusRunning') || 'In progress',
+                passed: t('passed') || 'Passed',
+                warned: t('drDrillStatusWarned') || 'Completed with warnings',
+                failed: t('taskStatusFailed') || 'Failed',
+            }[status] || status || '-');
             const getClusterName = (id) => { const c = clusters.find(cl => cl.id === id); return c ? c.name : id; };
             const rpoColor = (vm) => {
                 if (!vm.last_replication) return 'text-gray-500';
@@ -7177,27 +7336,27 @@
 
             // actions
             const handleCreatePlan = async () => {
-                if (!createForm.name || !createForm.source_cluster || !createForm.target_cluster) { addToast('Name + clusters required', 'error'); return; }
+                if (!createForm.name || !createForm.source_cluster || !createForm.target_cluster) { addToast(t('siteRecoveryRequiredFields') || 'Plan name, source cluster, and target cluster are required', 'error'); return; }
                 const r = await authFetch(`${API_URL}/site-recovery/plans`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(createForm) });
-                if (r && r.ok) { addToast(t('createPlan') + ' OK'); setShowCreateModal(false); setCreateForm({ name: '', source_cluster: '', target_cluster: '' }); fetchPlans(); }
-                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Failed', 'error'); }
+                if (r && r.ok) { addToast(t('siteRecoveryPlanCreated') || 'Recovery plan created'); setShowCreateModal(false); setCreateForm({ name: '', source_cluster: '', target_cluster: '' }); fetchPlans(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('actionFailed') || 'Action failed'), 'error'); }
             };
             const handleDeletePlan = async (planId, force) => {
                 const msg = force ? (t('forceDeletePlan') || 'Force-delete this stuck plan?') : (t('deletePlan') + '?');
                 if (!confirm(msg)) return;
                 const url = force ? `${API_URL}/site-recovery/plans/${planId}?force=1` : `${API_URL}/site-recovery/plans/${planId}`;
                 const r = await authFetch(url, { method: 'DELETE' });
-                if (r && r.ok) { addToast('Plan deleted'); setSelectedPlan(null); fetchPlans(); }
-                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Delete failed', 'error'); }
+                if (r && r.ok) { addToast(t('siteRecoveryPlanDeleted') || 'Recovery plan deleted'); setSelectedPlan(null); fetchPlans(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('siteRecoveryPlanDeleteFailed') || 'Failed to delete recovery plan'), 'error'); }
             };
             const handleAction = async (planId, action, confirmMsg) => {
                 if (confirmMsg && !confirm(confirmMsg)) return;
                 setActionRunning(true);
                 try {
                     const r = await authFetch(`${API_URL}/site-recovery/plans/${planId}/${action}`, { method: 'POST' });
-                    if (r && r.ok) { const d = await r.json(); addToast(d.message || 'Action started'); fetchPlanDetail(planId); fetchPlans(); }
-                    else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Action failed', 'error'); }
-                } catch(e) { addToast('Action failed', 'error'); }
+                    if (r && r.ok) { const d = await r.json(); addToast(d.message || (t('siteRecoveryActionStarted') || 'Action started')); fetchPlanDetail(planId); fetchPlans(); }
+                    else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('actionFailed') || 'Action failed'), 'error'); }
+                } catch(e) { addToast(t('actionFailed') || 'Action failed', 'error'); }
                 finally { setTimeout(() => setActionRunning(false), 2000); }
             };
             // readiness check with modal
@@ -7206,8 +7365,8 @@
                 try {
                     const r = await authFetch(`${API_URL}/site-recovery/plans/${planId}/readiness`, { method: 'POST' });
                     if (r && r.ok) setShowReadinessModal(await r.json());
-                    else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Check failed', 'error'); }
-                } catch(e) { addToast('Check failed', 'error'); } finally { setActionRunning(false); }
+                    else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('checkFailed') || 'Check failed'), 'error'); }
+                } catch(e) { addToast(t('checkFailed') || 'Check failed', 'error'); } finally { setActionRunning(false); }
             };
 
             // NS May 2026 — DR Drill: structured dry-run + compliance evidence PDF.
@@ -7219,7 +7378,7 @@
                     const r = await authFetch(`${API_URL}/site-recovery/plans/${plan.id}/drill`, { method: 'POST' });
                     if (!(r && r.ok)) {
                         const e = r ? await r.json().catch(() => ({})) : {};
-                        addToast(e.error || 'Drill start failed', 'error');
+                        addToast(e.error || (t('drDrillStartFailed') || 'Failed to start DR drill'), 'error');
                         setDrDrillModal(null);
                         return;
                     }
@@ -7253,21 +7412,25 @@
 
             const exportDrillPdf = async () => {
                 if (!drDrillData || typeof generatePegaProxPDF !== 'function') {
-                    addToast('PDF library not loaded', 'error');
+                    addToast(t('pdfLibraryNotLoaded') || 'PDF library not loaded', 'error');
                     return;
                 }
                 const safe = (s) => String(s ?? '')
                     .replace(/[≥]/g, '>=').replace(/[≤]/g, '<=')
                     .replace(/[→]/g, '->').replace(/[·]/g, '*')
                     .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');
-                const verdict = (s) => ({pass: 'PASS', warn: 'WARN', fail: 'FAIL'}[s] || s);
+                const verdict = (s) => ({
+                    pass: (t('passed') || 'Passed').toUpperCase(),
+                    warn: (t('warning') || 'Warning').toUpperCase(),
+                    fail: (t('failed') || 'Failed').toUpperCase(),
+                }[s] || s);
                 const blocks = [];
                 blocks.push({
                     type: 'stats',
                     data: [
-                        { value: String(drDrillData.pass_count), label: 'Pass', color: '#16a34a' },
-                        { value: String(drDrillData.warn_count), label: 'Warn', color: '#eab308' },
-                        { value: String(drDrillData.fail_count), label: 'Fail', color: '#dc2626' },
+                        { value: String(drDrillData.pass_count), label: safe(t('passed') || 'Passed'), color: '#16a34a' },
+                        { value: String(drDrillData.warn_count), label: safe(t('warning') || 'Warning'), color: '#eab308' },
+                        { value: String(drDrillData.fail_count), label: safe(t('failed') || 'Failed'), color: '#dc2626' },
                         { value: drDrillData.estimated_rto_seconds ? `${Math.round(drDrillData.estimated_rto_seconds/60)} min` : '—',
                           label: safe(t('drDrillRto') || 'Est. RTO'), color: '#3b82f6' },
                     ],
@@ -7275,12 +7438,12 @@
                 blocks.push({ type: 'spacer', height: 4 });
                 blocks.push({
                     type: 'text',
-                    value: safe(`Plan: ${drDrillData.plan_name}\n`
-                                + `Started: ${drDrillData.started_at}\n`
-                                + `Finished: ${drDrillData.finished_at || '(running)'}\n`
-                                + `Executor: ${drDrillData.started_by || 'unknown'}\n`
-                                + `Verdict: ${(drDrillData.status || '').toUpperCase()}\n`
-                                + `Summary: ${drDrillData.summary}`),
+                    value: safe(`${t('planName') || 'Plan Name'}: ${drDrillData.plan_name}\n`
+                                + `${t('startTime') || 'Start Time'}: ${drDrillData.started_at}\n`
+                                + `${t('completionTime') || 'Completion'}: ${drDrillData.finished_at || `(${t('taskStatusRunning') || 'In progress'})`}\n`
+                                + `${t('drDrillExecutor') || 'Executor'}: ${drDrillData.started_by || (t('unknownValue') || 'Unknown')}\n`
+                                + `${t('drDrillVerdict') || 'Verdict'}: ${formatDrDrillStatus(drDrillData.status).toUpperCase()}\n`
+                                + `${t('drDrillSummary') || 'Summary'}: ${drDrillData.summary}`),
                 });
                 blocks.push({ type: 'spacer', height: 4 });
                 blocks.push({
@@ -7302,7 +7465,7 @@
                     blocks.push({ type: 'spacer', height: 4 });
                     blocks.push({
                         type: 'text',
-                        value: safe('Check details:\n\n' + (drDrillData.checks || [])
+                        value: safe(`${t('drDrillCheckDetails') || 'Check details'}:\n\n` + (drDrillData.checks || [])
                             .filter(c => c.detail)
                             .map(c => `[${c.sequence}] ${c.category}/${c.name}:\n${c.detail}\n`)
                             .join('\n')),
@@ -7312,7 +7475,7 @@
                 try {
                     await generatePegaProxPDF({
                         title: safe(t('drDrillPdfTitle') || 'DR Drill Evidence Report'),
-                        subtitle: safe(`${drDrillData.plan_name} - ${drDrillData.status}`),
+                        subtitle: safe(`${drDrillData.plan_name} - ${formatDrDrillStatus(drDrillData.status)}`),
                         clusterName: '',
                         filename: `pegaprox-dr-drill-${(drDrillModal?.plan?.id || 'plan')}-${dt}.pdf`,
                         content: blocks,
@@ -7320,21 +7483,21 @@
                     });
                 } catch (e) {
                     console.error('[DR Drill PDF]', e);
-                    addToast('PDF export failed', 'error');
+                    addToast(t('pdfExportFailed') || 'PDF export failed', 'error');
                 }
             };
             // add VM
             const handleAddVm = async () => {
-                if (!addVmForm.vmid) { addToast('Select a VM', 'error'); return; }
+                if (!addVmForm.vmid) { addToast(t('siteRecoverySelectVmRequired') || 'Select a VM', 'error'); return; }
                 const srcVm = sourceVms.find(v => v.vmid == addVmForm.vmid);
                 const payload = { ...addVmForm, vmid: parseInt(addVmForm.vmid), vm_name: srcVm ? srcVm.name : '', vm_type: srcVm?.type || 'qemu' };
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}/vms`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-                if (r && r.ok) { addToast('VM added'); setShowAddVmModal(false); setAddVmForm({ vmid: '', vm_name: '', boot_group: 0, boot_delay: 30, replication_job_id: '' }); fetchPlanDetail(planDetail.id); }
-                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Failed', 'error'); }
+                if (r && r.ok) { addToast(t('siteRecoveryVmAdded') || 'VM added to recovery plan'); setShowAddVmModal(false); setAddVmForm({ vmid: '', vm_name: '', boot_group: 0, boot_delay: 30, replication_job_id: '' }); fetchPlanDetail(planDetail.id); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('actionFailed') || 'Action failed'), 'error'); }
             };
             const handleRemoveVm = async (vmId) => {
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}/vms/${vmId}`, { method: 'DELETE' });
-                if (r && r.ok) fetchPlanDetail(planDetail.id); else addToast('Remove failed', 'error');
+                if (r && r.ok) fetchPlanDetail(planDetail.id); else addToast(t('siteRecoveryVmRemoveFailed') || 'Failed to remove VM from recovery plan', 'error');
             };
             const handleUpdateVm = async (vmId, field, value) => {
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}/vms/${vmId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ [field]: value }) });
@@ -7346,12 +7509,12 @@
                 const nm = {}; netMapRows.forEach(r => { if (r.src && r.tgt) nm[r.src] = r.tgt; });
                 const sm = {}; storMapRows.forEach(r => { if (r.src && r.tgt) sm[r.src] = r.tgt; });
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ network_mappings: nm, storage_mappings: sm }) });
-                if (r && r.ok) { addToast(t('saveMappings') || 'Mappings saved'); fetchPlanDetail(planDetail.id); } else addToast('Save failed', 'error');
+                if (r && r.ok) { addToast(t('siteRecoveryMappingsSaved') || 'Mappings saved'); fetchPlanDetail(planDetail.id); } else addToast(t('saveFailed') || 'Save failed', 'error');
             };
             // save settings
             const saveSettings = async () => {
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settingsForm) });
-                if (r && r.ok) { addToast(t('saveSettings') || 'Settings saved'); fetchPlanDetail(planDetail.id); setSettingsDirty(false); } else addToast('Save failed', 'error');
+                if (r && r.ok) { addToast(t('siteRecoverySettingsSaved') || 'Settings saved'); fetchPlanDetail(planDetail.id); setSettingsDirty(false); } else addToast(t('saveFailed') || 'Save failed', 'error');
             };
 
             if (loading) return React.createElement('div', {className: 'flex justify-center p-12'}, React.createElement('span', {className: 'w-8 h-8 border-3 border-proxmox-orange/30 border-t-proxmox-orange rounded-full animate-spin'}));
@@ -7373,7 +7536,7 @@
                             <div className="flex items-center gap-3">
                                 <button onClick={() => setSelectedPlan(null)} className="text-gray-400 hover:text-white"><Icons.ChevronLeft className="w-5 h-5" /></button>
                                 <h2 className="text-lg font-semibold flex items-center gap-2"><Icons.Shield className="w-5 h-5 text-proxmox-orange" />{pd.name}</h2>
-                                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[pd.status] || 'bg-gray-500/20 text-gray-400'}`}>{pd.status}</span>
+                                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[pd.status] || 'bg-gray-500/20 text-gray-400'}`}>{formatPlanStatus(pd.status)}</span>
                             </div>
                             <div className="flex items-center gap-2 flex-wrap">
                                 {canFailover && <button onClick={() => handleReadiness(pd.id)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-gray-600/50 text-gray-300 hover:bg-gray-600 disabled:opacity-40">{t('readinessCheck')}</button>}
@@ -7414,8 +7577,8 @@
                                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-3 text-center"><p className="text-2xl font-bold text-proxmox-orange">{(pd.vms || []).length}</p><p className="text-xs text-gray-500">{t('protectedVMs')}</p></div>
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-3 text-center"><p className="text-2xl font-bold">{Object.keys(pd.network_mappings || {}).length}</p><p className="text-xs text-gray-500">{t('networkMappings')}</p></div>
-                                    <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-3 text-center"><p className="text-sm font-medium mt-1">{pd.auto_failover ? <span className="text-green-400">{t('autoFailover')}</span> : <span className="text-gray-500">Off</span>}</p><p className="text-xs text-gray-500 mt-1">{pd.auto_failover ? `${pd.failover_timeout}s timeout` : t('autoFailover')}</p></div>
-                                    <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-3 text-center"><p className="text-sm font-medium mt-1">{pd.last_failover ? new Date(pd.last_failover).toLocaleDateString() : '-'}</p><p className="text-xs text-gray-500 mt-1">Last Failover</p></div>
+                                    <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-3 text-center"><p className="text-sm font-medium mt-1">{pd.auto_failover ? <span className="text-green-400">{t('autoFailover')}</span> : <span className="text-gray-500">{t('disabled') || 'Disabled'}</span>}</p><p className="text-xs text-gray-500 mt-1">{pd.auto_failover ? `${t('failoverTimeout') || 'Failover Timeout (s)'}: ${pd.failover_timeout}` : t('autoFailover')}</p></div>
+                                    <div className="bg-proxmox-card border border-proxmox-border rounded-lg p-3 text-center"><p className="text-sm font-medium mt-1">{pd.last_failover ? new Date(pd.last_failover).toLocaleDateString() : '-'}</p><p className="text-xs text-gray-500 mt-1">{t('siteRecoveryLastFailover') || 'Last Failover'}</p></div>
                                 </div>
                             </div>
                         )}
@@ -7431,7 +7594,7 @@
                                 ) : sortedGroups.map(([groupNum, groupVms], gIdx) => (
                                     <div key={groupNum} className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                         <div className="flex items-center justify-between px-4 py-2 bg-proxmox-dark/50 border-b border-proxmox-border">
-                                            <span className="text-xs font-medium flex items-center gap-2"><span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded">Group {groupNum}</span><span className="text-gray-500">{groupVms.length} VM{groupVms.length !== 1 ? 's' : ''}</span></span>
+                                            <span className="text-xs font-medium flex items-center gap-2"><span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded">{t('bootGroup') || 'Boot Group'} {groupNum}</span><span className="text-gray-500">{groupVms.length} VM{groupVms.length !== 1 ? 's' : ''}</span></span>
                                             {gIdx > 0 && <span className="text-xs text-gray-500 flex items-center gap-1"><Icons.Clock className="w-3 h-3" />{t('bootDelay')}: {groupVms[0]?.boot_delay || 30}s</span>}
                                         </div>
                                         <table className="w-full text-sm">
@@ -7518,8 +7681,8 @@
                                         <div key={ev.id} className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                             <div className="flex items-center justify-between p-3 cursor-pointer hover:bg-proxmox-hover/30" onClick={() => setExpandedEvent(expandedEvent === ev.id ? null : ev.id)}>
                                                 <div className="flex items-center gap-2">
-                                                    <span className={`px-2 py-0.5 rounded text-xs ${typeColors[ev.event_type] || 'bg-gray-500/20 text-gray-400'}`}>{ev.event_type}</span>
-                                                    <span className={`px-2 py-0.5 rounded text-xs ${statusColors[ev.status] || ''}`}>{ev.status}</span>
+                                                    <span className={`px-2 py-0.5 rounded text-xs ${typeColors[ev.event_type] || 'bg-gray-500/20 text-gray-400'}`}>{formatRecoveryEventType(ev.event_type)}</span>
+                                                    <span className={`px-2 py-0.5 rounded text-xs ${statusColors[ev.status] || ''}`}>{formatRecoveryEventStatus(ev.status)}</span>
                                                     <span className="text-xs text-gray-500">{fmtDate(ev.started_at)}</span>
                                                     {dur !== null && <span className="text-xs text-gray-600">{dur < 60 ? `${dur}s` : `${Math.floor(dur/60)}m ${dur%60}s`}</span>}
                                                 </div>
@@ -7528,11 +7691,11 @@
                                             {expandedEvent === ev.id && Object.keys(results).length > 0 && (
                                                 <div className="border-t border-proxmox-border p-3">
                                                     <table className="w-full text-xs">
-                                                        <thead><tr className="text-gray-500"><th className="text-left pb-1">VMID</th><th className="text-left pb-1">{t('name')||'Name'}</th><th className="text-left pb-1">Status</th><th className="text-left pb-1">Error</th></tr></thead>
+                                                        <thead><tr className="text-gray-500"><th className="text-left pb-1">VMID</th><th className="text-left pb-1">{t('name')||'Name'}</th><th className="text-left pb-1">{t('status') || 'Status'}</th><th className="text-left pb-1">{t('error') || 'Error'}</th></tr></thead>
                                                         <tbody>{Object.entries(results).map(([vmid, r]) => (
                                                             <tr key={vmid} className="border-t border-proxmox-border/30">
                                                                 <td className="py-1 font-mono">{vmid}</td><td className="py-1">{r.vm_name || '-'}</td>
-                                                                <td className="py-1">{r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
+                                                                <td className="py-1">{r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">{t('failed') || 'Failed'}</span>}</td>
                                                                 <td className="py-1 text-gray-500">{r.error || '-'}</td>
                                                             </tr>
                                                         ))}</tbody>
@@ -7578,7 +7741,7 @@
                                     <h3 className="font-semibold">{t('addVmToPlan') || 'Add VM to Plan'}</h3>
                                     <select value={addVmForm.vmid} onChange={e => setAddVmForm(f => ({...f, vmid: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm">
                                         <option value="">{t('selectVm') || 'Select VM...'}</option>
-                                        {sourceVms.filter(v => !existingVmids.includes(v.vmid)).map(v => <option key={v.vmid} value={v.vmid}>{v.vmid} - {v.name || 'unnamed'}</option>)}
+                                        {sourceVms.filter(v => !existingVmids.includes(v.vmid)).map(v => <option key={v.vmid} value={v.vmid}>{v.vmid} - {v.name || (t('unnamed') || 'unnamed')}</option>)}
                                     </select>
                                     <div className="grid grid-cols-2 gap-3">
                                         <div><label className="text-xs text-gray-500 block mb-1">{t('bootGroup')}</label><input type="number" value={addVmForm.boot_group} onChange={e => setAddVmForm(f => ({...f, boot_group: parseInt(e.target.value) || 0}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm" /></div>
@@ -7641,7 +7804,7 @@
                                                 drDrillData.status === 'passed' ? 'bg-green-500/20 text-green-400' :
                                                 drDrillData.status === 'warned' ? 'bg-yellow-500/20 text-yellow-400' :
                                                 'bg-red-500/20 text-red-400'
-                                            }`}>{drDrillData.status.toUpperCase()}</span>
+                                            }`}>{formatDrDrillStatus(drDrillData.status).toUpperCase()}</span>
                                         )}
                                     </div>
 
@@ -7649,7 +7812,7 @@
                                         <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 flex items-center gap-2">
                                             <Icons.RotateCw className="w-4 h-4 text-blue-400 animate-spin" />
                                             <span className="text-sm text-blue-300">
-                                                {t('drDrillRunning') || 'Running checks…'} ({drDrillData?.checks?.length || 0} done)
+                                                {t('drDrillRunning') || 'Running checks…'} ({t('completed') || 'Completed'}: {drDrillData?.checks?.length || 0})
                                             </span>
                                         </div>
                                     )}
@@ -7659,15 +7822,15 @@
                                             <div className="grid grid-cols-4 gap-2">
                                                 <div className="bg-green-500/10 border border-green-500/30 rounded p-2 text-center">
                                                     <div className="text-2xl font-bold text-green-400">{drDrillData.pass_count}</div>
-                                                    <div className="text-[10px] text-gray-400">PASS</div>
+                                                    <div className="text-[10px] text-gray-400">{(t('passed') || 'Passed').toUpperCase()}</div>
                                                 </div>
                                                 <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-2 text-center">
                                                     <div className="text-2xl font-bold text-yellow-400">{drDrillData.warn_count}</div>
-                                                    <div className="text-[10px] text-gray-400">WARN</div>
+                                                    <div className="text-[10px] text-gray-400">{(t('warning') || 'Warning').toUpperCase()}</div>
                                                 </div>
                                                 <div className="bg-red-500/10 border border-red-500/30 rounded p-2 text-center">
                                                     <div className="text-2xl font-bold text-red-400">{drDrillData.fail_count}</div>
-                                                    <div className="text-[10px] text-gray-400">FAIL</div>
+                                                    <div className="text-[10px] text-gray-400">{(t('failed') || 'Failed').toUpperCase()}</div>
                                                 </div>
                                                 <div className="bg-blue-500/10 border border-blue-500/30 rounded p-2 text-center">
                                                     <div className="text-lg font-bold text-blue-400">{drDrillData.estimated_rto_seconds ? `${Math.round(drDrillData.estimated_rto_seconds/60)}m` : '—'}</div>
@@ -7676,7 +7839,7 @@
                                             </div>
                                             <p className="text-xs text-gray-500">
                                                 {t('drDrillSummary') || 'Summary'}: {drDrillData.summary} ·
-                                                {' '}{t('drDrillExecutor') || 'Executor'}: <code className="text-gray-300">{drDrillData.started_by || 'unknown'}</code>
+                                                {' '}{t('drDrillExecutor') || 'Executor'}: <code className="text-gray-300">{drDrillData.started_by || (t('unknown') || 'Unknown')}</code>
                                                 {drDrillData.rpo_breach_seconds > 0 && (
                                                     <> · <span className="text-yellow-400">{t('drDrillRpoBreach') || 'RPO breach'}: {Math.round(drDrillData.rpo_breach_seconds / 60)}m</span></>
                                                 )}
@@ -7745,7 +7908,7 @@
                         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
                             {plans.map(plan => (
                                 <div key={plan.id} onClick={() => setSelectedPlan(plan.id)} className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 cursor-pointer hover:border-proxmox-orange/50 transition-colors">
-                                    <div className="flex items-center justify-between mb-3"><h3 className="font-medium text-sm">{plan.name}</h3><span className={`px-2 py-0.5 rounded-full text-xs ${statusColors[plan.status] || 'bg-gray-500/20 text-gray-400'}`}>{plan.status}</span></div>
+                                    <div className="flex items-center justify-between mb-3"><h3 className="font-medium text-sm">{plan.name}</h3><span className={`px-2 py-0.5 rounded-full text-xs ${statusColors[plan.status] || 'bg-gray-500/20 text-gray-400'}`}>{formatPlanStatus(plan.status)}</span></div>
                                     <div className="text-xs text-gray-500 space-y-1"><p>{getClusterName(plan.source_cluster)} → {getClusterName(plan.target_cluster)}</p><p>{plan.vm_count} {t('protectedVMs')}</p>{plan.last_failover && <p>Last failover: {fmtDate(plan.last_failover)}</p>}</div>
                                     {canManage && <div className="mt-3 flex justify-end"><button onClick={(e) => { e.stopPropagation(); handleDeletePlan(plan.id, plan.status === 'running' || plan.status === 'testing'); }} className="text-red-400 hover:text-red-300 text-xs"><Icons.Trash2 className="w-3.5 h-3.5" /></button></div>}
                                 </div>
@@ -8706,7 +8869,7 @@
                         {filteredNodes.map(({ name: nodeName, metrics: nodeMetrics, online: nodeOnline }) => {
                             const isMaint = nodeMetrics?.maintenance_mode;
                             const isUpdating = nodeMetrics?.is_updating;
-                            const statusSuffix = isMaint ? ` (${t('maintenance')})` : isUpdating ? ` (${t('updating')})` : !nodeOnline ? ' (Offline)' : '';
+                            const statusSuffix = isMaint ? ` (${t('maintenance')})` : isUpdating ? ` (${t('updating')})` : !nodeOnline ? ` (${t('offline') || 'Offline'})` : '';
                             const isNodeSelected = selectedSidebarNode?.name === nodeName && selectedSidebarNode?.clusterId === clusterId;
                             return (
                                 <div
@@ -8783,7 +8946,7 @@
                                         {vmRunning && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{background: vm.type === 'lxc' ? 'var(--corp-accent)' : 'var(--color-success)'}} />}
                                     </span>
                                     {isSidebarGuestTemplate(vm) && (
-                                        <span className="flex-shrink-0" title="Template" style={{color: '#e9ecef'}}>
+                                        <span className="flex-shrink-0" title={t('template') || 'Template'} style={{color: '#e9ecef'}}>
                                             <Icons.Template className="w-3.5 h-3.5" />
                                         </span>
                                     )}
@@ -8876,7 +9039,7 @@
                                 {vmRunning && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{background: vm.type === 'lxc' ? '#49afd9' : '#60b515'}} />}
                             </span>
                             {isSidebarGuestTemplate(vm) && (
-                                <span className="flex-shrink-0" title="Template" style={{color: '#e9ecef'}}>
+                                <span className="flex-shrink-0" title={t('template') || 'Template'} style={{color: '#e9ecef'}}>
                                     <Icons.Template className="w-3 h-3" />
                                 </span>
                             )}
@@ -8924,9 +9087,9 @@
                                                                     setTimeout(() => { fetchClusterPools(clusterId); fetchSidebarClusterData(clusterId); }, 300);
                                                                 } else {
                                                                     const err = await res?.json().catch(() => ({}));
-                                                                    addToast(err?.error || 'Failed', 'error');
+                                                                    addToast(err?.error || (t('saveFailed') || 'Save failed'), 'error');
                                                                 }
-                                                            } catch { addToast('Failed', 'error'); }
+                                                            } catch { addToast(t('saveFailed') || 'Save failed', 'error'); }
                                                         }
                                                         if (e.key === 'Escape') setInlinePoolEdit(null);
                                                     }}
@@ -9019,9 +9182,9 @@
                                                     setTimeout(() => { fetchClusterPools(clusterId); fetchSidebarClusterData(clusterId); }, 300);
                                                 } else {
                                                     const err = await res?.json().catch(() => ({}));
-                                                    addToast(err?.error || 'Failed', 'error');
+                                                    addToast(err?.error || (t('createFailed') || 'Create failed'), 'error');
                                                 }
-                                            } catch { addToast('Failed', 'error'); }
+                                            } catch { addToast(t('createFailed') || 'Create failed', 'error'); }
                                         }
                                         if (e.key === 'Escape') setInlinePoolCreate(null);
                                     }}
@@ -9258,7 +9421,7 @@
                                                     >
                                                         <span className="text-[9px]">{isNodeExpanded ? '▾' : '▸'}</span>
                                                         <Icons.Server className="w-3 h-3 flex-shrink-0" />
-                                                        <span className="truncate">{nodeName}</span>
+                                                        <span className="truncate">{nodeName === 'unknown' ? (t('unknownValue') || 'Unknown') : nodeName}</span>
                                                         {nodeVms.length > 0 && <span className="text-[10px] ml-auto" style={{color: '#3d5a6a'}}>{nodeVms.length}</span>}
                                                     </div>
                                                 )}
@@ -9290,7 +9453,7 @@
                                                                 {isRunning && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{background: vm.type === 'lxc' ? 'var(--corp-accent)' : 'var(--color-success)'}} />}
                                                             </span>
                                                             {isSidebarGuestTemplate(vm) && (
-                                                                <span className="flex-shrink-0" title="Template" style={{color: '#e9ecef'}}>
+                                                                <span className="flex-shrink-0" title={t('template') || 'Template'} style={{color: '#e9ecef'}}>
                                                                     <Icons.Template className="w-3 h-3" />
                                                                 </span>
                                                             )}
@@ -21252,10 +21415,10 @@
                                                                         <span className="text-amber-300 text-base leading-none mt-0.5">⚠</span>
                                                                         <div className="flex-1 min-w-0">
                                                                             <p className="text-xs text-amber-200 font-semibold mb-1">
-                                                                                {t('virtioPreInstallWarnTitle') || 'Treiber besser VOR der Migration installieren'}
+                                                                                {t('virtioPreInstallWarnTitle') || 'Better install drivers BEFORE migration'}
                                                                             </p>
                                                                             <p className="text-xs text-amber-100/90 leading-snug">
-                                                                                {t('virtioPreInstallWarnBody') || 'Lade virtio-win.iso in der laufenden Quell-VM auf VMware, mounte sie als CD und führe virtio-win-guest-tools.exe aus — dann migriere. Unsere Inject-Variante ist Best-Effort: Windows 11 / Server 2025 binden vioscsi im Early-Boot nicht zuverlässig (Proxmox/QEMU-Limitation), Boot-Disk muss dann auf pvscsi bleiben. VMs die vor Migration die Treiber installiert haben, lassen sich danach problemlos auf virtio-scsi umstellen.'}
+                                                                                {t('virtioPreInstallWarnBody') || 'Load virtio-win.iso into the running source VM on VMware, mount it as a CD and run virtio-win-guest-tools.exe — then migrate. Our offline injection is best-effort: Windows 11 / Server 2025 do not reliably bind vioscsi during early boot (Proxmox/QEMU limitation), so the boot disk must stay on pvscsi. VMs that had the drivers installed pre-migration can switch to virtio-scsi cleanly afterwards.'}
                                                                             </p>
                                                                         </div>
                                                                     </div>
