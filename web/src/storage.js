@@ -469,7 +469,7 @@
                         fetchStorageClusters();
                     } else {
                         const err = await response.json();
-                        alert(err.error || 'Failed to create');
+                        alert(err.error || t('createFailed') || 'Create failed');
                     }
                 } catch (error) {
                     console.error('creating storage cluster:', error);
@@ -1128,15 +1128,15 @@
                                         setSyncContentType(e.target.value);
                                         setTimeout(refreshSyncStatus, 50);
                                     }} className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm text-white">
-                                        <option value="iso">ISOs</option>
-                                        <option value="vztmpl">Templates</option>
+                                        <option value="iso">{t('isos') || 'ISOs'}</option>
+                                        <option value="vztmpl">{t('templates') || 'Templates'}</option>
                                     </select>
                                     <button onClick={triggerSyncAll} disabled={syncingFiles._all}
                                         className="px-4 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-1.5">
                                         {syncingFiles._all && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
                                         {t('syncAll') || 'Sync All Missing'}
                                     </button>
-                                    <button onClick={refreshSyncStatus} className="p-1.5 text-gray-400 hover:text-white transition-colors" title="Refresh">
+                                    <button onClick={refreshSyncStatus} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh') || 'Refresh'}>
                                         <Icons.RefreshCw className={`w-4 h-4 ${syncLoading ? 'animate-spin' : ''}`} />
                                     </button>
                                 </div>
@@ -1146,7 +1146,12 @@
                                 <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
                                     <input type="checkbox" className="rounded"
                                         checked={localStorage.getItem(`autosync-${clusterId}`) === 'true'}
-                                        onChange={e => { localStorage.setItem(`autosync-${clusterId}`, e.target.checked); addToast(e.target.checked ? 'Auto-sync enabled — new uploads will be distributed automatically' : 'Auto-sync disabled', 'success'); }}
+                                        onChange={e => { localStorage.setItem(`autosync-${clusterId}`, e.target.checked); addToast(
+                                            e.target.checked
+                                                ? (t('autoSyncEnabled') || 'Auto-sync enabled — new uploads will be distributed automatically')
+                                                : (t('autoSyncDisabled') || 'Auto-sync disabled'),
+                                            'success'
+                                        ); }}
                                     />
                                     {t('autoSync') || 'Auto-Sync after Upload'}
                                 </label>
@@ -1192,7 +1197,7 @@
                                                                     disabled={!!syncingFiles[f.name]}
                                                                     className="px-2 py-1 text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded transition-colors disabled:opacity-50 flex items-center gap-1"
                                                                 >
-                                                                    {syncingFiles[f.name] ? <><Icons.RotateCw className="w-3 h-3 animate-spin" /> Syncing...</> : (t('sync') || 'Sync')}
+                                                                    {syncingFiles[f.name] ? <><Icons.RotateCw className="w-3 h-3 animate-spin" /> {t('syncing') || 'Syncing'}...</> : (t('sync') || 'Sync')}
                                                                 </button>
                                                             ) : null}
                                                         </td>
@@ -1312,6 +1317,13 @@
                                                         'no-backup': 'bg-orange-500/15 text-orange-400',
                                                         'disabled': 'bg-gray-500/15 text-gray-400',
                                                     }[v.sla_status] || 'bg-gray-500/15 text-gray-400';
+                                                    const statusLabel = {
+                                                        'ok': t('compliant') || 'Compliant',
+                                                        'warning': t('warning') || 'Warning',
+                                                        'breached': t('breached') || 'Breached',
+                                                        'no-backup': t('noBackup') || 'No backup',
+                                                        'disabled': t('disabled') || 'Disabled',
+                                                    }[v.sla_status] || v.sla_status;
                                                     return (
                                                         <tr key={`${v.type}-${v.vmid}`} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover">
                                                             <td className="px-3 py-2 text-gray-300">{v.vmid}</td>
@@ -1321,7 +1333,7 @@
                                                             <td className="px-3 py-2 text-gray-300">{fmtAgeHours(v.age_hours)}</td>
                                                             <td className="px-3 py-2 text-xs text-gray-500">{v.backup_source || '-'}</td>
                                                             <td className="px-3 py-2">
-                                                                <span className={`px-2 py-0.5 rounded text-xs ${statusColor}`}>{v.sla_status}</span>
+                                                                <span className={`px-2 py-0.5 rounded text-xs ${statusColor}`}>{statusLabel}</span>
                                                             </td>
                                                         </tr>
                                                     );
