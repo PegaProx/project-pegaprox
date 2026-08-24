@@ -175,7 +175,7 @@
                                 </button>
                             )}
                             <span className="px-2 py-1 bg-red-500 text-white text-xs font-bold rounded animate-pulse">
-                                OFFLINE
+                                {(t('offline') || 'Offline').toUpperCase()}
                             </span>
                         </div>
                         <div className="flex items-center gap-3 mb-4">
@@ -186,7 +186,7 @@
                                 <h3 className="font-semibold text-white">{name}</h3>
                                 <div className="flex items-center gap-2 mt-1">
                                     <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                                    <span className="text-xs text-red-400">offline</span>
+                                    <span className="text-xs text-red-400">{t('offline') || 'Offline'}</span>
                                 </div>
                             </div>
                         </div>
@@ -259,9 +259,12 @@
                                         }`}>
                                             {updateTask.phase === 'apt_update' ? 'apt update' :
                                              updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
-                                             updateTask.phase === 'reboot' ? 'Reboot' :
-                                             updateTask.phase === 'wait_online' ? t('waitingForNode') :
-                                             updateTask.phase === 'done' ? t('done') :
+                                             updateTask.phase === 'reboot' ? (t('reboot') || 'Reboot') :
+                                             updateTask.phase === 'wait_online' ? (t('waitingForNode') || 'Waiting for node...') :
+                                             updateTask.phase === 'done' ? (t('done') || 'Done') :
+                                             updateTask.status === 'failed' ? (t('updateFailed') || 'Update failed') :
+                                             updateTask.status === 'completed' ? (t('updateCompleted') || 'Update completed!') :
+                                             updateTask.status === 'running' ? (t('updateRunning') || 'Update running') :
                                              updateTask.status}
                                         </span>
                                         {/* Dismiss button for completed/failed */}
@@ -737,7 +740,7 @@
                                 <div className="p-6">
                                     <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 mb-4">
                                         <p className="text-sm text-yellow-200">
-                                            <strong>{t('warning')}:</strong> {t('maintenanceWarning').replace('Warning: ', '')}
+                                            {t('maintenanceWarning')}
                                         </p>
                                     </div>
                                     <p className="text-sm text-gray-400 mb-6">
@@ -1031,7 +1034,14 @@
                                         border: `1px solid ${updateTask.status === 'failed' ? 'rgba(245,79,71,0.3)' : updateTask.status === 'completed' ? 'rgba(96,181,21,0.3)' : 'rgba(73,175,217,0.3)'}`
                                     }}>
                                         {updateTask.status === 'completed' ? '✓ ' : updateTask.status === 'failed' ? '✕ ' : '⟳ '}
-                                        {updateTask.status === 'failed' ? t('updateFailed') : updateTask.status === 'completed' ? t('updateCompleted') : `${t('updating') || 'Updating'}: ${updateTask.phase || '...'}`}
+                                        {updateTask.status === 'failed' ? t('updateFailed') : updateTask.status === 'completed' ? t('updateCompleted') : `${t('updating') || 'Updating'}: ${
+                                            updateTask.phase === 'apt_update' ? 'apt update' :
+                                            updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
+                                            updateTask.phase === 'reboot' ? (t('reboot') || 'Reboot') :
+                                            updateTask.phase === 'wait_online' ? (t('waitingForNode') || 'Waiting for node...') :
+                                            updateTask.phase === 'done' ? (t('done') || 'Done') :
+                                            updateTask.phase || '...'
+                                        }`}
                                     </span>
                                 )}
                                 <span className="w-8" style={{color: '#728b9a'}}>CPU</span>
@@ -1082,7 +1092,14 @@
                                                 updateTask.status === 'failed' ? t('updateFailed') :
                                                 updateTask.status === 'completed' ? t('updateCompleted') :
                                                 t('updateRunning')
-                                            }: {updateTask.phase || '...'}</span>
+                                            }: {
+                                                updateTask.phase === 'apt_update' ? 'apt update' :
+                                                updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
+                                                updateTask.phase === 'reboot' ? (t('reboot') || 'Reboot') :
+                                                updateTask.phase === 'wait_online' ? (t('waitingForNode') || 'Waiting for node...') :
+                                                updateTask.phase === 'done' ? (t('done') || 'Done') :
+                                                updateTask.phase || '...'
+                                            }</span>
                                         </div>
                                         {(updateTask.status === 'completed' || updateTask.status === 'failed') && (
                                             <button onClick={(e) => { e.stopPropagation();
@@ -1166,7 +1183,7 @@
                                     <div className="corp-node-detail-sub">{metrics.disk_total ? `${formatBytes(metrics.disk_used || 0)} / ${formatBytes(metrics.disk_total)}` : '-'}</div>
                                 </div>
                                 <div className="corp-node-detail-card">
-                                    <div className="corp-node-detail-label">Load</div>
+                                    <div className="corp-node-detail-label">{t('load') || 'Load'}</div>
                                     <div className="corp-node-detail-value">{
                                         Array.isArray(metrics.loadavg) ? metrics.loadavg.map(l => typeof l === 'number' ? l.toFixed(2) : l).join(' / ') :
                                         typeof metrics.loadavg === 'number' ? metrics.loadavg.toFixed(2) : (metrics.loadavg || '-')
@@ -1819,7 +1836,11 @@
                                                         ? 'bg-green-500/10 text-green-400' 
                                                         : 'bg-red-500/10 text-red-400'
                                                 }`}>
-                                                    {resource.status === 'running' ? t('running') : t('stopped')}
+                                                    {resource.status === 'running'
+                                                        ? (t('running') || 'Running')
+                                                        : resource.status === 'stopped'
+                                                            ? (t('stopped') || 'Stopped')
+                                                            : (resource.status || '-')}
                                                 </span>
                                             </div>
                                             {/* IP Address - shown for running VMs with guest agent */}
@@ -1842,7 +1863,7 @@
                                             {/* NS May 2026 — backup status pill */}
                                             {backupStatus && backupStatus[resource.vmid] && window.PegaProxBackupStatusPill && (
                                                 <div className="flex items-center justify-between text-sm">
-                                                    <span className="text-gray-500 text-xs">Backup</span>
+                                                    <span className="text-gray-500 text-xs">{t('backup') || 'Backup'}</span>
                                                     {React.createElement(window.PegaProxBackupStatusPill, {
                                                         status: backupStatus[resource.vmid].status,
                                                         lastAgeHours: backupStatus[resource.vmid].last_backup_age_hours,
@@ -2474,7 +2495,9 @@
                             <div className="lg:col-span-1 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden flex flex-col"
                                  style={{maxHeight: 'calc(100vh - 260px)', minHeight: '400px'}}>
                                 <div className="p-3 border-b border-proxmox-border bg-proxmox-dark/50 flex-shrink-0">
-                                    <h3 className="text-sm font-medium text-gray-300">VMs & Container ({filteredResources.length})</h3>
+                                    <h3 className="text-sm font-medium text-gray-300">
+                                        {t('vms') || 'VMs'} & {t('containers') || 'Containers'} ({filteredResources.length})
+                                    </h3>
                                 </div>
                                 <div className="flex-1 overflow-y-auto" style={{scrollbarWidth: 'thin'}}>
                                     {paginatedResources.map(resource => (
@@ -2599,7 +2622,7 @@
                                     onClick={() => setCurrentPage(1)}
                                     disabled={effectivePage === 1}
                                     className="px-2 py-1 rounded bg-proxmox-dark border border-proxmox-border disabled:opacity-30 hover:bg-proxmox-hover disabled:hover:bg-proxmox-dark"
-                                    title="First page"
+                                    title={t('firstPage') || 'First page'}
                                 >
                                     ««
                                 </button>
@@ -2649,7 +2672,7 @@
                                     onClick={() => setCurrentPage(totalPages)}
                                     disabled={effectivePage === totalPages}
                                     className="px-2 py-1 rounded bg-proxmox-dark border border-proxmox-border disabled:opacity-30 hover:bg-proxmox-hover disabled:hover:bg-proxmox-dark"
-                                    title="Last page"
+                                    title={t('lastPage') || 'Last page'}
                                 >
                                     »»
                                 </button>
