@@ -43,11 +43,21 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immedi
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error
 from pegaprox.utils.ssh import get_paramiko
+from pegaprox.utils.concurrent import install_gevent_to_thread
 from pegaprox.utils.sanitization import sanitize_int
 from urllib.parse import urlencode, quote as url_quote
 import signal
 import requests.exceptions
 from pegaprox.api.realtime import sock
+
+# The console proxy below offloads every PVE-side socket call with
+# asyncio.to_thread. Under gevent's monkey-patched threading the executor
+# worker is a greenlet and the loop only picks the finished future up when an
+# unrelated timer fires, so those calls resolve after the caller's timeout
+# rather than when the work is done — the VNC handshake then burns
+# VNC_PVE_CONNECT_TIMEOUT instead of connecting. Installing the replacement
+# once covers every call site; it is a no-op when gevent is not patched in.
+install_gevent_to_thread()
 
 bp = Blueprint('vms', __name__)
 
