@@ -8068,6 +8068,54 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
 
 
 # Standalone VNC WebSocket Server using websockets library
+def _pegaprox_gevent_listen_socket(host, port):
+    """Bind a listening socket using the ORIGINAL (un-monkey-patched) socket.
+
+    Local PegaProx patch. Under gevent's monkey-patching, websockets.serve()
+    never binds on Python >= 3.13: the greenlet parks in gevent/selectors.py
+    select() inside asyncio's _run_once, stays alive, raises nothing, and no
+    listener ever appears — the console then answers "connection refused".
+    Creating the listening socket ourselves with the unpatched socket module
+    and passing it to websockets.serve(sock=...) sidesteps that emulation.
+    Verified on this VM: py3.12 binds either way, py3.13/py3.14 only this way.
+    """
+    import socket as _socket
+    try:
+        from gevent.monkey import get_original
+        _socket_cls = get_original('socket', 'socket')
+    except Exception:
+        _socket_cls = _socket.socket
+
+    if not host:
+        # Dual-stack: one IPv6 socket serving IPv4 too, matching the previous
+        # behaviour of letting asyncio bind all interfaces.
+        try:
+            sock = _socket_cls(_socket.AF_INET6, _socket.SOCK_STREAM)
+            try:
+                sock.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 0)
+            except OSError:
+                pass
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            sock.bind(('', port))
+        except OSError:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            sock = _socket_cls(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            sock.bind(('0.0.0.0', port))
+    else:
+        family = _socket.getaddrinfo(host, port, type=_socket.SOCK_STREAM)[0][0]
+        sock = _socket_cls(family, _socket.SOCK_STREAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+
+    sock.listen(100)
+    sock.setblocking(False)
+    return sock
+
+
 def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0.0.0'):
     """Start a dedicated WebSocket server for VNC proxying"""
     import asyncio
@@ -8617,8 +8665,9 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_vnc
         ws_host = host if host else None
         display_host = host or '0.0.0.0'
+        _listen_sock = _pegaprox_gevent_listen_socket(ws_host, port)
         try:
-            async with websockets.serve(vnc_handler, ws_host, port, ssl=ssl_context, ping_interval=30, ping_timeout=60, process_request=_lpr_vnc):
+            async with websockets.serve(vnc_handler, sock=_listen_sock, ssl=ssl_context, ping_interval=30, ping_timeout=60, process_request=_lpr_vnc):
                 print(f"VNC WebSocket Server ready on {proto}://{display_host}:{port}", flush=True)
                 server_ready.set()
                 await asyncio.Future()  # Run forever
