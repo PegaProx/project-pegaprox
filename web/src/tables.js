@@ -2684,8 +2684,8 @@
                                 Object.keys(groupedByNode).length === 1
                                     ? (t('nodeSingular') || 'węzeł')
                                     : (Object.keys(groupedByNode).length % 10 >= 2 && Object.keys(groupedByNode).length % 10 <= 4 && !(Object.keys(groupedByNode).length % 100 >= 12 && Object.keys(groupedByNode).length % 100 <= 14)
-                                        ? (t('nodePluralFew') || 'węzły')
-                                        : (t('nodePluralMany') || 'węzłów'))
+                                        ? (t('nodePluralFew') || 'nodes')
+                                        : (t('nodePluralMany') || 'nodes'))
                             }
                         </span>
                     </div>
