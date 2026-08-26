@@ -11419,7 +11419,10 @@
                         setPbsCatalog(await resp.json());
                     } else {
                         setPbsCatalog([]);
-                        addToast('Catalog not available for this snapshot (may be encrypted or non-pxar)', 'warning');
+                        addToast(
+                            t('pbsCatalogUnavailable') || 'Catalog not available for this snapshot (it may be encrypted or not use pxar)',
+                            'warning'
+                        );
                     }
                 } catch (e) { 
                     console.warn('PBS catalog error:', e); 
@@ -11461,7 +11464,7 @@
                         body: JSON.stringify({ ...params, notes: pbsNotesText })
                     });
                     if (resp && resp.ok) {
-                        addToast('Notes saved', 'success');
+                        addToast(t('pbsNotesSaved') || 'Notes saved', 'success');
                         setPbsEditingNotes(null);
                         // Refresh data
                         if (type === 'snapshot') {
@@ -11469,9 +11472,11 @@
                             fetchPBSSnapshots(selectedPBS.id, pbsSelectedStore, bt, bi);
                         } else fetchPBSGroups(selectedPBS.id, pbsSelectedStore);
                     } else {
-                        addToast('Failed to save notes', 'error');
+                        addToast(t('pbsNotesSaveFailed') || 'Failed to save notes', 'error');
                     }
-                } catch (e) { addToast('Error saving notes: ' + e.message, 'error'); }
+                } catch (e) {
+                    addToast((t('pbsNotesSaveFailed') || 'Failed to save notes') + ': ' + e.message, 'error');
+                }
             };
             
             const pbsToggleProtected = async (snapshot) => {
@@ -11488,13 +11493,20 @@
                         })
                     });
                     if (resp && resp.ok) {
-                        addToast(`Snapshot ${newState ? 'protected' : 'unprotected'}`, 'success');
+                        addToast(
+                            newState
+                                ? (t('pbsSnapshotProtected') || 'Snapshot protected')
+                                : (t('pbsSnapshotUnprotected') || 'Snapshot unprotected'),
+                            'success'
+                        );
                         const [bt, bi] = pbsSelectedGroup ? pbsSelectedGroup.split('/') : [null, null];
                         fetchPBSSnapshots(selectedPBS.id, pbsSelectedStore, bt, bi);
                     } else {
-                        addToast('Failed to update protection', 'error');
+                        addToast(t('pbsProtectionUpdateFailed') || 'Failed to update protection', 'error');
                     }
-                } catch (e) { addToast('Error: ' + e.message, 'error'); }
+                } catch (e) {
+                    addToast((t('error') || 'Error') + ': ' + e.message, 'error');
+                }
             };
             
             // Load PBS when selected
@@ -11567,7 +11579,7 @@
                     });
                     if (resp && resp.ok) {
                         const data = await resp.json();
-                        addToast('PBS server added successfully', 'success');
+                        addToast(t('pbsServerAdded') || 'PBS server added successfully', 'success');
                         setShowAddPBS(false);
                         fetchPBSServers();
                         setSelectedPBS(data);
@@ -11589,26 +11601,28 @@
                         body: JSON.stringify(config),
                     });
                     if (resp && resp.ok) {
-                        addToast('PBS server updated', 'success');
+                        addToast(t('pbsServerUpdated') || 'PBS server updated', 'success');
                         fetchPBSServers();
                         if (selectedPBS?.id === pbsId) fetchPBSStatus(pbsId);
                         return { success: true };
                     }
                     const err = resp ? await resp.json().catch(() => ({})) : {};
-                    return { success: false, error: err.error || 'Update failed' };
+                    return { success: false, error: err.error || (t('updateFailed') || 'Update failed') };
                 } catch (e) { return { success: false, error: e.message }; }
             };
             
             const handleDeletePBS = async (pbsId) => {
-                if (!confirm('Delete this PBS server? This cannot be undone.')) return;
+                if (!confirm(t('pbsServerDeleteConfirm') || 'Delete this PBS server? This cannot be undone.')) return;
                 try {
                     const resp = await authFetch(`${API_URL}/pbs/${pbsId}`, { method: 'DELETE' });
                     if (resp && resp.ok) {
-                        addToast('PBS server deleted', 'success');
+                        addToast(t('pbsServerDeleted') || 'PBS server deleted', 'success');
                         if (selectedPBS?.id === pbsId) setSelectedPBS(null);
                         fetchPBSServers();
                     }
-                } catch (e) { addToast('Delete failed: ' + e.message, 'error'); }
+                } catch (e) {
+                    addToast((t('deleteFailed') || 'Delete failed') + ': ' + e.message, 'error');
+                }
             };
             
             const handleTestPBS = async (config) => {
@@ -11627,6 +11641,13 @@
             const pbsAction = async (action, store, data = {}) => {
                 if (!selectedPBS) return;
                 const pbsId = selectedPBS.id;
+                const actionName = ({
+                    'gc': t('pbsActionGc') || 'garbage collection',
+                    'verify': t('pbsActionVerify') || 'verification',
+                    'prune': t('pbsActionPrune') || 'prune',
+                    'delete-snapshot': t('pbsActionDeleteSnapshot') || 'snapshot deletion',
+                })[action] || action;
+
                 try {
                     let url, method = 'POST';
                     if (action === 'gc') url = `${API_URL}/pbs/${pbsId}/datastores/${store}/gc`;
@@ -11644,7 +11665,16 @@
                     if (resp && resp.ok) {
                         const result = await resp.json();
                         const upid = result?.data;
-                        addToast(`${action} started on ${store}${upid ? ' (task: ' + String(upid).slice(-8) + ')' : ''}`, 'success');
+                        const taskRef = upid
+                            ? ` (${(t('pbsTaskRef') || 'task: {id}').replace('{id}', String(upid).slice(-8))})`
+                            : '';
+                        addToast(
+                            (t('pbsActionStarted') || '{action} started on {store}{task}')
+                                .replace('{action}', actionName)
+                                .replace('{store}', store)
+                                .replace('{task}', taskRef),
+                            'success'
+                        );
                         // Refresh tasks
                         setTimeout(() => {
                             fetchPBSTasks(pbsId);
@@ -11657,24 +11687,60 @@
                         return result;
                     }
                     const err = resp ? await resp.json().catch(() => ({})) : {};
-                    addToast(`${action} failed: ${err.error || 'unknown'}`, 'error');
-                } catch (e) { addToast(`${action} error: ${e.message}`, 'error'); }
+                    addToast(
+                        (t('pbsActionFailed') || '{action} failed')
+                            .replace('{action}', actionName)
+                        + ': '
+                        + (err.error || (t('unknownError') || 'Unknown error')),
+                        'error'
+                    );
+                } catch (e) {
+                    addToast(
+                        (t('pbsActionFailed') || '{action} failed')
+                            .replace('{action}', actionName)
+                        + ': '
+                        + e.message,
+                        'error'
+                    );
+                }
             };
             
             const pbsRunJob = async (jobType, jobId) => {
                 if (!selectedPBS) return;
+
+                const jobTypeName = ({
+                    'sync': t('pbsJobTypeSync') || 'sync',
+                    'verify': t('pbsJobTypeVerify') || 'verify',
+                    'prune': t('pbsJobTypePrune') || 'prune',
+                })[jobType] || jobType;
+
                 try {
                     const resp = await authFetch(`${API_URL}/pbs/${selectedPBS.id}/jobs/${jobType}/${jobId}/run`, {
                         method: 'POST',
                     });
                     if (resp && resp.ok) {
-                        addToast(`${jobType} job '${jobId}' started`, 'success');
+                        addToast(
+                            (t('pbsJobStarted') || '{type} job "{id}" started')
+                                .replace('{type}', jobTypeName)
+                                .replace('{id}', jobId),
+                            'success'
+                        );
                         setTimeout(() => fetchPBSTasks(selectedPBS.id), 1000);
                     } else {
                         const err = resp ? await resp.json().catch(() => ({})) : {};
-                        addToast(`Job failed: ${err.error || 'unknown'}`, 'error');
+                        addToast(
+                            (t('pbsJobFailed') || 'Job failed')
+                            + ': '
+                            + (err.error || (t('unknownError') || 'Unknown error')),
+                            'error'
+                        );
                     }
-                } catch (e) { addToast('Job error: ' + e.message, 'error'); }
+                } catch (e) {
+                    addToast(
+                        (t('pbsJobFailed') || 'Job failed') + ': ' + e.message,
+                        'error'
+                    );
+                }
             };
             
             const viewPBSTaskLog = async (upid) => {
@@ -11685,7 +11751,9 @@
                         const data = await resp.json();
                         setPbsTaskLog({ upid, ...data });
                     }
-                } catch (e) { addToast('Failed to load task log', 'error'); }
+                } catch (e) {
+                    addToast(t('errorLoadingLog') || 'Error loading log', 'error');
+                }
             };
             
             
@@ -14807,7 +14875,7 @@
                                         <div className="flex items-center justify-between px-1 mb-2">
                                             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('backupServers') || 'Backup Servers'}</h2>
                                             {isAdmin && (
-                                                <button onClick={() => setShowAddPBS(true)} className="p-1 text-gray-500 hover:text-proxmox-orange rounded transition-colors" title="Add PBS">
+                                                <button onClick={() => setShowAddPBS(true)} className="p-1 text-gray-500 hover:text-proxmox-orange rounded transition-colors" title={t('addPbsServer') || 'Add Backup Server'}>
                                                     <Icons.Plus className="w-4 h-4" />
                                                 </button>
                                             )}
@@ -18804,8 +18872,8 @@
                                             <div className="space-y-6">
                                                 {pbsStatus.errors && pbsStatus.errors.length > 0 && (
                                                     <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-sm text-yellow-300">
-                                                        <span className="font-medium">Could not load all data:</span> {pbsStatus.errors.join('; ')}
-                                                        <div className="text-xs text-yellow-400/70 mt-1">Check that the API token has Sys.Audit and Datastore.Audit privileges on the PBS server.</div>
+                                                        <span className="font-medium">{t('pbsPartialDataLoad') || 'Could not load all data'}:</span> {pbsStatus.errors.join('; ')}
+                                                        <div className="text-xs text-yellow-400/70 mt-1">{t('pbsAuditPrivilegeHint') || 'Check that the API token has Sys.Audit and Datastore.Audit privileges on the PBS server.'}</div>
                                                     </div>
                                                 )}
                                                 {/* Resource Gauges */}
@@ -18923,12 +18991,12 @@
                                                                                 <div className={`h-full rounded-full ${parseFloat(pct) > 85 ? 'bg-red-500' : parseFloat(pct) > 60 ? 'bg-yellow-500' : 'bg-blue-500'}`} style={{width: `${pct}%`}}></div>
                                                                             </div>
                                                                             <div className="grid grid-cols-2 gap-2 text-xs">
-                                                                                <div><span className="text-gray-500">Used:</span> <span className="text-gray-300">{formatBytes(used)}</span></div>
-                                                                                <div><span className="text-gray-500">Total:</span> <span className="text-gray-300">{formatBytes(total)}</span></div>
+                                                                                <div><span className="text-gray-500">{t('pbsUsed') || 'Used'}:</span> <span className="text-gray-300">{formatBytes(used)}</span></div>
+                                                                                <div><span className="text-gray-500">{t('pbsTotal') || 'Total'}:</span> <span className="text-gray-300">{formatBytes(total)}</span></div>
                                                                                 {gcStatus.index && (
                                                                                     <>
-                                                                                        <div><span className="text-gray-500">Dedup:</span> <span className="text-cyan-400">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span></div>
-                                                                                        <div><span className="text-gray-500">Chunks:</span> <span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span></div>
+                                                                                        <div><span className="text-gray-500">{t('pbsDedup') || 'Dedup'}:</span> <span className="text-cyan-400">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span></div>
+                                                                                        <div><span className="text-gray-500">{t('pbsChunks') || 'Chunks'}:</span> <span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span></div>
                                                                                     </>
                                                                                 )}
                                                                                 {detail['total-snapshots'] !== undefined && (
@@ -18940,7 +19008,7 @@
                                                                                     <button onClick={e => { e.stopPropagation(); setPbsActionLoading(p => ({...p, [`gc-${ds.name||ds.store}`]: true})); pbsAction('gc', ds.name || ds.store).finally(() => setPbsActionLoading(p => ({...p, [`gc-${ds.name||ds.store}`]: false}))); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-blue-500/20 transition-all" disabled={pbsActionLoading[`gc-${ds.name||ds.store}`]}>
                                                                                         {pbsActionLoading[`gc-${ds.name||ds.store}`] ? 'Starting...' : 'GC'}
                                                                                     </button>
-                                                                                    <button onClick={e => { e.stopPropagation(); pbsAction('verify', ds.name || ds.store); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-green-500/20 transition-all">Verify</button>
+                                                                                    <button onClick={e => { e.stopPropagation(); pbsAction('verify', ds.name || ds.store); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-green-500/20 transition-all">{t('pbsVerify') || 'Verify'}</button>
                                                                                 </div>
                                                                             )}
                                                                         </>
@@ -19035,7 +19103,7 @@
                                                 {/* Linked Clusters */}
                                                 {selectedPBS.linked_clusters && selectedPBS.linked_clusters.length > 0 && (
                                                     <div>
-                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Linked PVE Clusters</h2>
+                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('pbsLinkedPveClusters') || 'Linked PVE Clusters'}</h2>
                                                         <div className="flex gap-2 flex-wrap">
                                                             {selectedPBS.linked_clusters.map(cid => {
                                                                 const cl = clusters.find(c => c.id === cid);
@@ -19052,11 +19120,11 @@
                                                 {/* Traffic Control / Bandwidth Limits */}
                                                 {pbsTrafficControl && pbsTrafficControl.length > 0 && (
                                                     <div>
-                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Traffic Control</h2>
+                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('pbsTrafficControl') || 'Traffic Control'}</h2>
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>Name</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate In</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate Out</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst In</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst Out</th><th className={isCorporate ? '' : 'text-left p-3'}>Network</th><th className={isCorporate ? '' : 'text-left p-3'}>Timeframe</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('name') || 'Name'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsRateIn') || 'Rate In'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsRateOut') || 'Rate Out'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsBurstIn') || 'Burst In'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsBurstOut') || 'Burst Out'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('network') || 'Network'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsTimeframe') || 'Timeframe'}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsTrafficControl.map((tc, i) => (
@@ -19212,7 +19280,7 @@
                                                                     <div className="flex flex-wrap gap-4 items-start">
                                                                         {pbsNamespaces.length > 0 && (
                                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-3 flex items-center gap-2">
-                                                                                <span className="text-xs text-gray-500">Namespace:</span>
+                                                                                <span className="text-xs text-gray-500">{t('namespace') || 'Namespace'}:</span>
                                                                                 <select className="bg-proxmox-dark border border-proxmox-border rounded px-2 py-1 text-sm text-white"
                                                                                     value={pbsSelectedNs}
                                                                                     onChange={e => {
@@ -19223,25 +19291,25 @@
                                                                                         fetchPBSGroups(selectedPBS.id, pbsSelectedStore, ns);
                                                                                     }}
                                                                                 >
-                                                                                    <option value="">Root</option>
+                                                                                    <option value="">{t('pbsNamespaceRoot') || 'Root'}</option>
                                                                                     {pbsNamespaces.map((ns, i) => <option key={i} value={ns.ns || ns.name}>{ns.ns || ns.name}</option>)}
                                                                                 </select>
                                                                             </div>
                                                                         )}
                                                                         {gcStatus['last-run-endtime'] && (
                                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-3 flex-1 min-w-[300px]">
-                                                                                <span className="text-xs text-gray-500 block mb-1.5">Garbage Collection</span>
+                                                                                <span className="text-xs text-gray-500 block mb-1.5">{t('pbsGarbageCollection') || 'Garbage Collection'}</span>
                                                                                 <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                                                                                    <span className="text-gray-500">Last GC:</span><span className="text-gray-300">{fmtDate(gcStatus['last-run-endtime'] * 1000)}</span>
-                                                                                    <span className="text-gray-500">Duration:</span><span className="text-gray-300">{gcStatus['last-run-duration'] ? `${Math.floor(gcStatus['last-run-duration'] / 60)}m ${gcStatus['last-run-duration'] % 60}s` : '-'}</span>
-                                                                                    <span className="text-gray-500">Dedup Factor:</span><span className="text-cyan-400 font-medium">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span>
-                                                                                    <span className="text-gray-500">Disk Chunks:</span><span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span>
-                                                                                    <span className="text-gray-500">Disk Bytes:</span><span className="text-gray-300">{formatBytes(gcStatus['disk-bytes'] || 0)}</span>
+                                                                                    <span className="text-gray-500">{t('pbsLastGc') || 'Last GC'}:</span><span className="text-gray-300">{fmtDate(gcStatus['last-run-endtime'] * 1000)}</span>
+                                                                                    <span className="text-gray-500">{t('duration') || 'Duration'}:</span><span className="text-gray-300">{gcStatus['last-run-duration'] ? `${Math.floor(gcStatus['last-run-duration'] / 60)}m ${gcStatus['last-run-duration'] % 60}s` : '-'}</span>
+                                                                                    <span className="text-gray-500">{t('pbsDedupFactor') || 'Dedup Factor'}:</span><span className="text-cyan-400 font-medium">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span>
+                                                                                    <span className="text-gray-500">{t('pbsDiskChunks') || 'Disk Chunks'}:</span><span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span>
+                                                                                    <span className="text-gray-500">{t('pbsDiskBytes') || 'Disk Bytes'}:</span><span className="text-gray-300">{formatBytes(gcStatus['disk-bytes'] || 0)}</span>
                                                                                     {gcStatus['pending-chunks'] > 0 && (
-                                                                                        <><span className="text-gray-500">Pending:</span><span className="text-yellow-400">{gcStatus['pending-chunks']} chunks ({formatBytes(gcStatus['pending-bytes'] || 0)})</span></>
+                                                                                        <><span className="text-gray-500">{t('pending') || 'Pending'}:</span><span className="text-yellow-400">{gcStatus['pending-chunks']} {t('pbsChunkCountUnit') || 'chunks'} ({formatBytes(gcStatus['pending-bytes'] || 0)})</span></>
                                                                                     )}
                                                                                     {gcStatus['removed-chunks'] > 0 && (
-                                                                                        <><span className="text-gray-500">Removed:</span><span className="text-green-400">{gcStatus['removed-chunks']} chunks ({formatBytes(gcStatus['removed-bytes'] || 0)})</span></>
+                                                                                        <><span className="text-gray-500">{t('pbsRemoved') || 'Removed'}:</span><span className="text-green-400">{gcStatus['removed-chunks']} {t('pbsChunkCountUnit') || 'chunks'} ({formatBytes(gcStatus['removed-bytes'] || 0)})</span></>
                                                                                     )}
                                                                                 </div>
                                                                             </div>
@@ -19311,7 +19379,7 @@
                                                                         })() : `(${t('all') || 'All'})`}
                                                                     </h3>
                                                                     {pbsSelectedGroup && (
-                                                                        <button onClick={() => setPbsSelectedGroup(null)} className="text-xs text-gray-500 hover:text-white transition-colors">Show All</button>
+                                                                        <button onClick={() => setPbsSelectedGroup(null)} className="text-xs text-gray-500 hover:text-white transition-colors">{t('pbsShowAll') || 'Show All'}</button>
                                                                     )}
                                                                 </div>
                                                                 {(() => {
@@ -19346,17 +19414,21 @@
                                                                                                 ) : <span className="text-gray-600">-</span>}
                                                                                             </td>
                                                                                             <td className="p-3 text-center">
-                                                                                                <button onClick={() => isAdmin && pbsToggleProtected(snap)} className={`px-2 py-0.5 rounded text-xs transition-all ${snap.protected ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-proxmox-dark text-gray-600 border border-proxmox-border'} ${isAdmin ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`} title={isAdmin ? 'Toggle protection' : (snap.protected ? 'Protected' : 'Unprotected')}>
-                                                                                                    {snap.protected ? Icons.Shield ? <Icons.Shield className="w-3.5 h-3.5 inline" /> : 'Yes' : '-'}
+                                                                                                <button onClick={() => isAdmin && pbsToggleProtected(snap)} className={`px-2 py-0.5 rounded text-xs transition-all ${snap.protected ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-proxmox-dark text-gray-600 border border-proxmox-border'} ${isAdmin ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`} title={isAdmin
+                            ? (t('pbsToggleProtection') || 'Toggle protection')
+                            : (snap.protected
+                                ? (t('protected') || 'Protected')
+                                : (t('unprotected') || 'Unprotected'))}>
+                                                                                                    {snap.protected ? Icons.Shield ? <Icons.Shield className="w-3.5 h-3.5 inline" /> : (t('yes') || 'Yes') : '-'}
                                                                                                 </button>
                                                                                             </td>
                                                                                             <td className="p-3 text-right flex items-center justify-end gap-1">
                                                                                                 {snap['backup-type'] === 'host' ? (
-                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title="Browse Files">
+                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title={t('pbsBrowseFiles') || 'Browse Files'}>
                                                                                                         {Icons.FolderOpen ? <Icons.FolderOpen className="w-3.5 h-3.5" /> : <Icons.Folder className="w-3.5 h-3.5" />}
                                                                                                     </button>
                                                                                                 ) : (
-                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-600 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title="Browse Catalog (if available)">
+                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-600 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title={t('pbsBrowseCatalog') || 'Browse Catalog (if available)'}>
                                                                                                         <Icons.Folder className="w-3.5 h-3.5" />
                                                                                                     </button>
                                                                                                 )}
@@ -19402,10 +19474,16 @@
                                                                                     ))}
                                                                                 </tbody>
                                                                             </table>
-                                                                            {sorted.length > 50 && <div className="text-center py-2 text-xs text-gray-500">Showing 50 of {sorted.length} snapshots</div>}
+                                                                            {sorted.length > 50 && (
+                                                    <div className="text-center py-2 text-xs text-gray-500">
+                                                        {(t('pbsShowingSnapshots') || 'Showing {shown} of {count} snapshots')
+                                                            .replace('{shown}', 50)
+                                                            .replace('{count}', sorted.length)}
+                                                    </div>
+                                                )}
                                                                         </div>
                                                                     ) : (
-                                                                        <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">No snapshots found</div>
+                                                                        <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">{t('noSnapshots') || 'No snapshots available'}</div>
                                                                     );
                                                                 })()}
                                                             </div>
@@ -19467,7 +19545,11 @@
                                                         </div>
                                                         <div className="p-3">
                                                             <div className="text-xs text-gray-500 mb-2">
-                                                                {t('status')}: <span className={pbsTaskLog.status?.status === 'stopped' ? 'text-green-400' : 'text-blue-400'}>{pbsTaskLog.status?.status || '?'}</span>
+                                                                {t('status')}: <span className={pbsTaskLog.status?.status === 'stopped' ? 'text-green-400' : 'text-blue-400'}>{pbsTaskLog.status?.status === 'running'
+                                            ? (t('running') || 'Running')
+                                            : pbsTaskLog.status?.status === 'stopped'
+                                                ? (t('stopped') || 'Stopped')
+                                                : (pbsTaskLog.status?.status || '?')}</span>
                                                                 {pbsTaskLog.status?.exitstatus && <span> | {t('exitStatus')}: {pbsTaskLog.status.exitstatus}</span>}
                                                             </div>
                                                             <pre className="text-xs text-gray-300 font-mono bg-proxmox-dark rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">
@@ -19614,7 +19696,7 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl w-full max-w-md animate-scale-in">
                                                     <div className="p-6">
-                                                        <h2 className="text-xl font-bold text-white mb-1">Prune Datastore</h2>
+                                                        <h2 className="text-xl font-bold text-white mb-1">{t('pbsPruneDatastore') || 'Prune Datastore'}</h2>
                                                         <p className="text-sm text-gray-400 mb-4">{showPbsPrune}</p>
                                                         <div className="space-y-3">
                                                             {[{k: 'keep_last', l: 'Keep Last'}, {k: 'keep_daily', l: 'Keep Daily'}, {k: 'keep_weekly', l: 'Keep Weekly'}, {k: 'keep_monthly', l: 'Keep Monthly'}, {k: 'keep_yearly', l: 'Keep Yearly'}].map(f => (
@@ -19624,21 +19706,23 @@
                                                                 </div>
                                                             ))}
                                                             <div className="flex items-center justify-between pt-2">
-                                                                <label className="text-sm text-gray-300">Dry Run (preview only)</label>
+                                                                <label className="text-sm text-gray-300">{t('pbsDryRunPreview') || 'Dry Run (preview only)'}</label>
                                                                 <button onClick={() => setPbsPruneForm(p => ({...p, dry_run: !p.dry_run}))} className={`w-10 h-5 rounded-full transition-all ${pbsPruneForm.dry_run ? 'bg-blue-500' : 'bg-red-500'}`}>
                                                                     <div className={`w-4 h-4 bg-white rounded-full transition-transform ${pbsPruneForm.dry_run ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
                                                                 </button>
                                                             </div>
                                                             {!pbsPruneForm.dry_run && (
                                                                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-xs text-red-400">
-                                                                    Warning: This will permanently delete backups that don't match the retention policy!
+                                                                    {t('pbsPruneWarning') || "Warning: This will permanently delete backups that don't match the retention policy!"}
                                                                 </div>
                                                             )}
                                                         </div>
                                                         <div className="flex justify-end gap-2 mt-6">
-                                                            <button onClick={() => setShowPbsPrune(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">Cancel</button>
+                                                            <button onClick={() => setShowPbsPrune(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">{t('cancel') || 'Cancel'}</button>
                                                             <button onClick={() => { pbsAction('prune', showPbsPrune, pbsPruneForm); setShowPbsPrune(null); }} className={`px-4 py-2 rounded-lg text-white text-sm font-medium ${pbsPruneForm.dry_run ? 'bg-blue-500 hover:bg-blue-600' : 'bg-red-500 hover:bg-red-600'}`}>
-                                                                {pbsPruneForm.dry_run ? 'Preview Prune' : 'Execute Prune'}
+                                                                {pbsPruneForm.dry_run
+                                                ? (t('pbsPreviewPrune') || 'Preview Prune')
+                                                : (t('pbsExecutePrune') || 'Execute Prune')}
                                                             </button>
                                                         </div>
                                                     </div>
@@ -19797,7 +19881,11 @@
                                                                 });
                                                             }
                                                             generatePegaProxPDF({
-                                                                title: `PBS Report — ${pbsReportSubTab}`,
+                                                                title: `${t('pbsReportTitle') || 'PBS Report'} — ${({
+                                                                    summary: t('reportSummary') || 'Summary',
+                                                                    inventory: t('reportInventory') || 'Inventory',
+                                                                    gap: t('reportGap') || 'Gap Analysis',
+                                                                })[pbsReportSubTab] || pbsReportSubTab}`,
                                                                 subtitle: selectedPBS?.name,
                                                                 clusterName: pbsReportSubTab === 'gap' && pbsReportGapCluster
                                                                     ? (clusters.find(c => c.id === pbsReportGapCluster)?.name || '')
@@ -22646,7 +22734,9 @@
                                     <div className="flex items-center justify-between mb-4">
                                         <h2 className="text-lg font-bold text-white flex items-center gap-2">
                                             <Icons.FileText className="w-5 h-5 text-cyan-400" />
-                                            {pbsEditingNotes.type === 'snapshot' ? 'Snapshot' : 'Group'} Notes
+                                            {pbsEditingNotes.type === 'snapshot'
+                                                ? (t('pbsSnapshotNotes') || 'Snapshot Notes')
+                                                : (t('groupNotes') || 'Group Notes')}
                                         </h2>
                                         <button onClick={() => setPbsEditingNotes(null)} className="text-gray-500 hover:text-white transition-colors">
                                             <Icons.X className="w-5 h-5" />
@@ -22657,11 +22747,11 @@
                                         value={pbsNotesText}
                                         onChange={e => setPbsNotesText(e.target.value)}
                                         className="w-full h-40 p-3 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm resize-y focus:outline-none focus:border-cyan-500/50"
-                                        placeholder="Enter notes..."
+                                        placeholder={t('pbsEnterNotes') || 'Enter notes...'}
                                     />
                                     <div className="flex justify-end gap-3 mt-4">
-                                        <button onClick={() => setPbsEditingNotes(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">Cancel</button>
-                                        <button onClick={() => pbsSaveNotes(pbsEditingNotes.type, pbsEditingNotes.params)} className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors text-sm font-medium">Save Notes</button>
+                                        <button onClick={() => setPbsEditingNotes(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">{t('cancel') || 'Cancel'}</button>
+                                        <button onClick={() => pbsSaveNotes(pbsEditingNotes.type, pbsEditingNotes.params)} className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors text-sm font-medium">{t('pbsSaveNotes') || 'Save Notes'}</button>
                                     </div>
                                 </div>
                             </div>
@@ -22676,7 +22766,7 @@
                                     <div>
                                         <h2 className="text-lg font-bold text-white flex items-center gap-2">
                                             <Icons.Folder className="w-5 h-5 text-blue-400" />
-                                            File Browser
+                                            {t('pbsFileBrowser') || 'File Browser'}
                                         </h2>
                                         <p className="text-xs text-gray-500 mt-1">
                                             <span className="font-mono">{pbsCatalogSnapshot['backup-type']}/{pbsCatalogSnapshot['backup-id']}</span>
@@ -22738,7 +22828,7 @@
                                                 {!isDir && size > 0 && <span className="text-xs text-gray-500 shrink-0">{formatBytes(size)}</span>}
                                                 {mtime && <span className="text-xs text-gray-600 shrink-0">{mtime}</span>}
                                                 {!isDir && (
-                                                    <button onClick={(e) => { e.stopPropagation(); pbsDownloadFile(fullPath); }} className="px-2 py-1 rounded text-xs text-gray-500 hover:text-green-400 hover:bg-green-500/10 transition-all shrink-0" title="Download">
+                                                    <button onClick={(e) => { e.stopPropagation(); pbsDownloadFile(fullPath); }} className="px-2 py-1 rounded text-xs text-gray-500 hover:text-green-400 hover:bg-green-500/10 transition-all shrink-0" title={t('download') || 'Download'}>
                                                         <Icons.Download className="w-3.5 h-3.5" />
                                                     </button>
                                                 )}
@@ -22747,8 +22837,8 @@
                                     }) : (
                                         <div className="text-center py-12 text-gray-500">
                                             <Icons.Folder className="w-8 h-8 mx-auto mb-3 opacity-30" />
-                                            <p className="text-sm">No files found or catalog unavailable</p>
-                                            <p className="text-xs text-gray-600 mt-1">File browsing is only available for host/file-level (pxar) backups</p>
+                                            <p className="text-sm">{t('pbsNoFilesOrCatalog') || 'No files found or catalog unavailable'}</p>
+                                            <p className="text-xs text-gray-600 mt-1">{t('pbsFileBrowserPxarOnly') || 'File browsing is only available for host/file-level (pxar) backups'}</p>
                                         </div>
                                     )}
                                 </div>
