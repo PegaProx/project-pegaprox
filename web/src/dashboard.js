@@ -10822,7 +10822,7 @@
                                 sseClientIdRef.current = data.client_id;
                                 console.log('SSE authenticated, client:', data.client_id);
                             } else if (data.type === 'tasks') {
-                                // Tasks kommen mit cluster_id - nur vom aktuellen Cluster anzeigen
+                                // Tasks include cluster_id — show only tasks from the current cluster
                                 if (currentCluster && data.cluster_id === currentCluster.id) {
                                     if (Array.isArray(data.data)) {
                                         console.log(`SSE tasks received for cluster ${data.cluster_id}:`, data.data.length);
@@ -10991,7 +10991,14 @@
                                     id: Date.now(),
                                     time: new Date(),
                                     type: 'action',
-                                    msg: `${action.resource_type === 'qemu' ? 'VM' : 'CT'} ${action.resource_id}: ${action.action}`,
+                                    msg: `${action.resource_type === 'qemu' ? 'VM' : 'CT'} ${action.resource_id}: ${({
+                            'start': t('started'),
+                            'stop': t('stopped'),
+                            'shutdown': t('stopped'),
+                            'reboot': t('restarted'),
+                            'delete': t('deleted'),
+                            'create': t('created')
+                        })[action.action] || action.action}`,
                                     user: action.user
                                 }, ...prev].slice(0, 10));
                             } else if (data.type === 'node_status') {
@@ -11003,7 +11010,13 @@
                                     id: Date.now(),
                                     time: new Date(),
                                     type: nodeEvent.event === 'node_offline' ? 'error' : 'success',
-                                    msg: nodeEvent.message || `${nodeEvent.node}: ${nodeEvent.event}`
+                                    msg: nodeEvent.message || `${nodeEvent.node}: ${
+                            nodeEvent.event === 'node_offline'
+                                ? (t('nodeOffline') || 'Node offline')
+                                : nodeEvent.event === 'node_online'
+                                    ? (t('nodeOnline') || 'Node online')
+                                    : nodeEvent.event
+                        }`
                                 }, ...prev].slice(0, 10));
 
                                 // NS: Feb 2026 - Cluster reconnect events, deduplicated to avoid toast spam (#163)
@@ -11017,7 +11030,7 @@
                                 } else if (currentCluster && nodeEvent.cluster_id === currentCluster.id) {
                                     if (nodeEvent.event === 'node_offline') {
                                         // Show critical alert for node offline
-                                        addToast(`⚠️ CRITICAL: ${nodeEvent.message}`, 'error');
+                                        addToast(`⚠️ ${t('critical') || 'Critical'}: ${nodeEvent.message}`, 'error');
                                         setNodeAlerts(prev => ({
                                             ...prev,
                                             [nodeEvent.node]: {
