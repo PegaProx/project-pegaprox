@@ -9825,7 +9825,7 @@
             const deleteSelectedSnapshots = async (clusterId) => {
                 const chosen = (sortedSnapshots || []).filter(s => selectedSnaps[snapKey(s)]);
                 if (chosen.length === 0) return;
-                if (!window.confirm(`Delete ${chosen.length} selected snapshot(s)?`)) {
+                if (!window.confirm((t('snapshotDeleteSelectedConfirm') || 'Delete {count} selected snapshot(s)?').replace('{count}', chosen.length))) {
                     return;
                 }
                 try {
@@ -9834,17 +9834,21 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ snapshots: chosen.map(s => ({ ...s, cluster_id: s.cluster_id || clusterId })) })
                     });
-                    addToast(`${chosen.length} snapshot(s) deleted`, 'success');
+                    addToast((t('snapshotDeleteSelectedSuccess') || 'Deleted {count} selected snapshot(s)').replace('{count}', chosen.length), 'success');
                     setSelectedSnaps({});
                     await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
                 } catch (err) {
                     console.error('Bulk snapshot delete failed:', err);
-                    addToast('Failed to delete selected snapshots', 'error');
+                    addToast(t('deleteFailed') || 'Delete failed', 'error');
                 }
             };
 
             const deleteGlobalSnapshot = async (snap, clusterId) => {
-                if (!window.confirm(`Delete snapshot "${snap.snapshot_name}" from VM ${snap.vmid}?`)) {
+                if (!window.confirm(
+                    (t('snapshotDeleteConfirm') || 'Delete snapshot "{name}" from VM {vmid}?')
+                        .replace('{name}', snap.snapshot_name)
+                        .replace('{vmid}', snap.vmid)
+                )) {
                     return;
                 }
                 try {
@@ -9853,11 +9857,11 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ snapshots: [snap] })
                     });
-                    addToast('Snapshot deleted', 'success');
+                    addToast(t('snapshotDeleted') || 'Snapshot deleted', 'success');
                     await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
                 } catch (err) {
                     console.error('Snapshot delete failed:', err);
-                    addToast('Failed to delete snapshot', 'error')
+                    addToast(t('deleteFailed') || 'Delete failed', 'error')
                 }
             };
             
@@ -9938,14 +9942,14 @@
                         setLogEvents([]);
                         setLogEventsTotal(0);
                         setLogEventsTotalPages(0);
-                        setLogEventsError('Failed to load log events');
+                        setLogEventsError(t('logEventsLoadFailed') || 'Failed to load log events');
                     }
                 } catch (err) {
                     console.error('Log events fetch failed:', err);
                     setLogEvents([]);
                     setLogEventsTotal(0);
                     setLogEventsTotalPages(0);
-                    setLogEventsError('Failed to load log events');
+                    setLogEventsError(t('logEventsLoadFailed') || 'Failed to load log events');
                 } finally {
                     setLogEventsLoading(false);
                 }
@@ -10021,11 +10025,11 @@
                         return true;
                     } else {
                         const err = await response.json();
-                        addToast(err.error || 'Failed to save schedule', 'error');
+                        addToast(err.error || (t('saveFailed') || 'Save failed'), 'error');
                     }
                 } catch (err) {
                     console.error('Failed to save schedule:', err);
-                    addToast('Failed to save schedule', 'error');
+                    addToast(t('saveFailed') || 'Save failed', 'error');
                 }
                 return false;
             };
@@ -10316,15 +10320,20 @@
                     const resp = await authFetch(`${API_URL}/clusters/${clId}/reports/install-debsecan`, { method: 'POST' });
                     if (resp && resp.ok) {
                         const data = await resp.json();
-                        addToast(`debsecan: ${data.installed}/${data.total} nodes`, 'success');
+                        addToast(
+                            (t('debsecanInstallResult') || 'debsecan: {installed}/{total} nodes')
+                                .replace('{installed}', data.installed)
+                                .replace('{total}', data.total),
+                            'success'
+                        );
                         // re-scan automatically so the banner disappears
                         runCveScan(clId);
                     } else {
                         const errData = await resp?.json().catch(() => null);
-                        addToast(errData?.error || 'Install failed', 'error');
+                        addToast(errData?.error || (t('debsecanInstallFailed') || 'Install failed'), 'error');
                     }
                 } catch (err) {
-                    addToast('Install failed: ' + err.message, 'error');
+                    addToast((t('debsecanInstallFailed') || 'Install failed') + ': ' + err.message, 'error');
                 }
                 setDebsecanInstalling(false);
             };
@@ -10356,10 +10365,10 @@
                         setHardenSelected(sel);
                     } else {
                         const errData = await resp?.json().catch(() => ({}));
-                        addToast(errData?.error || 'Check failed', 'error');
+                        addToast(errData?.error || (t('hardeningCheckFailed') || 'Check failed'), 'error');
                     }
                 } catch (e) {
-                    addToast('SSH error: ' + e.message, 'error');
+                    addToast((t('hardeningSshError') || 'SSH error') + ': ' + e.message, 'error');
                 }
                 setHardenLoading(false);
             };
@@ -10393,7 +10402,7 @@
                             });
                             if (resp && resp.ok) {
                                 const data = await resp.json();
-                                const r = (data.results || {})[ctrlId] || { success: false, error: 'no result' };
+                                const r = (data.results || {})[ctrlId] || { success: false, error: t('unknownError') || 'Unknown error' };
                                 accumulated[ctrlId] = r;
                                 if (r.success) appliedOk++;
                             } else {
@@ -10410,7 +10419,7 @@
                     // refresh status
                     checkHardening(hardenNode, hardenVerbose, hardenProfile);
                 } catch (e) {
-                    addToast('Error: ' + e.message, 'error');
+                    addToast((t('error') || 'Error') + ': ' + e.message, 'error');
                 } finally {
                     setHardenApplyProgress(null);
                     setHardenApplying(false);
@@ -10438,10 +10447,10 @@
                         checkHardening(hardenNode, hardenVerbose, hardenProfile);
                     } else {
                         const errData = await resp?.json().catch(() => ({}));
-                        addToast('Error: ' + (errData?.error || `HTTP ${resp?.status}`), 'error');
+                        addToast((t('error') || 'Error') + ': ' + (errData?.error || `HTTP ${resp?.status}`), 'error');
                     }
                 } catch (e) {
-                    addToast('Error: ' + e.message, 'error');
+                    addToast((t('error') || 'Error') + ': ' + e.message, 'error');
                 } finally {
                     setHardenApplying(false);
                 }
@@ -10535,7 +10544,7 @@
                                     if (!newAlerts[nodeName]) {
                                         newAlerts[nodeName] = {
                                             status: 'offline',
-                                            message: `Node ${nodeName} is offline`,
+                                            message: `${t('nodeOffline') || 'Node offline'}: ${nodeName}`,
                                             timestamp: nodeData.last_seen || new Date().toISOString(),
                                             severity: 'critical',
                                             cluster_id: clusterId  // Important for filtering!
