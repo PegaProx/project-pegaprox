@@ -7871,7 +7871,7 @@
                                                         <div className="cloud-meter"><div style={{ width: `${cp}%`, background: meterColor(cp) }} /></div>
                                                     </div>
                                                     <div>
-                                                        <div className="flex justify-between text-[11px] mb-1" style={{ color: 'var(--cloud-text-secondary)' }}><span>RAM</span><span>{mp}%</span></div>
+                                                        <div className="flex justify-between text-[11px] mb-1" style={{ color: 'var(--cloud-text-secondary)' }} title="Host-resident memory, including reclaimable guest cache"><span>Host RAM</span><span>{mp}%</span></div>
                                                         <div className="cloud-meter"><div style={{ width: `${mp}%`, background: meterColor(mp) }} /></div>
                                                     </div>
                                                 </div>
@@ -14935,7 +14935,7 @@
                                             <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">{t('status')}</span><span className="corp-hover-tip-value" style={{color: vmRunning ? 'var(--color-success)' : 'var(--corp-text-muted)'}}>{vmRunning ? t('running') : t('stopped')}</span></div>
                                             <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">{t('node')}</span><span className="corp-hover-tip-value">{data.node}</span></div>
                                             {vmRunning && data.cpu != null && <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">CPU</span><span className="corp-hover-tip-value">{(data.cpu * 100).toFixed(1)}%</span></div>}
-                                            {vmRunning && data.mem != null && data.maxmem != null && <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">RAM</span><span className="corp-hover-tip-value">{fmtBytes(data.mem)} / {fmtBytes(data.maxmem)}</span></div>}
+                                            {vmRunning && data.mem != null && data.maxmem != null && <div className="corp-hover-tip-row" title="Host-resident QEMU memory, including reclaimable guest cache"><span className="corp-hover-tip-label">Host RAM</span><span className="corp-hover-tip-value">{fmtBytes(data.mem)} / {fmtBytes(data.maxmem)}</span></div>}
                                         </div>
                                     );
                                 }
