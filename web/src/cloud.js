@@ -49,9 +49,8 @@
             return cloudPct(r && r.cpu);  // cpu is a 0..1 fraction
         }
         function cloudMemPct(r) {
-            if (r && r.mem_percent != null && isFinite(r.mem_percent)) return Math.min(100, Math.round(r.mem_percent));
-            const mx = Number(r && r.maxmem) || 0;
-            return mx > 0 ? Math.round((Number(r.mem) || 0) / mx * 100) : 0;
+            if (r && r.guest_mem_percent != null && isFinite(r.guest_mem_percent)) return Math.min(100, Math.round(r.guest_mem_percent));
+            return null;
         }
 
         function cloudRelTime(epoch) {
@@ -144,6 +143,9 @@
 
         // inline meter used in table cells
         function CloudMiniMeter({ pct, color }) {
+            if (pct == null) {
+                return <span className="cloud-cell-meter-num" title="QEMU guest-agent memory unavailable">Unavailable</span>;
+            }
             const p = Math.min(100, Math.max(0, Number(pct) || 0));
             return (
                 <div className="cloud-cell-meter">
@@ -844,7 +846,7 @@
             const running = r.status === 'running';
             const cpuP = cloudCpuPct(r);
             const memP = cloudMemPct(r);
-            const memMax = Number(r.maxmem) || 0, memUse = Number(r.mem) || 0;
+            const memMax = Number(r.guest_maxmem) || 0, memUse = Number(r.guest_mem) || 0;
             const diskMax = Number(r.maxdisk) || 0, diskUse = Number(r.disk) || 0;
             const tags = cloudTagList(r.tags);
 
@@ -909,8 +911,9 @@
                             <CloudKVPanel title={t('cloud.tabCapacity') || 'Capacity'}>
                                 <CloudKVRow label={t('cloud.vcpu') || 'vCPU'} value={Number(r.maxcpu) || '—'} />
                                 <CloudKVRow label={t('cloud.colCpu') || 'CPU usage'} value={cpuP + '%'} />
-                                <CloudKVRow label={t('cloud.ram') || 'Memory'} value={memMax ? cloudFmtBytes(memMax) : '—'} />
-                                <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={`${cloudFmtBytes(memUse)} (${memP}%)`} />
+                                <CloudKVRow label="Guest memory" value={memMax ? cloudFmtBytes(memMax) : 'Unavailable'} />
+                                <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={memP == null ? 'Unavailable' : `${cloudFmtBytes(memUse)} (${memP}%)`} />
+                                <CloudKVRow label="Host resident" value={r.host_maxmem ? `${cloudFmtBytes(r.host_mem)} / ${cloudFmtBytes(r.host_maxmem)}` : '—'} />
                                 {diskMax > 0 && <CloudKVRow label={t('cloud.disk') || 'Disk'} value={`${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}`} />}
                             </CloudKVPanel>
                             <CloudKVPanel title={t('cloud.tabNetwork') || 'Network'}>
@@ -935,9 +938,9 @@
                                 <div className="cloud-meter-sub">{Number(r.maxcpu) || 0} {t('cloud.cores') || 'vCPU'}</div>
                             </div>
                             <div className="cloud-meter-block">
-                                <div className="cloud-meter-label">{t('cloud.ram') || 'Memory'} · {memP}%</div>
-                                <div className="cloud-meter cloud-meter-lg"><div style={{ width: memP + '%', background: '#a855f7' }} /></div>
-                                <div className="cloud-meter-sub">{cloudFmtBytes(memUse)} / {cloudFmtBytes(memMax)}</div>
+                                <div className="cloud-meter-label">Guest memory · {memP == null ? 'Unavailable' : `${memP}%`}</div>
+                                <div className="cloud-meter cloud-meter-lg"><div style={{ width: (memP || 0) + '%', background: memP == null ? 'var(--cloud-text-muted)' : '#a855f7' }} /></div>
+                                <div className="cloud-meter-sub">{memP == null ? 'QEMU guest-agent memory unavailable' : `${cloudFmtBytes(memUse)} / ${cloudFmtBytes(memMax)}`}</div>
                             </div>
                             {diskMax > 0 && (
                                 <div className="cloud-meter-block">

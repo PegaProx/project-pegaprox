@@ -1289,6 +1289,9 @@
             const { t } = useTranslation();
             const { getAuthHeaders, user } = useAuth();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - corporate defaults to table view
+            const guestMemPct = (r) => r?.guest_mem_percent == null
+                ? null
+                : Math.max(0, Math.min(Number(r.guest_mem_percent), 100));
             // NS Mar 2026 - per-VM sparkline history for table view
             const vmHistRef = useRef({});
             useEffect(() => {
@@ -1299,7 +1302,7 @@
                     const id = r.vmid;
                     if (!buf[id]) buf[id] = { cpu: Array(15).fill(0), mem: Array(15).fill(0) };
                     buf[id].cpu = [...buf[id].cpu.slice(1), r.cpu_percent || 0];
-                    buf[id].mem = [...buf[id].mem.slice(1), r.mem_percent || 0];
+                    buf[id].mem = [...buf[id].mem.slice(1), guestMemPct(r) || 0];
                 });
             }, [resources]);
             const [search, setSearch] = useState('');
@@ -1842,17 +1845,17 @@
                                             )}
                                             <div>
                                                 <div className="flex items-center justify-between text-xs mb-1">
-                                                    <span className="text-gray-500">{t('ram')}</span>
+                                                    <span className="text-gray-500">Guest RAM</span>
                                                     <span className="text-gray-400 font-mono">
-                                                        {formatBytes(resource.mem)} / {formatBytes(resource.maxmem)}
+                                                        {guestMemPct(resource) == null ? 'Unavailable' : `${formatBytes(resource.guest_mem)} / ${formatBytes(resource.guest_maxmem)}`}
                                                     </span>
                                                 </div>
                                                 <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
                                                     <div 
                                                         className="h-full rounded-full transition-all"
                                                         style={{
-                                                            width: `${resource.mem_percent || 0}%`,
-                                                            background: resource.mem_percent < 50 ? '#22c55e' : resource.mem_percent < 80 ? '#eab308' : '#ef4444'
+                                                            width: `${guestMemPct(resource) || 0}%`,
+                                                            background: guestMemPct(resource) == null ? '#6b7280' : guestMemPct(resource) < 50 ? '#22c55e' : guestMemPct(resource) < 80 ? '#eab308' : '#ef4444'
                                                         }}
                                                     />
                                                 </div>
@@ -2081,7 +2084,7 @@
                                             { key: 'node', label: 'Node' },
                                             { key: 'ip', label: 'IP' },
                                             { key: 'cpu_percent', label: 'CPU' },
-                                            { key: 'mem', label: 'RAM' },
+                                            { key: 'guest_mem_percent', label: 'Guest RAM' },
                                             { key: 'disk', label: t('disk') },
                                             { key: 'status', label: 'Status' },
                                             { key: 'actions', label: t('actions') },
@@ -2221,14 +2224,14 @@
                                                                 <div
                                                                     className="h-full rounded-full transition-all"
                                                                     style={{
-                                                                        width: `${resource.mem_percent || 0}%`,
-                                                                        background: resource.mem_percent < 50 ? '#22c55e' : resource.mem_percent < 80 ? '#eab308' : '#ef4444'
+                                                                        width: `${guestMemPct(resource) || 0}%`,
+                                                                        background: guestMemPct(resource) == null ? '#6b7280' : guestMemPct(resource) < 50 ? '#22c55e' : guestMemPct(resource) < 80 ? '#eab308' : '#ef4444'
                                                                     }}
                                                                 />
                                                             </div>
                                                         </div>
                                                         <span className="text-xs text-gray-400 font-mono whitespace-nowrap">
-                                                            {formatBytes(resource.mem)} / {formatBytes(resource.maxmem)}
+                                                            {guestMemPct(resource) == null ? 'Unavailable' : `${guestMemPct(resource).toFixed(1)}%`}
                                                         </span>
                                                         {isCorporate && resource.status === 'running' && (() => {
                                                             const h = (vmHistRef.current[resource.vmid] || {}).mem;

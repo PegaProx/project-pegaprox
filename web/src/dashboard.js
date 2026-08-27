@@ -7771,14 +7771,15 @@
             const running = runningVms.length;
             const clamp = (v) => Math.max(0, Math.min(100, Math.round(v || 0)));
             const cpuOf = (r) => clamp((r.cpu || 0) * 100);
-            const memOf = (r) => r.maxmem ? clamp((r.mem / r.maxmem) * 100) : 0;
+            const memOf = (r) => r.guest_mem_percent == null ? null : clamp(r.guest_mem_percent);
             const meterColor = (p) => p > 90 ? 'var(--cloud-error)' : p > 75 ? 'var(--cloud-warning)' : 'var(--cloud-accent)';
             // at-a-glance aggregates from the selected cluster's resources (defensive)
             const nodes = new Set(vms.map(v => v.node).filter(Boolean)).size;
             const vcpu = vms.reduce((s, v) => s + (v.maxcpu || 0), 0);
-            const ramAlloc = vms.reduce((s, v) => s + (v.maxmem || 0), 0);
-            const ramUsed = runningVms.reduce((s, v) => s + (v.mem || 0), 0);
-            const ramPct = ramAlloc ? clamp(ramUsed / ramAlloc * 100) : 0;
+            const guestMeasured = runningVms.filter(v => v.guest_mem != null && v.guest_maxmem > 0);
+            const ramAlloc = guestMeasured.reduce((s, v) => s + v.guest_maxmem, 0);
+            const ramUsed = guestMeasured.reduce((s, v) => s + v.guest_mem, 0);
+            const ramPct = ramAlloc ? clamp(ramUsed / ramAlloc * 100) : null;
             const cpuAvg = running ? clamp(runningVms.reduce((s, v) => s + (v.cpu || 0) * 100, 0) / running) : 0;
             const connected = list.filter(c => c.connected).length;
             const gbStr = (b) => ((b || 0) / 1073741824).toFixed(0);
@@ -7790,8 +7791,8 @@
             );
             const Gauge = ({ pct, label }) => (
                 <div className="flex flex-col items-center gap-1">
-                    <div className="cloud-gauge" style={{ background: `conic-gradient(${meterColor(pct)} ${pct * 3.6}deg, var(--cloud-surface-1) 0)` }}>
-                        <div className="cloud-gauge-inner"><span style={{ fontSize: '18px', fontWeight: 700, color: 'var(--color-text)' }}>{pct}%</span></div>
+                    <div className="cloud-gauge" style={{ background: `conic-gradient(${meterColor(pct || 0)} ${(pct || 0) * 3.6}deg, var(--cloud-surface-1) 0)` }}>
+                        <div className="cloud-gauge-inner"><span style={{ fontSize: '18px', fontWeight: 700, color: 'var(--color-text)' }}>{pct == null ? '—' : `${pct}%`}</span></div>
                     </div>
                     <span style={{ fontSize: '11px', color: 'var(--cloud-text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
                 </div>
@@ -7814,7 +7815,7 @@
                                 <span className="text-sm font-semibold">{selectedCluster.display_name || selectedCluster.name}</span>
                             </div>
                             <Gauge pct={cpuAvg} label={'CPU'} />
-                            <Gauge pct={ramPct} label={'RAM'} />
+                            <Gauge pct={ramPct} label={'Guest RAM'} />
                         </div>
                     )}
                     <div>
@@ -7871,8 +7872,8 @@
                                                         <div className="cloud-meter"><div style={{ width: `${cp}%`, background: meterColor(cp) }} /></div>
                                                     </div>
                                                     <div>
-                                                        <div className="flex justify-between text-[11px] mb-1" style={{ color: 'var(--cloud-text-secondary)' }} title="Host-resident memory, including reclaimable guest cache"><span>Host RAM</span><span>{mp}%</span></div>
-                                                        <div className="cloud-meter"><div style={{ width: `${mp}%`, background: meterColor(mp) }} /></div>
+                                                        <div className="flex justify-between text-[11px] mb-1" style={{ color: 'var(--cloud-text-secondary)' }} title={mp == null ? 'QEMU guest-agent memory unavailable' : `Host-resident: ${Number(v.host_mem_percent || 0).toFixed(1)}%`}><span>Guest RAM</span><span>{mp == null ? 'Unavailable' : `${mp}%`}</span></div>
+                                                        <div className="cloud-meter"><div style={{ width: `${mp == null ? 0 : mp}%`, background: mp == null ? 'var(--cloud-text-muted)' : meterColor(mp) }} /></div>
                                                     </div>
                                                 </div>
                                             </div>
@@ -7896,7 +7897,7 @@
         // re-rendering every second.
         function _resSig(r) {
             return r.vmid + '|' + (r.status || '') + '|' + (r.node || '') + '|' + (r.name || '') +
-                   '|' + Math.floor((r.cpu_percent || 0) / 5) + '|' + Math.floor((r.mem_percent || 0) / 2) +
+                   '|' + Math.floor((r.cpu_percent || 0) / 5) + '|' + (r.guest_mem_percent == null ? 'na' : Math.floor(r.guest_mem_percent / 2)) +
                    '|' + (r.ip || '') + '|' + (r.tags || '');
         }
         function areResourcesEqual(a, b) {
@@ -12349,8 +12350,8 @@
                         // sort by combined cpu+ram usage
                         const runningGuests = allGuests.filter(g => g.status === 'running');
                         runningGuests.sort((a, b) => {
-                            const aScore = ((a.cpu || 0) * 100) + (a.maxmem > 0 ? (a.mem / a.maxmem) * 100 : 0);
-                            const bScore = ((b.cpu || 0) * 100) + (b.maxmem > 0 ? (b.mem / b.maxmem) * 100 : 0);
+                            const aScore = ((a.cpu || 0) * 100) + (a.guest_mem_percent || 0);
+                            const bScore = ((b.cpu || 0) * 100) + (b.guest_mem_percent || 0);
                             return bScore - aScore;
                         });
                         setTopGuests(runningGuests.slice(0, 10));
@@ -14935,7 +14936,8 @@
                                             <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">{t('status')}</span><span className="corp-hover-tip-value" style={{color: vmRunning ? 'var(--color-success)' : 'var(--corp-text-muted)'}}>{vmRunning ? t('running') : t('stopped')}</span></div>
                                             <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">{t('node')}</span><span className="corp-hover-tip-value">{data.node}</span></div>
                                             {vmRunning && data.cpu != null && <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">CPU</span><span className="corp-hover-tip-value">{(data.cpu * 100).toFixed(1)}%</span></div>}
-                                            {vmRunning && data.mem != null && data.maxmem != null && <div className="corp-hover-tip-row" title="Host-resident QEMU memory, including reclaimable guest cache"><span className="corp-hover-tip-label">Host RAM</span><span className="corp-hover-tip-value">{fmtBytes(data.mem)} / {fmtBytes(data.maxmem)}</span></div>}
+                                            {vmRunning && <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">Guest RAM</span><span className="corp-hover-tip-value">{data.guest_mem_percent == null ? 'Unavailable' : `${Number(data.guest_mem_percent).toFixed(1)}%`}</span></div>}
+                                            {vmRunning && data.host_mem != null && data.host_maxmem != null && <div className="corp-hover-tip-row" title="Secondary QEMU host-resident accounting"><span className="corp-hover-tip-label">Host resident</span><span className="corp-hover-tip-value">{fmtBytes(data.host_mem)} / {fmtBytes(data.host_maxmem)}</span></div>}
                                         </div>
                                     );
                                 }

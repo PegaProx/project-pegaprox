@@ -1,5 +1,7 @@
+import threading
 from unittest.mock import Mock, call, patch
 
+from pegaprox.core.manager import PegaProxManager
 from pegaprox.api.vms import _get_guest_linux_memory, _parse_linux_meminfo
 
 
@@ -49,7 +51,7 @@ def test_get_guest_linux_memory_uses_bounded_exec_and_polls_to_exit():
         }),
     ]
 
-    with patch('pegaprox.api.vms.time.sleep') as sleep:
+    with patch('pegaprox.utils.guest_memory.time.sleep') as sleep:
         result = _get_guest_linux_memory(manager, 'https://pve/api/agent')
 
     assert result['used_pct'] == 25.0
@@ -70,3 +72,61 @@ def test_get_guest_linux_memory_returns_none_on_agent_failure():
     manager._api_post.return_value = _response(500, None)
     assert _get_guest_linux_memory(manager, 'https://pve/api/agent') is None
     manager._api_get.assert_not_called()
+
+
+def _manager_with_memory_cache(cache):
+    manager = object.__new__(PegaProxManager)
+    manager._memory_cache = cache
+    manager._memory_cache_lock = threading.Lock()
+    return manager
+
+
+def test_inventory_uses_cached_guest_pressure_and_preserves_host_accounting():
+    manager = _manager_with_memory_cache({
+        ('pve', 179): {
+            'total_bytes': 64 * 1024**3,
+            'used_bytes': 10 * 1024**3,
+            'available_bytes': 54 * 1024**3,
+            'used_pct': 15.6,
+            'source': 'qemu-guest-agent:/proc/meminfo:MemAvailable',
+        }
+    })
+    resources = [{
+        'type': 'qemu', 'node': 'pve', 'vmid': 179, 'status': 'running',
+        'mem': 65 * 1024**3, 'maxmem': 64 * 1024**3, 'mem_percent': 101.6,
+    }]
+
+    manager._inject_guest_memory(resources)
+
+    assert resources[0]['guest_mem_percent'] == 15.6
+    assert resources[0]['guest_memory_status'] == 'available'
+    assert resources[0]['host_mem_percent'] == 101.6
+    assert resources[0]['host_mem'] == 65 * 1024**3
+
+
+def test_inventory_does_not_substitute_host_ram_when_guest_data_unavailable():
+    manager = _manager_with_memory_cache({})
+    resources = [{
+        'type': 'qemu', 'node': 'pve', 'vmid': 150, 'status': 'running',
+        'mem': 7 * 1024**3, 'maxmem': 8 * 1024**3, 'mem_percent': 87.5,
+    }]
+
+    manager._inject_guest_memory(resources)
+
+    assert resources[0]['guest_mem_percent'] is None
+    assert resources[0]['guest_memory_status'] == 'unavailable'
+    assert resources[0]['host_mem_percent'] == 87.5
+
+
+def test_lxc_cgroup_memory_is_valid_guest_pressure_and_is_bounded():
+    manager = _manager_with_memory_cache({})
+    resources = [{
+        'type': 'lxc', 'node': 'pve', 'vmid': 9000, 'status': 'running',
+        'mem': 1100, 'maxmem': 1000, 'mem_percent': 110.0,
+    }]
+
+    manager._inject_guest_memory(resources)
+
+    assert resources[0]['guest_mem_percent'] == 100.0
+    assert resources[0]['guest_memory_status'] == 'available'
+    assert resources[0]['guest_memory_source'] == 'proxmox-lxc-cgroup'
