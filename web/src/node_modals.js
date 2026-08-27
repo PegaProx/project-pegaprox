@@ -946,7 +946,11 @@
                                     <div className="flex items-center gap-4">
                                         <span className="text-sm text-gray-400">{t('health') || 'Health'}</span>
                                         <span className={`px-3 py-1 rounded text-sm font-medium ${healthColor}`}>
-                                            {health || 'N/A'}
+                                            {healthUp === 'PASSED' || healthUp === 'OK'
+                                                ? 'OK'
+                                                : healthUp === 'FAILED'
+                                                    ? (t('error') || 'Error')
+                                                    : (health || 'N/A')}
                                         </span>
                                         {isNvme && <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">NVMe</span>}
                                     </div>
@@ -1937,7 +1941,7 @@
                                                         className="flex items-center gap-2 px-4 py-2 bg-proxmox-orange rounded-lg text-white text-sm hover:bg-orange-600"
                                                     >
                                                         <Icons.Plus />
-                                                        Create
+                                                        {t('create') || 'Create'}
                                                     </button>
                                                     {data.showCreateMenu && (
                                                         <div className="absolute top-full left-0 mt-1 bg-proxmox-card border border-proxmox-border rounded-lg shadow-xl z-10 min-w-[160px]">
@@ -1964,7 +1968,7 @@
                                                     }}
                                                     className="px-4 py-2 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700"
                                                 >
-                                                    Apply Configuration
+                                                    {t('networkApplyConfiguration') || 'Apply Configuration'}
                                                 </button>
                                                 <button 
                                                     onClick={async () => {
@@ -1977,7 +1981,7 @@
                                                     }}
                                                     className="px-4 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-gray-300 text-sm hover:text-white"
                                                 >
-                                                    Revert
+                                                    {t('networkRevertChanges') || 'Revert'}
                                                 </button>
                                             </div>
 
@@ -2273,7 +2277,7 @@
                                                                     }
                                                                 } catch (e) { addToast(t('error') || 'Error', 'error'); }
                                                             }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600">
-                                                                {data.editIface.isNew ? 'Create' : 'Save'}
+                                                                {data.editIface.isNew ? (t('create') || 'Create') : (t('save') || 'Save')}
                                                             </button>
                                                         </div>
                                                     </div>
@@ -2725,7 +2729,11 @@
                                                                             d.health === 'FAILED' ? 'bg-red-500/20 text-red-400' :
                                                                             'bg-gray-500/20 text-gray-400'
                                                                         }`}>
-                                                                            {d.health || 'N/A'}
+                                                                            {String(d.health || '').toUpperCase() === 'PASSED' || String(d.health || '').toUpperCase() === 'OK'
+                                                                                ? 'OK'
+                                                                                : String(d.health || '').toUpperCase() === 'FAILED'
+                                                                                    ? (t('error') || 'Error')
+                                                                                    : (d.health || 'N/A')}
                                                                         </span>
                                                                     </td>
                                                                     <td className="p-3">
@@ -3411,7 +3419,13 @@
                                                                     data.ceph?.status?.health?.status === 'HEALTH_WARN' ? 'text-yellow-400' :
                                                                     'text-red-400'
                                                                 }`}>
-                                                                    {data.ceph?.status?.health?.status || (t('unknown') || 'Unknown')}
+                                                                    {data.ceph?.status?.health?.status === 'HEALTH_OK'
+                                                                        ? 'OK'
+                                                                        : data.ceph?.status?.health?.status === 'HEALTH_WARN'
+                                                                            ? (t('warning') || 'Warning')
+                                                                            : data.ceph?.status?.health?.status === 'HEALTH_ERR'
+                                                                                ? (t('error') || 'Error')
+                                                                                : (data.ceph?.status?.health?.status || (t('unknown') || 'Unknown'))}
                                                                 </div>
                                                             </div>
                                                             <div className="bg-proxmox-dark rounded-lg p-4">
@@ -5588,7 +5602,11 @@
                                                                     <td style={{fontFamily: 'monospace', fontSize: '12px'}}>{disk.devpath || '-'}</td>
                                                                     <td>{disk.type || '-'}</td>
                                                                     <td>{formatBytes(disk.size)}</td>
-                                                                    <td>{disk.health || disk.used || '-'}</td>
+                                                                    <td>{String(disk.health || '').toUpperCase() === 'PASSED' || String(disk.health || '').toUpperCase() === 'OK'
+                                                                    ? 'OK'
+                                                                    : String(disk.health || '').toUpperCase() === 'FAILED'
+                                                                        ? (t('error') || 'Error')
+                                                                        : (disk.health || disk.used || '-')}</td>
                                                                 </tr>
                                                             ))}
                                                             {(!data.disks || data.disks.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>{t('noDisks') || 'No disks'}</td></tr>}
@@ -5679,7 +5697,13 @@
                                                             {data.ceph?.status && (
                                                                 <table className="corp-property-grid">
                                                                     <tbody>
-                                                                        <tr><td>{t('health') || 'Health'}</td><td style={{color: data.ceph.status.health?.status === 'HEALTH_OK' ? '#60b515' : '#efc006'}}>{data.ceph.status.health?.status || '-'}</td></tr>
+                                                                        <tr><td>{t('health') || 'Health'}</td><td style={{color: data.ceph.status.health?.status === 'HEALTH_OK' ? '#60b515' : '#efc006'}}>{data.ceph.status.health?.status === 'HEALTH_OK'
+                                                                            ? 'OK'
+                                                                            : data.ceph.status.health?.status === 'HEALTH_WARN'
+                                                                                ? (t('warning') || 'Warning')
+                                                                                : data.ceph.status.health?.status === 'HEALTH_ERR'
+                                                                                    ? (t('error') || 'Error')
+                                                                                    : (data.ceph.status.health?.status || '-')}</td></tr>
                                                                         <tr><td>OSDs</td><td>{data.ceph.osd?.length || 0}</td></tr>
                                                                         <tr><td>MONs</td><td>{data.ceph.mon?.length || 0}</td></tr>
                                                                         <tr><td>{t('pools') || 'Pools'}</td><td>{data.ceph.pools?.length || 0}</td></tr>

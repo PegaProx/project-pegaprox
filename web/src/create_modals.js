@@ -1244,7 +1244,7 @@
                                 <div className="space-y-4">
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Node</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('node') || 'Node'}</label>
                                             <select value={config.node} onChange={e => setConfig({...config, node: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
                                                 {nodes.map(n => <option key={n} value={n}>{n}</option>)}
@@ -1258,7 +1258,7 @@
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Hostname</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('hostname') || 'Hostname'}</label>
                                         <input type="text" value={config.name} onChange={e => setConfig({...config, name: e.target.value})}
                                             placeholder="my-container"
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
