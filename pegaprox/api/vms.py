@@ -52,6 +52,67 @@ from pegaprox.api.realtime import sock
 bp = Blueprint('vms', __name__)
 
 
+def _parse_linux_meminfo(content):
+    """Return guest memory pressure from Linux /proc/meminfo.
+
+    Proxmox's per-VM ``mem`` value is host/QEMU accounting. In particular,
+    page cache and QEMU overhead can make ``mem / maxmem`` look close to (or
+    slightly above) 100% while the guest still has ample reclaimable memory.
+    MemAvailable is the Linux kernel's estimate of memory available to start
+    new work without swapping, so it is the appropriate guest-pressure value.
+    """
+    values = {}
+    for line in (content or '').splitlines():
+        if ':' not in line:
+            continue
+        key, raw = line.split(':', 1)
+        parts = raw.strip().split()
+        if not parts or not parts[0].isdigit():
+            continue
+        multiplier = 1024 if len(parts) > 1 and parts[1].lower() == 'kb' else 1
+        values[key] = int(parts[0]) * multiplier
+
+    total = values.get('MemTotal')
+    available = values.get('MemAvailable')
+    if not total or available is None:
+        return None
+    available = max(0, min(available, total))
+    used = total - available
+    return {
+        'total_bytes': total,
+        'used_bytes': used,
+        'available_bytes': available,
+        'used_pct': round((used / total) * 100, 1),
+        'source': 'qemu-guest-agent:/proc/meminfo:MemAvailable',
+    }
+
+
+def _get_guest_linux_memory(mgr, base):
+    """Read /proc/meminfo through PVE's bounded guest-exec API."""
+    started = mgr._api_post(
+        f"{base}/exec",
+        data=[('command', '/usr/bin/cat'), ('command', '/proc/meminfo')],
+        timeout=8,
+    )
+    if started.status_code != 200:
+        return None
+    pid = (started.json().get('data') or {}).get('pid')
+    if pid is None:
+        return None
+
+    for _ in range(10):
+        status = mgr._api_get(f"{base}/exec-status", params={'pid': pid}, timeout=8)
+        if status.status_code != 200:
+            return None
+        payload = status.json().get('data') or {}
+        if payload.get('exited'):
+            if payload.get('exitcode') != 0:
+                return None
+            return _parse_linux_meminfo(payload.get('out-data') or '')
+        time.sleep(0.05)
+    return None
+
+
 # MK Apr 2026 — VNC connection hardening helpers. We keep the proxy path through
 # pegaprox (most customer browsers can't reach the PVE node directly), so the
 # resilience has to come from the proxy code itself. These helpers apply OS-level
@@ -4383,6 +4444,7 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
               'interfaces': [],
               'users': [],
               'filesystems': [],
+              'memory': None,
               'guest_time_ns': None}
 
     try:
@@ -4399,6 +4461,18 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
                 # short-circuit: agent down, skip the 5 follow-up calls
                 return jsonify(result)
         except Exception:
+            pass
+
+        # Guest pressure is not the same metric as /cluster/resources ``mem``.
+        # Read Linux MemAvailable through QGA so the detail UI can show real
+        # pressure while retaining Proxmox's value as host-resident memory.
+        try:
+            result['memory'] = _get_guest_linux_memory(mgr, base)
+            if result['memory']:
+                result['agent_running'] = True
+        except Exception:
+            # Optional enrichment: unsupported guests and older agents must not
+            # break the rest of the guest-info response.
             pass
 
         try:
@@ -10870,4 +10944,3 @@ def create_container_api(cluster_id, node):
         return jsonify(result)
     else:
         return jsonify(result), 400
-

@@ -1874,7 +1874,13 @@
             };
 
             const cpuPercent = vm.maxcpu ? ((vm.cpu || 0) * 100).toFixed(1) : 0;
-            const ramPercent = vm.maxmem ? ((vm.mem / vm.maxmem) * 100).toFixed(1) : 0;
+            const guestMemory = guestInfo?.memory || null;
+            const ramPercent = guestMemory?.used_pct != null
+                ? guestMemory.used_pct.toFixed(1)
+                : (vm.maxmem ? ((vm.mem / vm.maxmem) * 100).toFixed(1) : 0);
+            const ramUsed = guestMemory?.used_bytes ?? vm.mem;
+            const ramTotal = guestMemory?.total_bytes ?? vm.maxmem;
+            const ramLabel = guestMemory ? (t('guestMemory') || 'Guest memory') : (t('hostResidentMemory') || 'Host-resident memory');
 
             return (
                 <div className="space-y-0">
@@ -2093,8 +2099,8 @@
                                         <div className="flex flex-col gap-1 min-w-[90px]">
                                             <div className="flex items-center gap-1.5">
                                                 <div className="w-2 h-2 rounded-full" style={{background: 'var(--corp-metric-ram)'}}></div>
-                                                <span className="text-[12px]" style={{color: '#adbbc4'}}>{t('ramUsage')}</span>
-                                                <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{formatBytes(vm.mem)}</span>
+                                                <span className="text-[12px]" style={{color: '#adbbc4'}} title={ramLabel}>{ramLabel}</span>
+                                                <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{formatBytes(ramUsed)}</span>
                                             </div>
                                             <div className="corp-capacity-bar"><div style={{width: Math.min(ramPercent, 100) + '%', background: ramPercent >= 90 ? 'var(--corp-thresh-crit)' : ramPercent >= 70 ? 'var(--corp-thresh-warn)' : 'var(--corp-thresh-ok)'}} /></div>
                                         </div>
@@ -2192,7 +2198,7 @@
                                         {/* Memory */}
                                         <div className="flex items-center gap-2 text-[12px]">
                                             <Icons.MemoryStick className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#9b59b6'}} />
-                                            <span style={{color: '#adbbc4', width: '60px'}}>{t('memory') || 'Memory'}</span>
+                                            <span style={{color: '#adbbc4', width: '60px'}} title={ramLabel}>{t('memory') || 'Memory'}</span>
                                             <div className="flex-1">
                                                 <div className="flex items-center gap-2">
                                                     <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
@@ -2200,7 +2206,7 @@
                                                     </div>
                                                     <span style={{color: '#e9ecef', minWidth: '35px'}}>{ramPercent}%</span>
                                                 </div>
-                                                <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{formatBytes(vm.mem)} / {formatBytes(vm.maxmem)}</div>
+                                                <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{formatBytes(ramUsed)} / {formatBytes(ramTotal)} · {ramLabel}</div>
                                             </div>
                                         </div>
                                         {/* Disk */}
@@ -4679,7 +4685,7 @@
                                         { field: 'nodes', label: t('nodes') || 'Nodes' },
                                         { field: 'vms', label: 'VMs' },
                                         { field: 'cpu', label: 'CPU' },
-                                        { field: 'ram', label: 'RAM' },
+                                        { field: 'ram', label: 'Host RAM' },
                                         { field: null, label: t('storage') || 'Storage' },
                                         { field: 'health', label: t('health') || 'Health' },
                                     ].map((col, i) => (
@@ -4748,8 +4754,9 @@
                                 <table className="corp-datagrid">
                                     <thead><tr>
                                         <th style={{width: '24px'}}></th>
-                                        {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU', align: 'right'}, {field: 'ram', label: 'RAM', align: 'right'}, {field: 'status', label: t('status')}].map(col => (
+                                        {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU', align: 'right'}, {field: 'ram', label: 'Host RAM', align: 'right', title: 'Host-resident QEMU memory, including reclaimable guest cache'}, {field: 'status', label: t('status')}].map(col => (
                                             <th key={col.field} className="cursor-pointer" style={{textAlign: col.align || 'left'}}
+                                                title={col.title}
                                                 onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
                                                 {col.label} {guestSortBy === col.field && <span className="sort-indicator">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
                                             </th>
@@ -4964,7 +4971,7 @@
                                         <thead className="bg-proxmox-dark/50">
                                             <tr className="text-left text-xs text-gray-400">
                                                 <th className="px-4 py-3 font-medium">{t('type')}</th>
-                                                {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'RAM'}, {field: 'status', label: t('status')}].map(col => (
+                                                {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'Host RAM'}, {field: 'status', label: t('status')}].map(col => (
                                                     <th key={col.field} className="px-4 py-3 font-medium cursor-pointer hover:text-white select-none"
                                                         onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
                                                         {col.label}{guestSortBy === col.field && <span className="ml-1">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
@@ -5469,7 +5476,7 @@
                                         { field: 'nodes', label: t('nodes') || 'Nodes' },
                                         { field: 'vms', label: 'VMs' },
                                         { field: 'cpu', label: 'CPU' },
-                                        { field: 'ram', label: 'RAM' },
+                                        { field: 'ram', label: 'Host RAM' },
                                         { field: null, label: t('storage') || 'Storage' },
                                         { field: 'health', label: t('health') || 'Health' },
                                     ].map((col, i) => (
@@ -5543,7 +5550,7 @@
                                     <thead>
                                         <tr>
                                             <th style={{width: '24px'}}></th>
-                                            {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'RAM'}, {field: 'status', label: t('status')}].map(col => (
+                                            {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'Host RAM'}, {field: 'status', label: t('status')}].map(col => (
                                                 <th key={col.field} className="cursor-pointer" style={{textAlign: 'left'}}
                                                     onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
                                                     {col.label} {guestSortBy === col.field && <span className="sort-indicator">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
@@ -5934,7 +5941,7 @@
                                     <thead className="bg-proxmox-dark/50">
                                         <tr className="text-left text-xs text-gray-400">
                                             <th className="px-4 py-3 font-medium">{t('type')}</th>
-                                            {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'RAM'}, {field: 'status', label: t('status')}].map(col => (
+                                            {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'Host RAM'}, {field: 'status', label: t('status')}].map(col => (
                                                 <th key={col.field} className="px-4 py-3 font-medium cursor-pointer hover:text-white select-none"
                                                     onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
                                                     {col.label}{guestSortBy === col.field && <span className="ml-1">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
