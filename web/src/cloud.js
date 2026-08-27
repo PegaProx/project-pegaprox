@@ -1549,7 +1549,16 @@
             const mons = Array.isArray(c.mon) ? c.mon : [];
             const osds = Array.isArray(c.osd) ? c.osd : [];
             const pools = Array.isArray(c.pools) ? c.pools : [];
-            const osdUp = osds.filter(o => o.up === 1 || o.up === true).length;
+            // #735 (mdobprv-lab) — flattened CRUSH-tree OSD entries normally carry
+            // status:"up"; keep the older numeric/boolean `up` variants as fallbacks.
+            const osdUp = osds.filter(
+                o => String(o.status || '').toLowerCase() === 'up'
+                    || o.up === 1
+                    || o.up === true
+            ).length;
+
+            // #735 — /ceph/status may return health as an object
+            // ({status:"HEALTH_OK", ...}); extract the scalar before rendering.
             const healthRaw = (c.status && (c.status.health || c.status.health_status)) || c.health || 'unknown';
             const health = healthRaw && typeof healthRaw === 'object'
                 ? (healthRaw.status || healthRaw.health_status || 'unknown')
