@@ -944,11 +944,26 @@ def require_auth(roles: list = None, perms: list = None):
                 # own permissions only — the owner's interactive extra perms / group grants
                 # do NOT extend to a token — while still honouring the owner's denials.
                 if session.get('api_token'):
+                    # NS Aug 2026 (AI-pentest) — carry the owner's tenant overrides so a tenant-scoped
+                    # DOWNGRADE / denial isn't silently dropped for token auth (the interactive path
+                    # keeps them), but cap any tenant ROLE at fresh_role so a tenant grant can only
+                    # downgrade a token, never re-escalate it above its declared/floored role.
+                    from pegaprox.models.permissions import ROLE_ADMIN as _RA, ROLE_USER as _RU, ROLE_VIEWER as _RV
+                    _h = {_RA: 3, _RU: 2, _RV: 1}
+                    _fl = _h.get(fresh_role, 1)
+                    _tp = {}
+                    for _tid, _ov in (user.get('tenant_permissions', {}) or {}).items():
+                        if isinstance(_ov, dict):
+                            _ov = dict(_ov)
+                            if _ov.get('role') and _h.get(_ov['role'], 1) > _fl:
+                                _ov['role'] = next((k for k, v in _h.items() if v == _fl), fresh_role)
+                        _tp[_tid] = _ov
                     perm_user = {
                         'role': fresh_role,
                         'permissions': [],
                         'denied_permissions': user.get('denied_permissions', []),
                         'tenant_id': user.get('tenant_id'),
+                        'tenant_permissions': _tp,
                     }
                 else:
                     perm_user = user

@@ -403,9 +403,18 @@ def _health_rollup(sensors, sel, chassis):
 
     MK Aug 2026 (#686) — was `any(e['severity']=='critical' for e in sel)`, which latched the
     whole node Critical on ANY historical SEL entry (incl. months-old, already-deasserted power
-    events) even while every live sensor read green. Now the status is driven by live sensor
-    status, chassis intrusion and only *currently-active* SEL assertions — and it returns the
-    concrete contributors so the UI can show WHAT is wrong instead of a red badge over green dots.
+    events) even while every live sensor read green. First pass kept *currently-active* SEL
+    assertions as a driver via _active_sel_events().
+
+    NS Aug 2026 (#714) — that still wasn't enough on HP iLO 4 / ProLiant Gen9: the recovery is
+    logged as one 'Redundancy Lost — Deasserted' on the Power-Unit sensor, but the per-PSU
+    'Power Supply failure — Asserted' carries a DIFFERENT sensor name and never gets its own
+    deassert, so the assert-vs-deassert pairing can't clear it and the node stayed Critical while
+    iLO's own live status read OK on every component. The SEL is history, not current state — so it
+    no longer drives the badge here either (it stays in the separately-returned `events` list).
+    Status is now the worst of live `ipmitool sensor` status + chassis intrusion — the live
+    reading of a recovered PSU/fan/temp is authoritative. This matches the Redfish rollup, which
+    already leans on the BMC's own live Health and treats LogEntry history as informational.
 
     Returns {'status': 'ok'|'warning'|'critical', 'reasons': [{source, label, severity}]}.
     """
@@ -417,11 +426,6 @@ def _health_rollup(sensors, sel, chassis):
     if (chassis.get('intrusion', '') or '').lower() not in ('', 'inactive', 'not present', 'disabled'):
         reasons.append({'source': 'chassis', 'label': f"chassis intrusion: {chassis.get('intrusion')}",
                         'severity': 'critical'})
-    for e in _active_sel_events(sel):
-        if e.get('severity') in ('critical', 'warning'):
-            reasons.append({'source': 'event',
-                            'label': e.get('sensor') or e.get('description') or 'SEL event',
-                            'severity': e['severity']})
     if any(r['severity'] == 'critical' for r in reasons):
         status = 'critical'
     elif any(r['severity'] == 'warning' for r in reasons):
@@ -458,6 +462,12 @@ def parse_inband(raw):
     power_w = parse_power(section(_M_POWER, [_M_FRU, _M_SEL]))
     fru = parse_fru(section(_M_FRU, [_M_SEL]))
     events = parse_sel(section(_M_SEL, []))
+    # NS Aug 2026 (#714) — tag which SEL entries are still an active assertion (not yet paired by
+    # a newer deassert) so the event-log UI can separate a live fault from resolved history. This
+    # is context only; the health badge is driven by live sensors + chassis, not the SEL.
+    _active_ids = {id(e) for e in _active_sel_events(events)}
+    for e in events:
+        e['active'] = id(e) in _active_ids
     if not (sensors or chassis or events or power_w is not None or any(fru.values())):
         return {'available': False, 'reason': 'in-band BMC returned no data'}
     hr = _health_rollup(sensors, sel=events, chassis=chassis)

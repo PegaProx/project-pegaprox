@@ -287,6 +287,11 @@ def validate_ws_token_api():
                         'host': cluster_host,
                         'node_ips': node_ips,
                         'ssh_port': getattr(cfg, 'ssh_port', 22) or 22,
+                        # NS Aug 2026 (AI-pentest) — carry the per-cluster TLS-verify flag to the
+                        # termproxy WS subprocess. Without it the consumer defaults verify_pve_tls to
+                        # False and pins CERT_NONE even when the admin enabled ssl_verification, so a
+                        # MitM between PegaProx and PVE could intercept the console + its auth ticket.
+                        'verify_pve_tls': bool(getattr(mgr, '_ssl_verify', False)),
                     }
                     # NS 2026-06-05 (C-1): hand the PVE session cookie to the WS
                     # subprocess server-side (it used to come from the browser).

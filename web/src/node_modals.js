@@ -46,7 +46,7 @@
                     setStatus('connecting');
                     if (termRef.current) {
                         const method = authData.privateKey ? `(${t('sshKey') || 'SSH Key'})` : '';
-                        termRef.current.write(`\r\n${t('connectingAs') || 'Connecting as'} ${authData.username}@${authData.host} ${method}...\r\n`);
+                        termRef.current.write(`\r\n${t('shellConnectingAs')} ${authData.username}@${authData.host} ${method}...\r\n`);
                     }
                     return true;
                 }
@@ -65,7 +65,7 @@
                 if (!_flushAuth(authData)) {
                     pendingCredsRef.current = authData;
                     if (termRef.current) {
-                        termRef.current.write(`\r\n\x1b[33m${t('waitingForWebSocket') || 'Waiting for WebSocket connection...'}\x1b[0m\r\n`);
+                        termRef.current.write(`\r\n\x1b[33m${t('waitingForWsConnection')}\x1b[0m\r\n`);
                     }
                     setStatus('connecting');
                     setShowLogin(false);
@@ -170,7 +170,7 @@
                         setTimeout(() => fitAddon && fitAddon.fit(), 50);  // idk why 50ms but it works
 
                         setStatus('connecting');
-                        term.write(`${t('connectingToServer') || 'Connecting to server...'}\r\n`);
+                        term.write(`${t('connectingToServer')}\r\n`);
                         
                         // First, try to get the node IP via API
                         let nodeIp = '';
@@ -273,7 +273,7 @@
                                             setStatus('login');
                                             return;
                                         } else if (msg.status === 'connecting') {
-                                            term.write(`${t('sshConnecting') || 'Establishing SSH connection...'}\r\n`);
+                                            term.write(`${t('sshConnecting')}\r\n`);
                                             return;
                                         } else if (msg.status === 'connected') {
                                             setStatus('connected');
@@ -344,9 +344,9 @@
                             console.log('WebSocket closed:', event.code, event.reason);
                             if (!cleanup) {
                                 // Different messages based on close code
-                                let msg = t('connectionClosed') || 'Connection closed';
+                                let msg = t('connectionClosed');
                                 if (event.code === 1006) {
-                                    msg = t('connectionUnexpectedlyClosed') || 'Connection unexpectedly closed';
+                                    msg = t('connectionLostUnexpected');
                                 } else if (event.code === 1011) {
                                     msg = t('serverError') || 'Server error';
                                 } else if (event.reason) {

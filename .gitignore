@@ -22,6 +22,10 @@ backups/
 *.db-journal
 images/login_bg.png
 
+# Generated at runtime (rewritten from the vms.py heredoc on every start — never edit
+# the dot-file directly; it drifts in the working tree on each restart otherwise)
+pegaprox/api/.ssh_ws_server.py
+
 # Build artifacts
 web/Dev/.build/
 web/Dev/config/

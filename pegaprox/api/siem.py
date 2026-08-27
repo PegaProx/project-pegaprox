@@ -169,14 +169,21 @@ def _to_syslog_5424(event, app='pegaprox', facility='local0'):
     pri = fac * 8 + sev
     ts = event.get('timestamp', datetime.now().isoformat())
     host = socket.gethostname() or '-'
-    msgid = event.get('action', '-').replace(' ', '_')[:32] or '-'
+    # NS Aug 2026 (AI-pentest) — strip ALL C0 control chars + DEL from every interpolated field, not
+    # just \n on details. A WebAuthn key name / audit detail with an embedded \r or ESC otherwise
+    # forges syslog lines / terminal escapes at the collector (CWE-117).
+    import re as _re
+    def _sc(v):
+        v = v if v not in (None, '') else '-'
+        return _re.sub(r'[\x00-\x1f\x7f]', ' ', str(v))
+    msgid = _sc(event.get('action', '-')).replace(' ', '_')[:32] or '-'
     sd = '-'
     msg = (
-        f"user={event.get('user', '-')} "
-        f"action={event.get('action', '-')} "
-        f"cluster={event.get('cluster', '') or '-'} "
-        f"ip={event.get('ip_address', '') or '-'} "
-        f"details={(event.get('details') or '').replace(chr(10), ' ')[:400]}"
+        f"user={_sc(event.get('user', '-'))} "
+        f"action={_sc(event.get('action', '-'))} "
+        f"cluster={_sc(event.get('cluster', '') or '-')} "
+        f"ip={_sc(event.get('ip_address', '') or '-')} "
+        f"details={_sc(event.get('details') or '-')[:400]}"
     )
     return f"<{pri}>1 {ts} {host} {app} - {msgid} {sd} {msg}"
 

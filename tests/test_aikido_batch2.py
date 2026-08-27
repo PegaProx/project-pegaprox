@@ -1,64 +1,7 @@
-# Regression guards for the Aikido Testing-branch pentest fixes (batch 2/2, Aug 2026, NS).
-# These pin the authz / validation / SSRF invariants the batch-2 commit added, driven through
-# the real Flask app (deny path fires before any manager is touched) plus a couple of pure-unit
-# checks for the helpers that don't need HTTP.
-
-import ipaddress
-import socket
-
-import pytest
-
-from pegaprox.utils import url_security
-from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
-
-
-# ---------------------------------------------------------------------------
-# storage download-url DNS-rebind pin — resolve_and_pin_url
-# ---------------------------------------------------------------------------
-
-def _resolver(mapping):
-    def _r(host):
-        if host not in mapping:
-            raise socket.gaierror('unresolvable in test')
-        return [ipaddress.ip_address(ip) for ip in mapping[host]]
-    return _r
-
-
-def test_pin_http_rewrites_host_to_validated_ip(monkeypatch):
-    # A delegated http download must be pinned to the exact IP we vetted so the PVE node can't
-    # re-resolve the hostname to a private address (DNS rebind). Path + port are preserved.
-    monkeypatch.setattr(url_security, '_resolve_all', _resolver({'mirror.example': ['93.184.216.34']}))
-    out = resolve_and_pin_url('http://mirror.example:8080/debian.iso', allowed_schemes=('https', 'http'))
-    assert out == 'http://93.184.216.34:8080/debian.iso'
-
-
-def test_pin_https_keeps_hostname(monkeypatch):
-    # https is left as the hostname on purpose — the fetcher's TLS cert check is bound to the
-    # name, so a rebind to an internal IP fails the handshake; rewriting would break legit certs.
-    monkeypatch.setattr(url_security, '_resolve_all', _resolver({'mirror.example': ['93.184.216.34']}))
-    out = resolve_and_pin_url('https://mirror.example/debian.iso', allowed_schemes=('https', 'http'))
-    assert out == 'https://mirror.example/debian.iso'
-
-
-def test_pin_http_rejects_private_only_host(monkeypatch):
-    monkeypatch.setattr(url_security, '_resolve_all', _resolver({'evil.example': ['10.0.0.5']}))
-    with pytest.raises(SsrfError):
-        resolve_and_pin_url('http://evil.example/x.iso', allowed_schemes=('https', 'http'))
-
-
-def test_pin_http_rejects_metadata_rebind(monkeypatch):
-    monkeypatch.setattr(url_security, '_resolve_all', _resolver({'rebind.example': ['169.254.169.254']}))
-    with pytest.raises(SsrfError):
-        resolve_and_pin_url('http://rebind.example/latest/meta-data/', allowed_schemes=('https', 'http'))
-
-
-def test_pin_ip_literal_http_unchanged(monkeypatch):
-    # already an IP literal → nothing to rebind, and the resolver must not even be consulted.
-    def _boom(host):
-        raise AssertionError('resolver must not run for an IP literal')
-    monkeypatch.setattr(url_security, '_resolve_all', _boom)
-    out = resolve_and_pin_url('http://93.184.216.34/x.iso', allowed_schemes=('https', 'http'))
-    assert out == 'http://93.184.216.34/x.iso'
+# Regression guards for the Aikido Testing-branch pentest fixes (batch 2/2, Aug 2026, NS) — authz +
+# validation invariants driven through the real Flask app (the deny path fires before any manager is
+# touched). The SSRF-pin unit tests that used to live here were consolidated into
+# tests/test_url_security.py (the canonical SSRF suite) to keep pin coverage in one place.
 
 
 # ---------------------------------------------------------------------------

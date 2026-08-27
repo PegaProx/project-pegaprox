@@ -12,7 +12,7 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
-from pegaprox.utils.auth import require_auth, load_users
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 # MK 2026-06-04 (CWE-117): mgr.name is from cluster-config (admin-controlled),
 # vmware_id from URL. Sanitise both before logging for consistency.
@@ -299,9 +299,9 @@ def get_vmware_vm_detail(vmware_id, vm_id):
     if not ok:
         return err
     # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     if vmware_id not in vmware_managers:
@@ -338,9 +338,9 @@ def vmware_vm_power(vmware_id, vm_id, action):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.power'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -364,9 +364,9 @@ def get_vmware_snapshots(vmware_id, vm_id):
     if not ok:
         return err
     # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.snapshot'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     if vmware_id not in vmware_managers:
@@ -390,9 +390,9 @@ def create_vmware_snapshot(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.snapshot'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -417,9 +417,9 @@ def delete_vmware_snapshot(vmware_id, vm_id, snapshot_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.snapshot'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -629,9 +629,9 @@ def get_vmware_vm_performance(vmware_id, vm_id):
     if not ok:
         return err
     # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     if vmware_id not in vmware_managers:
@@ -802,9 +802,9 @@ def get_vmware_console(vmware_id, vm_id):
 
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
 
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -838,9 +838,9 @@ def update_vmware_vm_config(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -865,9 +865,9 @@ def update_vmware_vm_network(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -895,9 +895,9 @@ def update_vmware_vm_boot_order(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -923,9 +923,9 @@ def clone_vmware_vm(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -949,9 +949,9 @@ def delete_vmware_vm(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.power'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -978,9 +978,9 @@ def rename_vmware_vm(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.power'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -1008,9 +1008,9 @@ def get_vmware_migration_plan(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
@@ -1088,9 +1088,9 @@ def start_vmware_migration(vmware_id, vm_id):
     
     # Security fix: Check VM-level authorization
     from pegaprox.utils.auth import load_users
-    users = load_users()
-    user = users.get(request.session.get('user', ''), {})
-    user['username'] = request.session.get('user', '')
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403

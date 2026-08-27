@@ -586,10 +586,42 @@ def execute_test_failover(plan_id):
                             while test_vmid in all_vmids:
                                 test_vmid += 1
                             vtype = vm.get('vm_type', 'qemu')
+                            # #709 — a full clone of a (possibly running) LXC is only allowed FROM a
+                            # snapshot. Take a throwaway snapshot on the replica, clone from it, wait
+                            # for the clone task to finish reading it, then drop the snapshot. (Also
+                            # closes the pre-existing start-before-clone-done race on the LXC path.)
+                            _temp_snap = None
+                            if vtype == 'lxc':
+                                _snapn = f"srtest{test_vmid}"
+                                _snr = tgt_mgr.create_snapshot(node_name, target_vmid, vtype, _snapn,
+                                                               description='PegaProx SR test-failover (temporary)')
+                                if isinstance(_snr, dict) and _snr.get('success'):
+                                    _temp_snap = _snapn
+                                    try:
+                                        if _snr.get('task'):
+                                            tgt_mgr._wait_for_task(node_name, _snr['task'], timeout=300)
+                                    except Exception:
+                                        pass
+                                else:
+                                    logger.warning(f"[SR] Test failover: temp snapshot on CT {target_vmid} failed "
+                                                   f"({_snr.get('error') if isinstance(_snr, dict) else _snr}); trying a direct clone")
                             clone_result = tgt_mgr.clone_vm(node_name, target_vmid, vtype,
-                                                            newid=test_vmid, name=f"SR-TEST-{vm_name}")
-                            # clone_vm returns dict {success, error, task?} OR truthy legacy value
+                                                            newid=test_vmid, name=f"SR-TEST-{vm_name}",
+                                                            snapname=_temp_snap)
+                            # clone_vm returns dict {success, error, data(task)?} OR truthy legacy value
                             clone_ok = clone_result.get('success') if isinstance(clone_result, dict) else bool(clone_result)
+                            if _temp_snap:
+                                try:
+                                    _cupid = clone_result.get('data') if isinstance(clone_result, dict) else None
+                                    if clone_ok and _cupid:
+                                        tgt_mgr._wait_for_task(node_name, _cupid, timeout=600)
+                                except Exception:
+                                    pass
+                                try:
+                                    tgt_mgr.delete_snapshot(node_name, target_vmid, vtype, _temp_snap)
+                                except Exception as _de:
+                                    logger.warning(f"[SR] Test failover: couldn't delete temp snapshot "
+                                                   f"{_temp_snap} on CT {target_vmid}: {_de}")
                             if clone_ok:
                                 test_vmids.append({'vmid': test_vmid, 'vm_type': vtype})
                                 # MK Jul 2026 (#413) — optionally disconnect every NIC

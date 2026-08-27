@@ -403,7 +403,16 @@ def _require_plan_access(plan_row):
     read another tenant's plan. Deny unless the caller reaches BOTH the source and target
     cluster (mirrors site_recovery.py). Returns an error response tuple, or None if allowed."""
     from pegaprox.api.helpers import check_cluster_access
-    pd = dict(plan_row) if plan_row is not None else {}
+    # NS Aug 2026 (AI-pentest) — fail closed. A deleted plan leaves orphaned drill history; if
+    # plan_row is None (or carries no clusters) the old code built pd={}, skipped the loop, and
+    # returned None=allowed, so anyone could read another tenant's orphaned drill detail by id.
+    if plan_row is None:
+        from flask import jsonify
+        return (jsonify({'error': 'not found'}), 404)
+    pd = dict(plan_row)
+    if not (pd.get('source_cluster') or pd.get('target_cluster')):
+        from flask import jsonify
+        return (jsonify({'error': 'not found'}), 404)
     for cid in (pd.get('source_cluster'), pd.get('target_cluster')):
         if not cid:
             continue

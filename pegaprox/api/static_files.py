@@ -433,6 +433,13 @@ def get_user_perms(username):
         return jsonify({'error': 'User not found'}), 404
     
     user = users[username]
+    # NS Aug 2026 (AI-pentest) — a tenant-scoped admin.users holder must not read RBAC metadata for a
+    # user in ANOTHER tenant (cross-tenant disclosure + existence oracle). Mirror the user PUT/DELETE
+    # siblings; a global admin (session role ROLE_ADMIN) still sees everyone.
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = users.get(request.session.get('user', ''), {})
+        if user.get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
+            return jsonify({'error': 'Access denied'}), 403
     tenant_id = request.args.get('tenant_id', user.get('tenant_id', DEFAULT_TENANT_ID))
     
     effective = get_user_permissions(user, tenant_id)

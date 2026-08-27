@@ -338,6 +338,26 @@ def get_integrated_syslog_events():
         else:
             where.append("1 = 0")
 
+    # NS Aug 2026 (AI-pentest) — always confine a non-all-cluster caller to the hostnames of the
+    # clusters they can actually reach, independent of the syslog_filter_by_selected_cluster flag and
+    # of whether a cluster_id filter was supplied. Omitting cluster_id previously returned EVERY
+    # cluster's syslog to a tenant-scoped admin.audit holder.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    _acc = get_user_clusters(build_authz_user(request.session.get('user', ''), request.session))
+    if _acc is not None:  # None = global-admin / all-cluster; a list = confine to it
+        _allowed_hosts = set()
+        for _cid in _acc:
+            _allowed_hosts.update(_syslog_cluster_hostnames(_cid))
+        if _allowed_hosts:
+            _hw = []
+            for _h in sorted(_allowed_hosts):
+                _hw.append("LOWER(logs.hostname) = ?"); params.append(_h)
+                _hw.append("LOWER(logs.hostname) LIKE ?"); params.append(f"{_h}.%")
+            where.append(f"({' OR '.join(_hw)})")
+        else:
+            where.append("1 = 0")
+
     where_sql = f"WHERE {' AND '.join(where)}" if where else ''
     joins_sql = f"{' '.join(joins)}" if joins else ''
     offset = (page - 1) * per_page
@@ -710,20 +730,38 @@ def apply_hardening(cluster_id, node):
     controls = data.get('controls', [])
     if not controls:
         return jsonify({'error': 'No controls specified'}), 400
+    force = bool(data.get('force', False))
+    requested_count = len(controls)
+
+    # #16745 — self-lockout guard (belt-and-suspenders behind the UI ack). sshd_hardening sets
+    # PermitRootLogin=prohibit-password; on a cluster we reach as root by password with no SSH
+    # key, that severs PegaProx's own access to the node — and rollback needs SSH too. Refuse it
+    # unless the caller explicitly forces (the UI does, after a checked acknowledgement).
+    mgr_has_key = bool(getattr(mgr.config, 'ssh_key', ''))
+    blocked = {}
+    if 'sshd_hardening' in controls and not mgr_has_key and not force:
+        controls = [c for c in controls if c != 'sshd_hardening']
+        blocked['sshd_hardening'] = {
+            'success': False, 'blocked': True,
+            'error': 'Blocked: SSH Access Hardening disables root password login and would cut off '
+                     'PegaProx access to this cluster (no SSH key is configured). Add an SSH key to '
+                     'the cluster first, or re-apply with force to override.'
+        }
 
     ctrl_params = data.get('params', {})
-    results = mgr.apply_node_hardening(node, controls, params=ctrl_params)
+    results = mgr.apply_node_hardening(node, controls, params=ctrl_params) if controls else {}
+    results.update(blocked)
     ok_count = sum(1 for v in results.values() if v.get('success'))
 
     from pegaprox.utils.audit import log_audit
     log_audit('node.hardening_applied', {
-        'node': node, 'controls': controls,
-        'success': ok_count, 'total': len(controls)
+        'node': node, 'controls': list(results.keys()), 'forced': force,
+        'success': ok_count, 'total': requested_count
     })
 
     return jsonify({
         'node': node, 'results': results,
-        'applied': ok_count, 'total': len(controls)
+        'applied': ok_count, 'total': requested_count
     })
 
 

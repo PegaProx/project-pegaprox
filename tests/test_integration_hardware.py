@@ -422,14 +422,15 @@ def test_e2e_old_deasserted_sel_does_not_latch_node_critical_686(api, seed, monk
     assert body['health_reasons'] == []
 
 
-def test_e2e_active_asserted_sel_is_critical_and_surfaced_686(api, seed, monkeypatch):
-    # green sensors + an active (asserted) critical SEL entry -> Critical, and the endpoint says WHY
+def test_e2e_active_asserted_sel_no_longer_latches_critical_714(api, seed, monkeypatch):
+    # #714 — an active (asserted) critical SEL entry no longer forces Critical while the live
+    # sensors read green; the SEL is history, not current state (matches the Redfish rollup).
     _consent_on(api, seed, monkeypatch)
     admin = seed.user('root', role='admin', tenant_id='default')
     api.set_manager(CID, _mgr(api, _get_node_ip='10.0.0.9', _ssh_run_command_output=_SEL_ASSERTED))
     body = api.as_user(admin).get(HW_ROUTE).get_json()
-    assert body['health'] == 'critical'
-    assert any(r['source'] == 'event' and 'PSU2' in r['label'] for r in body['health_reasons'])
+    assert body['health'] == 'ok'
+    assert all(r['source'] != 'event' for r in body['health_reasons'])
 
 
 def test_read_bad_node_name_is_400(api, seed, monkeypatch):

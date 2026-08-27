@@ -214,9 +214,20 @@ def test_pin_preserves_port_and_userinfo(monkeypatch):
     assert pinned == 'http://user:pw@8.8.8.8:8443/p'
 
 
-def test_pin_ip_literal_unchanged():
+def test_pin_ip_literal_unchanged(monkeypatch):
+    # already an IP literal → nothing to rebind, and the resolver must not even be consulted
+    def _boom(host):
+        raise AssertionError('resolver must not run for an IP literal')
+    monkeypatch.setattr(url_security, '_resolve_all', _boom)
     assert resolve_and_pin_url('http://93.184.216.34/x',
                                allowed_schemes=('https', 'http')) == 'http://93.184.216.34/x'
+
+
+def test_pin_rejects_rebind_to_metadata(monkeypatch):
+    monkeypatch.setattr(url_security, '_resolve_all',
+                        _fake_resolver({'rebind.evil.example': ['169.254.169.254']}))
+    with pytest.raises(SsrfError):
+        resolve_and_pin_url('http://rebind.evil.example/latest/meta-data/', allowed_schemes=('https', 'http'))
 
 
 def test_pin_rejects_rebind_to_loopback(monkeypatch):

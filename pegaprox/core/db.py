@@ -514,7 +514,18 @@ class PegaProxDB:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_migration_timestamp ON migration_history(timestamp DESC)
         ''')
-        
+
+        # #720 — persist SOFT (non-HA) node maintenance so it survives a PegaProx restart. Native HA
+        # maintenance is re-derived from PVE on each poll (#78) and is NOT stored here.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS node_maintenance (
+                cluster_id TEXT NOT NULL,
+                node TEXT NOT NULL,
+                entered_at TEXT NOT NULL,
+                PRIMARY KEY (cluster_id, node)
+            )
+        ''')
+
         # Server settings table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS server_settings (
@@ -4176,6 +4187,27 @@ class PegaProxDB:
     # AFFINITY RULES OPERATIONS
     # ========================================
     
+    def save_node_maintenance(self, cluster_id: str, node: str):
+        """#720 — persist a soft (non-HA) node-maintenance entry so it survives a PegaProx restart."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO node_maintenance (cluster_id, node, entered_at) VALUES (?, ?, '
+            'COALESCE((SELECT entered_at FROM node_maintenance WHERE cluster_id=? AND node=?), ?))',
+            (cluster_id, node, cluster_id, node, datetime.now().isoformat()))
+        self.conn.commit()
+
+    def remove_node_maintenance(self, cluster_id: str, node: str):
+        """#720 — drop a persisted soft-maintenance entry on exit."""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM node_maintenance WHERE cluster_id=? AND node=?', (cluster_id, node))
+        self.conn.commit()
+
+    def get_node_maintenance(self, cluster_id: str) -> list:
+        """#720 — [(node, entered_at), ...] of a cluster's persisted soft maintenance, for restore."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT node, entered_at FROM node_maintenance WHERE cluster_id=?', (cluster_id,))
+        return [(r['node'], r['entered_at']) for r in cursor.fetchall()]
+
     def get_affinity_rules(self, cluster_id: str = None) -> dict:
         """Get affinity rules"""
         cursor = self.conn.cursor()

@@ -3314,6 +3314,88 @@ def _ensure_block_device(pve_mgr, node, vol_id, dev_path, storage_type):
     return _is_block()
 
 
+def _parse_rbd_uri(rbd_uri):
+    """Split a librbd `pvesm path` URI into (pool, image, opts).
+
+    A non-krbd RBD storage returns `rbd:<pool>/<image>[:k=v[:k=v...]]` from
+    `pvesm path` (conf / id / keyring / mon_host are the ones PVE emits). Returns
+    (pool, image, {k: v}) or (None, None, {}) when there's no parseable
+    pool/image. Kept separate from the mapping so it's unit-testable without a node.
+    """
+    body = rbd_uri[4:] if str(rbd_uri or '').startswith('rbd:') else str(rbd_uri or '')
+    parts = body.split(':')
+    pool_image = parts[0].strip()
+    if '/' not in pool_image:
+        return None, None, {}
+    pool, image = pool_image.split('/', 1)
+    opts = {}
+    for p in parts[1:]:
+        if '=' in p:
+            k, v = p.split('=', 1)
+            k, v = k.strip(), v.strip()
+            if k and v:
+                opts[k] = v
+    if not (pool and image):
+        return None, None, {}
+    return pool, image, opts
+
+
+def _rbd_map_command(pool, image, opts):
+    """Build the `rbd map` command line for a librbd URI, honouring whatever
+    conf / id / keyring / mon_host the URI carried (a PVE-managed pool needs the
+    storage's own conf+keyring; the default client.admin case carries none)."""
+    flags = ""
+    if opts.get('id'):
+        flags += f" --id {shlex.quote(opts['id'])}"
+    if opts.get('conf'):
+        flags += f" --conf {shlex.quote(opts['conf'])}"
+    if opts.get('keyring'):
+        flags += f" --keyring {shlex.quote(opts['keyring'])}"
+    if opts.get('mon_host'):
+        flags += f" -m {shlex.quote(opts['mon_host'])}"
+    return f"rbd map{flags} -p {shlex.quote(pool)} {shlex.quote(image)}"
+
+
+def _map_rbd_uri_to_device(pve_mgr, node, vol_id, rbd_uri):
+    """Map a NON-krbd RBD librbd URI to a kernel /dev/rbdN block device.
+
+    MK 2026-08-23 (#722 mluenzer) — a krbd=0 (librbd/qemu) Ceph storage makes
+    `pvesm path` return `rbd:<pool>/<image>:conf=...:id=...:keyring=...` instead
+    of a /dev path, because the image is never kernel-mapped for such a storage.
+    The raw dd V2P copy still needs an actual block device, so map it explicitly
+    and return the resulting /dev/rbdN (None if it can't be mapped). `rbd map`
+    prints the device it created on success; if the image is already mapped it
+    errors with no stdout, so fall back to `rbd device list` to resolve it.
+
+    CAVEAT (validate in E2E, #722): this leaves a kernel map on the image that
+    PVE — which drives this storage through librbd, not the kernel — won't tear
+    down. The migration teardown should `rbd unmap` it once the copy is done.
+    """
+    pool, image, opts = _parse_rbd_uri(rbd_uri)
+    if not (pool and image):
+        logging.warning(f"[V2P] unparseable RBD URI (no pool/image): {str(rbd_uri)[:80]}")
+        return None
+    rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"{_rbd_map_command(pool, image, opts)} 2>/dev/null; "
+        f"udevadm settle 2>/dev/null || true", timeout=45)
+    for line in str(out or '').splitlines():
+        line = line.strip()
+        if line.startswith('/dev/rbd'):
+            return line
+    # No device on stdout (already mapped / older rbd) — resolve from the kernel
+    # map table. `rbd device list` reads local /sys, so it needs no cluster auth.
+    rc2, out2, _ = _pve_node_exec(pve_mgr, node,
+        "rbd device list --format json 2>/dev/null", timeout=20)
+    try:
+        import json as _json
+        for row in _json.loads(str(out2 or '').strip() or '[]'):
+            if row.get('pool') == pool and row.get('image') == image and row.get('device'):
+                return str(row['device']).strip()
+    except Exception as _e:
+        logging.debug(f"[V2P] rbd device list parse failed: {_e}")
+    return None
+
+
 def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes, errbuf=None):
     """Robustly allocate a disk via pvesm alloc.
 
@@ -3478,6 +3560,28 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes, errb
                 logging.info(f"[V2P] Disk allocated: {vol_id} → {dev_path} (via: {attempt_cmd[:60]})")
                 return vol_id, dev_path
 
+            # MK 2026-08-23 (#722 mluenzer) — non-krbd RBD storage: `pvesm path`
+            # returns a librbd URI (rbd:<pool>/<image>:conf=...:keyring=...) rather
+            # than a /dev path, so the `startswith('/')` gate above rejected the
+            # valid URI and the alloc died with "volume path could not be resolved".
+            # Map the URI to a real /dev/rbdN so the raw dd copy has a block device.
+            if dev_path.startswith('rbd:') and rc_p == 0:
+                mapped = _map_rbd_uri_to_device(pve_mgr, node, vol_id, dev_path)
+                if mapped and _ensure_block_device(pve_mgr, node, vol_id, mapped, 'rbd'):
+                    logging.info(f"[V2P] Disk allocated (non-krbd RBD mapped): {vol_id} → {mapped}")
+                    return vol_id, mapped
+                logging.error(f"[V2P] {vol_id}: non-krbd RBD URI could not be mapped to a "
+                              f"block device — failing alloc to avoid a phantom-file write")
+                if errbuf is not None:
+                    errbuf.append(
+                        f"volume {vol_id} is on a non-krbd RBD storage and its image could not be "
+                        f"kernel-mapped for the raw copy — enable 'krbd' on the storage, or make sure "
+                        f"the ceph keyring/conf the storage references is readable on {node}.")
+                # drop the empty volume so it doesn't orphan (same as the krbd guard)
+                _pve_node_exec(pve_mgr, node,
+                    f"pvesm free {shlex.quote(vol_id)} 2>/dev/null", timeout=60)
+                return None, None
+
             # path didn't resolve. Only trust a storage-type-derived path when
             # the alloc itself was genuinely clean (rc==0) — for a non-zero
             # benign-warning result we can't assume the LV exists, so fall through
@@ -3523,6 +3627,12 @@ def _pvesm_alloc_disk(pve_mgr, node, storage, vmid, disk_index, size_bytes, errb
                 if dev_path.startswith('/'):
                     logging.info(f"[V2P] Disk allocated via API: {vol_id} → {dev_path}")
                     return vol_id, dev_path
+                # #722 — non-krbd RBD here too: map the librbd URI to a block device.
+                if dev_path.startswith('rbd:'):
+                    mapped = _map_rbd_uri_to_device(pve_mgr, node, vol_id, dev_path)
+                    if mapped and _ensure_block_device(pve_mgr, node, vol_id, mapped, 'rbd'):
+                        logging.info(f"[V2P] Disk allocated via API (non-krbd RBD mapped): {vol_id} → {mapped}")
+                        return vol_id, mapped
                 logging.warning(f"[V2P] API alloc OK but path invalid: {vol_id} → {dev_path[:100]}")
     except Exception as e:
         logging.debug(f"[V2P] API alloc failed: {e}")

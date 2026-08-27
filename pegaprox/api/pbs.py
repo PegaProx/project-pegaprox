@@ -121,39 +121,94 @@ def update_pbs_server(pbs_id):
     if not ok:
         return err
     data = request.json or {}
-    
-    if pbs_id not in pbs_managers:
-        # Try loading from DB
+
+    # Resolve the CURRENT stored config (in-memory manager preferred, else DB row) so we can detect
+    # a host/port change BEFORE persisting anything.
+    old_mgr = pbs_managers.get(pbs_id)
+    old_host, old_port = None, None
+    if old_mgr is not None:
+        old_host, old_port = old_mgr.host, old_mgr.port
+    else:
         db = get_db()
         row = db.conn.cursor().execute("SELECT * FROM pbs_servers WHERE id = ?", (pbs_id,)).fetchone()
         if not row:
             return jsonify({'error': 'PBS server not found'}), 404
-    
-    save_pbs_server(pbs_id, data)
+        try:
+            _rk = row.keys()
+            old_host = row['host'] if 'host' in _rk else None
+            old_port = row['port'] if 'port' in _rk else None
+        except Exception:
+            old_host, old_port = None, None
 
-    # MK May 2026 (#469 port) — track whether saved-creds are being preserved AND
-    # the host moved at the same time. If yes: don't auto-connect, because the
-    # operation could be a credential-exfil attempt where the user keeps the
-    # password (sent as ********) but points the server at an attacker-controlled
-    # host. We'd otherwise send the real password to that host on connect.
-    credentials_preserved = False
-    host_changed = False
+    # NS Aug 2026 (CodeAnt) — a non-numeric submitted port must not blow up change-detection with an
+    # unhandled ValueError (500). Reject it up front; everything below assumes a parseable port.
+    _new_port = data.get('port')
+    if _new_port not in (None, ''):
+        try:
+            _new_port = int(_new_port)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid port'}), 400
+    else:
+        _new_port = None
+    # NS Aug 2026 (CodeAnt) — treat an unstored port as the PBS default (8007) so a port change from
+    # "none stored" to a new value still counts as an endpoint change and trips the cred-exfil guard.
+    try:
+        _old_port_i = int(old_port) if old_port not in (None, '') else 8007
+    except (TypeError, ValueError):
+        _old_port_i = 8007
+    host_changed = (data.get('host') and data.get('host') != old_host) or \
+                   (_new_port is not None and _new_port != _old_port_i)
 
-    # Recreate manager with new config
-    if pbs_id in pbs_managers:
-        old_mgr = pbs_managers[pbs_id]
-        if (data.get('host') and data.get('host') != old_mgr.host) or \
-           (data.get('port') and int(data.get('port', 8007)) != old_mgr.port):
-            host_changed = True
-        # Preserve credentials if masked
+    # NS Aug 2026 (Aikido 469089267 + AI-pentest re-check) — FAIL CLOSED on a host/port change: every
+    # credential the STORED config holds must be freshly re-entered, otherwise it would be shipped to
+    # the caller-chosen new host (on save+auto-connect, the next daemon reload, or a follow-up /test).
+    # The first guard only checked the '********' sentinel and gated each clause on the key being
+    # PRESENT — so simply OMITTING password/api_token_secret/ssh_key bypassed it and the stored secret
+    # was still preserved against the attacker host. An omitted OR blank OR masked value is NOT a
+    # re-entry.
+    def _fresh(key):
+        return data.get(key) not in (None, '', '********')
+    if host_changed:
+        if old_mgr is not None:
+            _stored = {'password': bool(getattr(old_mgr, 'password', '')),
+                       'api_token_secret': bool(getattr(old_mgr, 'api_token_secret', '')),
+                       'ssh_key': bool(getattr(old_mgr, 'ssh_key', ''))}
+        else:
+            # disabled/not-loaded server (old_mgr None): introspect the encrypted DB columns — the
+            # earlier "require one connect cred" shortcut still let an attacker re-point a disabled
+            # server by supplying a dummy password and OMITTING api_token_secret/ssh_key, which
+            # save_pbs_server then preserved and shipped to the new host.
+            def _rowhas(col):
+                try:
+                    return bool(row[col])
+                except Exception:
+                    return False
+            _stored = {'password': _rowhas('pass_encrypted'),
+                       'api_token_secret': _rowhas('api_token_secret_encrypted'),
+                       'ssh_key': _rowhas('ssh_key_encrypted')}
+        _stale = [k for k, present in _stored.items() if present and not _fresh(k)]
+        if _stale:
+            logging.warning(f"[PBS:{pbs_id}] Rejected host/port change without re-entering {_stale} (cred-exfil guard)")
+            return jsonify({'error': 'Re-enter the PBS credentials when changing the host or port.'}), 400
+
+    # NS Aug 2026 — normalise the port so an empty/invalid value can't hit int('') in save_pbs_server
+    # (500). We already parsed/validated it above; drop an empty one so the stored default is used.
+    if data.get('port') in ('', None):
+        data.pop('port', None)
+    elif _new_port is not None:
+        data['port'] = _new_port
+
+    # Host unchanged (or full creds supplied): preserve masked creds from the stored config so the
+    # rebuilt manager keeps working. (save_pbs_server also preserves at the DB layer.)
+    if old_mgr is not None:
         if data.get('password') == '********':
             data['password'] = old_mgr.password
-            credentials_preserved = True
         if data.get('api_token_secret') == '********':
             data['api_token_secret'] = old_mgr.api_token_secret
-            credentials_preserved = True
         if data.get('ssh_key') == '********':
             data['ssh_key'] = getattr(old_mgr, 'ssh_key', '')
+
+    save_pbs_server(pbs_id, data)
 
     try:
         mgr = PBSManager(pbs_id, data)
@@ -161,13 +216,7 @@ def update_pbs_server(pbs_id):
         return jsonify({'error': 'Invalid PBS host'}), 400
 
     if data.get('enabled', True):
-        if host_changed and credentials_preserved:
-            # cred-exfil guard — operator must explicitly re-test the new host
-            mgr.connected = False
-            mgr.last_error = 'Host changed — auto-connect skipped for security (preserved credentials). Use Test Connection manually after verifying the new host.'
-            logging.warning(f"[PBS:{mgr.name}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
-        else:
-            mgr.connect()
+        mgr.connect()
     pbs_managers[pbs_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'pbs.updated', f"Updated PBS server: {data.get('name', pbs_id)}")

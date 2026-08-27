@@ -511,6 +511,16 @@ def check_vm_affinity(cluster_id, vmid, target_node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
 
+    # NS Aug 2026 (AI-pentest) — per-VM object check; cluster access alone let a VM-ACL/pool-scoped
+    # user enumerate a foreign VM's affinity peers + node placement by vmid substitution. Mirror the
+    # migration-history sibling above.
+    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.rbac import user_can_access_vm
+    _u = load_users().get(request.session['user'], {})
+    _u['username'] = request.session['user']
+    if not user_can_access_vm(_u, cluster_id, vmid, 'vm.view'):
+        return jsonify({'error': 'Permission denied'}), 403
+
     result = check_affinity_violation(cluster_id, vmid, target_node)
     return jsonify(result)
 

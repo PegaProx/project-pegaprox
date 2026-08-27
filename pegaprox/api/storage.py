@@ -482,6 +482,21 @@ def create_storage_cluster(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
 
+    # NS Aug 2026 (Aikido 469089261) — the auto_balance flag configured here drives a USERLESS
+    # background worker (run_auto_storage_balance) that moves disks of EVERY VM in the cluster with no
+    # per-VM authz. A background worker can't do per-VM checks, so confine the enable path to clusters
+    # the caller's TENANT owns; a user who reached this cluster only via a VM-ACL / pool grant (the
+    # #248/#555 fallbacks in check_cluster_access) must not enable cluster-wide balancing. Admins /
+    # default-tenant (get_user_clusters None) unaffected.
+    from pegaprox.utils.rbac import get_user_clusters as _guc
+    from pegaprox.utils.auth import build_authz_user
+    _usr = request.session.get('user', 'system')
+    # #491 — floor an admin-owned scoped token to its effective_role before the tenant-ownership
+    # check (matches check_cluster_access / trigger_balance_now), else the raw admin role bypasses it.
+    _allowed = _guc(build_authz_user(_usr, request.session))
+    if _allowed is not None and cluster_id not in _allowed:
+        return jsonify({'error': 'Access denied'}), 403
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -536,9 +551,20 @@ def update_storage_cluster(cluster_id, sc_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
 
+    # NS Aug 2026 (Aikido 469089261) — same tenant-ownership confinement as create: editing
+    # auto_balance/enabled here arms the userless cluster-wide disk-move worker.
+    from pegaprox.utils.rbac import get_user_clusters as _guc
+    from pegaprox.utils.auth import build_authz_user
+    _usr = request.session.get('user', 'system')
+    # #491 — floor an admin-owned scoped token to its effective_role before the tenant-ownership
+    # check (matches check_cluster_access / trigger_balance_now), else the raw admin role bypasses it.
+    _allowed = _guc(build_authz_user(_usr, request.session))
+    if _allowed is not None and cluster_id not in _allowed:
+        return jsonify({'error': 'Access denied'}), 403
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
     data = request.json or {}
     

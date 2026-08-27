@@ -45,7 +45,10 @@ bp = Blueprint('webauthn', __name__)
 
 # MK: challenges live in memory, keyed by (username, ceremony).
 # 5 min TTL. Sweeping on every touch keeps the map small without a cron.
-_challenges = {}  # {(user, 'register'|'auth'): (state, expiry)}
+_challenges = {}  # {(user, 'register'|'auth'|'proof'[, nonce]): (state, expiry)}
+import threading as _threading
+_challenge_lock = _threading.Lock()  # NS Aug 2026 (CodeAnt) — serialize concurrent match/pop of the
+#                                      same auth ceremony so two finishes can't reuse one challenge
 
 
 def _sweep_challenges():
@@ -299,7 +302,17 @@ def auth_begin():
         credentials=creds,
         user_verification=UserVerificationRequirement.PREFERRED,
     )
-    _challenges[(username, 'auth')] = (state, time.time() + 300)
+    # NS Aug 2026 (AI-pentest) — key each begin under a unique nonce instead of a single
+    # (username,'auth') slot, so a concurrent (unauthenticated) begin for the same username can't
+    # clobber a victim's in-flight ceremony (targeted login DoS). auth_finish tries every live
+    # ceremony for the user; the matching assertion wins, decoy begins are ignored. Bound per user.
+    import secrets as _secrets
+    _live = [k for k in list(_challenges) if len(k) == 3 and k[0] == username and k[1] == 'auth']
+    while len(_live) >= 5:
+        _oldest = min(_live, key=lambda k: _challenges[k][1])
+        _challenges.pop(_oldest, None)
+        _live.remove(_oldest)
+    _challenges[(username, 'auth', _secrets.token_hex(8))] = (state, time.time() + 120)
     return jsonify(dict(options))
 
 
@@ -316,10 +329,11 @@ def auth_finish():
     if not username:
         return jsonify({'error': 'username required'}), 400
 
-    stash = _challenges.pop((username, 'auth'), None)
-    if not stash:
+    # NS Aug 2026 (AI-pentest) — try every in-flight ceremony for this user (keyed by nonce in
+    # auth_begin); the matching one wins, so a concurrent attacker begin can't invalidate the victim's.
+    _keys = [k for k in list(_challenges) if len(k) == 3 and k[0] == username and k[1] == 'auth']
+    if not _keys:
         return jsonify({'error': 'No auth ceremony in progress or challenge expired'}), 400
-    state = stash[0]
 
     creds = _load_attested_list(username)
     if not creds:
@@ -327,11 +341,22 @@ def auth_finish():
 
     srv, err = _get_server_or_error()
     if err: return err
-    try:
-        matched_cred = srv.authenticate_complete(state, credentials=creds, response=data)
-    except Exception as e:
-        logging.warning(f"[WebAuthn] auth_complete failed for {_sl(username)}: {_sl(str(e))}")
-        return jsonify({'error': f'Verification failed: {e}'}), 400
+    matched_cred = None
+    _last_err = None
+    with _challenge_lock:  # one ceremony is matched+consumed atomically per user
+        for _k in sorted(_keys, key=lambda k: (_challenges.get(k) or (None, 0))[1], reverse=True):
+            _st = _challenges.get(_k)
+            if _st is None:
+                continue  # already consumed by a racing finish
+            try:
+                matched_cred = srv.authenticate_complete(_st[0], credentials=creds, response=data)
+                _challenges.pop(_k, None)  # consume only the ceremony that actually matched
+                break
+            except Exception as e:
+                _last_err = e
+    if matched_cred is None:
+        logging.warning(f"[WebAuthn] auth_complete failed for {_sl(username)}: {_sl(str(_last_err))}")
+        return jsonify({'error': f'Verification failed: {_last_err}'}), 400
 
     # Counter lives on the AuthenticatorData in the assertion response. fido2 2.x
     # doesn't expose it on the return value, so we parse it ourselves for our

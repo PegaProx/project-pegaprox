@@ -12,7 +12,7 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
-from pegaprox.utils.auth import require_auth, load_users
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 
 from pegaprox.utils.rbac import (
@@ -136,9 +136,8 @@ def global_search():
     
     results = []
     user = request.session.get('user', '')
-    users_db = load_users()
-    user_data = users_db.get(user, {})
-    user_data['username'] = user
+    # #491 — token-scoped identity so an admin-owned viewer/user token doesn't get all-cluster search results
+    user_data = build_authz_user(user, request.session)
     # #285: cluster access is tenant/group-based — resolve via the RBAC helper,
     # not a non-existent user['clusters'] field. The old read was always [] so
     # the filter below never fired and non-admins saw every cluster. MK
@@ -293,8 +292,8 @@ def global_summary():
     """
     try:
         user = request.session.get('user', '')
-        users_db = load_users()
-        user_data = users_db.get(user, {})
+        # #491 — token-scoped identity (build_authz_user applies the token's effective_role)
+        user_data = build_authz_user(user, request.session)
         # #285: tenant/group-based access via the RBAC helper (was reading a
         # missing user['clusters'] → empty → no filtering). MK
         accessible_clusters = get_user_clusters(user_data)  # None = admin / all
@@ -791,8 +790,8 @@ def search_vms_by_tag():
     results = []
     
     user = request.session.get('user', '')
-    users_db = load_users()
-    user_data = users_db.get(user, {})
+    # #491 — token-scoped identity (build_authz_user applies the token's effective_role)
+    user_data = build_authz_user(user, request.session)
     # #285: tenant/group-based access via the RBAC helper (was reading a missing
     # user['clusters'] → empty → tags leaked across every cluster). MK
     accessible_clusters = get_user_clusters(user_data)  # None = admin / all

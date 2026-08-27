@@ -439,7 +439,11 @@ def drift_status(cluster_id):
 
 
 @bp.route('/api/clusters/<cluster_id>/drift/events', methods=['GET'])
-@require_auth(perms=['cluster.view'])
+# NS Aug 2026 (AI-pentest) — drift events carry the full before/after VM config diff (cloud-init
+# cipassword/sshkeys, disk/net layout). Gate reads at admin.audit like the scan/baseline/acknowledge
+# siblings, not cluster.view — a plain cluster viewer (or per-VM-ACL user) must not read other VMs'
+# secrets out of the drift log.
+@require_auth(perms=['admin.audit'])
 def list_events(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err

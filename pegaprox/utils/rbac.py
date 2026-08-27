@@ -306,14 +306,15 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     if not tenants_db:
         tenants_db = load_tenants()
     
-    # admin sees all
-    if user.get('role') == ROLE_ADMIN:
+    # admin sees all — honor the token-scoped effective_role (#491) so an admin-owned API token
+    # restricted to viewer/user doesn't inherit the owner's all-cluster access.
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return None  # None means all clusters
-    
+
     tenant_id = user.get('tenant_id', DEFAULT_TENANT_ID)
-    
+
     # MK: If user has default tenant but a tenant-specific role, use the role's tenant
-    role = user.get('role', ROLE_VIEWER)
+    role = user.get('effective_role', user.get('role', ROLE_VIEWER))
     if tenant_id == DEFAULT_TENANT_ID and role not in BUILTIN_ROLES:
         custom_roles = load_custom_roles()
         for tid, roles in custom_roles.get('tenants', {}).items():

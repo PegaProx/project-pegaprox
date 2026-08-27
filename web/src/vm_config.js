@@ -224,8 +224,13 @@
             const [showAddSerial, setShowAddSerial] = useState(false);
             const [showAddEfiDisk, setShowAddEfiDisk] = useState(false);  // NS: EFI Disk modal
             const [showAddTpm, setShowAddTpm] = useState(false);          // NS: TPM modal
+            const [showAddCloudInit, setShowAddCloudInit] = useState(false);
             const [efiStorage, setEfiStorage] = useState('');             // NS: Selected storage for EFI
             const [tpmStorage, setTpmStorage] = useState('');             // NS: Selected storage for TPM
+            const [cloudInitStorage, setCloudInitStorage] = useState('');
+            const [cloudInitFormat, setCloudInitFormat] = useState('raw');
+            const [cloudInitBus, setCloudInitBus] = useState('ide');
+            const [cloudInitDevice, setCloudInitDevice] = useState('2');
             const [selectedPciDevice, setSelectedPciDevice] = useState(null);
             const [selectedUsbDevice, setSelectedUsbDevice] = useState(null);
             const [pciOptions, setPciOptions] = useState({ pcie: true, rombar: true });
@@ -1147,11 +1152,21 @@
                 if (Object.keys(changes).length === 0) return;
 
                 // Validate VM name format (DNS-compatible)
+                // KG Aug 2026 — this demanded a SINGLE label starting with a LETTER, which is
+                // stricter than both PVE and our own create wizard (which doesn't check the name
+                // at all). PVE's `name`/`hostname` are format=dns-name: dot-separated labels,
+                // each up to 63 chars, and a label may start with a digit. So a guest created
+                // here as "10.158.163.101-app01" could never be renamed afterwards — the request
+                // was rejected client-side and never reached the API. Mirror dns-name instead.
                 const nameValue = 'name' in changes ? changes.name : ('hostname' in changes ? changes.hostname : undefined);
                 if (nameValue !== undefined && nameValue !== '') {
-                    const dnsRegex = /^[a-zA-Z]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$/;
-                    if (!dnsRegex.test(nameValue)) {
-                        addToast(t('invalidDnsName') || 'Invalid name: must start with a letter, only alphanumeric and hyphens allowed, max 63 characters', 'error');
+                    const dnsLabel = '[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?';
+                    const dnsRegex = new RegExp(`^${dnsLabel}(?:\\.${dnsLabel})*$`);
+                    // The per-label rule above does not bound the total length, and PVE declares
+                    // the LXC hostname with maxLength 255 — check it here instead of letting the
+                    // API reject the request.
+                    if (!dnsRegex.test(nameValue) || nameValue.length > 255) {
+                        addToast(t('invalidDnsName'), 'error');
                         return;
                     }
                 }
@@ -1443,13 +1458,68 @@
                 return parts.join(':');
             };
 
+            const diskBusSlotLimits = { ide: 4, scsi: 30, sata: 30, virtio: 30, mp: 30 };
+            const getDiskBusSlots = (bus) => Array.from(
+                { length: diskBusSlotLimits[bus] || 30 },
+                (_, index) => String(index)
+            );
+
             const getNextDiskId = (busType = 'scsi') => {
                 const existing = config?.disks?.filter(d => d.id.startsWith(busType)).map(d => parseInt(d.id.replace(busType, ''))) || [];
-                for (let i = 0; i < 30; i++) {
-                    if (!existing.includes(i)) return `${busType}${i}`;
+                for (const slot of getDiskBusSlots(busType)) {
+                    if (!existing.includes(Number(slot))) return `${busType}${slot}`;
                 }
                 return `${busType}0`;
             };
+
+            const getFirstFreeCloudInitDevice = (bus) => {
+                const used = new Set(Object.keys(config?.raw || {}));
+                return getDiskBusSlots(bus).find(slot => !used.has(`${bus}${slot}`)) || '';
+            };
+
+            const getCloudInitFormatsForStorage = (storageName) => {
+                // NS Aug 2026 — a cloud-init drive is a tiny config disk; keep the format valid for
+                // the target: raw-first everywhere (Proxmox's own default, cf. templates_lib.py which
+                // attaches plain `storage:cloudinit`), block storages are raw-only, and vmdk is not a
+                // valid cloud-init format so it's dropped. Prevents PVE rejecting qcow2-on-LVM /
+                // vmdk-cloud-init combos the original PR offered.
+                const storageType = storageList.find(s => s.storage === storageName)?.type;
+                if (!storageType) return ['raw', 'qcow2'];
+                switch (storageType) {
+                    case 'dir': case 'nfs': case 'cifs': case 'glusterfs': case 'btrfs':
+                        return ['raw', 'qcow2'];
+                    case 'lvm': case 'lvmthin':
+                    case 'zfspool': case 'zfs': case 'rbd': case 'iscsi': case 'iscsidirect':
+                        return ['raw'];
+                    default:
+                        return ['raw', 'qcow2'];
+                }
+            };
+
+            // memoized so the reset-effect below doesn't fire on every render (stable array identity)
+            const cloudInitStorageFormats = useMemo(
+                () => cloudInitStorage ? getCloudInitFormatsForStorage(cloudInitStorage) : ['raw', 'qcow2'],
+                [cloudInitStorage, storageList]
+            );
+
+            useEffect(() => {
+                if (!showAddCloudInit) return;
+                const preferredBus = getFirstFreeCloudInitDevice('ide') ? 'ide'
+                    : getFirstFreeCloudInitDevice('scsi') ? 'scsi'
+                    : 'sata';
+                setCloudInitBus(preferredBus);
+                setCloudInitDevice(getFirstFreeCloudInitDevice(preferredBus));
+            }, [showAddCloudInit]);
+
+            useEffect(() => {
+                if (!cloudInitStorage) {
+                    setCloudInitFormat('raw');
+                    return;
+                }
+                if (!cloudInitStorageFormats.includes(cloudInitFormat)) {
+                    setCloudInitFormat(cloudInitStorageFormats[0] || 'raw');
+                }
+            }, [cloudInitStorage, cloudInitStorageFormats, cloudInitFormat]);
 
             const getNextNetId = () => {
                 const existing = config?.networks?.map(n => parseInt(n.id.replace('net', ''))) || [];
@@ -2308,6 +2378,67 @@
                                                             </div>
                                                         </div>
                                                     )}
+
+                                                    <div className="mt-6 pt-6 border-t border-proxmox-border">
+                                                        <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+                                                            <Icons.Cloud className="w-4 h-4 text-cyan-400" />
+                                                            {t('cloudInitDrive')}
+                                                        </h3>
+                                                        {(() => {
+                                                            const cloudInitDrive = Object.entries(config?.raw || {}).find(([key, value]) =>
+                                                                /^(ide|scsi|sata)\d+$/.test(key) && String(value).includes('cloudinit')
+                                                            );
+                                                            return cloudInitDrive ? (
+                                                                <div className="p-3 bg-proxmox-dark rounded-lg">
+                                                                    <div className="flex items-center justify-between">
+                                                                        <div className="flex items-center gap-2 min-w-0">
+                                                                            <Icons.Cloud className="w-4 h-4 text-cyan-400 shrink-0" />
+                                                                            <span className="text-xs text-gray-500 font-mono">{cloudInitDrive[0]}</span>
+                                                                            <span className="text-sm font-mono text-gray-300 truncate">{cloudInitDrive[1]}</span>
+                                                                        </div>
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                if (!confirm(t('confirmDeleteCloudInitDrive'))) return;
+                                                                                try {
+                                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                                                                        method: 'PUT',
+                                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                                        body: JSON.stringify({ delete: cloudInitDrive[0] })
+                                                                                    });
+                                                                                    if (res?.ok) {
+                                                                                        addToast(t('cloudInitDriveRemoved'), 'success');
+                                                                                        fetchConfig();
+                                                                                    } else {
+                                                                                        const err = await res.json();
+                                                                                        addToast(err.error || t('cloudInitDriveRemoveFailed'), 'error');
+                                                                                    }
+                                                                                } catch (e) {
+                                                                                    addToast(t('connectionError'), 'error');
+                                                                                }
+                                                                            }}
+                                                                            className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
+                                                                            title={t('remove')}
+                                                                        >
+                                                                            <Icons.Trash className="w-3.5 h-3.5" />
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
+                                                                    <div className="flex items-center justify-between gap-4">
+                                                                        <span className="text-sm text-gray-500">{t('noCloudInitDrive')}</span>
+                                                                        <button
+                                                                            onClick={() => setShowAddCloudInit(true)}
+                                                                            className="shrink-0 text-xs px-3 py-1.5 bg-cyan-500/20 text-cyan-400 rounded hover:bg-cyan-500/30 flex items-center gap-1"
+                                                                        >
+                                                                            <Icons.Plus className="w-3 h-3" />
+                                                                            {t('addCloudInitDrive')}
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </div>
                                                     
                                                     {/* PCI/USB/Serial Passthrough Section */}
                                                     <div className="mt-6 pt-6 border-t border-proxmox-border">
@@ -5755,6 +5886,118 @@
                                             }}
                                             disabled={!efiStorage || passthroughLoading} 
                                             className="px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded disabled:opacity-50"
+                                        >
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showAddCloudInit && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                    <Icons.Cloud className="text-cyan-400" />
+                                    {t('addCloudInitDrive')}
+                                </h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('storage')}</label>
+                                        <select
+                                            value={cloudInitStorage}
+                                            onChange={(e) => {
+                                                setCloudInitStorage(e.target.value);
+                                                const nextFormats = getCloudInitFormatsForStorage(e.target.value);
+                                                setCloudInitFormat(nextFormats.includes(cloudInitFormat) ? cloudInitFormat : (nextFormats[0] || 'raw'));
+                                            }}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                                <option value="">{t('selectStorage')}</option>
+                                            {storageList.filter(s => s.content?.includes('images')).map(s => (
+                                                <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
+                                            <select
+                                                value={cloudInitBus}
+                                                onChange={(e) => {
+                                                    const bus = e.target.value;
+                                                    setCloudInitBus(bus);
+                                                    setCloudInitDevice(getFirstFreeCloudInitDevice(bus));
+                                                }}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            >
+                                                <option value="ide">IDE</option>
+                                                <option value="scsi">SCSI</option>
+                                                <option value="sata">SATA</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('device')}</label>
+                                            <select
+                                                value={cloudInitDevice}
+                                                onChange={(e) => setCloudInitDevice(e.target.value)}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            >
+                                                {getDiskBusSlots(cloudInitBus).map(slot => {
+                                                    const driveId = `${cloudInitBus}${slot}`;
+                                                    const occupied = Boolean(config?.raw?.[driveId]);
+                                                    return <option key={slot} value={slot} disabled={occupied}>{driveId}{occupied ? ` (${t('inUse')})` : ''}</option>;
+                                                })}
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('cloudInitDiskFormat')}</label>
+                                        <select
+                                            value={cloudInitFormat}
+                                            onChange={(e) => setCloudInitFormat(e.target.value)}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            disabled={cloudInitStorageFormats.length <= 1}
+                                        >
+                                            {cloudInitStorageFormats.map(format => (
+                                                <option key={format} value={format}>{format}</option>
+                                            ))}
+                                        </select>
+                                        {cloudInitStorageFormats.length === 1 && (
+                                            <p className="text-xs text-gray-500 mt-1">{t('cloudInitDiskFormatLockedHint')}</p>
+                                        )}
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => setShowAddCloudInit(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button
+                                            onClick={async () => {
+                                                const driveId = `${cloudInitBus}${cloudInitDevice}`;
+                                                if (!cloudInitStorage || !cloudInitDevice || config?.raw?.[driveId]) return;
+                                                setPassthroughLoading(true);
+                                                try {
+                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/config`, {
+                                                        method: 'PUT',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ [driveId]: `${cloudInitStorage}:cloudinit,format=${cloudInitFormat}` })
+                                                    });
+                                                    if (res?.ok) {
+                                                        addToast(t('cloudInitDriveAdded'), 'success');
+                                                        setShowAddCloudInit(false);
+                                                        setCloudInitStorage('');
+                                                        setCloudInitFormat('raw');
+                                                        fetchConfig();
+                                                    } else {
+                                                        const err = await res.json();
+                                                        addToast(err.error || t('cloudInitDriveAddFailed'), 'error');
+                                                    }
+                                                } catch (e) {
+                                                    addToast(t('connectionError'), 'error');
+                                                }
+                                                setPassthroughLoading(false);
+                                            }}
+                                            disabled={!cloudInitStorage || !cloudInitDevice || passthroughLoading}
+                                            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded disabled:opacity-50"
                                         >
                                             {passthroughLoading ? t('adding') : t('add')}
                                         </button>

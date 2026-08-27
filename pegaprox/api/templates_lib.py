@@ -479,6 +479,17 @@ def delete_custom_template(tpl_id):
         return jsonify({'error': 'cannot delete built-in template'}), 400
     try:
         c = get_db().conn.cursor()
+        # NS Aug 2026 (AI-pentest) — object-level authz: the catalog is world-readable, so without an
+        # owner check any vm.create holder could enumerate ids and wipe other users'/tenants' custom
+        # templates. Only the creator (or an admin) may delete.
+        c.execute('SELECT created_by FROM custom_cloud_templates WHERE id = ?', (tpl_id,))
+        _row = c.fetchone()
+        if _row is None:
+            return jsonify({'error': 'not found'}), 404
+        _owner = (_row['created_by'] if hasattr(_row, 'keys') else _row[0]) or ''
+        from pegaprox.models.permissions import ROLE_ADMIN
+        if _owner != _current_user() and request.session.get('role') != ROLE_ADMIN:
+            return jsonify({'error': 'Access denied'}), 403
         c.execute('DELETE FROM custom_cloud_templates WHERE id = ?', (tpl_id,))
         get_db().conn.commit()
         if c.rowcount == 0:

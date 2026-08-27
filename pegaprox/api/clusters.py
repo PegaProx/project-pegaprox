@@ -114,6 +114,10 @@ def get_clusters():
                 'status': 'running' if mgr.running else 'stopped',
                 'connected': mgr.is_connected,
                 'connection_error': mgr.connection_error,
+                # #16745 — presence only (never the key). Lets the Harden PVE Node UI warn before
+                # the sshd_hardening control (PermitRootLogin prohibit-password) cuts off PegaProx's
+                # own access on a cluster we reach by root password with no key deployed.
+                'has_ssh_key': bool(getattr(mgr.config, 'ssh_key', '')),
                 'migration_threshold': mgr.config.migration_threshold,
                 'migration_tolerance': getattr(mgr.config, 'migration_tolerance', 10),
                 'check_interval': mgr.config.check_interval,
@@ -1808,7 +1812,17 @@ def cancel_task(cluster_id, node, upid):
     # pool-scoped user can't cancel another pool/tenant's VM task on a shared cluster.
     _p = str(upid).split(':')
     _tvmid = _p[6] if len(_p) > 6 and _p[6].isdigit() else None
-    if _tvmid is not None:
+    if _tvmid is None:
+        # NS Aug 2026 (AI-pentest) — XCP-ng UPIDs aren't the PVE colon format, so the split yields no
+        # vmid and the gate was skipped, letting a pool-scoped user cancel another VM's XAPI task.
+        # Resolve the VM from the manager's tracked tasks.
+        try:
+            _tv = (getattr(mgr, '_active_tasks', {}) or {}).get(upid, {}).get('vmid')
+            if _tv is not None:
+                _tvmid = str(_tv)
+        except Exception:
+            pass
+    if _tvmid is not None and str(_tvmid).isdigit():
         from pegaprox.utils.auth import build_authz_user
         _u = build_authz_user(request.session.get('user', ''), request.session)
         if not user_can_access_vm(_u, cluster_id, int(_tvmid), 'vm.stop'):
@@ -2479,6 +2493,22 @@ def remove_from_proxmox_ha_by_sid(cluster_id, sid):
 def trigger_balance_now(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+
+    # NS Aug 2026 (Aikido 469089250) — balance-now spawns cluster-wide node-to-node VM migrations, so
+    # confine it to clusters the caller's TENANT owns; a user who reached this cluster only via a
+    # single VM-ACL / pool grant (the #248/#555 fallbacks in check_cluster_access) must not rebalance
+    # VMs outside their scope. Admins / default-tenant (get_user_clusters None) unaffected. Mirrors
+    # the cluster-group balance guard in groups.py.
+    _sess = getattr(request, 'session', {})
+    _usr = _sess.get('user', 'system')
+    # #491 — resolve the token-scoped identity (build_authz_user floors an admin-owned scoped
+    # token to its effective_role) so a scoped token that only reached this cluster via the
+    # #248/#555 ACL/pool fallbacks in check_cluster_access can't slip past the raw admin role.
+    from pegaprox.utils.auth import build_authz_user
+    _allowed = get_user_clusters(build_authz_user(_usr, _sess))
+    if _allowed is not None and cluster_id not in _allowed:
+        log_audit(_usr, 'balance.manual_denied', f"Denied balance-now on {cluster_id} (not tenant-owned)")
+        return jsonify({'error': 'Access denied'}), 403
 
     mgr = cluster_managers.get(cluster_id)
     if not mgr:

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from pegaprox.constants import (
     PEGAPROX_VERSION, PEGAPROX_BUILD,
-    SESSION_TIMEOUT, SSL_CERT_FILE, SSL_KEY_FILE,
+    SESSION_TIMEOUT, SSL_CERT_FILE, SSL_KEY_FILE, SSL_DIR,
     API_RATE_LIMIT, API_RATE_WINDOW, SSH_MAX_CONCURRENT,
 )
 from pegaprox import globals as g
@@ -1067,10 +1067,10 @@ def main(debug_mode=False):
                 _settings = load_server_settings()
                 if _settings.get('acme_enabled') and _settings.get('domain'):
                     from pegaprox.core.acme import check_and_renew
-                    if Path("/usr/lib/pegaprox").exists():
-                        _ssl = str(Path("/var/lib/pegaprox/ssl"))
-                    else:
-                        _ssl = str(Path(__file__).resolve().parent.parent / 'ssl')
+                    # #725 (nvaert1986) — renew INTO the dir the TLS listener loads
+                    # from (config/ssl). The old heuristic wrote to the retired
+                    # <root>/ssl, so a renewed cert was issued but never served.
+                    _ssl = SSL_DIR
                     _challenge_type = _settings.get('acme_challenge_type') or 'http-01'
                     _dns_provider = _settings.get('acme_dns_provider') or 'manual'
                     renewed = check_and_renew(

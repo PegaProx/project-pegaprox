@@ -127,9 +127,21 @@ def right_sizing(cluster_id):
         pass
 
     recommendations = []
+    # NS Aug 2026 (AI-pentest) — the metrics history is cluster-wide; filter the per-VM sizing output
+    # to VMs the caller can actually read, so a pool-/ACL-scoped user doesn't get every cluster VM's
+    # name/node/CPU/mem stats. Admin & cluster-wide are scope-wins (user_can_access_vm returns True).
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _authz_u = build_authz_user(request.session.get('user', ''), request.session)
     counts = {'oversized_cpu': 0, 'oversized_mem': 0, 'undersized_cpu': 0,
               'undersized_mem': 0, 'idle': 0, 'no_data': 0, 'ok': 0}
     for vmid, e in by_vm.items():
+        try:
+            _vmid_i = int(vmid)
+        except (TypeError, ValueError):
+            _vmid_i = None
+        if _vmid_i is None or not user_can_access_vm(_authz_u, cluster_id, _vmid_i, 'vm.view'):
+            continue
         cpus = e['cpu']; mems = e['mem']
         if e['running'] < min_samples or len(cpus) < min_samples:
             counts['no_data'] += 1
@@ -479,11 +491,24 @@ def top_talkers(cluster_id):
         v['_disk_io'] = (v.get('diskread') or 0) + (v.get('diskwrite') or 0)
         v['_net_io'] = (v.get('netin') or 0) + (v.get('netout') or 0)
 
+    # NS Aug 2026 (AI-pentest + CodeAnt) — filter to VMs the caller can read BEFORE ranking + limit,
+    # so a pool-/ACL-scoped user gets THEIR top-N, not (cluster top-N minus what they can't see).
+    # Admin & cluster-wide are scope-wins.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _authz_u = build_authz_user(request.session.get('user', ''), request.session)
+    def _vm_ok(v):
+        try:
+            return user_can_access_vm(_authz_u, cluster_id, int(v.get('vmid')), 'vm.view')
+        except (TypeError, ValueError):
+            return False
+    vms = [v for v in vms if _vm_ok(v)]
+
     sort_key, unit = _TOP_METRICS[metric]
     vms.sort(key=lambda x: x.get(sort_key) or 0, reverse=True)
     top = vms[:limit]
 
-    # trim payload to what the UI cares about
+    # trim payload to what the UI cares about (already authz-filtered above)
     out = []
     for v in top:
         out.append({

@@ -1894,6 +1894,7 @@
                             acme_dns_cloudflare_zone_id: serverSettings.acme_dns_cloudflare_zone_id || '',
                             acme_dns_cloudflare_account_id: serverSettings.acme_dns_cloudflare_account_id || '',
                             directory_url: serverSettings.acme_provider === 'custom' ? serverSettings.acme_directory_url : '',
+                            acme_allow_private_ca: !!serverSettings.acme_allow_private_ca,
                         })
                     });
                     const data = await resp.json();

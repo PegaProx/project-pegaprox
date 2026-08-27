@@ -3402,6 +3402,14 @@ class PegaProxManager:
             t.daemon = True
             t.start()
 
+        # #720 — persist SOFT (non-HA) maintenance so it survives a PegaProx restart. Native HA
+        # maintenance is re-derived from PVE on each poll (#78), so we don't store that here.
+        if not getattr(task, 'native_ha', False):
+            try:
+                get_db().save_node_maintenance(self.id, node_name)
+            except Exception as _e:
+                self.logger.debug(f"[MAINT] persist failed for {node_name}: {_e}")
+
         return task
 
     def _set_ceph_maintenance_flags(self, node_name):
@@ -3862,6 +3870,10 @@ class PegaProxManager:
         # never had native_ha set in the first place
         with self.maintenance_lock:
             self.nodes_in_maintenance.pop(node_name, None)
+        try:
+            get_db().remove_node_maintenance(self.id, node_name)   # #720 — drop persisted soft state
+        except Exception:
+            pass
         self.logger.info(f"[OK] Exited maintenance mode for {node_name}")
 
         # unset ceph flags after maintenance (#141)
@@ -9012,13 +9024,16 @@ echo "AGENT_INSTALLED_OK"
                             
                             channel.close()
                             task.add_output("Reboot command sent / Reboot-Befehl gesendet")
+                            task.reboot_issued = True   # #715 — let the RU loop skip the offline-wait
                         else:
                             self.logger.info(f"Skipping reboot for node: {node_name}")
                             task.add_output(f"Skipping reboot for node: {node_name}")
-                        
+                            task.reboot_issued = False   # #715 — no reboot: RU must NOT wait for offline
+
                     except Exception as e:
                         self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
                         task.add_output("Reboot command sent / Reboot-Befehl gesendet")
+                        task.reboot_issued = True   # #715 — assume reboot on a dropped connection (safe: wait)
                     finally:
                         try:
                             ssh.close()
@@ -9186,9 +9201,9 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"[ERROR] vm_action: {e}")
             return {'success': False, 'error': str(e)}
     
-    def clone_vm(self, node: str, vmid: int, vm_type: str, newid: int, name: str = None, 
+    def clone_vm(self, node: str, vmid: int, vm_type: str, newid: int, name: str = None,
                  full: bool = True, target_node: str = None, target_storage: str = None,
-                 description: str = None) -> Dict[str, Any]:
+                 description: str = None, snapname: str = None) -> Dict[str, Any]:
         """clone a vm"""
         # MK: full clone = independent copy, linked clone = shares base with original
         # linked clones only work for qemu
@@ -9229,7 +9244,11 @@ echo "AGENT_INSTALLED_OK"
                 data['storage'] = target_storage
             if description:
                 data['description'] = description
-            
+            # #709 — PVE only allows a FULL clone of a running container from a snapshot; the caller
+            # passes the snapshot name to clone from (also valid for a stopped source).
+            if snapname:
+                data['snapname'] = snapname
+
             self._no_agent_vms.discard(newid)  # #237
             self.logger.info(f"Cloning {vm_type}/{vmid} to {newid} (full={full})")
             response = self._api_post(url, data=data)
@@ -15720,6 +15739,12 @@ echo DONE""",
             'defaults': {'service_user': ''},
         },
         'default_umask': {
+            # MK 2026-08-25 (community-scripts #16745) — reversible now. umask 027 in a login
+            # shell propagates to `pct create` (it extracts the template under the caller's umask),
+            # so community LXC scripts land /etc at 750 and DNS breaks in the CT. Declaring
+            # backup_files lets the operator roll this control back (restores login.defs + profile)
+            # without hand-editing; the GUI create-CT path (pvedaemon, umask 022) is unaffected.
+            'backup_files': ['/etc/login.defs', '/etc/profile'],
             'check': """(grep -q 'UMASK.*027' /etc/login.defs 2>/dev/null || grep -q 'umask 027' /etc/profile 2>/dev/null) && echo OK || echo FAIL""",
             'apply': """if grep -q '^UMASK' /etc/login.defs 2>/dev/null; then
   sed -i 's/^UMASK.*/UMASK           027/' /etc/login.defs
@@ -16740,11 +16765,32 @@ echo DONE""",
             # H4: jitter so 30 managers don't fire on the same wall-clock tick
             self.stop_event.wait(30 + random.uniform(0, 10))
 
+    def _restore_persisted_maintenance(self):
+        """#720 — repopulate SOFT (non-HA) node maintenance from the DB after a restart, so a node
+        left in maintenance still shows as such. Native HA maintenance is re-derived from PVE on the
+        first poll (#78), so only the soft entries we persisted are restored here."""
+        try:
+            from pegaprox.models.tasks import MaintenanceTask
+            for node_name, _entered_at in get_db().get_node_maintenance(self.id):
+                with self.maintenance_lock:
+                    if node_name in self.nodes_in_maintenance:
+                        continue
+                    t = MaintenanceTask(node_name)
+                    t.native_ha = False
+                    t.status = 'completed'
+                    t.total_vms = 0
+                    t._restored = True
+                    self.nodes_in_maintenance[node_name] = t
+                self.logger.info(f"[MAINT] Restored soft maintenance for {node_name} after restart (#720)")
+        except Exception as e:
+            self.logger.debug(f"[MAINT] maintenance restore failed: {e}")
+
     def start(self):
         """Start the PegaProx daemon"""
         if self.running:
             return
-        
+
+        self._restore_persisted_maintenance()   # #720 — before the first poll assumes everything Online
         self.stop_event.clear()
         self.thread = threading.Thread(target=self.daemon_loop)
         self.thread.daemon = True
