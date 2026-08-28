@@ -8395,10 +8395,15 @@
                 return () => window.removeEventListener('pegaprox:theme', sync);
             }, []);
             // Reads the body instead of corpLight so the keyboard shortcut (registered
-            // once) never toggles against a stale closure.
-            const toggleCorpTheme = () => {
+            // once) never toggles against a stale closure. The theme lives on the
+            // server, so a failed save means no toggle — say so instead of doing
+            // nothing silently (the old localStorage toggle always reacted visibly).
+            const toggleCorpTheme = async () => {
                 const light = document.body?.dataset?.corpTheme === 'light';
-                updatePreferences({ theme: light ? 'corporateDark' : 'corporateLight' });
+                const result = await updatePreferences({ theme: light ? 'corporateDark' : 'corporateLight' });
+                if (!result?.success) {
+                    addToast(t('themeChangeFailed') || 'Failed to save theme', 'error');
+                }
             };
             const [globalSearchResults, setGlobalSearchResults] = useState(null);
             const [globalSearchLoading, setGlobalSearchLoading] = useState(false);

@@ -6995,8 +6995,10 @@ const[globalSearchQuery,setGlobalSearchQuery]=useState('');// LW: corporate ligh
 const[corpLight,setCorpLight]=useState(()=>document.body?.dataset?.corpTheme==='light');useEffect(()=>{const sync=()=>setCorpLight(document.body?.dataset?.corpTheme==='light');window.addEventListener('pegaprox:theme',sync);// useLayout() above applies the theme in an earlier effect of this same
 // component, so its event fired before this listener existed.
 sync();return()=>window.removeEventListener('pegaprox:theme',sync);},[]);// Reads the body instead of corpLight so the keyboard shortcut (registered
-// once) never toggles against a stale closure.
-const toggleCorpTheme=()=>{const light=document.body?.dataset?.corpTheme==='light';updatePreferences({theme:light?'corporateDark':'corporateLight'});};const[globalSearchResults,setGlobalSearchResults]=useState(null);const[globalSearchLoading,setGlobalSearchLoading]=useState(false);const[showGlobalSearch,setShowGlobalSearch]=useState(false);const[globalSearchIndex,setGlobalSearchIndex]=useState(0);const globalSearchRef=React.useRef(null);const globalSearchTimerRef=React.useRef(null);const[highlightedVm,setHighlightedVm]=useState(null);// {vmid, node} - for scrolling to VM in table
+// once) never toggles against a stale closure. The theme lives on the
+// server, so a failed save means no toggle — say so instead of doing
+// nothing silently (the old localStorage toggle always reacted visibly).
+const toggleCorpTheme=async()=>{const light=document.body?.dataset?.corpTheme==='light';const result=await updatePreferences({theme:light?'corporateDark':'corporateLight'});if(!result?.success){addToast(t('themeChangeFailed')||'Failed to save theme','error');}};const[globalSearchResults,setGlobalSearchResults]=useState(null);const[globalSearchLoading,setGlobalSearchLoading]=useState(false);const[showGlobalSearch,setShowGlobalSearch]=useState(false);const[globalSearchIndex,setGlobalSearchIndex]=useState(0);const globalSearchRef=React.useRef(null);const globalSearchTimerRef=React.useRef(null);const[highlightedVm,setHighlightedVm]=useState(null);// {vmid, node} - for scrolling to VM in table
 // NS: User Favorites state
 const[favorites,setFavorites]=useState({vms:[],nodes:[],clusters:[]});const[datacenterSummary,setDatacenterSummary]=useState(null);// NS: VM Tags state - Jan 2026
 const[vmTags,setVmTags]=useState({});// cluster -> vmid -> tags
