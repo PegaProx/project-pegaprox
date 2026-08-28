@@ -8269,28 +8269,27 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
 
-            # Login to Proxmox to get auth ticket
-            login_data = urlencode({
-                'username': manager.config.user,
-                'password': manager.config.pass_
-            }).encode('utf-8')
-
-            login_req = urllib.request.Request(
-                f"https://{host}:{port}/api2/json/access/ticket",
-                data=login_data, method='POST'
-            )
-
-            # MK Apr 2026 — wrap synchronous urllib.urlopen in asyncio.to_thread
-            # so concurrent VNC handlers don't serialize on the TLS handshake.
+            # The console gets a FRESH session ticket, minted server-side by the
+            # manager — never its own live ticket (security audit C-1, see
+            # mint_console_session). The mint logs in against the registered
+            # node: `host` here is manager.host, which follows the HA fallback,
+            # and the stored @pam password only exists on the registered node,
+            # so a login there answered 401 and the console timed out.
+            # MK Apr 2026 — offloaded with asyncio.to_thread so concurrent VNC
+            # handlers don't serialize on the TLS handshake.
             import asyncio as _aiowrap
             def _do_urlopen(req):
                 with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as r:
                     return r.read()
-            login_body = await _aiowrap.to_thread(_do_urlopen, login_req)
-            login_result = json.loads(login_body.decode('utf-8'))
 
-            pve_ticket = login_result['data']['ticket']
-            csrf_token = login_result['data']['CSRFPreventionToken']
+            pve_ticket, csrf_token = await _aiowrap.to_thread(manager.mint_console_session)
+            if not pve_ticket:
+                # API-token clusters have no password to mint a session with, and
+                # PVE's vncwebsocket needs a session cookie. Say so instead of
+                # burning the connect timeout.
+                logging.warning(f"[VNC] {cluster_id}: no console session (token-registered cluster?)")
+                await websocket.close(1011, "Console needs a password-registered cluster")
+                return
 
             # MK Apr 2026 — issue #352 follow-up. Single-vncproxy fast path.
             # If the JS already obtained a vncproxy ticket+port via /console

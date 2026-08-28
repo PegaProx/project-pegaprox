@@ -11095,22 +11095,26 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-    def mint_console_auth_ticket(self):
-        """Mint a FRESH PVE session ticket (PVEAuthCookie) for the console WS proxy.
+    def mint_console_session(self):
+        """Mint a FRESH PVE session (ticket + CSRFPreventionToken) for the console proxies.
 
         NS 2026-06-05 (security audit C-1): the cluster-wide PVE ticket must NOT
-        transit the browser — it's effectively root on pve:8006. The standalone
-        WS subprocess fetches it server-side (via the internal cluster-creds /
-        ws-token-validate path) right before connecting to PVE's vncwebsocket.
-        Returns the ticket string, or None when the cluster has no stored
-        password (API-token clusters can't mint session tickets anyway, and
-        termproxy needs a real session cookie). Kept off self._ticket on purpose
-        so we always hand out a freshly-minted, non-stale cookie.
+        transit the browser — it's effectively root on pve:8006. The console
+        proxies fetch it server-side right before talking to PVE. Returns
+        (ticket, csrf), or (None, None) when the cluster has no stored password
+        (API-token clusters can't mint session tickets anyway, and termproxy
+        needs a real session cookie). Kept off self._ticket on purpose so we
+        always hand out a freshly-minted, non-stale cookie.
+
+        The login goes to the REGISTERED host (config.host), not self.host: the
+        latter follows the HA fallback, and the stored @pam password is a local
+        account on one node only — a login against any other node answers 401.
+        The ticket itself is cluster-wide, so it then works on every node.
         """
         pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
         usr = getattr(self.config, 'user', None) or 'root@pam'
         if not pwd:
-            return None
+            return None, None
         try:
             import ssl as _ssl
             import urllib.request as _ur
@@ -11121,18 +11125,23 @@ echo "AGENT_INSTALLED_OK"
             if not getattr(self, '_ssl_verify', False):
                 ctx.check_hostname = False
                 ctx.verify_mode = _ssl.CERT_NONE
+            login_host = self._bracket_ipv6(self.config.host)
             req = _ur.Request(
-                f"https://{self.host}:{self.api_port}/api2/json/access/ticket",
+                f"https://{login_host}:{self.api_port}/api2/json/access/ticket",
                 data=_ue({'username': usr, 'password': pwd}).encode('utf-8'),
                 method='POST',
             )
             with _ur.urlopen(req, context=ctx, timeout=10) as resp:
                 import json as _json
                 res = _json.loads(resp.read().decode('utf-8'))
-            return res['data']['ticket']
+            return res['data']['ticket'], res['data'].get('CSRFPreventionToken')
         except Exception as e:
             self.logger.warning(f"[CONSOLE] auth-ticket mint failed: {type(e).__name__}")
-            return None
+            return None, None
+
+    def mint_console_auth_ticket(self):
+        """Ticket-only view of mint_console_session() for the WS-subprocess hand-off."""
+        return self.mint_console_session()[0]
 
     def create_privileged_session(self):
         """Return a requests.Session authenticated with a FRESH password-based
