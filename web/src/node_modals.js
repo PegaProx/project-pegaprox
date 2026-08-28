@@ -1016,6 +1016,7 @@
         }
 
         function SmartAttrTable({ rows }) {
+            const { t } = useTranslation();
             return (
                 <table className="w-full text-sm">
                     <thead className="bg-proxmox-dark text-xs text-gray-400">

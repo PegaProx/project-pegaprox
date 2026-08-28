@@ -1292,6 +1292,7 @@
         // NS 2026-06-11 — mutation helper for the cloud sections (phase 3). POST/PUT/
         // DELETE with auth, optional confirm() for destructive ops, reload on success.
         function useCloudMutate(reload) {
+            const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
             const [busy, setBusy] = React.useState('');
             const run = React.useCallback((key, method, path, body, confirmMsg) => {
@@ -1303,7 +1304,7 @@
                     .then(r => r.ok ? r.json().catch(() => ({})) : Promise.reject(new Error('HTTP ' + r.status)))
                     .then(() => { setBusy(''); if (reload) reload(); })
                     .catch(e => { setBusy(''); window.alert((t('cloud.actionFailedPrefix')) + ' ' + (e && e.message || e)); });
-            }, [reload]);
+            }, [reload, t]);
             return { busy, run };
         }
         function CloudRowActions({ children }) { return <td><div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>{children}</div></td>; }

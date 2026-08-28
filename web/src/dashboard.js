@@ -25574,6 +25574,7 @@
         }
 
         function App() {
+            const { t } = useTranslation();
             const { user, loading, requires2FASetup, needsSetup } = useAuth();
 
             if (loading) {
