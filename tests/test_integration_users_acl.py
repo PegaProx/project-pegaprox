@@ -391,6 +391,22 @@ def test_viewer_reads_own_preferences_200(api, seed):
     assert 'default_theme' in body
 
 
+def test_user_saves_system_theme_200(api, seed):
+    # 'system' is not a palette of its own — the client resolves it against the OS
+    # setting — but it must round-trip through the preferences whitelist unchanged.
+    user = seed.user('sam', role='viewer', tenant_id=DEFAULT)
+    resp = api.as_user(user).put(PREFS, json={'theme': 'system'})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.get_json()['theme'] == 'system'
+    assert api.as_user(user).get(PREFS).get_json()['theme'] == 'system'
+
+
+def test_user_saves_unknown_theme_400(api, seed):
+    user = seed.user('sal', role='viewer', tenant_id=DEFAULT)
+    resp = api.as_user(user).put(PREFS, json={'theme': 'notATheme'})
+    assert resp.status_code == 400
+
+
 def test_viewer_reads_permission_catalog_200(api, seed):
     viewer = seed.user('quinn', role='viewer', tenant_id=DEFAULT)
     resp = api.as_user(viewer).get(PERMS)

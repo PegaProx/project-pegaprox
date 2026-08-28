@@ -25,6 +25,7 @@ ALLOWED_THEMES = [
     'gruvbox',
     'corporateDark',
     'corporateLight',
+    'system',
     'enterpriseBlue',
     'cloud',
 ]
@@ -33,6 +34,7 @@ ALLOWED_THEMES = [
 CORPORATE_THEMES = [
     'corporateDark',
     'corporateLight',
+    'system',
     'enterpriseBlue',
 ]
 

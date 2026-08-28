@@ -666,6 +666,19 @@
                     success: '#60b515', warning: '#efc006', error: '#f54f47', info: '#0079b8'
                 }
             },
+            system: {
+                name: 'System',
+                icon: '🌗',
+                description: 'Follows the OS light/dark setting',
+                corporate: true,
+                // Placeholder only — applyTheme() resolves 'system' to a concrete
+                // theme before reading colors (see resolveTheme).
+                colors: {
+                    primary: '#49afd9', primaryHover: '#3d9bc2', dark: '#1b2a32', darker: '#111a21',
+                    card: '#243542', border: '#344955', hover: '#29414e', text: '#e9ecef', textMuted: '#728b9a',
+                    success: '#60b515', warning: '#efc006', error: '#f54f47', info: '#49afd9'
+                }
+            },
             enterpriseBlue: {
                 name: 'Enterprise Blue',
                 icon: '🔷',
@@ -707,8 +720,25 @@
         }
 
         // Apply theme by setting CSS variables
+        // 'system' is the only theme that is not a palette of its own: it follows the
+        // OS light/dark setting and picks a light or dark theme for the layout.
+        // corporateLight is the only light palette there is (Modern uses it as its
+        // light option too, see #451), so both layouts share it and differ in dark.
+        const SYSTEM_THEME_MEDIA = '(prefers-color-scheme: light)';
+        function resolveTheme(themeName, layout) {
+            if (themeName !== 'system') return themeName;
+            const prefersLight = typeof window.matchMedia === 'function' && window.matchMedia(SYSTEM_THEME_MEDIA).matches;
+            const effectiveLayout = layout || (document.body && document.body.dataset.layout) || 'modern';
+            if (effectiveLayout === 'corporate') return prefersLight ? 'corporateLight' : 'corporateDark';
+            return prefersLight ? 'corporateLight' : 'proxmoxDark';
+        }
+
         function applyTheme(themeName) {
-            const theme = PEGAPROX_THEMES[themeName] || PEGAPROX_THEMES.proxmoxDark;
+            // `themeName` is what the user chose (may be 'system'); `resolved` is what
+            // gets painted. localStorage keeps the choice so the next load resolves it
+            // against the OS setting of that moment.
+            const resolved = resolveTheme(themeName);
+            const theme = PEGAPROX_THEMES[resolved] || PEGAPROX_THEMES.proxmoxDark;
             const root = document.documentElement;
 
             Object.entries(theme.colors).forEach(([key, value]) => {
@@ -739,9 +769,17 @@
             }
             
             localStorage.setItem('pegaprox-theme', themeName);
-            console.log(`Theme applied: ${theme.name}`);
+            window.__pegaproxRequestedTheme = themeName;
+            console.log(`Theme applied: ${theme.name}` + (themeName === 'system' ? ` (system → ${resolved})` : ''));
             // Lets React state (header sun/moon icon) follow the body without polling.
-            window.dispatchEvent(new CustomEvent('pegaprox:theme', { detail: { theme: themeName } }));
+            window.dispatchEvent(new CustomEvent('pegaprox:theme', { detail: { theme: themeName, resolved } }));
+        }
+
+        // Live follow of the OS setting: re-resolve when it flips and 'system' is active.
+        if (typeof window.matchMedia === 'function') {
+            window.matchMedia(SYSTEM_THEME_MEDIA).addEventListener('change', () => {
+                if (window.__pegaproxRequestedTheme === 'system') applyTheme('system');
+            });
         }
         
         // Load saved theme on page load - apply CSS vars immediately, body classes after DOM ready
@@ -749,7 +787,7 @@
             const saved = localStorage.getItem('pegaprox-theme') || 'proxmoxDark';
             console.log('[Theme] Initial load from localStorage:', saved);
             // Apply CSS variables immediately (works on documentElement)
-            const theme = PEGAPROX_THEMES[saved] || PEGAPROX_THEMES.proxmoxDark;
+            const theme = PEGAPROX_THEMES[resolveTheme(saved)] || PEGAPROX_THEMES.proxmoxDark;
             Object.entries(theme.colors).forEach(([key, value]) => {
                 document.documentElement.style.setProperty(`--color-${key}`, value);
                 if (value && value.startsWith('#')) {

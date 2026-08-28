@@ -14045,7 +14045,9 @@
                                         <button
                                             onClick={toggleCorpTheme}
                                             className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
-                                            title={corpLight ? 'Dark Mode' : 'Light Mode'}
+                                            title={user?.theme === 'system'
+                                                ? (t('themeSystemHint') || 'System theme (follows the OS) — click for an explicit choice')
+                                                : (corpLight ? 'Dark Mode' : 'Light Mode')}
                                         >
                                             {corpLight ? <Icons.Moon /> : <Icons.Sun />}
                                         </button>

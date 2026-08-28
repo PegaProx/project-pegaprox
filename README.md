@@ -207,7 +207,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 
 ### Advanced Features
 - 🌐 **Offline Mode** - Works without internet (local assets, air-gap mode disables external CVE/sponsor lookups for VS-NfD / classified networks)
-- 🎨 **Themes** - 17 themes including Dark/Light, Proxmox, Corporate (light/dark), Dracula, Nord, Monokai, Solarized, Cyberpunk, etc.
+- 🎨 **Themes** - 17 themes including Dark/Light, Proxmox, Corporate (light/dark), Dracula, Nord, Monokai, Solarized, Cyberpunk, etc. — plus **System**, which follows the OS light/dark setting live. In the Corporate layout the header sun/moon toggle is an explicit choice that overrides System.
 - 🏢 **Corporate Layout** - Tree-based sidebar with dense tables
 - 🌍 **Multi-Language** - English, German, French, Spanish, Portuguese, Korean, Italian, Simplified Chinese
 - 📱 **Responsive + PWA** - Works on desktop and mobile, installable as native-feeling app
