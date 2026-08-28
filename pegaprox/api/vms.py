@@ -4406,17 +4406,11 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
         except Exception:
             pass
 
-        # Guest pressure is not the same metric as /cluster/resources ``mem``.
-        # Read Linux MemAvailable through QGA so the detail UI can show real
-        # pressure while retaining Proxmox's value as host-resident memory.
-        try:
-            result['memory'] = _get_guest_linux_memory(mgr, base)
-            if result['memory']:
-                result['agent_running'] = True
-        except Exception:
-            # Optional enrichment: unsupported guests and older agents must not
-            # break the rest of the guest-info response.
-            pass
+        # Guest pressure is refreshed asynchronously for watched clusters.
+        # Never turn this request path into a potentially slow guest-exec poll.
+        result['memory'] = mgr.get_cached_guest_memory(node, vmid)
+        if result['memory']:
+            result['agent_running'] = True
 
         try:
             resp = session.get(f"{base}/get-osinfo", timeout=8)

@@ -1985,6 +1985,12 @@ class PegaProxManager:
                 resource['guest_mem_percent'] = None
                 resource['guest_memory_status'] = 'unavailable'
                 resource['guest_memory_source'] = None
+
+    def get_cached_guest_memory(self, node: str, vmid: int):
+        """Return a copy of the watched-cluster guest-memory sample, if present."""
+        with self._memory_cache_lock:
+            memory = self._memory_cache.get((node, vmid))
+            return dict(memory) if memory else None
     
     # MK May 2026 (#413) — uniform get_vms(node=None) shim so the site-recovery
     # detection code (and any other caller that loops over manager types) can

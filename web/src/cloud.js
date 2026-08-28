@@ -48,6 +48,7 @@
             if (r && r.cpu_percent != null && isFinite(r.cpu_percent)) return Math.min(100, Math.round(r.cpu_percent));
             return cloudPct(r && r.cpu);  // cpu is a 0..1 fraction
         }
+        /** Return bounded guest pressure or null when the guest cannot report it. */
         function cloudMemPct(r) {
             if (r && r.guest_mem_percent != null && isFinite(r.guest_mem_percent)) return Math.min(100, Math.round(r.guest_mem_percent));
             return null;
@@ -142,9 +143,11 @@
         }
 
         // inline meter used in table cells
+        /** Render a compact guest-memory meter without inventing missing data. */
         function CloudMiniMeter({ pct, color }) {
+            const { t } = useTranslation();
             if (pct == null) {
-                return <span className="cloud-cell-meter-num" title="QEMU guest-agent memory unavailable">Unavailable</span>;
+                return <span className="cloud-cell-meter-num" title={t('guestMemoryUnavailable')}>{t('guestMemoryUnavailable')}</span>;
             }
             const p = Math.min(100, Math.max(0, Number(pct) || 0));
             return (
@@ -911,9 +914,9 @@
                             <CloudKVPanel title={t('cloud.tabCapacity') || 'Capacity'}>
                                 <CloudKVRow label={t('cloud.vcpu') || 'vCPU'} value={Number(r.maxcpu) || '—'} />
                                 <CloudKVRow label={t('cloud.colCpu') || 'CPU usage'} value={cpuP + '%'} />
-                                <CloudKVRow label="Guest memory" value={memMax ? cloudFmtBytes(memMax) : 'Unavailable'} />
-                                <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={memP == null ? 'Unavailable' : `${cloudFmtBytes(memUse)} (${memP}%)`} />
-                                <CloudKVRow label="Host resident" value={r.host_maxmem ? `${cloudFmtBytes(r.host_mem)} / ${cloudFmtBytes(r.host_maxmem)}` : '—'} />
+                                <CloudKVRow label={t('guestMemory')} value={memMax ? cloudFmtBytes(memMax) : t('guestMemoryUnavailable')} />
+                                <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={memP == null ? t('guestMemoryUnavailable') : `${cloudFmtBytes(memUse)} (${memP}%)`} />
+                                <CloudKVRow label={t('hostResident')} value={r.host_maxmem ? `${cloudFmtBytes(r.host_mem)} / ${cloudFmtBytes(r.host_maxmem)}` : '—'} />
                                 {diskMax > 0 && <CloudKVRow label={t('cloud.disk') || 'Disk'} value={`${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}`} />}
                             </CloudKVPanel>
                             <CloudKVPanel title={t('cloud.tabNetwork') || 'Network'}>
@@ -938,9 +941,9 @@
                                 <div className="cloud-meter-sub">{Number(r.maxcpu) || 0} {t('cloud.cores') || 'vCPU'}</div>
                             </div>
                             <div className="cloud-meter-block">
-                                <div className="cloud-meter-label">Guest memory · {memP == null ? 'Unavailable' : `${memP}%`}</div>
+                                <div className="cloud-meter-label">{t('guestMemory')} · {memP == null ? t('guestMemoryUnavailable') : `${memP}%`}</div>
                                 <div className="cloud-meter cloud-meter-lg"><div style={{ width: (memP || 0) + '%', background: memP == null ? 'var(--cloud-text-muted)' : '#a855f7' }} /></div>
-                                <div className="cloud-meter-sub">{memP == null ? 'QEMU guest-agent memory unavailable' : `${cloudFmtBytes(memUse)} / ${cloudFmtBytes(memMax)}`}</div>
+                                <div className="cloud-meter-sub">{memP == null ? t('guestMemoryUnavailable') : `${cloudFmtBytes(memUse)} / ${cloudFmtBytes(memMax)}`}</div>
                             </div>
                             {diskMax > 0 && (
                                 <div className="cloud-meter-block">

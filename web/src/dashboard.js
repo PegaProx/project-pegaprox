@@ -1073,7 +1073,8 @@
                 const gb = bytes / (1024*1024*1024);
                 return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024*1024)).toFixed(0)} MB`;
             };
-            const fmtGuestMem = (vm) => vm?.guest_mem == null ? 'Unavailable' : fmtMem(vm.guest_mem);
+            /** Format measured guest memory without falling back to QEMU residency. */
+            const fmtGuestMem = (vm) => vm?.guest_mem == null ? t('guestMemoryUnavailable') : fmtMem(vm.guest_mem);
 
             const barColor = (v) => v > 80 ? '#f54f47' : v > 60 ? '#efc006' : '#60b515';
 
@@ -2386,7 +2387,7 @@
                                                 `Type: ${isQemu ? 'QEMU' : 'LXC'}`,
                                                 `Status: ${vm.status}`,
                                                 isRunning ? `CPU: ${((vm.cpu || 0) * 100).toFixed(0)}%` : null,
-                                                isRunning ? `Guest RAM: ${fmtGuestMem(vm)}` : null,
+                                                isRunning ? `${t('guestRam')}: ${fmtGuestMem(vm)}` : null,
                                                 bridges.length ? `Bridge${bridges.length > 1 ? 's' : ''}: ${bridges.join(', ')}`
                                                     : (vmBridgeMap[String(vm.vmid)] ? `Bridge: ${vmBridgeMap[String(vm.vmid)]}` : null),
                                                 storages.length ? `Storage: ${storages.join(', ')}` : null,
@@ -7772,7 +7773,11 @@
             const running = runningVms.length;
             const clamp = (v) => Math.max(0, Math.min(100, Math.round(v || 0)));
             const cpuOf = (r) => clamp((r.cpu || 0) * 100);
-            const memOf = (r) => r.guest_mem_percent == null ? null : clamp(r.guest_mem_percent);
+            /** Normalize a guest-pressure sample for dashboard meters. */
+            const memOf = (r) => {
+                if (r.guest_mem_percent == null || !Number.isFinite(Number(r.guest_mem_percent))) return null;
+                return clamp(Number(r.guest_mem_percent));
+            };
             const meterColor = (p) => p > 90 ? 'var(--cloud-error)' : p > 75 ? 'var(--cloud-warning)' : 'var(--cloud-accent)';
             // at-a-glance aggregates from the selected cluster's resources (defensive)
             const nodes = new Set(vms.map(v => v.node).filter(Boolean)).size;
@@ -7816,7 +7821,7 @@
                                 <span className="text-sm font-semibold">{selectedCluster.display_name || selectedCluster.name}</span>
                             </div>
                             <Gauge pct={cpuAvg} label={'CPU'} />
-                            <Gauge pct={ramPct} label={'Guest RAM'} />
+                            <Gauge pct={ramPct} label={t('guestRam')} />
                         </div>
                     )}
                     <div>
@@ -7873,7 +7878,7 @@
                                                         <div className="cloud-meter"><div style={{ width: `${cp}%`, background: meterColor(cp) }} /></div>
                                                     </div>
                                                     <div>
-                                                        <div className="flex justify-between text-[11px] mb-1" style={{ color: 'var(--cloud-text-secondary)' }} title={mp == null ? 'QEMU guest-agent memory unavailable' : `Host-resident: ${Number(v.host_mem_percent || 0).toFixed(1)}%`}><span>Guest RAM</span><span>{mp == null ? 'Unavailable' : `${mp}%`}</span></div>
+                                                        <div className="flex justify-between text-[11px] mb-1" style={{ color: 'var(--cloud-text-secondary)' }} title={mp == null ? t('guestMemoryUnavailable') : (v.host_mem_percent == null ? t('hostResidentMemory') + ': —' : `${t('hostResident')}: ${Number(v.host_mem_percent).toFixed(1)}%`)}><span>{t('guestRam')}</span><span>{mp == null ? t('guestMemoryUnavailable') : `${mp}%`}</span></div>
                                                         <div className="cloud-meter"><div style={{ width: `${mp == null ? 0 : mp}%`, background: mp == null ? 'var(--cloud-text-muted)' : meterColor(mp) }} /></div>
                                                     </div>
                                                 </div>
@@ -7896,9 +7901,11 @@
         // the server dedup) lets us keep the SAME array reference on a no-op frame, so
         // ResourceTable's filter/sort useMemos + the whole grid stay idle instead of
         // re-rendering every second.
+        /** Build a signature containing every visible guest and host memory field. */
         function _resSig(r) {
             return r.vmid + '|' + (r.status || '') + '|' + (r.node || '') + '|' + (r.name || '') +
                    '|' + Math.floor((r.cpu_percent || 0) / 5) + '|' + (r.guest_mem_percent == null ? 'na' : Math.floor(r.guest_mem_percent / 2)) +
+                   '|' + (r.host_mem_percent == null ? 'na' : Math.floor(r.host_mem_percent / 2)) + '|' + (r.host_mem || '') + '|' + (r.host_maxmem || '') +
                    '|' + (r.ip || '') + '|' + (r.tags || '');
         }
         function areResourcesEqual(a, b) {
@@ -14937,8 +14944,8 @@
                                             <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">{t('status')}</span><span className="corp-hover-tip-value" style={{color: vmRunning ? 'var(--color-success)' : 'var(--corp-text-muted)'}}>{vmRunning ? t('running') : t('stopped')}</span></div>
                                             <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">{t('node')}</span><span className="corp-hover-tip-value">{data.node}</span></div>
                                             {vmRunning && data.cpu != null && <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">CPU</span><span className="corp-hover-tip-value">{(data.cpu * 100).toFixed(1)}%</span></div>}
-                                            {vmRunning && <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">Guest RAM</span><span className="corp-hover-tip-value">{data.guest_mem_percent == null ? 'Unavailable' : `${Number(data.guest_mem_percent).toFixed(1)}%`}</span></div>}
-                                            {vmRunning && data.host_mem != null && data.host_maxmem != null && <div className="corp-hover-tip-row" title="Secondary QEMU host-resident accounting"><span className="corp-hover-tip-label">Host resident</span><span className="corp-hover-tip-value">{fmtBytes(data.host_mem)} / {fmtBytes(data.host_maxmem)}</span></div>}
+                                            {vmRunning && <div className="corp-hover-tip-row"><span className="corp-hover-tip-label">{t('guestRam')}</span><span className="corp-hover-tip-value">{data.guest_mem_percent == null || !Number.isFinite(Number(data.guest_mem_percent)) ? t('guestMemoryUnavailable') : `${Math.max(0, Math.min(100, Number(data.guest_mem_percent))).toFixed(1)}%`}</span></div>}
+                                            {vmRunning && data.host_mem != null && data.host_maxmem != null && <div className="corp-hover-tip-row" title={t('hostResidentMemoryTooltip')}><span className="corp-hover-tip-label">{t('hostResident')}</span><span className="corp-hover-tip-value">{fmtBytes(data.host_mem)} / {fmtBytes(data.host_maxmem)}</span></div>}
                                         </div>
                                     );
                                 }
@@ -15392,9 +15399,9 @@
                                                                                         <span className="corp-consumer-rank">{i + 1}.</span>
                                                                                         <span className="corp-consumer-name" onClick={() => { setActiveTab('resources'); setResourcesSubTab('management'); setTimeout(() => setHighlightedVm(vm), 100); }} title={`${vm.name || vm.vmid} (${vm.node})`}>{vm.name || `VM ${vm.vmid}`}</span>
                                                                                         <div className="corp-consumer-bar">
-                                                                                            <div className="corp-consumer-bar-fill" style={{width: `${Math.min((vm.mem / (vm.maxmem || 1)) * 100, 100)}%`, background: '#9b59b6'}}></div>
+                                                                                            <div className="corp-consumer-bar-fill" style={{width: vm.guest_mem == null ? '0%' : `${Math.min((vm.guest_mem / (vm.guest_maxmem || 1)) * 100, 100)}%`, background: vm.guest_mem == null ? 'var(--cloud-text-muted)' : '#9b59b6'}}></div>
                                                                                         </div>
-                                                                                        <span className="corp-consumer-val">{vm.guest_mem == null ? 'Unavailable' : fmtMem(vm.guest_mem)}</span>
+                                                                                        <span className="corp-consumer-val">{vm.guest_mem == null ? t('guestMemoryUnavailable') : fmtMem(vm.guest_mem)}</span>
                                                                                     </div>
                                                                                 ))}
                                                                             </div>

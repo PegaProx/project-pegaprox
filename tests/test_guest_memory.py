@@ -1,6 +1,7 @@
 import threading
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, patch
 
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.api.vms import _get_guest_linux_memory, _parse_linux_meminfo
@@ -56,15 +57,13 @@ def test_get_guest_linux_memory_uses_bounded_exec_and_polls_to_exit():
         result = _get_guest_linux_memory(manager, 'https://pve/api/agent')
 
     assert result['used_pct'] == 25.0
-    manager._api_post.assert_called_once_with(
-        'https://pve/api/agent/exec',
-        data=[('command', '/usr/bin/cat'), ('command', '/proc/meminfo')],
-        timeout=8,
-    )
-    assert manager._api_get.call_args_list == [
-        call('https://pve/api/agent/exec-status', params={'pid': 42}, timeout=8),
-        call('https://pve/api/agent/exec-status', params={'pid': 42}, timeout=8),
-    ]
+    post_timeout = manager._api_post.call_args.kwargs['timeout']
+    assert 0 < post_timeout <= 3
+    assert manager._api_post.call_args.args == ('https://pve/api/agent/exec',)
+    assert manager._api_post.call_args.kwargs['data'] == [
+        ('command', '/usr/bin/cat'), ('command', '/proc/meminfo')]
+    assert len(manager._api_get.call_args_list) == 2
+    assert all(0 < item.kwargs['timeout'] <= 1 for item in manager._api_get.call_args_list)
     sleep.assert_called_once_with(0.05)
 
 
@@ -73,6 +72,18 @@ def test_get_guest_linux_memory_returns_none_on_agent_failure():
     manager._api_post.return_value = _response(500, None)
     assert _get_guest_linux_memory(manager, 'https://pve/api/agent') is None
     manager._api_get.assert_not_called()
+
+
+def test_get_guest_linux_memory_stops_at_overall_deadline():
+    manager = Mock()
+    manager._api_post.return_value = _response(200, {'pid': 42})
+    manager._api_get.return_value = _response(200, {'exited': 0})
+
+    with patch('pegaprox.utils.guest_memory.time.monotonic', side_effect=[0, 0, 0, 6]), \
+            patch('pegaprox.utils.guest_memory.time.sleep'):
+        assert _get_guest_linux_memory(manager, 'https://pve/api/agent', deadline_seconds=5) is None
+
+    manager._api_get.assert_called_once()
 
 
 def _manager_with_memory_cache(cache):
@@ -103,6 +114,17 @@ def test_inventory_uses_cached_guest_pressure_and_preserves_host_accounting():
     assert resources[0]['guest_memory_status'] == 'available'
     assert resources[0]['host_mem_percent'] == 101.6
     assert resources[0]['host_mem'] == 65 * 1024**3
+
+
+def test_cached_guest_memory_returns_copy_without_live_poll():
+    sample = {'used_pct': 15.6, 'used_bytes': 10}
+    manager = _manager_with_memory_cache({('pve', 179): sample})
+
+    cached = manager.get_cached_guest_memory('pve', 179)
+    cached['used_pct'] = 99
+
+    assert sample['used_pct'] == 15.6
+    assert manager.get_cached_guest_memory('pve', 999) is None
 
 
 def test_inventory_does_not_substitute_host_ram_when_guest_data_unavailable():
@@ -149,3 +171,26 @@ def test_freshly_booted_vm_forces_memory_probe_past_no_agent_cache():
 
     assert result['used_pct'] == 10.0
     assert 200 not in manager._no_agent_vms
+
+
+def test_frontend_guest_memory_paths_do_not_fall_back_to_host_residency():
+    root = Path(__file__).parents[1]
+    dashboard = (root / 'web/src/dashboard.js').read_text()
+    modals = (root / 'web/src/vm_modals.js').read_text()
+
+    assert "vm.guest_mem / (vm.guest_maxmem || 1)" in dashboard
+    assert "vm.mem / (vm.maxmem || 1)" not in dashboard
+    assert "clMeasuredGuests.reduce((s, g) => s + g.guest_mem" in modals
+    assert "measuredGuests.reduce((s, g) => s + g.guest_mem" in modals
+    assert "allGuests.reduce((s, g) => s + (g.mem || 0)" not in modals
+    assert "nd.guests.reduce((s, g) => s + (g.mem || 0)" not in modals
+
+
+def test_guest_memory_labels_exist_in_every_locale():
+    translations = (Path(__file__).parents[1] / 'web/src/translations.js').read_text()
+    for key in (
+        'guestRam', 'guestMemory', 'guestMemoryUnavailable',
+        'guestMemoryPressureTooltip', 'hostResident', 'hostResidentMemory',
+        'hostResidentMemoryTooltip', 'availableMemory',
+    ):
+        assert translations.count(f'{key}:') == 8

@@ -31,12 +31,21 @@ def parse_linux_meminfo(content):
     }
 
 
-def get_guest_linux_memory(manager, base):
-    """Read /proc/meminfo through PVE's bounded guest-exec API."""
+def get_guest_linux_memory(manager, base, deadline_seconds=5.0):
+    """Read /proc/meminfo through PVE guest-exec within one wall-clock deadline."""
+    deadline = time.monotonic() + deadline_seconds
+
+    def remaining_timeout(cap):
+        remaining = deadline - time.monotonic()
+        return max(0.05, min(cap, remaining)) if remaining > 0 else None
+
+    timeout = remaining_timeout(3.0)
+    if timeout is None:
+        return None
     started = manager._api_post(
         f"{base}/exec",
         data=[('command', '/usr/bin/cat'), ('command', '/proc/meminfo')],
-        timeout=8,
+        timeout=timeout,
     )
     if started.status_code != 200:
         return None
@@ -45,7 +54,10 @@ def get_guest_linux_memory(manager, base):
         return None
 
     for _ in range(10):
-        status = manager._api_get(f"{base}/exec-status", params={'pid': pid}, timeout=8)
+        timeout = remaining_timeout(1.0)
+        if timeout is None:
+            return None
+        status = manager._api_get(f"{base}/exec-status", params={'pid': pid}, timeout=timeout)
         if status.status_code != 200:
             return None
         payload = status.json().get('data') or {}
@@ -53,5 +65,8 @@ def get_guest_linux_memory(manager, base):
             if payload.get('exitcode') != 0:
                 return None
             return parse_linux_meminfo(payload.get('out-data') or '')
-        time.sleep(0.05)
+        sleep_for = min(0.05, max(0, deadline - time.monotonic()))
+        if sleep_for <= 0:
+            return None
+        time.sleep(sleep_for)
     return None

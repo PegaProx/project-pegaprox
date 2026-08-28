@@ -4,6 +4,14 @@
         // ═══════════════════════════════════════════════
         const translations = {
             de: {
+                guestRam: 'Gast-RAM',
+                guestMemory: 'Gastspeicher',
+                guestMemoryUnavailable: 'Gastspeicher nicht verfügbar',
+                guestMemoryPressureTooltip: 'Speicherdruck im Gast; nicht verfügbar, wenn der Gast ihn nicht melden kann',
+                hostResident: 'Host-resident',
+                hostResidentMemory: 'Host-residenter Speicher',
+                hostResidentMemoryTooltip: 'Host-residenter QEMU-Speicher einschließlich zurückgewinnbarem Gast-Cache',
+                availableMemory: 'Verfügbar: {value}',
                 languageSimplifiedChinese: 'Vereinfachtes Chinesisch',
                 setupFailedHttp: 'Einrichtung fehlgeschlagen (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
@@ -4452,6 +4460,14 @@
                 zone: 'Zone',
             },
             en: {
+                guestRam: 'Guest RAM',
+                guestMemory: 'Guest memory',
+                guestMemoryUnavailable: 'Guest memory unavailable',
+                guestMemoryPressureTooltip: 'Guest memory pressure; unavailable when the guest cannot report it',
+                hostResident: 'Host resident',
+                hostResidentMemory: 'Host-resident memory',
+                hostResidentMemoryTooltip: 'Host-resident QEMU memory, including reclaimable guest cache',
+                availableMemory: 'Available: {value}',
                 languageSimplifiedChinese: 'Simplified Chinese',
                 setupFailedHttp: 'Setup failed (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
@@ -8845,6 +8861,14 @@
                 allAttributes: 'All attributes',
             },
             zh: {
+                guestRam: '客户机内存',
+                guestMemory: '客户机内存',
+                guestMemoryUnavailable: '客户机内存不可用',
+                guestMemoryPressureTooltip: '客户机内存压力；客户机无法报告时不可用',
+                hostResident: '主机驻留',
+                hostResidentMemory: '主机驻留内存',
+                hostResidentMemoryTooltip: '主机驻留的 QEMU 内存，包括可回收的客户机缓存',
+                availableMemory: '可用：{value}',
                 languageSimplifiedChinese: '简体中文',
                 setupFailedHttp: '初始化失败（HTTP {status}）',
                 mcevpnMemberAdded: '已将集群加入跨域',
@@ -12775,6 +12799,14 @@
             // French translations by @IMNotMax (PR #186)
             // Falls back to EN for missing keys
             fr: {
+                guestRam: 'RAM invitée',
+                guestMemory: 'Mémoire invitée',
+                guestMemoryUnavailable: 'Mémoire invitée indisponible',
+                guestMemoryPressureTooltip: 'Pression mémoire de l’invité ; indisponible si l’invité ne peut pas la signaler',
+                hostResident: 'Résident hôte',
+                hostResidentMemory: 'Mémoire résidente hôte',
+                hostResidentMemoryTooltip: 'Mémoire QEMU résidente sur l’hôte, y compris le cache invité récupérable',
+                availableMemory: 'Disponible : {value}',
                 timeAgoSec: 'il y a {n}s',
                 timeAgoMin: 'il y a {n}m',
                 languageSimplifiedChinese: 'Chinois simplifié',
@@ -17131,6 +17163,14 @@
                 zoomOut: 'Zoom arrière',
             },
             es: {
+                guestRam: 'RAM del invitado',
+                guestMemory: 'Memoria del invitado',
+                guestMemoryUnavailable: 'Memoria del invitado no disponible',
+                guestMemoryPressureTooltip: 'Presión de memoria del invitado; no disponible si el invitado no puede informarla',
+                hostResident: 'Residente en host',
+                hostResidentMemory: 'Memoria residente en host',
+                hostResidentMemoryTooltip: 'Memoria QEMU residente en el host, incluida la caché recuperable del invitado',
+                availableMemory: 'Disponible: {value}',
                 languageSimplifiedChinese: 'Chino simplificado',
                 setupFailedHttp: 'Error de configuración (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
@@ -21503,6 +21543,14 @@
                 zoomOut: 'Alejar',
             },
             pt: {
+                guestRam: 'RAM do convidado',
+                guestMemory: 'Memória do convidado',
+                guestMemoryUnavailable: 'Memória do convidado indisponível',
+                guestMemoryPressureTooltip: 'Pressão de memória do convidado; indisponível quando o convidado não pode informá-la',
+                hostResident: 'Residente no host',
+                hostResidentMemory: 'Memória residente no host',
+                hostResidentMemoryTooltip: 'Memória QEMU residente no host, incluindo cache recuperável do convidado',
+                availableMemory: 'Disponível: {value}',
                 languageSimplifiedChinese: 'Chinês simplificado',
                 setupFailedHttp: 'Falha na configuração (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
@@ -25719,6 +25767,14 @@
                 zoomOut: 'Afastar',
             },
             ko: {
+                guestRam: '게스트 RAM',
+                guestMemory: '게스트 메모리',
+                guestMemoryUnavailable: '게스트 메모리를 사용할 수 없음',
+                guestMemoryPressureTooltip: '게스트 메모리 압력; 게스트가 보고할 수 없으면 사용할 수 없음',
+                hostResident: '호스트 상주',
+                hostResidentMemory: '호스트 상주 메모리',
+                hostResidentMemoryTooltip: '회수 가능한 게스트 캐시를 포함한 호스트 상주 QEMU 메모리',
+                availableMemory: '사용 가능: {value}',
                 languageSimplifiedChinese: '중국어 간체',
                 setupFailedHttp: '설정 실패(HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove
@@ -30167,6 +30223,14 @@
                 zoomOut: '축소',
             },
             it: {
+                guestRam: 'RAM guest',
+                guestMemory: 'Memoria guest',
+                guestMemoryUnavailable: 'Memoria guest non disponibile',
+                guestMemoryPressureTooltip: 'Pressione della memoria guest; non disponibile se il guest non può segnalarla',
+                hostResident: 'Residente host',
+                hostResidentMemory: 'Memoria residente host',
+                hostResidentMemoryTooltip: 'Memoria QEMU residente sull’host, inclusa la cache guest recuperabile',
+                availableMemory: 'Disponibile: {value}',
                 languageSimplifiedChinese: 'Cinese semplificato',
                 setupFailedHttp: 'Configurazione non riuscita (HTTP {status})',
                 // #612 Phase 3 — Multi-Cluster EVPN member add/remove

@@ -28,6 +28,38 @@ from pegaprox.globals import (
 _MAX_BROADCAST_BYTES = int(os.environ.get('PEGAPROX_MAX_BROADCAST_BYTES', str(5_000_000)))
 
 
+def _filter_sse_resources_for_user(resources, cluster_id, username):
+    """Apply the normal per-VM authorization decision before an SSE frame leaves."""
+    from pegaprox.utils.auth import load_users
+    from pegaprox.utils.rbac import user_can_access_vm
+
+    stored = load_users().get(username)
+    if not stored:
+        return []
+    user = dict(stored)
+    user['username'] = username
+    return [
+        resource for resource in resources
+        if user_can_access_vm(
+            user,
+            cluster_id,
+            resource.get('vmid'),
+            'vm.view',
+            resource.get('type'),
+        )
+    ]
+
+
+def _serialize_sse_message(update_type, data, cluster_id, timestamp):
+    """Serialize one SSE payload consistently for shared and per-user frames."""
+    return json.dumps({
+        'type': update_type,
+        'data': data,
+        'cluster_id': cluster_id,
+        'timestamp': timestamp,
+    }, default=str)
+
+
 def watched_clusters():
     """Cluster IDs at least one live SSE/WS client is subscribed to, or None if
     any client has all-access (clusters=None → poll everything). Shared by the
@@ -95,7 +127,7 @@ def broadcast_update(update_type: str, data: dict, cluster_id: str = None):
         })
 
         # Limit message size
-        if len(message) > _MAX_BROADCAST_BYTES:
+        if update_type != 'resources' and len(message) > _MAX_BROADCAST_BYTES:
             logging.warning(f"Broadcast message too large ({len(message)} bytes), skipping")
             return
 
@@ -257,13 +289,9 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         # broadcast. Caller's intent was "best-effort dispatch", not "verify
         # data shape" — that's a stability/observability win for broadcasts
         # like #413 layer 1 where a wrong arg shape killed the publisher.
+        timestamp = datetime.now().isoformat()
         try:
-            message = json.dumps({
-                'type': update_type,
-                'data': data,
-                'cluster_id': cluster_id,
-                'timestamp': datetime.now().isoformat()
-            }, default=str)
+            message = _serialize_sse_message(update_type, data, cluster_id, timestamp)
         except (TypeError, ValueError) as _ser_err:
             # If even default=str can't coerce, log enough context to find
             # the bad caller, then drop. Don't take the broadcaster down.
@@ -285,6 +313,7 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                                    'ha_event', 'alert', 'ha_status']
         is_cluster_specific = update_type in cluster_specific_events or cluster_id is not None
 
+        clients_to_send = []
         with sse_clients_lock:
             for client_id, client_info in list(sse_clients.items()):
                 try:
@@ -313,16 +342,30 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                         should_send = True
 
                     if q and should_send:
-                        try:
-                            q.put_nowait(message)
-                        except Exception:
-                            # R3 (regression scan): a slow client's queue is full, so
-                            # this frame is dropped — make it OBSERVABLE instead of
-                            # silent (its VM grid goes stale otherwise with no signal).
-                            n = client_info['dropped'] = client_info.get('dropped', 0) + 1
-                            if n == 1 or n % 100 == 0:
-                                logging.warning(f"[SSE] client {client_id} queue full — dropped {n} frames (slow consumer)")
+                        clients_to_send.append((client_id, client_info, q))
                 except:
                     pass
+
+        for client_id, client_info, q in clients_to_send:
+            try:
+                client_message = message
+                if update_type == 'resources' and cluster_id is not None:
+                    filtered = _filter_sse_resources_for_user(
+                        data, cluster_id, client_info.get('user'))
+                    client_message = _serialize_sse_message(
+                        update_type, filtered, cluster_id, timestamp)
+                if len(client_message) > _MAX_BROADCAST_BYTES:
+                    logging.warning(
+                        f"SSE message too large ({len(client_message)} bytes), skipping")
+                    continue
+                q.put_nowait(client_message)
+            except Exception:
+                # R3 (regression scan): a slow client's queue is full, so
+                # this frame is dropped — make it OBSERVABLE instead of
+                # silent (its VM grid goes stale otherwise with no signal).
+                n = client_info['dropped'] = client_info.get('dropped', 0) + 1
+                if n == 1 or n % 100 == 0:
+                    logging.warning(
+                        f"[SSE] client {client_id} queue full — dropped {n} frames (slow consumer)")
     except Exception as e:
         logging.error(f"SSE broadcast error: {e}")

@@ -1289,9 +1289,12 @@
             const { t } = useTranslation();
             const { getAuthHeaders, user } = useAuth();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - corporate defaults to table view
-            const guestMemPct = (r) => r?.guest_mem_percent == null
-                ? null
-                : Math.max(0, Math.min(Number(r.guest_mem_percent), 100));
+            /** Return finite, bounded guest pressure or null when no sample exists. */
+            const guestMemPct = (r) => {
+                if (r?.guest_mem_percent == null) return null;
+                const value = Number(r.guest_mem_percent);
+                return Number.isFinite(value) ? Math.max(0, Math.min(value, 100)) : null;
+            };
             // NS Mar 2026 - per-VM sparkline history for table view
             const vmHistRef = useRef({});
             useEffect(() => {
@@ -1300,9 +1303,10 @@
                 resources.forEach(r => {
                     if (r.status !== 'running') return;
                     const id = r.vmid;
-                    if (!buf[id]) buf[id] = { cpu: Array(15).fill(0), mem: Array(15).fill(0) };
+                    if (!buf[id]) buf[id] = { cpu: Array(15).fill(0), mem: [] };
                     buf[id].cpu = [...buf[id].cpu.slice(1), r.cpu_percent || 0];
-                    buf[id].mem = [...buf[id].mem.slice(1), guestMemPct(r) || 0];
+                    const memPct = guestMemPct(r);
+                    if (memPct != null) buf[id].mem = [...buf[id].mem.slice(-14), memPct];
                 });
             }, [resources]);
             const [search, setSearch] = useState('');
@@ -1313,7 +1317,8 @@
             // username so a shared browser keeps each operator's choice).
             const _sortKey = `pegaprox-vmsort-${user?.username || '_'}`;
             const _savedSort = (() => { try { return JSON.parse(localStorage.getItem(_sortKey) || '{}'); } catch (e) { return {}; } })();
-            const [sortBy, setSortBy] = useState(_savedSort.by || 'vmid');
+            const initialSortBy = _savedSort.by === 'mem_percent' ? 'guest_mem_percent' : (_savedSort.by || 'vmid');
+            const [sortBy, setSortBy] = useState(initialSortBy);
             const [sortDir, setSortDir] = useState(_savedSort.dir || 'asc');
             const [viewMode, setViewMode] = useState(isCorporate ? 'table' : 'cards'); // LW: corporate defaults to table
             const [actionLoading, setActionLoading] = useState({});
@@ -1380,6 +1385,9 @@
                             updatedVm.cpu !== selectedDetailVm.cpu ||
                             updatedVm.mem !== selectedDetailVm.mem ||
                             updatedVm.maxmem !== selectedDetailVm.maxmem ||
+                            updatedVm.guest_mem !== selectedDetailVm.guest_mem ||
+                            updatedVm.guest_maxmem !== selectedDetailVm.guest_maxmem ||
+                            updatedVm.guest_mem_percent !== selectedDetailVm.guest_mem_percent ||
                             updatedVm.uptime !== selectedDetailVm.uptime ||
                             updatedVm.node !== selectedDetailVm.node ||
                             updatedVm.name !== selectedDetailVm.name ||
@@ -1845,9 +1853,9 @@
                                             )}
                                             <div>
                                                 <div className="flex items-center justify-between text-xs mb-1">
-                                                    <span className="text-gray-500">Guest RAM</span>
+                                                    <span className="text-gray-500">{t('guestRam')}</span>
                                                     <span className="text-gray-400 font-mono">
-                                                        {guestMemPct(resource) == null ? 'Unavailable' : `${formatBytes(resource.guest_mem)} / ${formatBytes(resource.guest_maxmem)}`}
+                                                        {guestMemPct(resource) == null ? t('guestMemoryUnavailable') : `${formatBytes(resource.guest_mem)} / ${formatBytes(resource.guest_maxmem)}`}
                                                     </span>
                                                 </div>
                                                 <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
@@ -2084,7 +2092,7 @@
                                             { key: 'node', label: 'Node' },
                                             { key: 'ip', label: 'IP' },
                                             { key: 'cpu_percent', label: 'CPU' },
-                                            { key: 'guest_mem_percent', label: 'Guest RAM' },
+                                            { key: 'guest_mem_percent', label: t('guestRam') },
                                             { key: 'disk', label: t('disk') },
                                             { key: 'status', label: 'Status' },
                                             { key: 'actions', label: t('actions') },
@@ -2231,7 +2239,7 @@
                                                             </div>
                                                         </div>
                                                         <span className="text-xs text-gray-400 font-mono whitespace-nowrap">
-                                                            {guestMemPct(resource) == null ? 'Unavailable' : `${guestMemPct(resource).toFixed(1)}%`}
+                                                            {guestMemPct(resource) == null ? t('guestMemoryUnavailable') : `${guestMemPct(resource).toFixed(1)}%`}
                                                         </span>
                                                         {isCorporate && resource.status === 'running' && (() => {
                                                             const h = (vmHistRef.current[resource.vmid] || {}).mem;
