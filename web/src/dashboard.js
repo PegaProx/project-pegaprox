@@ -1073,6 +1073,7 @@
                 const gb = bytes / (1024*1024*1024);
                 return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024*1024)).toFixed(0)} MB`;
             };
+            const fmtGuestMem = (vm) => vm?.guest_mem == null ? 'Unavailable' : fmtMem(vm.guest_mem);
 
             const barColor = (v) => v > 80 ? '#f54f47' : v > 60 ? '#efc006' : '#60b515';
 
@@ -2385,7 +2386,7 @@
                                                 `Type: ${isQemu ? 'QEMU' : 'LXC'}`,
                                                 `Status: ${vm.status}`,
                                                 isRunning ? `CPU: ${((vm.cpu || 0) * 100).toFixed(0)}%` : null,
-                                                isRunning ? `RAM: ${fmtMem(vm.mem)}` : null,
+                                                isRunning ? `Guest RAM: ${fmtGuestMem(vm)}` : null,
                                                 bridges.length ? `Bridge${bridges.length > 1 ? 's' : ''}: ${bridges.join(', ')}`
                                                     : (vmBridgeMap[String(vm.vmid)] ? `Bridge: ${vmBridgeMap[String(vm.vmid)]}` : null),
                                                 storages.length ? `Storage: ${storages.join(', ')}` : null,
@@ -2873,7 +2874,7 @@
                                                                 })()}
                                                                 {vm.status === 'running' && (
                                                                     <span className="text-[10px] ml-auto flex-shrink-0" style={{color: '#728b9a'}}>
-                                                                        {((vm.cpu || 0) * 100).toFixed(0)}% &middot; {fmtMem(vm.mem)}
+                                                                        {((vm.cpu || 0) * 100).toFixed(0)}% &middot; {fmtGuestMem(vm)}
                                                                     </span>
                                                                 )}
                                                                 {hasPbs && (
@@ -15393,7 +15394,7 @@
                                                                                         <div className="corp-consumer-bar">
                                                                                             <div className="corp-consumer-bar-fill" style={{width: `${Math.min((vm.mem / (vm.maxmem || 1)) * 100, 100)}%`, background: '#9b59b6'}}></div>
                                                                                         </div>
-                                                                                        <span className="corp-consumer-val">{fmtMem(vm.mem)}</span>
+                                                                                        <span className="corp-consumer-val">{vm.guest_mem == null ? 'Unavailable' : fmtMem(vm.guest_mem)}</span>
                                                                                     </div>
                                                                                 ))}
                                                                             </div>

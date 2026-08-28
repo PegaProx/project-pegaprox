@@ -1,4 +1,5 @@
 import threading
+from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
 from pegaprox.core.manager import PegaProxManager
@@ -130,3 +131,21 @@ def test_lxc_cgroup_memory_is_valid_guest_pressure_and_is_bounded():
     assert resources[0]['guest_mem_percent'] == 100.0
     assert resources[0]['guest_memory_status'] == 'available'
     assert resources[0]['guest_memory_source'] == 'proxmox-lxc-cgroup'
+
+
+def test_freshly_booted_vm_forces_memory_probe_past_no_agent_cache():
+    manager = _manager_with_memory_cache({})
+    manager._no_agent_vms = {200}
+    manager.current_host = None
+    manager.config = SimpleNamespace(host='pve', api_port=8006)
+    manager._api_post = Mock(return_value=_response(200, {'pid': 7}))
+    manager._api_get = Mock(return_value=_response(200, {
+        'exited': 1,
+        'exitcode': 0,
+        'out-data': 'MemTotal: 1000 kB\nMemAvailable: 900 kB\n',
+    }))
+
+    result = manager._fetch_qemu_memory('pve', 200, force=True)
+
+    assert result['used_pct'] == 10.0
+    assert 200 not in manager._no_agent_vms

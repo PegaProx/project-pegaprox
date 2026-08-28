@@ -5764,7 +5764,7 @@
                                                                                 }}>{g.type === 'qemu' ? 'VM' : 'LXC'}</span>
                                                                                 {g.status === 'running' && (
                                                                                     <span className="ml-auto text-[10px] flex-shrink-0" style={{color: 'var(--corp-text-muted)'}}>
-                                                                                        {((g.cpu || 0) * 100).toFixed(0)}% &middot; {fmtMem(g.mem)}
+                                                                                        {((g.cpu || 0) * 100).toFixed(0)}% &middot; {g.guest_mem == null ? 'Unavailable' : fmtMem(g.guest_mem)}
                                                                                     </span>
                                                                                 )}
                                                                             </div>

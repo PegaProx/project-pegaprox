@@ -16699,15 +16699,21 @@ echo DONE""",
         except Exception:
             return {}
 
-    def _fetch_qemu_memory(self, node: str, vmid: int):
+    def _fetch_qemu_memory(self, node: str, vmid: int, force: bool = False):
         """Get Linux guest memory pressure through QGA, or None if unavailable."""
-        if vmid in self._no_agent_vms:
+        if vmid in self._no_agent_vms and not force:
             return None
         try:
             from pegaprox.utils.guest_memory import get_guest_linux_memory
             base = (f"https://{self.host}:{self.api_port}/api2/json/nodes/"
                     f"{node}/qemu/{vmid}/agent")
-            return get_guest_linux_memory(self, base)
+            memory = get_guest_linux_memory(self, base)
+            if memory:
+                # A guest can gain an agent after package installation/reboot.
+                # Recover the shared IP/disk probes immediately instead of
+                # leaving the VM unavailable until the five-minute sweep.
+                self._no_agent_vms.discard(vmid)
+            return memory
         except Exception:
             return None
 
@@ -16773,7 +16779,11 @@ echo DONE""",
                 else:
                     ips = self._fetch_qemu_ips(node, vmid)
                     disk = self._fetch_qemu_disk_usage(node, vmid)
-                    memory = self._fetch_qemu_memory(node, vmid)
+                    # A freshly booted VM may have acquired its agent channel
+                    # since it entered the no-agent skip list. Probe memory once
+                    # during the boot window so inventory recovers immediately.
+                    force_memory = 0 < (r.get('uptime') or 0) < 180
+                    memory = self._fetch_qemu_memory(node, vmid, force=force_memory)
                     return (node, vmid, ips, disk, memory)
 
             tasks = [lambda r=r: fetch_one(r) for r in running]
