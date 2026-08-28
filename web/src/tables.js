@@ -68,6 +68,40 @@
             return isGuestTemplate(resource) ? `${typeLabel} (${getTemplateLabel(t)})` : typeLabel;
         }
 
+        function getUpdateTaskLabel(updateTask = {}, t) {
+            switch (updateTask.phase) {
+                case 'apt_update':
+                    return 'apt update';
+                case 'apt_upgrade':
+                    return 'apt upgrade';
+                case 'reboot':
+                    return t('reboot');
+                case 'wait_online':
+                    return t('waitingForNode');
+                case 'done':
+                    return t('done');
+                default:
+                    break;
+            }
+
+            switch (updateTask.status) {
+                case 'failed':
+                    return t('updateFailed');
+                case 'completed':
+                    return t('updateCompleted');
+                case 'running':
+                    return t('updateRunning');
+                default:
+                    return (updateTask.phase || updateTask.status) ? t('unknown') : '...';
+            }
+        }
+
+        function getResourceStatusLabel(status, t) {
+            if (status === 'running') return t('running');
+            if (status === 'stopped') return t('stopped');
+            return status ? t('unknown') : '-';
+        }
+
         // Node Card Component
         function NodeCard({ name, metrics, index, clusterId, onMaintenanceToggle, onStartUpdate, onOpenNodeConfig, onNodeAction, onRemoveNode, onMoveNode }) {
             const { t } = useTranslation();
@@ -257,15 +291,7 @@
                                             updateTask.status === 'failed' ? 'bg-red-500/20 text-red-400' :
                                             'bg-blue-500/20 text-blue-400'
                                         }`}>
-                                            {updateTask.phase === 'apt_update' ? 'apt update' :
-                                             updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
-                                             updateTask.phase === 'reboot' ? (t('reboot')) :
-                                             updateTask.phase === 'wait_online' ? (t('waitingForNode')) :
-                                             updateTask.phase === 'done' ? (t('done')) :
-                                             updateTask.status === 'failed' ? (t('updateFailed')) :
-                                             updateTask.status === 'completed' ? (t('updateCompleted')) :
-                                             updateTask.status === 'running' ? (t('updateRunning')) :
-                                             updateTask.status}
+                                            {getUpdateTaskLabel(updateTask, t)}
                                         </span>
                                         {/* Dismiss button for completed/failed */}
                                         {(updateTask.status === 'completed' || updateTask.status === 'failed') && (
@@ -1014,7 +1040,7 @@
 
             // Status colors - Clarity dark theme
             const statusDotStyle = isOffline ? {background: '#f54f47'} : isInMaintenance ? {background: '#efc006'} : isUpdating ? {background: '#49afd9'} : {background: '#60b515'};
-            const statusLabel = isOffline ? '' : isInMaintenance ? t('maintenance') : isUpdating ? (updateTask?.phase || t('updating')) : '';
+            const statusLabel = isOffline ? '' : isInMaintenance ? t('maintenance') : isUpdating ? getUpdateTaskLabel(updateTask, t) : '';
 
             const nodeStatusCls = isOffline ? 'node-offline' : isInMaintenance ? 'node-maintenance' : 'node-online';
             return (
@@ -1035,12 +1061,7 @@
                                     }}>
                                         {updateTask.status === 'completed' ? '✓ ' : updateTask.status === 'failed' ? '✕ ' : '⟳ '}
                                         {updateTask.status === 'failed' ? t('updateFailed') : updateTask.status === 'completed' ? t('updateCompleted') : `${t('updating')}: ${
-                                            updateTask.phase === 'apt_update' ? 'apt update' :
-                                            updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
-                                            updateTask.phase === 'reboot' ? (t('reboot')) :
-                                            updateTask.phase === 'wait_online' ? (t('waitingForNode')) :
-                                            updateTask.phase === 'done' ? (t('done')) :
-                                            updateTask.phase || '...'
+                                            getUpdateTaskLabel(updateTask, t)
                                         }`}
                                     </span>
                                 )}
@@ -1093,12 +1114,7 @@
                                                 updateTask.status === 'completed' ? t('updateCompleted') :
                                                 t('updateRunning')
                                             }: {
-                                                updateTask.phase === 'apt_update' ? 'apt update' :
-                                                updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
-                                                updateTask.phase === 'reboot' ? (t('reboot')) :
-                                                updateTask.phase === 'wait_online' ? (t('waitingForNode')) :
-                                                updateTask.phase === 'done' ? (t('done')) :
-                                                updateTask.phase || '...'
+                                                getUpdateTaskLabel(updateTask, t)
                                             }</span>
                                         </div>
                                         {(updateTask.status === 'completed' || updateTask.status === 'failed') && (
@@ -1428,17 +1444,6 @@
                 lxc: 'LXC'
             };
 
-            const itemsLabel = (count) => {
-                const base = t('items');
-                if (base === 'elementy') {
-                    const mod10 = count % 10;
-                    const mod100 = count % 100;
-                    if (count === 1) return 'element';
-                    if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return 'elementy';
-                    return 'elementów';
-                }
-                return base;
-            };
 
             // NS #431: IP sorts by octet value, not as a string. Pull the IP from
             // the lazy guest-agent cache (qemu) or off the resource (lxc); blanks last.
@@ -1640,7 +1645,7 @@
                             ))}
                             <span className="corp-toolbar-divider" />
                             <span className="text-[11px]" style={{color: '#728b9a'}}>
-                                {filteredResources.length} {itemsLabel(filteredResources.length)}
+                                {t('items')}: {filteredResources.length}
                             </span>
                             <div style={{flex: 1}} />
                             {selectedVms.length > 0 && (
@@ -1836,11 +1841,7 @@
                                                         ? 'bg-green-500/10 text-green-400' 
                                                         : 'bg-red-500/10 text-red-400'
                                                 }`}>
-                                                    {resource.status === 'running'
-                                                        ? (t('running'))
-                                                        : resource.status === 'stopped'
-                                                            ? (t('stopped'))
-                                                            : (resource.status || '-')}
+                                                    {getResourceStatusLabel(resource.status, t)}
                                                 </span>
                                             </div>
                                             {/* IP Address - shown for running VMs with guest agent */}
@@ -2303,7 +2304,7 @@
                                                         <span className={`w-1.5 h-1.5 rounded-full ${
                                                             resource.status === 'running' ? 'bg-green-400' : 'bg-red-400'
                                                         }`} />
-                                                        {resource.status === 'running' ? (t('running')) : resource.status === 'stopped' ? (t('stopped')) : (resource.status || '-')}
+                                                        {getResourceStatusLabel(resource.status, t)}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3" style={{whiteSpace:'nowrap'}}>
@@ -2680,13 +2681,7 @@
                         )}
                         
                         <span className="text-gray-500">
-                            {Object.keys(groupedByNode).length} {
-                                Object.keys(groupedByNode).length === 1
-                                    ? (t('nodeSingular'))
-                                    : (Object.keys(groupedByNode).length % 10 >= 2 && Object.keys(groupedByNode).length % 10 <= 4 && !(Object.keys(groupedByNode).length % 100 >= 12 && Object.keys(groupedByNode).length % 100 <= 14)
-                                        ? (t('nodePluralFew'))
-                                        : (t('nodePluralMany')))
-                            }
+                            {t('nodes')}: {Object.keys(groupedByNode).length}
                         </span>
                     </div>
 

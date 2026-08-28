@@ -2512,22 +2512,6 @@
             const nodesWithUpdates = updateStatus?.summary?.nodes_with_updates || 0;
             const nodesFailed = updateStatus?.summary?.nodes_failed || 0;
 
-            // i18n: plural forms for update counters.
-            // Polish: 1 aktualizacja, 2-4 aktualizacje,
-            // 5+, 12-14, 21, 25... aktualizacji.
-            const formatUpdateCount = (count) => {
-                const n = Math.abs(Number(count) || 0);
-                const mod10 = n % 10;
-                const mod100 = n % 100;
-
-                const key = n === 1
-                    ? 'updateCountOne'
-                    : (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14))
-                        ? 'updateCountFew'
-                        : 'updateCountMany';
-
-                return `${n} ${t(key)}`;
-            };
             
             // Check for kernel updates
             // NS: kernel updates require reboot, so we flag them seperately
@@ -2710,7 +2694,7 @@
                                                             !nodeData.success ? 'bg-red-500/20 text-red-400' :
                                                             nodeData.count > 0 ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'
                                                         }`}>
-                                                            {!nodeData.success ? `⚠ ${t('checkFailed') || 'Check failed'}` : formatUpdateCount(nodeData.count || 0)}
+                                                            {!nodeData.success ? `⚠ ${t('checkFailed') || 'Check failed'}` : `${t('updates')}: ${nodeData.count || 0}`}
                                                         </span>
                                                         <Icons.ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                                                     </div>
@@ -2838,7 +2822,7 @@
                                                         !pbsData.success ? 'bg-red-500/20 text-red-400' :
                                                         pbsData.count > 0 ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'
                                                     }`}>
-                                                        {!pbsData.success ? `⚠ ${t('checkFailed') || 'Check failed'}` : formatUpdateCount(pbsData.count || 0)}
+                                                        {!pbsData.success ? `⚠ ${t('checkFailed') || 'Check failed'}` : `${t('updates')}: ${pbsData.count || 0}`}
                                                     </span>
                                                     <Icons.ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${selectedNode === pbsKey ? 'rotate-180' : ''}`} />
                                                 </div>
@@ -3010,12 +2994,10 @@
                                         <p className="text-xs text-gray-400 mt-2">
                                             {rollingUpdate.completed_nodes?.length || 0}/{rollingUpdate.nodes?.length || '?'} {t('nodesUpdated') || 'nodes updated'}
                                             {rollingUpdate.failed_nodes?.length > 0 && (
-                                                (t('rollingUpdateFailedNodeCount') || ', failed nodes: {count}')
-                                                    .replace('{count}', rollingUpdate.failed_nodes.length)
+                                                `, ${t('failed')}: ${rollingUpdate.failed_nodes.length}`
                                             )}
                                             {rollingUpdate.skipped_nodes?.length > 0 && (
-                                                (t('rollingUpdateSkippedNodeCount') || ', skipped nodes: {count}')
-                                                    .replace('{count}', rollingUpdate.skipped_nodes.length)
+                                                `, ${t('skipped')}: ${rollingUpdate.skipped_nodes.length}`
                                             )}
                                         </p>
                                     )}
@@ -3163,8 +3145,7 @@
                                                     {t('updateLogs')}
                                                 </span>
                                                 <span className="text-xs text-gray-500">
-                                                    {(t('rollingUpdateLogEntries') || 'Log entries: {count}')
-                                                        .replace('{count}', rollingUpdate.logs.length)}
+                                                    {t('updateLogs')}: {rollingUpdate.logs.length}
                                                 </span>
                                             </div>
                                             <div className="max-h-48 overflow-y-auto p-3 font-mono text-xs space-y-1">
