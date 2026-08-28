@@ -2940,7 +2940,7 @@
                                             {/* Corporate layout card */}
                                             <button
                                                 onClick={async () => {
-                                                    const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
+                                                    const corpTheme = corporateThemeFor(user?.theme);
                                                     const result = await updatePreferences({ ui_layout: 'corporate', theme: corpTheme });
                                                     if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporate') || 'Corporate'}`, 'success');
                                                 }}

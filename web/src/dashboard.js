@@ -1454,11 +1454,9 @@
 
             // LW Apr 2026: SVG colors — the diagram was dark-mode-only and unreadable
             // in Corporate Light. We can't use CSS vars directly inside <text fill>
-            // reliably so we switch palettes JS-side. Re-reads localStorage on each
-            // render, which is cheap.
-            const isLightCorp = isCorporate && (() => {
-                try { return localStorage.getItem('corp-theme') === 'light'; } catch(_) { return false; }
-            })();
+            // reliably so we switch palettes JS-side. Reads the body attribute that
+            // applyTheme() derives from user.theme, same as the chart helpers in ui.js.
+            const isLightCorp = isCorporate && document.body?.dataset?.corpTheme === 'light';
             // LW May 2026: brand colour gets its own slot now — Corporate uses Clarity
             // blue, Modern keeps the orange. Was hardcoded in 7 places previously.
             const topoColor = React.useMemo(() => (isLightCorp ? {
@@ -8383,11 +8381,25 @@
             // NS: Global Search state - Jan 2026
             const [globalSearchQuery, setGlobalSearchQuery] = useState('');
             // LW: corporate light/dark toggle
-            const [corpLight, setCorpLight] = useState(() => {
-                const saved = localStorage.getItem('corp-theme');
-                if (saved === 'light') document.body.dataset.corpTheme = 'light';
-                return saved === 'light';
-            });
+            // Light/dark for Corporate lives in user.theme on the server; the body
+            // attribute is derived from it by applyTheme(). This state only mirrors
+            // the body for the header icon, so it follows every writer (toggle,
+            // shortcut, settings picker, session restore) without owning the value.
+            const [corpLight, setCorpLight] = useState(() => document.body?.dataset?.corpTheme === 'light');
+            useEffect(() => {
+                const sync = () => setCorpLight(document.body?.dataset?.corpTheme === 'light');
+                window.addEventListener('pegaprox:theme', sync);
+                // useLayout() above applies the theme in an earlier effect of this same
+                // component, so its event fired before this listener existed.
+                sync();
+                return () => window.removeEventListener('pegaprox:theme', sync);
+            }, []);
+            // Reads the body instead of corpLight so the keyboard shortcut (registered
+            // once) never toggles against a stale closure.
+            const toggleCorpTheme = () => {
+                const light = document.body?.dataset?.corpTheme === 'light';
+                updatePreferences({ theme: light ? 'corporateDark' : 'corporateLight' });
+            };
             const [globalSearchResults, setGlobalSearchResults] = useState(null);
             const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
             const [showGlobalSearch, setShowGlobalSearch] = useState(false);
@@ -9412,12 +9424,7 @@
                     }
                     if (e.key === 't') {
                         e.preventDefault();
-                        const cur = document.body?.dataset?.corpTheme === 'light' ? 'light' : 'dark';
-                        const next = cur === 'light' ? 'dark' : 'light';
-                        try {
-                            document.body.dataset.corpTheme = next;
-                            localStorage.setItem('pegaprox-corp-theme', next);
-                        } catch (_) {}
+                        toggleCorpTheme();
                         return;
                     }
                 };
@@ -14015,22 +14022,7 @@
                                     {/* light/dark toggle for corporate */}
                                     {isCorporate && (
                                         <button
-                                            onClick={() => {
-                                                const next = !corpLight;
-                                                document.body.dataset.corpTheme = next ? 'light' : '';
-                                                localStorage.setItem('corp-theme', next ? 'light' : '');
-                                                applyTheme(next ? 'corporateLight' : 'corporateDark');
-                                                setCorpLight(next);
-                                                // MK May 2026 — also persist on server so checkSession on next
-                                                // F5 doesn't apply a stale user.theme that mismatches the local
-                                                // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
-                                                // light-on-dark when toggle and server preference drifted).
-                                                fetch(`${API_URL}/user/preferences`, {
-                                                    method: 'PUT', credentials: 'include',
-                                                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                                                    body: JSON.stringify({ theme: next ? 'corporateLight' : 'corporateDark' })
-                                                }).catch(() => {});
-                                            }}
+                                            onClick={toggleCorpTheme}
                                             className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
                                             title={corpLight ? 'Dark Mode' : 'Light Mode'}
                                         >

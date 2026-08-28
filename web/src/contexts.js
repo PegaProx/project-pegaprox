@@ -11,6 +11,15 @@
         // backend allowlist in pegaprox/api/users.py and the LanguageSwitcher list.
         const SUPPORTED_LANGS = ['de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh'];
 
+        // Corporate layout only renders its own two themes; anything else saved on
+        // the user (a Modern theme, an empty value) falls back to dark. The saved
+        // user.theme is the single source of truth for light vs dark in Corporate —
+        // the header toggle, the shortcut and the settings picker all write it.
+        const CORPORATE_THEMES = ['corporateDark', 'corporateLight'];
+        function corporateThemeFor(theme) {
+            return CORPORATE_THEMES.includes(theme) ? theme : 'corporateDark';
+        }
+
         // map navigator.language ("en-US", "de-AT", ...) onto a supported code, or null
         function _detectBrowserLang() {
             try {
@@ -255,18 +264,10 @@
                                 applyLanguage(d.user.language);
                             }
                             // NS: Apply user's theme or default
-                            // MK May 2026 — when user is in corporate layout, the local
-                            // corp-theme toggle is the source of truth for that session.
-                            // Without this, a stale server.user.theme=corporateLight would
-                            // override an active corporateDark toggle on F5 → taskbar
-                            // bg-proxmox-dark/50 etc. would render with light CSS vars.
                             let userTheme = d.user?.theme || d.default_theme || 'proxmoxDark';
-                            try {
-                                if (d.user?.ui_layout === 'corporate') {
-                                    const isLight = localStorage.getItem('corp-theme') === 'light';
-                                    userTheme = isLight ? 'corporateLight' : 'corporateDark';
-                                }
-                            } catch (_) {}
+                            if (d.user?.ui_layout === 'corporate') {
+                                userTheme = corporateThemeFor(userTheme);
+                            }
                             console.log('[Theme] checkSession - Server theme:', d.user?.theme, 'Default:', d.default_theme, 'Using:', userTheme);
                             if (userTheme && PEGAPROX_THEMES[userTheme]) {
                                 applyTheme(userTheme);
@@ -358,12 +359,9 @@
                         }
                         // NS: Apply user's theme (with fallback to default)
                         let userTheme = data.user?.theme || data.default_theme || 'proxmoxDark';
-                        try {
-                            if (data.user?.ui_layout === 'corporate') {
-                                const isLight = localStorage.getItem('corp-theme') === 'light';
-                                userTheme = isLight ? 'corporateLight' : 'corporateDark';
-                            }
-                        } catch (_) {}
+                        if (data.user?.ui_layout === 'corporate') {
+                            userTheme = corporateThemeFor(userTheme);
+                        }
                         console.log('[Theme] Login - Server theme:', data.user?.theme, 'Default:', data.default_theme, 'Using:', userTheme);
                         if (userTheme && PEGAPROX_THEMES[userTheme]) {
                             applyTheme(userTheme);
@@ -496,13 +494,9 @@
             useEffect(() => {
                 document.body.setAttribute('data-layout', layout);
                 if (isCorporate) {
-                    const isLight = localStorage.getItem('corp-theme') === 'light';
-                    // MK May 2026 (#296): the data-corp-theme attribute gates ALL light-mode
-                    // CSS overrides. The header toggle sets this on click, but on a fresh
-                    // page load only applyTheme() ran — so light variables got applied but
-                    // body still had no data-corp-theme, leaving every component in dark.
-                    document.body.dataset.corpTheme = isLight ? 'light' : '';
-                    applyTheme(isLight ? 'corporateLight' : 'corporateDark');
+                    // applyTheme() derives data-corp-theme (the gate for every light-mode
+                    // CSS override) from the theme, so this is the only call needed.
+                    applyTheme(corporateThemeFor(user?.theme));
                 } else if (isCloud) {
                     // NS: force the cloud theme on layout change + F5-restore so the
                     // teal/navy variables apply even if a stale theme was stored.

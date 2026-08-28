@@ -725,10 +725,20 @@
                     document.body.classList.add('dark-theme');
                     document.body.classList.remove('light-theme');
                 }
+                // Every Corporate light-mode CSS override is gated on this attribute.
+                // Derive it from the theme right here so the settings picker, the
+                // header toggle and the session restore all leave body in the same
+                // state — previously only the toggle set it, so a theme saved on the
+                // server rendered dark on the next load. Modern/Cloud never carry it.
+                if (document.body.dataset.layout === 'corporate') {
+                    document.body.dataset.corpTheme = themeName === 'corporateLight' ? 'light' : '';
+                }
             }
             
             localStorage.setItem('pegaprox-theme', themeName);
             console.log(`Theme applied: ${theme.name}`);
+            // Lets React state (header sun/moon icon) follow the body without polling.
+            window.dispatchEvent(new CustomEvent('pegaprox:theme', { detail: { theme: themeName } }));
         }
         
         // Load saved theme on page load - apply CSS vars immediately, body classes after DOM ready
