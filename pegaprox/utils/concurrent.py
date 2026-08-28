@@ -249,7 +249,15 @@ def gevent_to_thread(fn, /, *args, **kwargs):
             loop.call_soon_threadsafe(
                 lambda r=result: None if future.done() else future.set_result(r))
 
-    gevent.spawn(_runner)
+    greenlet = gevent.spawn(_runner)
+
+    def _on_done(fut):
+        # A caller timing out / cancelling (wait_for, handler teardown) must not
+        # leave the blocking call running to completion in the background.
+        if fut.cancelled():
+            greenlet.kill(block=False)
+
+    future.add_done_callback(_on_done)
     return future
 
 

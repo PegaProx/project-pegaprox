@@ -11113,7 +11113,12 @@ echo "AGENT_INSTALLED_OK"
         """
         pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
         usr = getattr(self.config, 'user', None) or 'root@pam'
-        if not pwd:
+        # An inline-token cluster stores 'user@realm!tokenid' in config.user and
+        # the token SECRET in config.pass_ (connect_to_proxmox), so pwd being
+        # truthy is not enough: POSTing a token secret to /access/ticket is a
+        # guaranteed 401 per console open, outside the connect path's failed-login
+        # circuit breaker (#444). Same guard as create_privileged_session().
+        if not pwd or '!' in usr:
             return None, None
         try:
             import ssl as _ssl

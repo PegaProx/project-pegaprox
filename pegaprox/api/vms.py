@@ -8664,17 +8664,25 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_vnc
         ws_host = host if host else None
         display_host = host or '0.0.0.0'
-        _listen_sock = _pegaprox_gevent_listen_socket(ws_host, port)
         try:
+            # Bind inside the try: _pegaprox_gevent_listen_socket() performs the
+            # bind itself now (websockets.serve used to, inside this block), so
+            # a bind failure must raise here for the #71 fallback to stay
+            # reachable.
+            _listen_sock = _pegaprox_gevent_listen_socket(ws_host, port)
             async with websockets.serve(vnc_handler, sock=_listen_sock, ssl=ssl_context, ping_interval=30, ping_timeout=60, process_request=_lpr_vnc):
                 print(f"VNC WebSocket Server ready on {proto}://{display_host}:{port}", flush=True)
                 server_ready.set()
                 await asyncio.Future()  # Run forever
         except OSError as bind_err:
-            # Issue #71: IPv6 bind failed, fall back to 0.0.0.0
+            # Issue #71: IPv6 bind failed, fall back to 0.0.0.0 — through the
+            # same gevent-safe helper; passing a host straight to
+            # websockets.serve() is the bind path that hangs under gevent on
+            # Python 3.13+.
             if ':' in str(host):
                 print(f"VNC WebSocket: IPv6 bind failed ({bind_err}), falling back to 0.0.0.0", flush=True)
-                async with websockets.serve(vnc_handler, '0.0.0.0', port, ssl=ssl_context, ping_interval=30, ping_timeout=60, process_request=_lpr_vnc):
+                _fallback_sock = _pegaprox_gevent_listen_socket('0.0.0.0', port)
+                async with websockets.serve(vnc_handler, sock=_fallback_sock, ssl=ssl_context, ping_interval=30, ping_timeout=60, process_request=_lpr_vnc):
                     print(f"VNC WebSocket Server ready on {proto}://0.0.0.0:{port}", flush=True)
                     server_ready.set()
                     await asyncio.Future()

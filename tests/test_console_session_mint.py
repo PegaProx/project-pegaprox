@@ -72,3 +72,15 @@ def test_mint_returns_none_pair_for_token_registered_cluster(capture_login):
 def test_ticket_only_view_keeps_old_contract(capture_login):
     mgr = _manager(host='pve1.example', current_host=None)
     assert mgr.mint_console_auth_ticket() == 'PVE:root@pam:TICKET'
+
+
+def test_mint_refuses_inline_token_identity(capture_login):
+    # An inline-token cluster stores 'user@realm!tokenid' in config.user and the
+    # token SECRET in config.pass_ — pwd is truthy, but POSTing it to
+    # /access/ticket is a guaranteed 401 per console open (and bypasses the
+    # connect path's failed-login circuit breaker). The mint must bail without
+    # ever talking to PVE.
+    mgr = _manager(host='pve1.example', current_host=None, password='tokensecret')
+    mgr.config.user = 'automation@pve!provisioning'
+    assert mgr.mint_console_session() == (None, None)
+    assert 'url' not in capture_login
