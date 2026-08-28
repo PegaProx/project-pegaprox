@@ -6416,17 +6416,19 @@ case'topology':body=/*#__PURE__*/React.createElement("div",{className:"cloud-mou
 const POLL_TIMEOUT_MS=12000;// A task older than this at the time it first shows up in the list was
 // already running before the user was looking (page load, cluster switch),
 // so it must not pop the TaskBar open. Compared against the browser clock.
-const TASKBAR_RECENT_START_S=120;// Normalize a task's start time to Unix seconds. Proxmox sends a Unix
-// timestamp; XCP-ng (xcpng.py get_tasks) sends datetime.isoformat(), a
-// naive local-time string — Date.parse reads that as browser-local time,
-// which matches when server and browser share a timezone. Returns null
-// when the field is missing or unparseable.
+const TASKBAR_RECENT_START_S=120;// Normalize a task's start time to Unix seconds. Providers send a Unix
+// timestamp (xcpng.py get_tasks converts its internal ISO string before
+// handing tasks out); the string branches stay as a defensive fallback
+// for numeric strings and ISO datetimes. Returns null when the field is
+// missing or unparseable.
 function taskStartS(task){const st=task.starttime;if(typeof st==='number'&&Number.isFinite(st))return st;if(typeof st==='string'&&st){const n=Number(st);if(Number.isFinite(n))return n;const ms=Date.parse(st);if(Number.isFinite(ms))return ms/1000;}return null;}// Returns true if `tasks` contains a running task whose UPID has not been
 // seen before and which started recently. Records every UPID in `seenUpids`.
 // The window is symmetric: a moderately skewed clock in either direction
 // still counts a just-started task as recent, while a start time far in
-// the future (broken clock) doesn't pop the bar.
-function hasNewlyStartedTask(tasks,seenUpids,nowS){let found=false;for(const task of tasks){if(!task||!task.upid)continue;const unseen=!seenUpids.has(task.upid);seenUpids.add(task.upid);if(!unseen||task.status!=='running')continue;const startS=taskStartS(task);const age=startS===null?0:nowS-startS;if(Math.abs(age)<TASKBAR_RECENT_START_S)found=true;}return found;}// Task Bar Component with Task Viewer
+// the future (broken clock) doesn't pop the bar. A task without a usable
+// start time is only observed, never treated as recent — "recently
+// started" can't be shown without a start time.
+function hasNewlyStartedTask(tasks,seenUpids,nowS){let found=false;for(const task of tasks){if(!task||!task.upid)continue;const unseen=!seenUpids.has(task.upid);seenUpids.add(task.upid);if(!unseen||task.status!=='running')continue;const startS=taskStartS(task);if(startS!==null&&Math.abs(nowS-startS)<TASKBAR_RECENT_START_S)found=true;}return found;}// Task Bar Component with Task Viewer
 function TaskBar({tasks,onClear,onClose,onCancel,onRefresh,clusterId,autoExpandEnabled=true}){const{t}=useTranslation();const[expanded,setExpanded]=useState(false);const[selectedTask,setSelectedTask]=useState(null);const[taskLog,setTaskLog]=useState('');const[taskLogLoading,setTaskLogLoading]=useState(false);const[filter,setFilter]=useState('all');// all, running, error, today
 const{getAuthHeaders}=useAuth();const seenTaskUpids=React.useRef(new Set());// First populated snapshot per cluster only seeds the seen-set; see effect.
 const taskSeedRef=React.useRef({clusterId:undefined,seeded:false});// LW: Resizable height - Feb 2026

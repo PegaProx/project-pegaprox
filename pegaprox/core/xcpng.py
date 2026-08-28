@@ -1725,12 +1725,22 @@ class XcpngManager:
         with self._task_lock:
             tasks = []
             for task_id, info in list(self._active_tasks.items())[-limit:]:
+                # 'started' is kept as datetime.isoformat() internally
+                # (_poll_tasks, get_task_log); the outward 'starttime' is Unix
+                # seconds like every other provider — the frontend sorts tasks
+                # numerically, renders `starttime * 1000` and compares against
+                # Date.now()/1000 for the TaskBar auto-expand, and a naive local
+                # ISO string is both NaN there and ambiguous across timezones.
+                try:
+                    started_s = int(datetime.fromisoformat(info['started']).timestamp())
+                except (ValueError, TypeError):
+                    started_s = None
                 tasks.append({
                     'upid': task_id,
                     'type': info['action'],
                     'status': info['status'],
                     'vmid': info['vmid'],
-                    'starttime': info['started'],
+                    'starttime': started_s,
                     'node': self.current_host or '',
                     'user': 'xapi@xcpng',
                 })

@@ -13,11 +13,11 @@
         // so it must not pop the TaskBar open. Compared against the browser clock.
         const TASKBAR_RECENT_START_S = 120;
 
-        // Normalize a task's start time to Unix seconds. Proxmox sends a Unix
-        // timestamp; XCP-ng (xcpng.py get_tasks) sends datetime.isoformat(), a
-        // naive local-time string — Date.parse reads that as browser-local time,
-        // which matches when server and browser share a timezone. Returns null
-        // when the field is missing or unparseable.
+        // Normalize a task's start time to Unix seconds. Providers send a Unix
+        // timestamp (xcpng.py get_tasks converts its internal ISO string before
+        // handing tasks out); the string branches stay as a defensive fallback
+        // for numeric strings and ISO datetimes. Returns null when the field is
+        // missing or unparseable.
         function taskStartS(task) {
             const st = task.starttime;
             if (typeof st === 'number' && Number.isFinite(st)) return st;
@@ -34,7 +34,9 @@
         // seen before and which started recently. Records every UPID in `seenUpids`.
         // The window is symmetric: a moderately skewed clock in either direction
         // still counts a just-started task as recent, while a start time far in
-        // the future (broken clock) doesn't pop the bar.
+        // the future (broken clock) doesn't pop the bar. A task without a usable
+        // start time is only observed, never treated as recent — "recently
+        // started" can't be shown without a start time.
         function hasNewlyStartedTask(tasks, seenUpids, nowS) {
             let found = false;
             for (const task of tasks) {
@@ -43,8 +45,7 @@
                 seenUpids.add(task.upid);
                 if (!unseen || task.status !== 'running') continue;
                 const startS = taskStartS(task);
-                const age = startS === null ? 0 : nowS - startS;
-                if (Math.abs(age) < TASKBAR_RECENT_START_S) found = true;
+                if (startS !== null && Math.abs(nowS - startS) < TASKBAR_RECENT_START_S) found = true;
             }
             return found;
         }
