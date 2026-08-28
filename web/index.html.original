@@ -670,14 +670,10 @@
                 name: 'System',
                 icon: '🌗',
                 description: 'Follows the OS light/dark setting',
-                corporate: true,
-                // Placeholder only — applyTheme() resolves 'system' to a concrete
-                // theme before reading colors (see resolveTheme).
-                colors: {
-                    primary: '#49afd9', primaryHover: '#3d9bc2', dark: '#1b2a32', darker: '#111a21',
-                    card: '#243542', border: '#344955', hover: '#29414e', text: '#e9ecef', textMuted: '#728b9a',
-                    success: '#60b515', warning: '#efc006', error: '#f54f47', info: '#49afd9'
-                }
+                corporate: true
+                // colors are assigned right below the registry: System is not a
+                // palette of its own — applyTheme() resolves it before reading
+                // colors, only the picker swatch shows them.
             },
             enterpriseBlue: {
                 name: 'Enterprise Blue',
@@ -724,6 +720,10 @@
         // OS light/dark setting and picks a light or dark theme for the layout.
         // corporateLight is the only light palette there is (Modern uses it as its
         // light option too, see #451), so both layouts share it and differ in dark.
+        // System is not a palette: reference Corporate Dark for the picker swatch
+        // so the two can never drift apart.
+        PEGAPROX_THEMES.system.colors = PEGAPROX_THEMES.corporateDark.colors;
+
         const SYSTEM_THEME_MEDIA = '(prefers-color-scheme: light)';
         function resolveTheme(themeName, layout) {
             if (themeName !== 'system') return themeName;
@@ -777,17 +777,27 @@
 
         // Live follow of the OS setting: re-resolve when it flips and 'system' is active.
         if (typeof window.matchMedia === 'function') {
-            window.matchMedia(SYSTEM_THEME_MEDIA).addEventListener('change', () => {
+            const _sysMql = window.matchMedia(SYSTEM_THEME_MEDIA);
+            const _sysOnChange = () => {
                 if (window.__pegaproxRequestedTheme === 'system') applyTheme('system');
-            });
+            };
+            // Older WebKit/embedded views ship MediaQueryList without addEventListener.
+            if (typeof _sysMql.addEventListener === 'function') _sysMql.addEventListener('change', _sysOnChange);
+            else if (typeof _sysMql.addListener === 'function') _sysMql.addListener(_sysOnChange);
         }
         
         // Load saved theme on page load - apply CSS vars immediately, body classes after DOM ready
         (function() {
             const saved = localStorage.getItem('pegaprox-theme') || 'proxmoxDark';
             console.log('[Theme] Initial load from localStorage:', saved);
-            // Apply CSS variables immediately (works on documentElement)
-            const theme = PEGAPROX_THEMES[resolveTheme(saved)] || PEGAPROX_THEMES.proxmoxDark;
+            // Apply CSS variables immediately (works on documentElement). At this
+            // point body has no data-layout yet, so 'system' resolves against the
+            // layout remembered from the last session (useLayout caches it) — a
+            // Corporate user on a dark OS gets corporateDark right away instead of
+            // a brief proxmoxDark until the session restore runs.
+            let lastLayout = null;
+            try { lastLayout = localStorage.getItem('pegaprox-last-layout'); } catch (_) {}
+            const theme = PEGAPROX_THEMES[resolveTheme(saved, lastLayout)] || PEGAPROX_THEMES.proxmoxDark;
             Object.entries(theme.colors).forEach(([key, value]) => {
                 document.documentElement.style.setProperty(`--color-${key}`, value);
                 if (value && value.startsWith('#')) {
