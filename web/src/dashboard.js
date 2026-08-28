@@ -8,6 +8,26 @@
         // backups) deliberately don't pass a timeout and are therefore unaffected.
         const POLL_TIMEOUT_MS = 12000;
 
+        // A task older than this at the time it first shows up in the list was
+        // already running before the user was looking (page load, cluster switch),
+        // so it must not pop the TaskBar open. Compared against the browser clock.
+        const TASKBAR_RECENT_START_S = 120;
+
+        // Returns true if `tasks` contains a running task whose UPID has not been
+        // seen before and which started recently. Records every UPID in `seenUpids`.
+        function hasNewlyStartedTask(tasks, seenUpids, nowS) {
+            let found = false;
+            for (const task of tasks) {
+                if (!task || !task.upid) continue;
+                const unseen = !seenUpids.has(task.upid);
+                seenUpids.add(task.upid);
+                if (!unseen || task.status !== 'running') continue;
+                const age = task.starttime ? nowS - task.starttime : 0;
+                if (age < TASKBAR_RECENT_START_S) found = true;
+            }
+            return found;
+        }
+
         // Task Bar Component with Task Viewer
         function TaskBar({ tasks, onClear, onClose, onCancel, onRefresh, clusterId, autoExpandEnabled = true }) {
             const { t } = useTranslation();
@@ -17,7 +37,7 @@
             const [taskLogLoading, setTaskLogLoading] = useState(false);
             const [filter, setFilter] = useState('all'); // all, running, error, today
             const { getAuthHeaders } = useAuth();
-            const prevRunningCount = React.useRef(0);
+            const seenTaskUpids = React.useRef(new Set());
             
             // LW: Resizable height - Feb 2026
             const [height, setHeight] = useState(() => {
@@ -32,13 +52,19 @@
             const runningCount = safeTasks.filter(task => task && task.status === 'running').length;
             const failedCount = safeTasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length;
             
-            // NS: Auto-expand when new task starts (if enabled in user preferences)
+            // NS: Auto-expand when new task starts (if enabled in user preferences).
+            // Decided per task, not by comparing running counts: the count also
+            // jumps 0→N on mount, on every cluster switch (the parent wipes and
+            // refetches `tasks`) and when a running task falls out of the 50-item
+            // slice and re-enters — none of which is a task the user just started.
+            // The seen-set is never reset, so a UPID can pop the bar at most once.
             React.useEffect(() => {
-                if (autoExpandEnabled && runningCount > prevRunningCount.current && runningCount > 0) {
+                const nowS = Date.now() / 1000;
+                const started = hasNewlyStartedTask(safeTasks, seenTaskUpids.current, nowS);
+                if (autoExpandEnabled && started) {
                     setExpanded(true);
                 }
-                prevRunningCount.current = runningCount;
-            }, [runningCount, autoExpandEnabled]);
+            }, [tasks, autoExpandEnabled]);
             
             // NS: Handle resize drag
             React.useEffect(() => {
