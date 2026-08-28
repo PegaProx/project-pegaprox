@@ -53,9 +53,9 @@
                                                     loadEntries(); setNewCidr('');
                                                 } else {
                                                     const err = await res.json().catch(() => ({}));
-                                                    addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                    addToast(err.error || `${t('operationFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                 }
-                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                         }
                                     }}
                                 />
@@ -72,9 +72,9 @@
                                                 loadEntries(); setNewCidr('');
                                             } else {
                                                 const err = await res.json().catch(() => ({}));
-                                                addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                addToast(err.error || `${t('operationFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                             }
-                                        } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                        } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                     }}
                                     className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
                                 >
@@ -98,9 +98,9 @@
                                                                 loadEntries();
                                                             } else {
                                                                 const err = await res.json().catch(() => ({}));
-                                                                addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                                addToast(err.error || `${t('operationFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                             }
-                                                        } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                        } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                     }}
                                                     className="p-1 hover:bg-red-500/20 rounded text-red-400 transition-colors"
                                                 >
@@ -492,7 +492,7 @@
                     } else if (response) {
                         // MK: API returned error status
                         const errText = await response.text();
-                        setConfigError(t('configLoadError') || 'Could not load configuration');
+                        setConfigError(t('configLoadError'));
                         console.error('Config load failed:', errText);
                     }
                 } catch (error) {
@@ -502,7 +502,7 @@
                         setTimeout(() => fetchConfig(retryCount + 1), 1000 * (retryCount + 1));
                         return;
                     }
-                    setConfigError(t('configLoadError') || 'Could not load configuration');
+                    setConfigError(t('configLoadError'));
                 }
                 setLoading(false);
             };
@@ -773,7 +773,7 @@
                             }
                         );
                         if (response && response.ok) {
-                            addToast(`${t('snapshotCreated') || 'Snapshot created'}: '${snapname}'`);
+                            addToast(`${t('snapshotCreated')}: '${snapname}'`);
                             setShowCreateSnapshot(false);
                             await fetchSnapshots();
                         } else if (response) {
@@ -818,7 +818,7 @@
                         { method: 'POST' }
                     );
                     if (response && response.ok) {
-                        addToast(`${t('rollbackStarted') || 'Rollback started'}: '${snapname}'`);
+                        addToast(`${t('rollbackStarted')}: '${snapname}'`);
                     } else if (response) {
                         const err = await response.json();
                         addToast(err.error || t('rollbackFailed'), 'error');
@@ -886,12 +886,12 @@
                         }
                     );
                     if (response && response.ok) {
-                        addToast(t('backupStarted') || 'Backup started');
+                        addToast(t('backupStarted'));
                         setShowCreateBackup(false);
                         setTimeout(() => fetchBackups(), 5000);
                     } else if (response) {
                         const err = await response.json();
-                        addToast(err.error || 'Backup failed', 'error');
+                        addToast(err.error || t('backupFailed'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -901,7 +901,7 @@
             
             const handleRestoreBackup = async (volid, targetVmid, storage, startAfter) => {
                 // LW: confirmation before restore - learned this the hard way lol
-                if (!confirm(t('confirmRestore') || `Really restore this backup? ${targetVmid === vm.vmid ? 'VM will be overwritten!' : ''}`)) return;
+                if (!confirm(t('confirmRestore'))) return;
                 
                 setBackupLoading(true);
                 try {
@@ -915,11 +915,11 @@
                     );
                     if (response && response.ok) {
                         const result = await response.json();
-                        addToast(t('restoreStarted') || `Restore started (VMID: ${result.vmid})`);
+                        addToast(t('restoreStarted'));
                         setShowRestoreBackup(null);
                     } else if (response) {
                         const err = await response.json();
-                        addToast(err.error || 'Restore failed', 'error');
+                        addToast(err.error || t('restoreFailed'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -928,7 +928,7 @@
             };
             
             const handleDeleteBackup = async (volid) => {
-                if (!confirm(t('confirmDeleteBackup') || 'Really delete this backup?')) return;
+                if (!confirm(t('confirmDeleteBackup'))) return;
                 
                 setBackupLoading(true);
                 try {
@@ -937,11 +937,11 @@
                         { method: 'DELETE' }
                     );
                     if (response && response.ok) {
-                        addToast(t('backupDeleted') || 'Backup deleted');
+                        addToast(t('backupDeleted'));
                         await fetchBackups();
                     } else if (response) {
                         const err = await response.json();
-                        addToast(err.error || 'Delete failed', 'error');
+                        addToast(err.error || t('deleteFailed'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -951,7 +951,7 @@
 
             // NS: Apr 2026 — Backup Verification
             const handleVerifyBackup = async (backup) => {
-                if (!confirm(t('confirmVerify') || 'Verify this backup? A temporary VM will be created, booted, checked, and then deleted.')) return;
+                if (!confirm(t('confirmVerify'))) return;
                 setVerifyingBackup(backup.volid);
                 try {
                     const response = await authFetch(
@@ -974,7 +974,7 @@
                     );
                     if (response && response.ok) {
                         const data = await response.json();
-                        addToast(t('verificationStarted') || 'Backup verification started', 'info');
+                        addToast(t('verificationStarted'), 'info');
                         const taskId = data.task_id;
                         if (verifyPollRef.current) clearInterval(verifyPollRef.current);
                         const poll = setInterval(async () => {
@@ -988,7 +988,7 @@
                                         verifyPollRef.current = null;
                                         setVerifyingBackup(null);
                                         addToast(st.status === 'passed'
-                                            ? (t('verificationPassed') || '✓ Backup verified — restore + boot OK')
+                                            ? (t('verificationPassed'))
                                             : (t('verificationFailed') || '✗ Verification failed: ' + (st.error || st.status)), st.status === 'passed' ? 'success' : 'error');
                                     }
                                 }
@@ -997,7 +997,7 @@
                         verifyPollRef.current = poll;
                     } else if (response) {
                         const err = await response.json();
-                        addToast(err.error || 'Verification failed', 'error');
+                        addToast(err.error || t('verificationFailed'), 'error');
                         setVerifyingBackup(null);
                     }
                 } catch(e) { addToast(t('connectionError'), 'error'); setVerifyingBackup(null); }
@@ -1021,7 +1021,7 @@
                         await fetchReplications();
                     } else if (response) {
                         const err = await response.json();
-                        addToast(err.error || 'Creation failed', 'error');
+                        addToast(err.error || t('creationFailed'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -1030,7 +1030,7 @@
             };
 
             const handleDeleteReplication = async (jobId) => {
-                if (!confirm(t('confirmDeleteReplication') || `Really delete replication job '${jobId}'?`)) return;
+                if (!confirm(t('confirmDeleteReplication'))) return;
                 setReplicationLoading(true);
                 try {
                     const response = await authFetch(
@@ -1042,7 +1042,7 @@
                         await fetchReplications();
                     } else if (response) {
                         const err = await response.json();
-                        addToast(err.error || 'Delete failed', 'error');
+                        addToast(err.error || t('deleteFailed'), 'error');
                     }
                 } catch(error) {
                     addToast(t('connectionError'), 'error');
@@ -1107,7 +1107,7 @@
             const handleDeleteXRepl = async (jobId) => {
                 if (!confirm(t('confirmDeleteXRepl'))) return;
                 // #552 - second prompt: optionally tear down the replica VM on the target too
-                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget'));
                 try {
                     // MK #564 — send the choice explicitly. Omitting the param let the
                     // job's stored delete_target flag win, so "keep replica" was ignored
@@ -1210,7 +1210,7 @@
                         }
                     );
                     if (response && response.ok) {
-                        addToast(t('diskAdded') || 'Disk added');
+                        addToast(t('diskAdded'));
                         setShowAddDisk(false);
                         // MK: Small delay to allow Proxmox to allocate the disk
                         await new Promise(resolve => setTimeout(resolve, 500));
@@ -1225,14 +1225,14 @@
             };
 
             const handleRemoveDisk = async (diskId) => {
-                if (!confirm(`${t('removeDiskConfirm') || 'Really remove disk'} ${diskId}? ${t('dataWillBeDeleted') || 'Data will be permanently deleted!'}`)) return;
+                if (!confirm(`${t('removeDiskConfirm')} ${diskId}? ${t('dataWillBeDeleted')}`)) return;
                 try {
                     const response = await authFetch(
                         `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/disks/${diskId}?delete_data=true`,
                         { method: 'DELETE' }
                     );
                     if (response && response.ok) {
-                        addToast(t('diskDeleted') || 'Disk deleted');
+                        addToast(t('diskDeleted'));
                         await fetchConfig();
                     } else if (response) {
                         const err = await response.json();
@@ -1245,14 +1245,14 @@
 
             // MK: Detach disk - removes from VM but keeps as unused
             const handleDetachDisk = async (diskId) => {
-                if (!confirm(`${t('detachDiskConfirm') || 'Really detach disk?'} ${diskId}`)) return;
+                if (!confirm(`${t('detachDiskConfirm')} ${diskId}`)) return;
                 try {
                     const response = await authFetch(
                         `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/disks/${diskId}`,
                         { method: 'DELETE' }
                     );
                     if (response && response.ok) {
-                        addToast(t('diskDetached') || 'Disk detached');
+                        addToast(t('diskDetached'));
                         await fetchConfig();
                     } else if (response) {
                         const err = await response.json();
@@ -1274,7 +1274,7 @@
                         }
                     );
                     if (response && response.ok) {
-                        addToast(t('diskResized') || 'Disk resized');
+                        addToast(t('diskResized'));
                         setShowResizeDisk(null);
                         await fetchConfig();
                     } else if (response) {
@@ -1297,7 +1297,7 @@
                         }
                     );
                     if (response && response.ok) {
-                        addToast(t('moveStarted') || 'Move started');
+                        addToast(t('moveStarted'));
                         setShowMoveDisk(null);
                         await fetchConfig();
                     } else if (response) {
@@ -1321,7 +1321,7 @@
                         }
                     );
                     if (response && response.ok) {
-                        addToast(isoPath ? (t('isoMounted') || `ISO mounted on ${drive}`) : (t('isoEjected') || `${drive} ejected`));
+                        addToast(isoPath ? (t('isoMounted')) : (t('isoEjected')));
                         setShowMountISO(false);
                         await fetchConfig();
                     } else if (response) {
@@ -1381,7 +1381,7 @@
             };
 
             const handleRemoveNetwork = async (netId) => {
-                if (!confirm(`${t('removeNetworkConfirm') || 'Really remove network'} ${netId}?`)) return;
+                if (!confirm(`${t('removeNetworkConfirm')} ${netId}?`)) return;
                 try {
                     const response = await authFetch(
                         `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/networks/${netId}`,
@@ -1606,23 +1606,23 @@
                                 </div>
                                 <div className="corp-vm-modal-actions">
                                     {hasChanges && (
-                                        <span className="corp-unsaved-pill">{t('unsavedChanges') || 'Unsaved Changes'}</span>
+                                        <span className="corp-unsaved-pill">{t('unsavedChanges')}</span>
                                     )}
                                     {hasChanges && (
                                         <button
                                             onClick={handleSave}
                                             disabled={saving}
                                             className="corp-vm-btn corp-vm-btn-primary"
-                                            title={t('save') || 'Apply changes'}
+                                            title={t('save')}
                                         >
-                                            {saving ? (t('saving') || 'Saving...') : (t('apply') || 'Apply')}
+                                            {saving ? (t('saving')) : (t('apply'))}
                                         </button>
                                     )}
                                     <button
                                         onClick={onClose}
                                         className="corp-vm-btn corp-vm-btn-ghost"
                                     >
-                                        {t('close') || 'Close'}
+                                        {t('close')}
                                     </button>
                                 </div>
                             </div>
@@ -1642,7 +1642,7 @@
                                 <div className="flex items-center gap-2">
                                     {hasChanges && (
                                         <span className="text-xs text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded">
-                                            {t('unsavedChanges') || 'Unsaved Changes'}
+                                            {t('unsavedChanges')}
                                         </span>
                                     )}
                                     <button
@@ -1707,27 +1707,27 @@
                                         <Icons.AlertTriangle className="w-10 h-10 mb-3" style={{color: '#f54f47'}} />
                                         <p style={{color: '#f54f47', fontWeight: 500, marginBottom: '6px'}}>{configError}</p>
                                         <p style={{fontSize: '12px', color: 'var(--corp-text-muted)', marginBottom: '14px'}}>
-                                            {t('checkConnectionAndRetry') || 'Please check your connection and try again.'}
+                                            {t('checkConnectionAndRetry')}
                                         </p>
                                         <button
                                             onClick={() => { setConfigError(null); fetchConfig(); }}
                                             className="corp-vm-btn corp-vm-btn-primary"
                                         >
                                             <Icons.RotateCw className="w-3.5 h-3.5" />
-                                            {t('retry') || 'Retry'}
+                                            {t('retry')}
                                         </button>
                                     </div>
                                 ) : (
                                     <div className="flex flex-col items-center justify-center h-64 text-center">
                                         <Icons.AlertTriangle className="w-12 h-12 text-red-400 mb-4" />
                                         <p className="text-red-400 font-medium mb-2">{configError}</p>
-                                        <p className="text-gray-500 text-sm mb-4">{t('checkConnectionAndRetry') || 'Please check your connection and try again.'}</p>
+                                        <p className="text-gray-500 text-sm mb-4">{t('checkConnectionAndRetry')}</p>
                                         <button
                                             onClick={() => { setConfigError(null); fetchConfig(); }}
                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 flex items-center gap-2"
                                         >
                                             <Icons.RotateCw className="w-4 h-4" />
-                                            {t('retry') || 'Retry'}
+                                            {t('retry')}
                                         </button>
                                     </div>
                                 )
@@ -1763,7 +1763,7 @@
                                                         </div>
                                                         <input
                                                             type="text"
-                                                            placeholder={t('addTag') || 'Add tag...'}
+                                                            placeholder={t('addTag')}
                                                             value={tagInputValue}
                                                             onChange={(e) => { setTagInputValue(e.target.value); setShowTagDropdown(true); }}
                                                             onFocus={() => setShowTagDropdown(true)}
@@ -1774,7 +1774,7 @@
                                                                     e.preventDefault();
                                                                     const val = tagInputValue.trim();
                                                                     if (!/^[a-z0-9][a-z0-9\-_.+]*$/.test(val)) {
-                                                                        addToast(t('invalidTagFormat') || 'Invalid format. Tags must be lowercase alphanumeric (hyphens, dots, underscores allowed).', 'error');
+                                                                        addToast(t('invalidTagFormat'), 'error');
                                                                         return;
                                                                     }
                                                                     const current = (getValue('general', 'tags') || '').split(';').filter(t => t.trim());
@@ -1823,7 +1823,7 @@
                                                         onClick={() => setDescEditMode(!descEditMode)}
                                                         className="text-xs px-2 py-0.5 rounded bg-proxmox-dark border border-proxmox-border text-gray-400 hover:text-white transition-colors"
                                                     >
-                                                        {descEditMode ? (t('preview') || 'Preview') : (t('edit') || 'Edit')}
+                                                        {descEditMode ? (t('preview')) : (t('edit'))}
                                                     </button>
                                                 </div>
                                                 {descEditMode ? (
@@ -1840,7 +1840,7 @@
                                                         dangerouslySetInnerHTML={{
                                                             __html: (() => {
                                                                 const raw = getValue('general', 'description');
-                                                                if (!raw) return `<span style="color:#6b7280">${t('noDescription') || 'No description'}</span>`;
+                                                                if (!raw) return `<span style="color:#6b7280">${t('noDescription')}</span>`;
                                                                 if (!window.marked) return (window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'));
                                                                 // MK: security audit — if DOMPurify not loaded, render as escaped plain text, NEVER unsanitized HTML
                                                                 const html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(raw)) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
@@ -2032,7 +2032,7 @@
                                                                 if (v && v.trim()) kept.push(`reported-model=${v.trim()}`);
                                                                 handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
                                                             }}
-                                                            placeholder="(empty) e.g. Skylake-Client, host"
+                                                            placeholder={t('cpuReportedModelPlaceholder')}
                                                             needsRestart={true}
                                                             t={t}
                                                         />
@@ -2059,7 +2059,7 @@
                                                                 }
                                                                 handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
                                                             }}
-                                                            placeholder="(empty) 1-64"
+                                                            placeholder={t('cpuLevelPlaceholder')}
                                                             needsRestart={true}
                                                             t={t}
                                                         />
@@ -2070,7 +2070,7 @@
                                                         flags= segment, preserving type/reported-model/level. Backend
                                                         passes cpu= through untouched, so this rides the delta-save. */}
                                                     <div className="mt-1">
-                                                        <label className="block text-sm text-gray-400 mb-2">{t('extraCpuFlags') || 'Extra CPU Flags'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-2">{t('extraCpuFlags')}</label>
                                                         <div className="grid grid-cols-3 gap-2">
                                                             {['pcid', 'spec-ctrl', 'ssbd', 'ibpb', 'virt-ssbd', 'amd-ssbd', 'amd-no-ssb', 'pdpe1gb', 'hv-tlbflush', 'hv-evmcs', 'aes', 'md-clear'].map(flag => {
                                                                 const cur = getValue('hardware', 'cpu') || '';
@@ -2110,7 +2110,7 @@
                                                                 );
                                                             })}
                                                         </div>
-                                                        <p className="text-xs text-gray-500 mt-1.5">{t('extraCpuFlagsHint') || 'Click to cycle each flag: default → enabled (+) → disabled (−). Requires a VM restart.'}</p>
+                                                        <p className="text-xs text-gray-500 mt-1.5">{t('extraCpuFlagsHint')}</p>
                                                     </div>
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <ConfigInputField
@@ -2246,7 +2246,7 @@
                                                     {getValue('hardware', 'bios') === 'ovmf' && (
                                                         <div className="mt-6 pt-6 border-t border-proxmox-border">
                                                             <h3 className="text-white font-medium mb-4 flex items-center gap-2">
-                                                                🔐 {t('efiTpmSettings') || 'EFI & TPM Settings'}
+                                                                🔐 {t('efiTpmSettings')}
                                                                 {vm.status === 'running' && (
                                                                     <span className="text-xs text-yellow-400 bg-yellow-500/10 px-2 py-0.5 rounded">
                                                                         {t('changesAfterRestart')}
@@ -2257,7 +2257,7 @@
                                                             {/* EFI Disk */}
                                                             <div className="mb-4">
                                                                 <div className="flex justify-between items-center mb-2">
-                                                                    <span className="text-sm text-gray-400">{t('efiDisk') || 'EFI Disk'}</span>
+                                                                    <span className="text-sm text-gray-400">{t('efiDisk')}</span>
                                                                 </div>
                                                                 {config?.raw?.efidisk0 ? (
                                                                     <div className="p-3 bg-proxmox-dark rounded-lg">
@@ -2267,10 +2267,10 @@
                                                                                 <span className="text-sm font-mono text-gray-300">{config.raw.efidisk0}</span>
                                                                             </div>
                                                                             <div className="flex items-center gap-2">
-                                                                                <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">{t('configured') || 'Configured'}</span>
+                                                                                <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">{t('configured')}</span>
                                                                                 <button
                                                                                     onClick={async () => {
-                                                                                        if (!confirm(t('confirmDeleteEfiDisk') || 'Delete EFI disk? This may prevent the VM from booting.')) return;
+                                                                                        if (!confirm(t('confirmDeleteEfiDisk'))) return;
                                                                                         try {
                                                                                             const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
                                                                                                 method: 'PUT',
@@ -2279,14 +2279,14 @@
                                                                                                 body: JSON.stringify({ delete: 'efidisk0' })
                                                                                             });
                                                                                             if (res.ok) {
-                                                                                                addToast(t('efiDiskDeleted') || 'EFI disk deleted', 'success');
+                                                                                                addToast(t('efiDiskDeleted'), 'success');
                                                                                                 fetchConfig();
                                                                                             } else {
                                                                                                 const err = await res.json();
-                                                                                                addToast(err.error || 'Error deleting EFI disk', 'error');
+                                                                                                addToast(err.error || t('efiDiskDeleteFailed'), 'error');
                                                                                             }
                                                                                         } catch (e) {
-                                                                                            addToast('Error deleting EFI disk', 'error');
+                                                                                            addToast(t('efiDiskDeleteFailed'), 'error');
                                                                                         }
                                                                                     }}
                                                                                     className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
@@ -2300,16 +2300,16 @@
                                                                 ) : (
                                                                     <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
                                                                         <div className="flex items-center justify-between">
-                                                                            <span className="text-sm text-gray-500">{t('noEfiDisk') || 'No EFI disk configured'}</span>
+                                                                            <span className="text-sm text-gray-500">{t('noEfiDisk')}</span>
                                                                             <button
                                                                                 onClick={() => setShowAddEfiDisk(true)}
                                                                                 className="text-xs px-3 py-1.5 bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30 flex items-center gap-1"
                                                                             >
                                                                                 <Icons.Plus className="w-3 h-3" />
-                                                                                {t('addEfiDisk') || 'Add EFI Disk'}
+                                                                                {t('addEfiDisk')}
                                                                             </button>
                                                                         </div>
-                                                                        <p className="text-xs text-gray-600 mt-2">{t('efiDiskRequired') || 'Required for UEFI boot. Will be created automatically on first boot if not configured.'}</p>
+                                                                        <p className="text-xs text-gray-600 mt-2">{t('efiDiskRequired')}</p>
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -2317,7 +2317,7 @@
                                                             {/* TPM */}
                                                             <div>
                                                                 <div className="flex justify-between items-center mb-2">
-                                                                    <span className="text-sm text-gray-400">{t('tpmChip') || 'TPM Chip'}</span>
+                                                                    <span className="text-sm text-gray-400">{t('tpmChip')}</span>
                                                                 </div>
                                                                 {config?.raw?.tpmstate0 ? (
                                                                     <div className="p-3 bg-proxmox-dark rounded-lg">
@@ -2330,7 +2330,7 @@
                                                                                 <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">TPM 2.0</span>
                                                                                 <button
                                                                                     onClick={async () => {
-                                                                                        if (!confirm(t('confirmDeleteTpm') || 'Delete TPM? Windows 11 and BitLocker will stop working.')) return;
+                                                                                        if (!confirm(t('confirmDeleteTpm'))) return;
                                                                                         try {
                                                                                             const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
                                                                                                 method: 'PUT',
@@ -2339,14 +2339,14 @@
                                                                                                 body: JSON.stringify({ delete: 'tpmstate0' })
                                                                                             });
                                                                                             if (res.ok) {
-                                                                                                addToast(t('tpmDeleted') || 'TPM deleted', 'success');
+                                                                                                addToast(t('tpmDeleted'), 'success');
                                                                                                 fetchConfig();
                                                                                             } else {
                                                                                                 const err = await res.json();
-                                                                                                addToast(err.error || 'Error deleting TPM', 'error');
+                                                                                                addToast(err.error || t('tpmDeleteFailed'), 'error');
                                                                                             }
                                                                                         } catch (e) {
-                                                                                            addToast('Error deleting TPM', 'error');
+                                                                                            addToast(t('tpmDeleteFailed'), 'error');
                                                                                         }
                                                                                     }}
                                                                                     className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
@@ -2360,18 +2360,18 @@
                                                                 ) : (
                                                                     <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
                                                                         <div className="flex items-center justify-between">
-                                                                            <span className="text-sm text-gray-500">{t('noTpm') || 'No TPM configured'}</span>
+                                                                            <span className="text-sm text-gray-500">{t('noTpm')}</span>
                                                                             <button
                                                                                 onClick={() => setShowAddTpm(true)}
                                                                                 className="text-xs px-3 py-1.5 bg-green-500/20 text-green-400 rounded hover:bg-green-500/30 flex items-center gap-1"
                                                                             >
                                                                                 <Icons.Plus className="w-3 h-3" />
-                                                                                {t('addTpm') || 'Add TPM'}
+                                                                                {t('addTpm')}
                                                                             </button>
                                                                         </div>
                                                                         <p className="text-xs text-yellow-500 mt-2 flex items-center gap-1">
                                                                             <Icons.AlertTriangle className="w-3 h-3" />
-                                                                            {t('win11NeedsTpm') || 'Windows 11 requires TPM 2.0'}
+                                                                            {t('win11NeedsTpm')}
                                                                         </p>
                                                                     </div>
                                                                 )}
@@ -2574,7 +2574,7 @@
                                                             className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
                                                         >
                                                             <Icons.Download />
-                                                            {t('importDisk') || 'Import Disk'}
+                                                            {t('importDisk')}
                                                         </button>
                                                     )}
                                                 </div>
@@ -2619,7 +2619,7 @@
                                                                 {disk.storage ? (
                                                                     <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded">{disk.storage}</span>
                                                                 ) : cdromEmpty ? (
-                                                                    <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded italic">{t('noMedia') || 'No media'}</span>
+                                                                    <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded italic">{t('noMedia')}</span>
                                                                 ) : null}
                                                                 {isCdrom && (
                                                                     <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30">CD</span>
@@ -2633,7 +2633,7 @@
                                                                     <button
                                                                         onClick={() => { setMountIsoInitialDrive(disk.id); setShowMountISO(true); }}
                                                                         className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-blue-400 transition-colors"
-                                                                        title={cdromEmpty ? (t('mountIso') || 'Mount ISO') : (t('changeIso') || 'Change ISO')}
+                                                                        title={cdromEmpty ? (t('mountIso')) : (t('changeIso'))}
                                                                     >
                                                                         <Icons.Disc />
                                                                     </button>
@@ -2642,7 +2642,7 @@
                                                                     <button
                                                                         onClick={() => handleMountISO(null, disk.id)}
                                                                         className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-red-400 transition-colors"
-                                                                        title={t('eject') || 'Eject'}
+                                                                        title={t('eject')}
                                                                     >
                                                                         <Icons.Unplug />
                                                                     </button>
@@ -2652,7 +2652,7 @@
                                                                     <button
                                                                         onClick={() => setShowEditDisk(disk)}
                                                                         className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-yellow-400 transition-colors"
-                                                                        title={t('editDiskType') || 'Change Bus Type'}
+                                                                        title={t('editDiskType')}
                                                                     >
                                                                         <Icons.Edit />
                                                                     </button>
@@ -2682,7 +2682,7 @@
                                                                             <button
                                                                                 onClick={() => setShowReassignOwner(disk)}
                                                                                 className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-purple-400 transition-colors"
-                                                                                title={t('reassignOwner') || 'Reassign Owner'}
+                                                                                title={t('reassignOwner')}
                                                                             >
                                                                                 <Icons.Users />
                                                                             </button>
@@ -2690,7 +2690,7 @@
                                                                         <button
                                                                             onClick={() => handleDetachDisk(disk.id)}
                                                                             className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-yellow-400 transition-colors"
-                                                                            title={t('detachDisk') || 'Detach'}
+                                                                            title={t('detachDisk')}
                                                                         >
                                                                             <Icons.Unplug />
                                                                         </button>
@@ -2707,12 +2707,12 @@
                                                         </div>
                                                         <div className="grid grid-cols-4 gap-4 text-sm">
                                                             <div>
-                                                                <span className="text-gray-500">Volume:</span>
+                                                                <span className="text-gray-500">{t('volume')}:</span>
                                                                 <span className="ml-2 text-gray-300 font-mono text-xs">{disk.volume}</span>
                                                             </div>
                                                             {disk.cache && (
                                                                 <div>
-                                                                    <span className="text-gray-500">Cache:</span>
+                                                                    <span className="text-gray-500">{t('cache')}:</span>
                                                                     <span className="ml-2 text-gray-300">{disk.cache}</span>
                                                                 </div>
                                                             )}
@@ -2724,7 +2724,7 @@
                                                             ) : null}
                                                             {disk.mountpoint && (
                                                                 <div>
-                                                                    <span className="text-gray-500">Mount:</span>
+                                                                    <span className="text-gray-500">{t('mountPath')}:</span>
                                                                     <span className="ml-2 text-gray-300">{disk.mountpoint}</span>
                                                                 </div>
                                                             )}
@@ -2743,11 +2743,11 @@
                                                 <div className="mt-6 pt-4 border-t border-proxmox-border">
                                                     <div className="flex items-center gap-2 mb-3">
                                                         <Icons.AlertTriangle className="w-4 h-4 text-yellow-500" />
-                                                        <h4 className="font-medium text-yellow-400">{t('unusedDisks') || 'Unused Disks'}</h4>
+                                                        <h4 className="font-medium text-yellow-400">{t('unusedDisks')}</h4>
                                                         <span className="text-xs text-gray-500">({config.unused_disks.length})</span>
                                                     </div>
                                                     <p className="text-xs text-gray-500 mb-3">
-                                                        {t('unusedDisksDesc') || 'These disks are detached but still exist. You can reattach or delete them.'}
+                                                        {t('unusedDisksDesc')}
                                                     </p>
                                                     {config.unused_disks.map((disk) => (
                                                         <div key={disk.id} className="p-3 bg-yellow-500/5 rounded-lg border border-yellow-500/30 mb-2">
@@ -2762,14 +2762,14 @@
                                                                     <button
                                                                         onClick={() => setShowReattachDisk(disk)}
                                                                         className="px-2 py-1 text-xs bg-green-600/20 text-green-400 rounded hover:bg-green-600/30 transition-colors"
-                                                                        title={t('reattachDisk') || 'Reattach disk'}
+                                                                        title={t('reattachDisk')}
                                                                     >
-                                                                        {t('reattach') || 'Reattach'}
+                                                                        {t('reattach')}
                                                                     </button>
                                                                     {/* MK: Delete permanently */}
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if (!confirm(t('deleteUnusedDiskConfirm') || `Permanently delete ${disk.id}? This cannot be undone!`)) return;
+                                                                            if (!confirm(t('deleteUnusedDiskConfirm'))) return;
                                                                             try {
                                                                                 // First delete the unused reference, then purge the actual volume
                                                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
@@ -2778,18 +2778,18 @@
                                                                                     body: JSON.stringify({ delete: disk.id })
                                                                                 });
                                                                                 if (res && res.ok) {
-                                                                                    addToast(t('unusedDiskDeleted') || 'Unused disk deleted', 'success');
+                                                                                    addToast(t('unusedDiskDeleted'), 'success');
                                                                                     fetchConfig();
                                                                                 } else {
                                                                                     const err = await res.json();
-                                                                                    addToast(err.error || 'Error deleting disk', 'error');
+                                                                                    addToast(err.error || t('diskDeleteFailed'), 'error');
                                                                                 }
                                                                             } catch (e) {
-                                                                                addToast('Error deleting disk', 'error');
+                                                                                addToast(t('diskDeleteFailed'), 'error');
                                                                             }
                                                                         }}
                                                                         className="px-2 py-1 text-xs bg-red-600/20 text-red-400 rounded hover:bg-red-600/30 transition-colors"
-                                                                        title={t('deletePermanently') || 'Delete permanently'}
+                                                                        title={t('deletePermanently')}
                                                                     >
                                                                         {t('delete')}
                                                                     </button>
@@ -2848,7 +2848,7 @@
                                                             </div>
                                                             <div className="flex items-center gap-2">
                                                                 {net.firewall ? (
-                                                                    <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">Firewall</span>
+                                                                    <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">{t('firewall')}</span>
                                                                 ) : null}
                                                                 {/* NS: Connect/Disconnect toggle (QEMU only - hot-pluggable) */}
                                                                 {isQemu && (
@@ -2879,19 +2879,19 @@
                                                         <div className="grid grid-cols-3 gap-4 text-sm">
                                                             {isQemu ? (
                                                                 <>
-                                                                    <div><span className="text-gray-500">Model:</span><span className="ml-2 text-gray-300">{net.model || 'virtio'}</span></div>
-                                                                    <div><span className="text-gray-500">MAC:</span><span className="ml-2 text-gray-300 font-mono text-xs">{net.macaddr || 'auto'}</span></div>
-                                                                    {net.queues && <div><span className="text-gray-500">Queues:</span><span className="ml-2 text-gray-300">{net.queues}</span></div>}
+                                                                    <div><span className="text-gray-500">{t('model')}:</span><span className="ml-2 text-gray-300">{net.model || 'virtio'}</span></div>
+                                                                    <div><span className="text-gray-500">{t('macAddress')}:</span><span className="ml-2 text-gray-300 font-mono text-xs">{net.macaddr || 'auto'}</span></div>
+                                                                    {net.queues && <div><span className="text-gray-500">{t('multiqueue')}:</span><span className="ml-2 text-gray-300">{net.queues}</span></div>}
                                                                 </>
                                                             ) : (
                                                                 <>
                                                                     <div><span className="text-gray-500">{t('name')}:</span><span className="ml-2 text-gray-300">{net.name || 'eth0'}</span></div>
-                                                                    <div><span className="text-gray-500">IP:</span><span className="ml-2 text-gray-300 font-mono">{net.ip || 'dhcp'}</span></div>
-                                                                    {net.gw && <div><span className="text-gray-500">Gateway:</span><span className="ml-2 text-gray-300 font-mono">{net.gw}</span></div>}
+                                                                    <div><span className="text-gray-500">{t('ipAddress')}:</span><span className="ml-2 text-gray-300 font-mono">{net.ip || 'dhcp'}</span></div>
+                                                                    {net.gw && <div><span className="text-gray-500">{t('gateway')}:</span><span className="ml-2 text-gray-300 font-mono">{net.gw}</span></div>}
                                                                 </>
                                                             )}
-                                                            {net.tag && <div><span className="text-gray-500">VLAN:</span><span className="ml-2 text-gray-300">{net.tag}</span></div>}
-                                                            {net.rate && <div><span className="text-gray-500">Rate:</span><span className="ml-2 text-gray-300">{net.rate} MB/s</span></div>}
+                                                            {net.tag && <div><span className="text-gray-500">{t('vlanTagLabel')}:</span><span className="ml-2 text-gray-300">{net.tag}</span></div>}
+                                                            {net.rate && <div><span className="text-gray-500">{t('networkRateLabel')}:</span><span className="ml-2 text-gray-300">{net.rate} MB/s</span></div>}
                                                             {net.mtu && <div><span className="text-gray-500">MTU:</span><span className="ml-2 text-gray-300">{net.mtu}</span></div>}
                                                         </div>
                                                     </div>
@@ -3089,7 +3089,7 @@
                                     {activeTab === 'backups' && (
                                         <div className="space-y-6">
                                             <div className="flex items-center justify-between">
-                                                <h3 className="text-sm font-semibold text-gray-300">{t('backupsTab') || 'Backups'}</h3>
+                                                <h3 className="text-sm font-semibold text-gray-300">{t('backupsTab')}</h3>
                                                 <div className="flex items-center gap-2">
                                                     <button
                                                         onClick={fetchBackups}
@@ -3104,7 +3104,7 @@
                                                         className="flex items-center gap-2 px-3 py-1.5 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700"
                                                     >
                                                         <Icons.Plus />
-                                                        {t('createBackup') || 'Create Backup'}
+                                                        {t('createBackup')}
                                                     </button>
                                                 </div>
                                             </div>
@@ -3146,9 +3146,9 @@
                                                                             verifyingBackup === backup.volid ? 'bg-yellow-500/10 text-yellow-400' :
                                                                             'bg-purple-500/10 hover:bg-purple-500/20 text-purple-400'
                                                                         }`}
-                                                                        title={verifyResults[backup.volid]?.status === 'passed' ? (t('verifiedOk') || 'Verified ✓') :
+                                                                        title={verifyResults[backup.volid]?.status === 'passed' ? (t('verifiedOk')) :
                                                                                verifyResults[backup.volid]?.status ? verifyResults[backup.volid].status :
-                                                                               (t('verifyBackup') || 'Verify Backup')}
+                                                                               (t('verifyBackup'))}
                                                                     >
                                                                         {verifyingBackup === backup.volid ? (
                                                                             <Icons.RotateCw className="animate-spin" />
@@ -3164,7 +3164,7 @@
                                                                         onClick={() => setShowRestoreBackup(backup)}
                                                                         disabled={backupLoading}
                                                                         className="p-2 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 transition-colors disabled:opacity-50"
-                                                                        title={t('restore') || 'Restore'}
+                                                                        title={t('restore')}
                                                                     >
                                                                         <Icons.RotateCcw />
                                                                     </button>
@@ -3188,22 +3188,22 @@
                                                                     {verifyingBackup === backup.volid ? (
                                                                         <>
                                                                             <Icons.RotateCw className="w-3 h-3 animate-spin" />
-                                                                            <span>{verifyResults[backup.volid]?.phase === 'restoring' ? (t('restoring') || 'Restoring...') :
-                                                                                   verifyResults[backup.volid]?.phase === 'booting' ? (t('booting') || 'Booting...') :
-                                                                                   verifyResults[backup.volid]?.phase === 'verifying' ? (t('verifying') || 'Checking health...') :
-                                                                                   verifyResults[backup.volid]?.phase === 'cleanup' ? (t('cleaningUp') || 'Cleaning up...') :
-                                                                                   (t('verifying') || 'Verifying...')}</span>
+                                                                            <span>{verifyResults[backup.volid]?.phase === 'restoring' ? (t('restoring')) :
+                                                                                   verifyResults[backup.volid]?.phase === 'booting' ? (t('booting')) :
+                                                                                   verifyResults[backup.volid]?.phase === 'verifying' ? (t('verifying')) :
+                                                                                   verifyResults[backup.volid]?.phase === 'cleanup' ? (t('cleaningUp')) :
+                                                                                   (t('verifying'))}</span>
                                                                         </>
                                                                     ) : verifyResults[backup.volid]?.status === 'passed' ? (
                                                                         <>
                                                                             <Icons.CheckCircle className="w-3 h-3" />
-                                                                            <span>{t('backupVerified') || 'Backup verified'} — {t('restoreBootOk') || 'Restore + Boot OK'}</span>
+                                                                            <span>{t('backupVerified')} — {t('restoreBootOk')}</span>
                                                                             <span className="text-gray-500 ml-auto">{verifyResults[backup.volid]?.duration_seconds}s</span>
                                                                         </>
                                                                     ) : (
                                                                         <>
                                                                             <Icons.XCircle className="w-3 h-3" />
-                                                                            <span>{verifyResults[backup.volid]?.error?.substring(0, 80) || (t('verificationFailed') || 'Failed')}</span>
+                                                                            <span>{verifyResults[backup.volid]?.error?.substring(0, 80) || (t('verificationFailed'))}</span>
                                                                             <span className="text-gray-500 ml-auto">{verifyResults[backup.volid]?.duration_seconds}s</span>
                                                                         </>
                                                                     )}
@@ -3215,8 +3215,8 @@
                                             ) : (
                                                 <div className="text-center py-8 text-gray-500">
                                                     <Icons.Database className="mx-auto opacity-50" />
-                                                    <p className="mt-2">{t('noBackups') || 'No backups found'}</p>
-                                                    <p className="text-xs mt-1">{t('noBackupsHint') || 'Create a backup or check your backup storages'}</p>
+                                                    <p className="mt-2">{t('noBackups')}</p>
+                                                    <p className="text-xs mt-1">{t('noBackupsHint')}</p>
                                                 </div>
                                             )}
                                             
@@ -3224,10 +3224,10 @@
                                             {showCreateBackup && (
                                                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
-                                                        <h3 className="text-lg font-semibold mb-4">{t('createBackup') || 'Create Backup'}</h3>
+                                                        <h3 className="text-lg font-semibold mb-4">{t('createBackup')}</h3>
                                                         <div className="space-y-4">
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('storage') || 'Storage'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('storage')}</label>
                                                                 <select
                                                                     id="backup-storage"
                                                                     defaultValue="local"
@@ -3242,36 +3242,36 @@
                                                                 </select>
                                                             </div>
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('backupMode') || 'Mode'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('backupMode')}</label>
                                                                 <select
                                                                     id="backup-mode"
                                                                     defaultValue="snapshot"
                                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                                 >
-                                                                    <option value="snapshot">{t('backupModeSnapshot') || 'Snapshot (no stop)'}</option>
-                                                                    <option value="suspend">{t('backupModeSuspend') || 'Suspend (brief pause)'}</option>
-                                                                    <option value="stop">{t('backupModeStop') || 'Stop (VM will stop)'}</option>
+                                                                    <option value="snapshot">{t('backupModeSnapshot')}</option>
+                                                                    <option value="suspend">{t('backupModeSuspend')}</option>
+                                                                    <option value="stop">{t('backupModeStop')}</option>
                                                                 </select>
                                                             </div>
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('compression') || 'Compression'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('compression')}</label>
                                                                 <select
                                                                     id="backup-compress"
                                                                     defaultValue="zstd"
                                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                                 >
-                                                                    <option value="zstd">{t('compressZstd') || 'ZSTD (recommended)'}</option>
-                                                                    <option value="lzo">{t('compressLzo') || 'LZO (fast)'}</option>
-                                                                    <option value="gzip">{t('compressGzip') || 'GZIP'}</option>
-                                                                    <option value="0">{t('compressNone') || 'None'}</option>
+                                                                    <option value="zstd">{t('compressZstd')}</option>
+                                                                    <option value="lzo">{t('compressLzo')}</option>
+                                                                    <option value="gzip">{t('compressGzip')}</option>
+                                                                    <option value="0">{t('compressNone')}</option>
                                                                 </select>
                                                             </div>
                                                             {/* NS: Notes/Description field */}
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('backupNotes') || 'Notes (optional)'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('backupNotes')}</label>
                                                                 <textarea
                                                                     id="backup-notes"
-                                                                    placeholder={t('backupNotesPlaceholder') || 'e.g. Before major update, weekly backup...'}
+                                                                    placeholder={t('backupNotesPlaceholder')}
                                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white resize-none"
                                                                     rows={2}
                                                                 />
@@ -3294,7 +3294,7 @@
                                                                     disabled={backupLoading}
                                                                     className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50"
                                                                 >
-                                                                    {backupLoading ? t('loading') : t('create') || 'Create'}
+                                                                    {backupLoading ? t('loading') : t('create')}
                                                                 </button>
                                                             </div>
                                                         </div>
@@ -3306,14 +3306,14 @@
                                             {showRestoreBackup && (
                                                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
-                                                        <h3 className="text-lg font-semibold mb-4">{t('restoreBackup') || 'Restore Backup'}</h3>
+                                                        <h3 className="text-lg font-semibold mb-4">{t('restoreBackup')}</h3>
                                                         <div className="space-y-4">
                                                             <div className="p-3 bg-proxmox-dark rounded-lg">
-                                                                <p className="text-sm text-gray-400">{t('selectedBackup') || 'Selected Backup'}:</p>
+                                                                <p className="text-sm text-gray-400">{t('selectedBackup')}:</p>
                                                                 <p className="font-mono text-sm truncate">{showRestoreBackup.filename}</p>
                                                             </div>
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetVmid') || 'Target VMID'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetVmid')}</label>
                                                                 <input
                                                                     type="number"
                                                                     id="restore-vmid"
@@ -3321,17 +3321,17 @@
                                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                                 />
                                                                 <p className="text-xs text-yellow-400 mt-1">
-                                                                    {t('sameVmidWarning') || 'Same VMID = VM will be overwritten!'}
+                                                                    {t('sameVmidWarning')}
                                                                 </p>
                                                             </div>
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetStorage') || 'Target Storage (optional)'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetStorage')}</label>
                                                                 <select
                                                                     id="restore-storage"
                                                                     defaultValue=""
                                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                                 >
-                                                                    <option value="">{t('originalStorage') || 'Keep original'}</option>
+                                                                    <option value="">{t('originalStorage')}</option>
                                                                     {storageList.filter(s => s.content?.includes('images')).map(s => (
                                                                         <option key={s.storage} value={s.storage}>{s.storage}</option>
                                                                     ))}
@@ -3344,7 +3344,7 @@
                                                                     className="w-4 h-4 rounded"
                                                                 />
                                                                 <label htmlFor="restore-start" className="text-sm text-gray-300">
-                                                                    {t('startAfterRestore') || 'Start after restore'}
+                                                                    {t('startAfterRestore')}
                                                                 </label>
                                                             </div>
                                                             <div className="flex gap-2 justify-end pt-2">
@@ -3364,7 +3364,7 @@
                                                                     disabled={backupLoading}
                                                                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50"
                                                                 >
-                                                                    {backupLoading ? t('loading') : t('restore') || 'Restore'}
+                                                                    {backupLoading ? t('loading') : t('restore')}
                                                                 </button>
                                                             </div>
                                                         </div>
@@ -3409,7 +3409,7 @@
                                                                             ↑ {job.target}
                                                                         </div>
                                                                         <div className="text-xs text-gray-400">
-                                                                            Schedule: {job.schedule || '*/15'} | 
+                                                                            {t('schedule')}: {job.schedule || '*/15'} |
                                                                             {job.last_sync ? ` ${t('lastSync')}: ${new Date(job.last_sync * 1000).toLocaleString()}` : ` ${t('neverSynced')}`}
                                                                         </div>
                                                                         {job.error && (
@@ -3520,7 +3520,7 @@
                                                                     onChange={e => setXReplForm(f => ({ ...f, target_cluster: e.target.value, target_storage: '', target_bridge: 'vmbr0' }))}
                                                                     className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                 >
-                                                                    <option value="">{t('selectCluster') || 'Select cluster...'}</option>
+                                                                    <option value="">{t('selectCluster')}</option>
                                                                     {allClusters.filter(c => c.id !== clusterId && c.connected).map(c => (
                                                                         <option key={c.id} value={c.id}>{c.name}</option>
                                                                     ))}
@@ -3539,13 +3539,13 @@
                                                                         onChange={e => setXReplForm(f => ({ ...f, target_storage: e.target.value }))}
                                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                     >
-                                                                        <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                                                        <option value="">{t('selectStorage')}</option>
                                                                         {xReplTargetStorages.map(s => (
                                                                             <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
                                                                         ))}
                                                                     </select>
                                                                 ) : (
-                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst')}</div>
                                                                 )}
                                                             </div>
                                                             <div className="col-span-2">
@@ -3556,7 +3556,7 @@
                                                                         {t('loading')}...
                                                                     </div>
                                                                 ) : !xReplForm.target_cluster ? (
-                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst')}</div>
                                                                 ) : [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))].length > 0 ? (
                                                                     // #532 - map each source NIC's bridge to a target bridge of choice
                                                                     <div className="space-y-2">
@@ -3611,13 +3611,13 @@
                                                                 )}
                                                             </div>
                                                             <div>
-                                                                <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional')}</label>
                                                                 <input
                                                                     type="number"
                                                                     min="100"
                                                                     value={xReplForm.target_vmid}
                                                                     onChange={e => setXReplForm(f => ({ ...f, target_vmid: e.target.value }))}
-                                                                    placeholder={t('autoNextId') || 'auto'}
+                                                                    placeholder={t('autoNextId')}
                                                                     className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                 />
                                                             </div>
@@ -3805,11 +3805,11 @@
                                                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'
                                                                 }`}
                                                             >
-                                                                {st === 'rules' ? t('firewallRules') || 'Rules' :
-                                                                 st === 'options' ? t('firewallOptions') || 'Options' :
-                                                                 st === 'aliases' ? t('aliases') || 'Aliases' :
+                                                                {st === 'rules' ? t('firewallRules') :
+                                                                 st === 'options' ? t('firewallOptions') :
+                                                                 st === 'aliases' ? t('aliases') :
                                                                  st === 'ipsets' ? t('ipSets') :
-                                                                 t('log') || 'Log'}
+                                                                 t('log')}
                                                             </button>
                                                         ))}
                                                     </div>
@@ -3818,7 +3818,7 @@
                                                     {fwSubTab === 'rules' && (
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                                <h3 className="font-semibold">{t('firewallRules') || 'Firewall Rules'}</h3>
+                                                                <h3 className="font-semibold">{t('firewallRules')}</h3>
                                                                 <button
                                                                     onClick={() => setShowAddFwRule(true)}
                                                                     className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
@@ -3845,7 +3845,7 @@
                                                                     </thead>
                                                                     <tbody>
                                                                         {(!fwRules || fwRules.length === 0) ? (
-                                                                            <tr><td colSpan="11" className="p-8 text-center text-gray-500">{t('noFirewallRules') || 'No firewall rules configured'}</td></tr>
+                                                                            <tr><td colSpan="11" className="p-8 text-center text-gray-500">{t('noFirewallRules')}</td></tr>
                                                                         ) : (Array.isArray(fwRules) ? fwRules : []).map((rule, idx) => (
                                                                             <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                                 <td className="p-3 text-gray-400">{rule.pos}</td>
@@ -3887,9 +3887,9 @@
                                                                                                     ));
                                                                                                 } else {
                                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                                    addToast(err.error || `Failed to toggle rule (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                    addToast(err.error || `${t('firewallToggleFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                                 }
-                                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                                         }}
                                                                                         className={`w-8 h-5 rounded-full transition-colors ${rule.enable ? 'bg-green-500' : 'bg-gray-600'}`}
                                                                                     >
@@ -3900,16 +3900,16 @@
                                                                                 <td className="p-3">
                                                                                     <button
                                                                                         onClick={async () => {
-                                                                                            if (!confirm(t('confirmDeleteRule') || 'Delete this firewall rule?')) return;
+                                                                                            if (!confirm(t('confirmDeleteRule'))) return;
                                                                                             try {
                                                                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/rules/${rule.pos}`, { method: 'DELETE' });
                                                                                                 if (res?.ok) {
                                                                                                     fetchFirewallData();
                                                                                                 } else {
                                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                                    addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                    addToast(err.error || `${t('operationFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                                 }
-                                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                                         }}
                                                                                         className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
                                                                                     >
@@ -3929,11 +3929,11 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
                                                             <h3 className="font-semibold flex items-center gap-2 mb-4">
                                                                 <Icons.Shield />
-                                                                {t('firewallOptions') || 'Firewall Options'}
+                                                                {t('firewallOptions')}
                                                             </h3>
                                                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-2">{t('fwEnable') || 'Firewall'}</div>
+                                                                    <div className="text-sm text-gray-400 mb-2">{t('fwEnable')}</div>
                                                                     <button
                                                                         onClick={async () => {
                                                                             const newVal = fwOptions.enable ? 0 : 1;
@@ -3947,9 +3947,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, enable: newVal }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                                                                             fwOptions.enable
@@ -3957,7 +3957,7 @@
                                                                                 : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
                                                                         }`}
                                                                     >
-                                                                        {fwOptions.enable ? t('enabled') || 'Enabled' : t('disabled') || 'Disabled'}
+                                                                        {fwOptions.enable ? t('enabled') : t('disabled')}
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
@@ -3975,9 +3975,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, policy_in: e.target.value }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                                                     >
@@ -4001,9 +4001,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, policy_out: e.target.value }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                                                     >
@@ -4013,7 +4013,7 @@
                                                                     </select>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwDhcp') || 'DHCP'}</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwDhcp')}</div>
                                                                     <button
                                                                         onClick={async () => {
                                                                             const newVal = fwOptions.dhcp ? 0 : 1;
@@ -4027,9 +4027,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, dhcp: newVal }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
                                                                             fwOptions.dhcp ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
@@ -4039,7 +4039,7 @@
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwNdp') || 'NDP'}</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwNdp')}</div>
                                                                     <button
                                                                         onClick={async () => {
                                                                             const newVal = fwOptions.ndp ? 0 : 1;
@@ -4053,9 +4053,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, ndp: newVal }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
                                                                             fwOptions.ndp ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
@@ -4065,7 +4065,7 @@
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwRadv') || 'Router Adv.'}</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwRadv')}</div>
                                                                     <button
                                                                         onClick={async () => {
                                                                             const newVal = fwOptions.radv ? 0 : 1;
@@ -4079,9 +4079,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, radv: newVal }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
                                                                             fwOptions.radv ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
@@ -4091,7 +4091,7 @@
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwMacFilter') || 'MAC Filter'}</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwMacFilter')}</div>
                                                                     <button
                                                                         onClick={async () => {
                                                                             const newVal = fwOptions.macfilter ? 0 : 1;
@@ -4105,9 +4105,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, macfilter: newVal }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
                                                                             fwOptions.macfilter ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
@@ -4117,7 +4117,7 @@
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwLogLevel') || 'Log Level In'}</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwLogLevel')}</div>
                                                                     <select
                                                                         value={fwOptions.log_level_in || 'nolog'}
                                                                         onChange={async (e) => {
@@ -4131,9 +4131,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, log_level_in: e.target.value }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                                                     >
@@ -4149,7 +4149,7 @@
                                                                     </select>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
-                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwLogLevelOut') || 'Log Level Out'}</div>
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwLogLevelOut')}</div>
                                                                     <select
                                                                         value={fwOptions.log_level_out || 'nolog'}
                                                                         onChange={async (e) => {
@@ -4163,9 +4163,9 @@
                                                                                     setFwOptions(prev => ({ ...prev, log_level_out: e.target.value }));
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('firewallOptionUpdateFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
                                                                     >
@@ -4188,7 +4188,7 @@
                                                     {fwSubTab === 'aliases' && (
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                                <h3 className="font-semibold">{t('aliases') || 'Aliases'}</h3>
+                                                                <h3 className="font-semibold">{t('aliases')}</h3>
                                                                 <button
                                                                     onClick={() => setShowAddFwAlias(true)}
                                                                     className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
@@ -4208,7 +4208,7 @@
                                                                     </thead>
                                                                     <tbody>
                                                                         {(!fwAliases || fwAliases.length === 0) ? (
-                                                                            <tr><td colSpan="4" className="p-8 text-center text-gray-500">{t('noAliases') || 'No aliases configured'}</td></tr>
+                                                                            <tr><td colSpan="4" className="p-8 text-center text-gray-500">{t('noAliases')}</td></tr>
                                                                         ) : fwAliases.map((alias, idx) => (
                                                                             <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                                 <td className="p-3 font-medium">{alias.name}</td>
@@ -4217,16 +4217,16 @@
                                                                                 <td className="p-3">
                                                                                     <button
                                                                                         onClick={async () => {
-                                                                                            if (!confirm(`Delete alias "${alias.name}"?`)) return;
+                                                                                            if (!confirm(t('confirmDeleteAlias').replace('{name}', alias.name))) return;
                                                                                             try {
                                                                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/aliases/${alias.name}`, { method: 'DELETE' });
                                                                                                 if (res?.ok) {
                                                                                                     fetchFirewallData();
                                                                                                 } else {
                                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                                    addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                    addToast(err.error || `${t('operationFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                                 }
-                                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                                         }}
                                                                                         className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
                                                                                     >
@@ -4255,7 +4255,7 @@
                                                             </div>
                                                             {(!fwIpsets || fwIpsets.length === 0) ? (
                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center text-gray-500">
-                                                                    {t('noIpsets') || 'No IP sets configured'}
+                                                                    {t('noIpsets')}
                                                                 </div>
                                                             ) : fwIpsets.map((ipset, idx) => (
                                                                 <div key={idx} className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
@@ -4271,16 +4271,16 @@
                                                                         <button
                                                                             onClick={async (e) => {
                                                                                 e.stopPropagation();
-                                                                                if (!confirm(`Delete IP set "${ipset.name}"?`)) return;
+                                                                                if (!confirm(t('confirmDeleteIpSet').replace('{name}', ipset.name))) return;
                                                                                 try {
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/ipset/${ipset.name}`, { method: 'DELETE' });
                                                                                     if (res?.ok) {
                                                                                         fetchFirewallData();
                                                                                     } else {
                                                                                         const err = await res.json().catch(() => ({}));
-                                                                                        addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                                                        addToast(err.error || `${t('operationFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                     }
-                                                                                } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                                } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                             }}
                                                                             className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
                                                                         >
@@ -4308,17 +4308,17 @@
                                                     {fwSubTab === 'log' && (
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                                <h3 className="font-semibold">{t('firewallLog') || 'Firewall Log'}</h3>
+                                                                <h3 className="font-semibold">{t('firewallLog')}</h3>
                                                                 <button
                                                                     onClick={fetchFwLog}
                                                                     className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors"
                                                                 >
-                                                                    <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                                    <Icons.RefreshCw className="w-4 h-4" /> {t('refresh')}
                                                                 </button>
                                                             </div>
                                                             <div className="p-4 max-h-96 overflow-y-auto">
                                                                 {(!fwLog || fwLog.length === 0) ? (
-                                                                    <div className="text-center text-gray-500 py-8">{t('noLogEntries') || 'No log entries'}</div>
+                                                                    <div className="text-center text-gray-500 py-8">{t('noLogEntries')}</div>
                                                                 ) : (
                                                                     <div className="space-y-1 font-mono text-xs">
                                                                         {(Array.isArray(fwLog) ? fwLog : []).map((entry, idx) => (
@@ -4337,7 +4337,7 @@
                                                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowAddFwRule(false)}>
                                                             <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                                 <div className="p-4 border-b border-proxmox-border">
-                                                                    <h3 className="font-semibold">{t('addFirewallRule') || 'Add Firewall Rule'}</h3>
+                                                                    <h3 className="font-semibold">{t('addFirewallRule')}</h3>
                                                                 </div>
                                                                 <div className="p-4 space-y-4">
                                                                     <div className="grid grid-cols-2 gap-4">
@@ -4503,7 +4503,7 @@
                                                                                     fetchFirewallData();
                                                                                     setShowAddFwRule(false);
                                                                                     setNewFwRule({ type: 'in', action: 'ACCEPT', enable: 1 });
-                                                                                    if (addToast) addToast(t('firewallRuleCreated') || 'Firewall rule created', 'success');
+                                                                                    if (addToast) addToast(t('firewallRuleCreated'), 'success');
                                                                                 } else {
                                                                                     const err = await res?.json().catch(() => ({}));
                                                                                     let errMsg = 'Failed to create rule';
@@ -4516,7 +4516,7 @@
                                                                                     }
                                                                                     if (addToast) addToast(errMsg, 'error');
                                                                                 }
-                                                                            } catch (e) { if (addToast) addToast('Connection error', 'error'); }
+                                                                            } catch (e) { if (addToast) addToast(t('connectionError'), 'error'); }
                                                                         }}
                                                                         className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                                     >
@@ -4532,7 +4532,7 @@
                                                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowAddFwAlias(false)}>
                                                             <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                                 <div className="p-4 border-b border-proxmox-border">
-                                                                    <h3 className="font-semibold">{t('fwAddAlias') || 'Add Alias'}</h3>
+                                                                    <h3 className="font-semibold">{t('fwAddAlias')}</h3>
                                                                 </div>
                                                                 <div className="p-4 space-y-4">
                                                                     <div>
@@ -4541,7 +4541,7 @@
                                                                             type="text"
                                                                             value={newFwAlias.name}
                                                                             onChange={e => setNewFwAlias(p => ({...p, name: e.target.value}))}
-                                                                            placeholder="e.g. myserver"
+                                                                            placeholder={`${t('exampleAbbr')} myserver`}
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                         />
                                                                     </div>
@@ -4551,7 +4551,7 @@
                                                                             type="text"
                                                                             value={newFwAlias.cidr}
                                                                             onChange={e => setNewFwAlias(p => ({...p, cidr: e.target.value}))}
-                                                                            placeholder="e.g. 10.0.0.1/32"
+                                                                            placeholder={`${t('exampleAbbr')} 10.0.0.1/32`}
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                         />
                                                                     </div>
@@ -4582,9 +4582,9 @@
                                                                                     setNewFwAlias({ name: '', cidr: '', comment: '' });
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to add alias (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('aliasAddFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                                     >
@@ -4600,7 +4600,7 @@
                                                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowAddFwIpset(false)}>
                                                             <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                                 <div className="p-4 border-b border-proxmox-border">
-                                                                    <h3 className="font-semibold">{t('fwAddIpset') || 'Add IP Set'}</h3>
+                                                                    <h3 className="font-semibold">{t('fwAddIpset')}</h3>
                                                                 </div>
                                                                 <div className="p-4 space-y-4">
                                                                     <div>
@@ -4640,9 +4640,9 @@
                                                                                     setNewFwIpset({ name: '', comment: '' });
                                                                                 } else {
                                                                                     const err = await res.json().catch(() => ({}));
-                                                                                    addToast(err.error || `Failed to add IP set (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    addToast(err.error || `${t('ipsetAddFailed')} (HTTP ${res?.status || '?'})`, 'error');
                                                                                 }
-                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            } catch (e) { addToast(`${t('networkError')}: ${e.message || e}`, 'error'); }
                                                                         }}
                                                                         className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                                     >
@@ -4820,8 +4820,8 @@
                                                     {/* NS: Boot Order UI - Dec 2025 */}
                                                     <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                         <div className="flex items-center justify-between mb-3">
-                                                            <label className="text-sm font-medium text-gray-300">{t('bootOrder') || 'Boot Order'}</label>
-                                                            <span className="text-xs text-gray-500">{t('bootOrderHint') || 'Click to toggle, use arrows to reorder'}</span>
+                                                            <label className="text-sm font-medium text-gray-300">{t('bootOrder')}</label>
+                                                            <span className="text-xs text-gray-500">{t('bootOrderHint')}</span>
                                                         </div>
                                                         
                                                         {/* Parse current boot order and available devices */}
@@ -4932,7 +4932,7 @@
                                                                                             onClick={() => moveDevice(device, 'up')}
                                                                                             disabled={isFirst}
                                                                                             className="p-1.5 rounded-md hover:bg-white/5 disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
-                                                                                            title="Move up"
+                                                                                            title={t('moveUp')}
                                                                                         >
                                                                                             <Icons.ChevronUp className="w-4 h-4" />
                                                                                         </button>
@@ -4940,7 +4940,7 @@
                                                                                             onClick={() => moveDevice(device, 'down')}
                                                                                             disabled={isLast}
                                                                                             className="p-1.5 rounded-md hover:bg-white/5 disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
-                                                                                            title="Move down"
+                                                                                            title={t('moveDown')}
                                                                                         >
                                                                                             <Icons.ChevronDown className="w-4 h-4" />
                                                                                         </button>
@@ -4952,7 +4952,7 @@
                                                                     })()}
                                                                     {sortedDevices.length === 0 && (
                                                                         <div className="text-center py-4 text-gray-500 text-sm">
-                                                                            {t('noBootDevices') || 'No boot devices found'}
+                                                                            {t('noBootDevices')}
                                                                         </div>
                                                                     )}
                                                                 </div>
@@ -4965,16 +4965,16 @@
                                                         <div className="flex items-center justify-between mb-3">
                                                             <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
                                                                 <Icons.Cpu />
-                                                                {t('smbiosSettings') || 'SMBIOS Settings'}
+                                                                {t('smbiosSettings')}
                                                             </label>
                                                             <span className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</span>
                                                         </div>
-                                                        <p className="text-xs text-gray-500 mb-4">{t('smbiosHint') || 'System Management BIOS settings - useful for Windows licensing and VM identification'}</p>
+                                                        <p className="text-xs text-gray-500 mb-4">{t('smbiosHint')}</p>
                                                         
                                                         {/* Current SMBIOS value display */}
                                                         {getValue('options', 'smbios1') && (
                                                             <div className="mb-4 p-3 bg-black/50 rounded-lg border border-green-500/30">
-                                                                <label className="block text-[10px] text-green-400 mb-1 font-medium">{t('currentValue') || 'Current Value'} (smbios1):</label>
+                                                                <label className="block text-[10px] text-green-400 mb-1 font-medium">{t('currentValue')} (smbios1):</label>
                                                                 <code className="text-xs text-green-300 font-mono break-all">
                                                                     {getValue('options', 'smbios1')}
                                                                 </code>
@@ -5039,26 +5039,26 @@
                                                                 <div className="space-y-3">
                                                                     {/* UUID - Display only, managed by Proxmox */}
                                                                     <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">UUID <span className="text-gray-600">({t('managedByProxmox') || 'managed by Proxmox'})</span></label>
+                                                                        <label className="block text-xs text-gray-400 mb-1">UUID <span className="text-gray-600">({t('managedByProxmox')})</span></label>
                                                                         <div className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-gray-500 text-sm font-mono">
-                                                                            {smbios.uuid ? smbios.uuid : <span className="italic">{t('willBeAutoGenerated') || 'Will be auto-generated on save'}</span>}
+                                                                            {smbios.uuid ? smbios.uuid : <span className="italic">{t('willBeAutoGenerated')}</span>}
                                                                         </div>
                                                                     </div>
                                                                     
                                                                     {/* Format hint */}
                                                                     <p className="text-[10px] text-yellow-500/70">
-                                                                        ⚠️ {t('smbiosFormatHint') || 'Only letters and numbers allowed (A-Za-z0-9)'}
+                                                                        ⚠️ {t('smbiosFormatHint')}
                                                                     </p>
                                                                     
                                                                     <div className="grid grid-cols-2 gap-3">
                                                                         {/* Manufacturer */}
                                                                         <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('manufacturer') || 'Manufacturer'}</label>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('manufacturer')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={smbios.manufacturer}
                                                                                 onChange={(e) => updateSmbios('manufacturer', e.target.value)}
-                                                                                placeholder="e.g. Dell"
+                                                                                placeholder={`${t('exampleAbbr')} Dell`}
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
                                                                             {smbios.manufacturer && sanitizeSmbios(smbios.manufacturer) !== smbios.manufacturer && (
@@ -5068,12 +5068,12 @@
                                                                         
                                                                         {/* Product */}
                                                                         <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('product') || 'Product'}</label>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('product')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={smbios.product}
                                                                                 onChange={(e) => updateSmbios('product', e.target.value)}
-                                                                                placeholder="e.g. PowerEdgeR740"
+                                                                                placeholder={`${t('exampleAbbr')} PowerEdgeR740`}
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
                                                                             {smbios.product && sanitizeSmbios(smbios.product) !== smbios.product && (
@@ -5083,12 +5083,12 @@
                                                                         
                                                                         {/* Version */}
                                                                         <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('version') || 'Version'}</label>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('version')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={smbios.version}
                                                                                 onChange={(e) => updateSmbios('version', e.target.value)}
-                                                                                placeholder="e.g. v1"
+                                                                                placeholder={`${t('exampleAbbr')} v1`}
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
                                                                             {smbios.version && sanitizeSmbios(smbios.version) !== smbios.version && (
@@ -5098,12 +5098,12 @@
                                                                         
                                                                         {/* Serial */}
                                                                         <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('serialNumber') || 'Serial Number'}</label>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('serialNumber')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={smbios.serial}
                                                                                 onChange={(e) => updateSmbios('serial', e.target.value)}
-                                                                                placeholder="e.g. ABC123"
+                                                                                placeholder={`${t('exampleAbbr')} ABC123`}
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
                                                                             {smbios.serial && sanitizeSmbios(smbios.serial) !== smbios.serial && (
@@ -5118,7 +5118,7 @@
                                                                                 type="text"
                                                                                 value={smbios.sku}
                                                                                 onChange={(e) => updateSmbios('sku', e.target.value)}
-                                                                                placeholder="e.g. SKU12345"
+                                                                                placeholder={`${t('exampleAbbr')} SKU12345`}
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
                                                                             {smbios.sku && sanitizeSmbios(smbios.sku) !== smbios.sku && (
@@ -5128,12 +5128,12 @@
                                                                         
                                                                         {/* Family */}
                                                                         <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('family') || 'Family'}</label>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('family')}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={smbios.family}
                                                                                 onChange={(e) => updateSmbios('family', e.target.value)}
-                                                                                placeholder="e.g. Server"
+                                                                                placeholder={`${t('exampleAbbr')} Server`}
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
                                                                             {smbios.family && sanitizeSmbios(smbios.family) !== smbios.family && (
@@ -5145,7 +5145,7 @@
                                                                     {/* Live Preview */}
                                                                     {(smbios.uuid || smbios.manufacturer || smbios.product || smbios.version || smbios.serial || smbios.sku || smbios.family) && (
                                                                         <div className="p-3 bg-black/50 rounded-lg border border-proxmox-border">
-                                                                            <label className="block text-[10px] text-gray-500 mb-1">{t('preview') || 'Preview'} (smbios1):</label>
+                                                                            <label className="block text-[10px] text-gray-500 mb-1">{t('preview')} (smbios1):</label>
                                                                             <code className="text-xs text-green-400 font-mono break-all">
                                                                                 {buildSmbios(smbios)}
                                                                             </code>
@@ -5154,7 +5154,7 @@
                                                                     
                                                                     {/* Quick presets - using only safe characters (A-Za-z0-9) */}
                                                                     <div className="pt-2 border-t border-proxmox-border">
-                                                                        <label className="block text-xs text-gray-400 mb-2">{t('presets') || 'Quick Presets'}</label>
+                                                                        <label className="block text-xs text-gray-400 mb-2">{t('presets')}</label>
                                                                         <div className="flex flex-wrap gap-2">
                                                                             <button
                                                                                 onClick={() => {
@@ -5163,7 +5163,7 @@
                                                                                 }}
                                                                                 className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
                                                                             >
-                                                                                Dell Server
+                                                                                {t('smbiosPresetDellServer')}
                                                                             </button>
                                                                             <button
                                                                                 onClick={() => {
@@ -5172,7 +5172,7 @@
                                                                                 }}
                                                                                 className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
                                                                             >
-                                                                                HP Server
+                                                                                {t('smbiosPresetHpServer')}
                                                                             </button>
                                                                             <button
                                                                                 onClick={() => {
@@ -5181,7 +5181,7 @@
                                                                                 }}
                                                                                 className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
                                                                             >
-                                                                                Lenovo Laptop
+                                                                                {t('smbiosPresetLenovoLaptop')}
                                                                             </button>
                                                                             <button
                                                                                 onClick={async () => {
@@ -5207,7 +5207,7 @@
                                                                                     }
                                                                                 }}
                                                                                 className="px-2 py-1 bg-proxmox-orange/20 border border-proxmox-orange/50 rounded text-xs text-proxmox-orange hover:bg-proxmox-orange/30"
-                                                                                title={t('applySmbiosFromClusterConfig') || 'Apply SMBIOS settings from cluster configuration'}
+                                                                                title={t('applySmbiosFromClusterConfig')}
                                                                             >
                                                                                 🦄 PegaProx
                                                                             </button>
@@ -5226,7 +5226,7 @@
                                                                                 }}
                                                                                 className="px-2 py-1 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-400 hover:bg-red-500/20"
                                                                             >
-                                                                                {t('clear') || 'Clear'}
+                                                                                {t('clear')}
                                                                             </button>
                                                                         </div>
                                                                     </div>
@@ -5255,7 +5255,7 @@
                                 </>
                             ) : (
                                 <div className="text-center py-8 text-red-400">
-                                    Konfiguration konnte nicht geladen werden
+                                    {t('configLoadError')}
                                 </div>
                             )}
                         </div>
@@ -5330,14 +5330,14 @@
                             onSave={async (newBusType) => {
                                 // MK: Double-check VM is stopped before changing bus type
                                 if (config?.status?.status === 'running') {
-                                    addToast(t('vmMustBeStopped') || 'VM must be stopped to change disk bus type', 'error');
+                                    addToast(t('vmMustBeStopped'), 'error');
                                     return;
                                 }
                                 
                                 const oldId = showEditDisk.id;
                                 const oldBusMatch = oldId.match(/^([a-z]+)(\d+)$/);
                                 if (!oldBusMatch) {
-                                    addToast('Invalid disk ID format', 'error');
+                                    addToast(t('invalidDiskIdFormat'), 'error');
                                     return;
                                 }
                                 const oldBus = oldBusMatch[1];
@@ -5386,7 +5386,7 @@
                                     
                                     if (!deleteRes.ok) {
                                         const err = await deleteRes.json();
-                                        addToast(err.error || 'Error detaching old disk', 'error');
+                                        addToast(err.error || t('diskDetachOldFailed'), 'error');
                                         return;
                                     }
                                     
@@ -5402,12 +5402,12 @@
                                     });
                                     
                                     if (attachRes.ok) {
-                                        addToast(`${t('diskBusChanged') || 'Disk bus changed'}: ${oldId} ↑ ${newId}`, 'success');
+                                        addToast(`${t('diskBusChanged')}: ${oldId} ↑ ${newId}`, 'success');
                                         fetchConfig();
                                         setShowEditDisk(null);
                                     } else {
                                         const err = await attachRes.json();
-                                        addToast(err.error || 'Error attaching disk with new bus type', 'error');
+                                        addToast(err.error || t('diskAttachBusFailed'), 'error');
                                         // LW: Try to restore old config on failure
                                         await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
                                             method: 'PUT',
@@ -5418,7 +5418,7 @@
                                         fetchConfig();
                                     }
                                 } catch (e) {
-                                    addToast('Error changing disk bus', 'error');
+                                    addToast(t('diskBusChangeFailed'), 'error');
                                 }
                             }}
                             onClose={() => setShowEditDisk(null)}
@@ -5438,15 +5438,15 @@
                                         body: JSON.stringify({ [diskId]: diskValue })
                                     });
                                     if (res && res.ok) {
-                                        addToast(`${t('diskReattached') || 'Disk reattached as'} ${diskId}`, 'success');
+                                        addToast(`${t('diskReattached')} ${diskId}`, 'success');
                                         fetchConfig();
                                         setShowReattachDisk(null);
                                     } else {
                                         const err = await res.json();
-                                        addToast(err.error || 'Error reattaching disk', 'error');
+                                        addToast(err.error || t('diskReattachFailed'), 'error');
                                     }
                                 } catch (e) {
-                                    addToast('Error reattaching disk', 'error');
+                                    addToast(t('diskReattachFailed'), 'error');
                                 }
                             }}
                             onClose={() => setShowReattachDisk(null)}
@@ -5457,11 +5457,11 @@
                     {showImportDisk && (
                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                             <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6">
-                                <h3 className="text-lg font-semibold text-white mb-2">{t('importDisk') || 'Import Disk'}</h3>
-                                <p className="text-sm text-gray-400 mb-4">{t('importDiskDesc') || 'Import existing disk image from storage'}</p>
+                                <h3 className="text-lg font-semibold text-white mb-2">{t('importDisk')}</h3>
+                                <p className="text-sm text-gray-400 mb-4">{t('importDiskDesc')}</p>
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('selectImportStorage') || 'Source Storage'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('selectImportStorage')}</label>
                                         <select
                                             id="importStorage"
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
@@ -5481,19 +5481,19 @@
                                                 } catch(e) { setImportableDisks([]); }
                                             }}
                                         >
-                                            <option value="">-- {t('selectStorage') || 'Select Storage'} --</option>
+                                            <option value="">-- {t('selectStorage')} --</option>
                                             {storageList.filter(s => s.type !== 'iso' && s.type !== 'vztmpl').map(s => (
                                                 <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
                                             ))}
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('selectDiskImage') || 'Select Disk Image'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('selectDiskImage')}</label>
                                         <select
                                             id="importDiskImage"
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
                                         >
-                                            <option value="">-- {t('selectDiskImage') || 'Select Image'} --</option>
+                                            <option value="">-- {t('selectDiskImage')} --</option>
                                             {importableDisks.map(disk => (
                                                 <option key={disk.volid} value={disk.volid}>
                                                     {disk.volid} ({disk.format}, {Math.round((disk.size || 0) / 1024 / 1024 / 1024)} GB)
@@ -5501,11 +5501,11 @@
                                             ))}
                                         </select>
                                         {importableDisks.length === 0 && (
-                                            <p className="text-xs text-yellow-500 mt-1">{t('noImportableDisks') || 'No importable disk images found'}</p>
+                                            <p className="text-xs text-yellow-500 mt-1">{t('noImportableDisks')}</p>
                                         )}
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('targetBus') || 'Target Bus'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('targetBus')}</label>
                                         <select
                                             id="importTargetBus"
                                             defaultValue="scsi"
@@ -5524,7 +5524,7 @@
                                                 const volid = document.getElementById('importDiskImage').value;
                                                 const sourceStorage = document.getElementById('importStorage').value;
                                                 const targetBus = document.getElementById('importTargetBus').value;
-                                                if (!volid) { addToast('Please select a disk image', 'error'); return; }
+                                                if (!volid) { addToast(t('selectDiskImage'), 'error'); return; }
                                                 
                                                 // MK: Ensure volid has storage prefix (some APIs return just volume name)
                                                 let fullVolid = volid;
@@ -5543,22 +5543,22 @@
                                                         body: JSON.stringify({ [nextId]: fullVolid })
                                                     });
                                                     if (res && res.ok) {
-                                                        addToast(t('diskImported') || 'Disk imported', 'success');
+                                                        addToast(t('diskImported'), 'success');
                                                         await new Promise(resolve => setTimeout(resolve, 500));
                                                         fetchConfig();
                                                         setShowImportDisk(false);
                                                         setImportableDisks([]);
                                                     } else {
                                                         const err = await res.json();
-                                                        addToast(err.error || 'Error importing disk', 'error');
+                                                        addToast(err.error || t('diskImportFailed'), 'error');
                                                     }
                                                 } catch(e) {
-                                                    addToast('Error importing disk', 'error');
+                                                    addToast(t('diskImportFailed'), 'error');
                                                 }
                                             }}
                                             className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded text-white"
                                         >
-                                            {t('import') || 'Import'}
+                                            {t('import')}
                                         </button>
                                     </div>
                                 </div>
@@ -5570,28 +5570,28 @@
                     {showReassignOwner && (
                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                             <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6">
-                                <h3 className="text-lg font-semibold text-white mb-2">{t('reassignOwner') || 'Reassign Owner'}</h3>
-                                <p className="text-sm text-gray-400 mb-4">{t('reassignOwnerDesc') || 'Assign disk to a different VM'}</p>
+                                <h3 className="text-lg font-semibold text-white mb-2">{t('reassignOwner')}</h3>
+                                <p className="text-sm text-gray-400 mb-4">{t('reassignOwnerDesc')}</p>
                                 <div className="space-y-4">
                                     <div className="p-3 bg-proxmox-dark rounded">
-                                        <span className="text-gray-400">{t('disk') || 'Disk'}:</span>
+                                        <span className="text-gray-400">{t('disk')}:</span>
                                         <span className="ml-2 text-white font-mono">{showReassignOwner.id}</span>
                                         <span className="ml-2 text-gray-500">({showReassignOwner.volume})</span>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('targetVm') || 'Target VM'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('targetVm')}</label>
                                         <select
                                             id="reassignTargetVm"
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
                                         >
-                                            <option value="">-- {t('selectVm') || 'Select VM'} --</option>
+                                            <option value="">-- {t('selectVm')} --</option>
                                             {(window.pegaproxVmList || []).filter(v => v.type === 'qemu' && v.vmid !== vm.vmid).map(v => (
                                                 <option key={v.vmid} value={v.vmid}>{v.vmid} - {v.name}</option>
                                             ))}
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('targetBus') || 'Target Bus'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('targetBus')}</label>
                                         <select
                                             id="reassignTargetBus"
                                             defaultValue="scsi"
@@ -5608,7 +5608,7 @@
                                             onClick={async () => {
                                                 const targetVmid = document.getElementById('reassignTargetVm').value;
                                                 const targetBus = document.getElementById('reassignTargetBus').value;
-                                                if (!targetVmid) { addToast('Please select a target VM', 'error'); return; }
+                                                if (!targetVmid) { addToast(t('selectVm'), 'error'); return; }
                                                 
                                                 try {
                                                     // Detach from current VM
@@ -5618,7 +5618,7 @@
                                                     );
                                                     if (!detachRes || !detachRes.ok) {
                                                         const err = await detachRes.json();
-                                                        addToast(err.error || 'Error detaching disk', 'error');
+                                                        addToast(err.error || t('diskDetachFailed'), 'error');
                                                         return;
                                                     }
                                                     
@@ -5651,21 +5651,21 @@
                                                     });
                                                     
                                                     if (attachRes && attachRes.ok) {
-                                                        addToast(t('diskReassigned') || 'Disk reassigned', 'success');
+                                                        addToast(t('diskReassigned'), 'success');
                                                         await new Promise(resolve => setTimeout(resolve, 500));
                                                         fetchConfig();
                                                         setShowReassignOwner(null);
                                                     } else {
                                                         const err = await attachRes.json();
-                                                        addToast(err.error || 'Error attaching to target VM', 'error');
+                                                        addToast(err.error || t('diskAttachTargetFailed'), 'error');
                                                     }
                                                 } catch(e) {
-                                                    addToast('Error reassigning disk', 'error');
+                                                    addToast(t('diskReassignFailed'), 'error');
                                                 }
                                             }}
                                             className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-white"
                                         >
-                                            {t('reassign') || 'Reassign'}
+                                            {t('reassign')}
                                         </button>
                                     </div>
                                 </div>
@@ -5737,7 +5737,7 @@
                                     {selectedPciDevice && (
                                         <div className="p-3 bg-proxmox-dark rounded text-sm">
                                             <div className="text-gray-400">{t('vendor')}: <span className="text-white">{selectedPciDevice.vendor_name}</span></div>
-                                            <div className="text-gray-400">Device: <span className="text-white">{selectedPciDevice.device_name}</span></div>
+                                            <div className="text-gray-400">{t('device')}: <span className="text-white">{selectedPciDevice.device_name}</span></div>
                                             <div className="text-gray-400">{t('iommuGroup')}: <span className="text-white">{selectedPciDevice.iommugroup}</span></div>
                                         </div>
                                     )}
@@ -5839,20 +5839,20 @@
                             <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
                                 <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
                                     <Icons.HardDrive className="text-blue-400" />
-                                    {t('addEfiDisk') || 'Add EFI Disk'}
+                                    {t('addEfiDisk')}
                                 </h3>
                                 <div className="space-y-4">
                                     <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm text-blue-300">
-                                        {t('efiDiskInfo') || 'EFI disk stores UEFI firmware variables and is required for UEFI boot. Size is automatically set to 4MB.'}
+                                        {t('efiDiskInfo')}
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('storage') || 'Storage'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('storage')}</label>
                                         <select
                                             value={efiStorage}
                                             onChange={(e) => setEfiStorage(e.target.value)}
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
                                         >
-                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                            <option value="">{t('selectStorage')}</option>
                                             {storageList.filter(s => s.content?.includes('images')).map(s => (
                                                 <option key={s.storage} value={s.storage}>{s.storage}</option>
                                             ))}
@@ -5872,15 +5872,15 @@
                                                         body: JSON.stringify({ efidisk0: `${efiStorage}:1,efitype=4m,pre-enrolled-keys=1` })
                                                     });
                                                     if (res.ok) {
-                                                        addToast(t('efiDiskAdded') || 'EFI disk added', 'success');
+                                                        addToast(t('efiDiskAdded'), 'success');
                                                         setShowAddEfiDisk(false);
                                                         fetchConfig();
                                                     } else {
                                                         const err = await res.json();
-                                                        addToast(err.error || 'Error adding EFI disk', 'error');
+                                                        addToast(err.error || t('efiDiskAddFailed'), 'error');
                                                     }
                                                 } catch (e) {
-                                                    addToast('Error adding EFI disk', 'error');
+                                                    addToast(t('efiDiskAddFailed'), 'error');
                                                 }
                                                 setPassthroughLoading(false);
                                             }}
@@ -6013,35 +6013,35 @@
                             <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
                                 <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
                                     <Icons.Shield className="text-green-400" />
-                                    {t('addTpm') || 'Add TPM'}
+                                    {t('addTpm')}
                                 </h3>
                                 <div className="space-y-4">
                                     <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-300">
                                         <div className="flex items-start gap-2">
                                             <Icons.AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                                            <div>{t('tpmInfo') || 'TPM (Trusted Platform Module) is required for Windows 11 and provides hardware-based security features like BitLocker.'}</div>
+                                            <div>{t('tpmInfo')}</div>
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('storage') || 'Storage'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('storage')}</label>
                                         <select
                                             value={tpmStorage}
                                             onChange={(e) => setTpmStorage(e.target.value)}
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
                                         >
-                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                            <option value="">{t('selectStorage')}</option>
                                             {storageList.filter(s => s.content?.includes('images')).map(s => (
                                                 <option key={s.storage} value={s.storage}>{s.storage}</option>
                                             ))}
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('tpmVersion') || 'TPM Version'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('tpmVersion')}</label>
                                         <select
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
                                             defaultValue="v2.0"
                                         >
-                                            <option value="v2.0">TPM 2.0 ({t('recommended') || 'Recommended'})</option>
+                                            <option value="v2.0">TPM 2.0 ({t('recommended')})</option>
                                             <option value="v1.2">TPM 1.2</option>
                                         </select>
                                     </div>
@@ -6059,15 +6059,15 @@
                                                         body: JSON.stringify({ tpmstate0: `${tpmStorage}:1,version=v2.0` })
                                                     });
                                                     if (res.ok) {
-                                                        addToast(t('tpmAdded') || 'TPM added', 'success');
+                                                        addToast(t('tpmAdded'), 'success');
                                                         setShowAddTpm(false);
                                                         fetchConfig();
                                                     } else {
                                                         const err = await res.json();
-                                                        addToast(err.error || 'Error adding TPM', 'error');
+                                                        addToast(err.error || t('tpmAddFailed'), 'error');
                                                     }
                                                 } catch (e) {
-                                                    addToast('Error adding TPM', 'error');
+                                                    addToast(t('tpmAddFailed'), 'error');
                                                 }
                                                 setPassthroughLoading(false);
                                             }}
@@ -6174,7 +6174,7 @@
                 if (!isQemu) {
                     const mp = (diskConfig.mountpoint || '').trim();
                     if (!mp || !mp.startsWith('/')) {
-                        alert(t('mountPathRequired') || 'Enter an absolute mount path inside the container (e.g. /data)');
+                        alert(t('mountPathRequired'));
                         return;
                     }
                     onAdd({
@@ -6270,7 +6270,7 @@
                                         return(
                                             <div className="mt-2 p-2 bg-proxmox-darker rounded-lg">
                                                 <div className="flex justify-between text-xs mb-1">
-                                                    <span className="text-gray-400">{t('freeSpace') || 'Free'}:</span>
+                                                    <span className="text-gray-400">{t('freeSpace')}:</span>
                                                     <span className={`font-medium ${freeBytes < diskConfig.size * 1024 * 1024 * 1024 ? 'text-red-400' : 'text-green-400'}`}>
                                                         {freeGB} GB
                                                     </span>
@@ -6282,7 +6282,7 @@
                                                     />
                                                 </div>
                                                 {freeBytes < diskConfig.size * 1024 * 1024 * 1024 && diskConfig.size > 0 && (
-                                                    <p className="text-xs text-red-400 mt-1">⚠️ {t('notEnoughSpace') || 'Not enough space!'}</p>
+                                                    <p className="text-xs text-red-400 mt-1">⚠️ {t('notEnoughSpace')}</p>
                                                 )}
                                             </div>
                                         );
@@ -6305,7 +6305,7 @@
                             {!isQemu && (
                                 <div>
                                     <label className="block text-xs text-gray-400 mb-1">
-                                        {t('mountPath') || 'Mount Path'}
+                                        {t('mountPath')}
                                         <span className="ml-2 text-gray-500">({diskConfig.disk_id})</span>
                                     </label>
                                     <input
@@ -6316,7 +6316,7 @@
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
                                     />
                                     <p className="text-xs text-gray-500 mt-1">
-                                        {t('mountPathHint') || 'Absolute path inside the container where this volume is mounted (e.g. /data).'}
+                                        {t('mountPathHint')}
                                     </p>
                                 </div>
                             )}
@@ -6325,7 +6325,7 @@
                             {isQemu && (
                                 <div>
                                     <label className="block text-xs text-gray-400 mb-1">
-                                        {t('diskFormat') || 'Format'}
+                                        {t('diskFormat')}
                                         {selectedStorageEntry?.type && (
                                             <span className="ml-2 text-gray-500">({selectedStorageEntry.type})</span>
                                         )}
@@ -6345,7 +6345,7 @@
                                     </select>
                                     {availableFormats.length === 1 && (
                                         <p className="text-xs text-gray-500 mt-1">
-                                            {t('diskFormatLockedHint') || 'This storage type only supports one format.'}
+                                            {t('diskFormatLockedHint')}
                                         </p>
                                     )}
                                 </div>
@@ -6414,10 +6414,10 @@
             return(
                 <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                     <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
-                        <h3 className="text-lg font-semibold text-white mb-4">{t('resizeDisk') || 'Resize Disk'}</h3>
-                        <p className="text-sm text-gray-400 mb-4">{t('currentSize') || 'Current size'}: {disk.size}</p>
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('resizeDisk')}</h3>
+                        <p className="text-sm text-gray-400 mb-4">{t('currentSize')}: {disk.size}</p>
                         <div>
-                            <label className="block text-xs text-gray-400 mb-1">{t('resizeDiskHint') || 'Increase by (e.g. +10G) or new size'}</label>
+                            <label className="block text-xs text-gray-400 mb-1">{t('resizeDiskHint')}</label>
                             <input
                                 type="text"
                                 value={size}
@@ -6427,7 +6427,7 @@
                         </div>
                         <div className="flex justify-end gap-3 mt-6">
                             <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
-                            <button onClick={() => onResize(size)} className="px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700">{t('resize') || 'Resize'}</button>
+                            <button onClick={() => onResize(size)} className="px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700">{t('resize')}</button>
                         </div>
                     </div>
                 </div>
@@ -6463,10 +6463,10 @@
             const supportsSsd = ['scsi', 'virtio', 'sata'].includes(busType);
             
             const busTypes = [
-                { value: 'scsi', label: 'SCSI', desc: t('scsiDesc') || 'Best performance with VirtIO SCSI controller' },
-                { value: 'virtio', label: 'VirtIO Block', desc: t('virtioDesc') || 'Legacy VirtIO, good performance' },
-                { value: 'sata', label: 'SATA', desc: t('sataDesc') || 'Good compatibility, moderate performance' },
-                { value: 'ide', label: 'IDE', desc: t('ideDesc') || 'Maximum compatibility, lowest performance' },
+                { value: 'scsi', label: 'SCSI', desc: t('scsiDesc') },
+                { value: 'virtio', label: 'VirtIO Block', desc: t('virtioDesc') },
+                { value: 'sata', label: 'SATA', desc: t('sataDesc') },
+                { value: 'ide', label: 'IDE', desc: t('ideDesc') },
             ];
             
             const handleReattach = async () => {
@@ -6495,15 +6495,15 @@
                     <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
                         <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
                             <Icons.HardDrive className="text-green-400" />
-                            {t('reattachDisk') || 'Reattach Disk'}
+                            {t('reattachDisk')}
                         </h3>
                         <p className="text-sm text-gray-400 mb-4">
-                            {t('volume') || 'Volume'}: <span className="font-mono text-white">{disk.value}</span>
+                            {t('volume')}: <span className="font-mono text-white">{disk.value}</span>
                         </p>
                         
                         {/* Bus Type Selection */}
                         <div className="mb-4">
-                            <label className="block text-xs text-gray-400 mb-2">{t('selectBusType') || 'Select Bus Type'}</label>
+                            <label className="block text-xs text-gray-400 mb-2">{t('selectBusType')}</label>
                             <div className="grid grid-cols-2 gap-2">
                                 {busTypes.map(bus => (
                                     <button
@@ -6525,7 +6525,7 @@
                         
                         {/* Disk ID */}
                         <div className="mb-4">
-                            <label className="block text-xs text-gray-400 mb-1">{t('diskId') || 'Disk ID'}</label>
+                            <label className="block text-xs text-gray-400 mb-1">{t('diskId')}</label>
                             <input
                                 type="text"
                                 value={diskId}
@@ -6533,12 +6533,12 @@
                                 disabled={loading}
                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono"
                             />
-                            <p className="text-xs text-gray-500 mt-1">{t('nextAvailableId') || 'Next available ID for selected bus type'}</p>
+                            <p className="text-xs text-gray-500 mt-1">{t('nextAvailableId')}</p>
                         </div>
                         
                         {/* Options */}
                         <div className="mb-4 p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
-                            <label className="block text-xs text-gray-400 mb-2">{t('diskOptions') || 'Disk Options'}</label>
+                            <label className="block text-xs text-gray-400 mb-2">{t('diskOptions')}</label>
                             <div className="flex flex-wrap gap-4">
                                 {supportsIothread && (
                                     <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
@@ -6549,7 +6549,7 @@
                                             disabled={loading}
                                             className="rounded" 
                                         />
-                                        IO Thread
+                                        {t('ioThread')}
                                     </label>
                                 )}
                                 {supportsSsd && (
@@ -6561,7 +6561,7 @@
                                             disabled={loading}
                                             className="rounded" 
                                         />
-                                        SSD Emulation
+                                        {t('ssdEmulation')}
                                     </label>
                                 )}
                                 <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
@@ -6572,19 +6572,19 @@
                                         disabled={loading}
                                         className="rounded" 
                                     />
-                                    Discard (TRIM)
+                                    {t('discard')} (TRIM)
                                 </label>
                             </div>
                             {!supportsIothread && !supportsSsd && (
                                 <p className="text-xs text-yellow-500 mt-2">
-                                    {t('ideLimitedOptions') || 'IDE has limited options available'}
+                                    {t('ideLimitedOptions')}
                                 </p>
                             )}
                         </div>
                         
                         {/* Preview */}
                         <div className="mb-4 p-3 bg-proxmox-dark/50 rounded-lg border border-dashed border-proxmox-border">
-                            <label className="block text-xs text-gray-400 mb-1">{t('preview') || 'Preview'}</label>
+                            <label className="block text-xs text-gray-400 mb-1">{t('preview')}</label>
                             <div className="flex items-center gap-2">
                                 <span className="text-green-400 font-mono font-medium">{diskId}</span>
                                 <Icons.ArrowRight className="w-4 h-4 text-gray-500" />
@@ -6606,7 +6606,7 @@
                                 className="px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
                             >
                                 {loading && <Icons.RotateCw className="w-4 h-4 animate-spin" />}
-                                {loading ? (t('attaching') || 'Attaching...') : (t('reattach') || 'Reattach')}
+                                {loading ? (t('attaching')) : (t('reattach'))}
                             </button>
                         </div>
                     </div>
@@ -6623,8 +6623,8 @@
             return(
                 <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                     <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
-                        <h3 className="text-lg font-semibold text-white mb-4">{t('moveDisk') || 'Move Disk'}</h3>
-                        <p className="text-sm text-gray-400 mb-4">{disk.id} - {t('from') || 'from'} <span className="text-white font-mono">{disk.storage}</span></p>
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('moveDisk')}</h3>
+                        <p className="text-sm text-gray-400 mb-4">{disk.id} - {t('from')} <span className="text-white font-mono">{disk.storage}</span></p>
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">{t('targetStorage')}</label>
                             <select
@@ -6638,16 +6638,16 @@
                             </select>
                         </div>
                         <div className="mt-4 flex items-center gap-3 p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
-                            <Toggle checked={deleteSource} onChange={setDeleteSource} label={t('deleteSourceDisk') || 'Delete source after move'} />
+                            <Toggle checked={deleteSource} onChange={setDeleteSource} label={t('deleteSourceDisk')} />
                         </div>
                         {!deleteSource && (
                             <p className="mt-2 text-xs text-yellow-400/80">
-                                {t('deleteSourceDiskWarning') || 'The original disk will remain on the source storage. You can remove it manually later.'}
+                                {t('deleteSourceDiskWarning')}
                             </p>
                         )}
                         <div className="flex justify-end gap-3 mt-6">
                             <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
-                            <button onClick={() => onMove(storage, deleteSource)} className="px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700">{t('move') || 'Move'}</button>
+                            <button onClick={() => onMove(storage, deleteSource)} className="px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700">{t('move')}</button>
                         </div>
                     </div>
                 </div>
@@ -6682,10 +6682,10 @@
             };
             
             const busTypes = [
-                { value: 'scsi', label: 'SCSI', desc: t('scsiDesc') || 'Best performance with VirtIO SCSI controller' },
-                { value: 'virtio', label: 'VirtIO Block', desc: t('virtioDesc') || 'Legacy VirtIO, good performance' },
-                { value: 'sata', label: 'SATA', desc: t('sataDesc') || 'Good compatibility, moderate performance' },
-                { value: 'ide', label: 'IDE', desc: t('ideDesc') || 'Maximum compatibility, lowest performance' },
+                { value: 'scsi', label: 'SCSI', desc: t('scsiDesc') },
+                { value: 'virtio', label: 'VirtIO Block', desc: t('virtioDesc') },
+                { value: 'sata', label: 'SATA', desc: t('sataDesc') },
+                { value: 'ide', label: 'IDE', desc: t('ideDesc') },
             ];
             
             return (
@@ -6693,10 +6693,10 @@
                     <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
                         <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
                             <Icons.Edit className="text-yellow-400" />
-                            {t('changeDiskBusType') || 'Change Disk Bus Type'}
+                            {t('changeDiskBusType')}
                         </h3>
                         <p className="text-sm text-gray-400 mb-4">
-                            {t('currentDisk') || 'Current'}: <span className="font-mono text-white">{disk.id}</span> ({disk.size})
+                            {t('currentDisk')}: <span className="font-mono text-white">{disk.id}</span> ({disk.size})
                             {disk.iothread && <span className="ml-2 text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">IOthread</span>}
                             {disk.ssd && <span className="ml-1 text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">SSD</span>}
                         </p>
@@ -6707,8 +6707,8 @@
                                 <div className="flex items-start gap-3">
                                     <Icons.AlertTriangle className="w-6 h-6 text-red-400 flex-shrink-0" />
                                     <div>
-                                        <div className="font-medium text-red-400 mb-1">{t('vmIsRunning') || 'VM is running'}</div>
-                                        <p className="text-sm text-red-300">{t('vmMustBeStoppedForBusChange') || 'The VM must be stopped before changing the disk bus type. Please shut down the VM first.'}</p>
+                                        <div className="font-medium text-red-400 mb-1">{t('vmIsRunning')}</div>
+                                        <p className="text-sm text-red-300">{t('vmMustBeStoppedForBusChange')}</p>
                                     </div>
                                 </div>
                             </div>
@@ -6716,7 +6716,7 @@
                             <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-300 mb-4">
                                 <div className="flex items-start gap-2">
                                     <Icons.AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                                    <div>{t('diskBusWarning') || 'Changing the bus type requires the VM to be stopped. The guest OS may need driver updates.'}</div>
+                                    <div>{t('diskBusWarning')}</div>
                                 </div>
                             </div>
                         )}
@@ -6727,8 +6727,8 @@
                                 <div className="flex items-start gap-2">
                                     <Icons.Info className="w-4 h-4 mt-0.5 flex-shrink-0" />
                                     <div>
-                                        {t('optionsWillBeRemoved') || 'The following options are not supported and will be removed'}:
-                                        {willStripIothread && <span className="ml-2 font-mono bg-red-500/20 px-1.5 py-0.5 rounded">IO Thread</span>}
+                                        {t('optionsWillBeRemoved')}:
+                                        {willStripIothread && <span className="ml-2 font-mono bg-red-500/20 px-1.5 py-0.5 rounded">{t('ioThread')}</span>}
                                         {willStripSsd && <span className="ml-2 font-mono bg-red-500/20 px-1.5 py-0.5 rounded">SSD</span>}
                                     </div>
                                 </div>
@@ -6736,7 +6736,7 @@
                         )}
                         
                         <div className="space-y-2">
-                            <label className="block text-xs text-gray-400 mb-2">{t('selectNewBusType') || 'Select new bus type'}</label>
+                            <label className="block text-xs text-gray-400 mb-2">{t('selectNewBusType')}</label>
                             {busTypes.map(bus => (
                                 <label 
                                     key={bus.value}
@@ -6759,7 +6759,7 @@
                                         <div className="flex items-center gap-2">
                                             <span className="font-medium text-white">{bus.label}</span>
                                             {currentBus === bus.value && (
-                                                <span className="text-xs bg-gray-600 px-2 py-0.5 rounded">{t('current') || 'Current'}</span>
+                                                <span className="text-xs bg-gray-600 px-2 py-0.5 rounded">{t('current')}</span>
                                             )}
                                         </div>
                                         <p className="text-xs text-gray-500 mt-0.5">{bus.desc}</p>
@@ -6776,7 +6776,7 @@
                                 className="px-4 py-2 bg-yellow-600 rounded-lg text-white hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                             >
                                 {loading && <Icons.RotateCw className="w-4 h-4 animate-spin" />}
-                                {isVmRunning ? (t('vmMustBeStopped') || 'VM must be stopped') : loading ? (t('saving') || 'Saving...') : (t('changeBusType') || 'Change Bus Type')}
+                                {isVmRunning ? (t('vmMustBeStopped')) : loading ? (t('saving')) : (t('changeBusType'))}
                             </button>
                         </div>
                     </div>
@@ -7017,7 +7017,7 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress')}</label>
                                         <div className="flex gap-2">
                                             <input type="text" value={netConfig.macaddr} onChange={(e) => setNetConfig({...netConfig, macaddr: e.target.value})}
                                                 placeholder="auto" className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
@@ -7038,7 +7038,7 @@
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('macAddress')}</label>
                                             <div className="flex gap-2">
                                                 <input type="text" value={netConfig.hwaddr} onChange={(e) => setNetConfig({...netConfig, hwaddr: e.target.value})}
                                                     placeholder="auto" className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
@@ -7179,7 +7179,7 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress')}</label>
                                         <div className="flex gap-2">
                                             <input type="text" value={editConfig.macaddr} onChange={(e) => setEditConfig({...editConfig, macaddr: e.target.value})}
                                                 className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
@@ -7257,7 +7257,7 @@
                                             placeholder="1"
                                             min="1" max="64"
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
-                                        <p className="text-xs text-gray-500 mt-1">{t('multiqueueHint') || '1–64 queues (VirtIO only)'}</p>
+                                        <p className="text-xs text-gray-500 mt-1">{t('multiqueueHint')}</p>
                                     </div>
                                 )}
                             </div>

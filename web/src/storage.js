@@ -52,14 +52,14 @@
                         body: JSON.stringify({ max_age_hours: parseInt(slaDraftHours) || 0 })
                     });
                     if (r && r.ok) {
-                        addToast(t('slaConfigSaved') || 'Backup SLA target saved', 'success');
+                        addToast(t('slaConfigSaved'), 'success');
                         refreshSla();
                     } else {
                         const err = await r?.json().catch(() => ({}));
-                        addToast(err.error || (t('slaConfigSaveFailed') || 'Save failed'), 'error');
+                        addToast(err.error || (t('slaConfigSaveFailed')), 'error');
                     }
                 } catch (e) {
-                    addToast(t('connectionError') || 'Connection error', 'error');
+                    addToast(t('connectionError'), 'error');
                 } finally {
                     setSlaSaving(false);
                 }
@@ -87,9 +87,9 @@
                         if (r?.ok) {
                             const d = await r.json();
                             if (d.filename === filename && d.results) {
-                                if (d.failed > 0) addToast(`${t('syncLabel') || 'Sync'} ${filename}: OK: ${d.ok}, ${t('syncResultFailed') || 'failed'}: ${d.failed}`, 'error');
-                                else if (d.ok > 0) addToast(`${t('syncComplete') || 'Sync complete'}: ${filename} (${t('nodes') || 'Nodes'}: ${d.ok})`, 'success');
-                                else addToast(`${t('syncLabel') || 'Sync'} ${filename}: ${t('alreadyOnAllNodes') || 'already on all nodes'}`, 'success');
+                                if (d.failed > 0) addToast(`${t('syncLabel')} ${filename}: OK: ${d.ok}, ${t('syncResultFailed')}: ${d.failed}`, 'error');
+                                else if (d.ok > 0) addToast(`${t('syncComplete')}: ${filename} (${t('nodes')}: ${d.ok})`, 'success');
+                                else addToast(`${t('syncLabel')} ${filename}: ${t('alreadyOnAllNodes')}`, 'success');
                                 setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
                                 refreshSyncStatus();
                                 return;
@@ -108,15 +108,15 @@
                         body: JSON.stringify({ source_node: sourceNode, storage, filename, content_type: syncContentType })
                     });
                     if (r?.ok) {
-                        addToast(`${t('syncing') || 'Syncing'} ${filename}...`, 'success');
+                        addToast(`${t('syncing')} ${filename}...`, 'success');
                         _pollSyncResult(filename);
                     } else {
                         const d = await r?.json().catch(() => ({}));
-                        addToast(d.error || `${t('syncFailed') || 'Sync failed for'} ${filename}`, 'error');
+                        addToast(d.error || `${t('syncFailed')} ${filename}`, 'error');
                         setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
                     }
                 } catch(e) {
-                    addToast(`${t('syncError') || 'Sync error'}: ${e.message}`, 'error');
+                    addToast(`${t('syncError')}: ${e.message}`, 'error');
                     setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
                 }
             };
@@ -129,14 +129,14 @@
                         body: JSON.stringify({content_type: syncContentType})
                     });
                     if (r?.ok) {
-                        addToast(t('syncAllStarted') || 'Syncing all missing files...', 'success');
+                        addToast(t('syncAllStarted'), 'success');
                         setTimeout(refreshSyncStatus, 10000);
                     } else {
                         const d = await r?.json().catch(() => ({}));
-                        addToast(d.error || t('syncAllFailed') || 'Sync all failed', 'error');
+                        addToast(d.error || t('syncAllFailed'), 'error');
                     }
                 } catch(e) {
-                    addToast(`${t('syncError') || 'Sync error'}: ${e.message}`, 'error');
+                    addToast(`${t('syncError')}: ${e.message}`, 'error');
                 }
                 setTimeout(() => setSyncingFiles({}), 5000);
             };
@@ -246,7 +246,7 @@
                     });
                     if (res?.ok) {
                         const data = await res.json();
-                        addToast(`${t('downloadStarted') || 'Download started'}: ${template.package || template.template}`, 'success');
+                        addToast(`${t('downloadStarted')}: ${template.package || template.template}`, 'success');
                         // Refresh storage content after a short delay
                         setTimeout(() => {
                             if (selectedStorage?.name === storage) {
@@ -255,11 +255,11 @@
                         }, 2000);
                     } else {
                         const err = await res.json();
-                        addToast(`${t('downloadFailed') || 'Download failed'}: ${err.error || t('unknownError') || 'Unknown error'}`, 'error');
+                        addToast(`${t('downloadFailed')}: ${err.error || t('unknownError')}`, 'error');
                     }
                 } catch (e) {
                     console.error('Error downloading template:', e);
-                    addToast(`${t('error') || 'Error'}: ${e.message}`, 'error');
+                    addToast(`${t('error')}: ${e.message}`, 'error');
                 }
                 setDownloadingTemplate(null);
             };
@@ -447,7 +447,7 @@
             
             const createStorageCluster = async () => {
                 if (!newClusterName.trim() || newClusterStorages.length < 2) {
-                    alert(t('needTwoStorages') || 'Need at least 2 storages');
+                    alert(t('needTwoStorages'));
                     return;
                 }
                 try {
@@ -469,7 +469,7 @@
                         fetchStorageClusters();
                     } else {
                         const err = await response.json();
-                        alert(err.error || t('createFailed') || 'Create failed');
+                        alert(err.error || t('createFailed'));
                     }
                 } catch (error) {
                     console.error('creating storage cluster:', error);
@@ -531,7 +531,7 @@
             };
             
             const deleteStorageCluster = async (scId) => {
-                if (!confirm(t('confirmDeleteCluster') || 'Delete this storage cluster?')) return;
+                if (!confirm(t('confirmDeleteCluster'))) return;
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
                         method: 'DELETE'
@@ -569,7 +569,7 @@
             const removeStorageFromCluster = async (scId, storageName) => {
                 const cluster = storageClusters.find(sc => sc.id === scId);
                 if (!cluster || cluster.storages.length <= 2) {
-                    alert(t('minTwoStorages') || 'Minimum 2 storages required');
+                    alert(t('minTwoStorages'));
                     return;
                 }
                 
@@ -588,7 +588,7 @@
             };
             
             const executeMigration = async (rec) => {
-                const confirmText = (t('confirmMigration') || 'Move {disk} of {vm} from {source} to {target}?')
+                const confirmText = (t('confirmMigration'))
                     .replace('{disk}', rec.disk)
                     .replace('{vm}', rec.vm_name)
                     .replace('{source}', rec.source)
@@ -605,11 +605,11 @@
                         })
                     });
                     if (response && response.ok) {
-                        alert(t('migrationStarted') || 'Migration started!');
+                        alert(t('migrationStarted'));
                         if (selectedCluster) loadClusterStatus(selectedCluster);
                     } else {
                         const err = await response.json();
-                        alert(err.error || t('migrationFailed') || 'Migration failed');
+                        alert(err.error || t('migrationFailed'));
                     }
                 } catch (error) {
                     console.error('executing migration:', error);
@@ -775,7 +775,7 @@
                 }
                 
                 setUrlDownloading(true);
-                setUrlDownloadProgress({ status: 'starting', percent: 0, message: t('startingDownload') || 'Starting download...' });
+                setUrlDownloadProgress({ status: 'starting', percent: 0, message: t('startingDownload') });
                 
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/datastores/${selectedStorage.name}/download-url`, {
@@ -811,7 +811,7 @@
                                     } else if (status.status === 'error') {
                                         clearInterval(pollInterval);
                                         setUrlDownloading(false);
-                                        alert(status.message || t('downloadFailed') || 'Download failed');
+                                        alert(status.message || t('downloadFailed'));
                                     }
                                 }
                             } catch (e) {
@@ -824,12 +824,12 @@
                         
                     } else {
                         const err = await response.json();
-                        alert(err.error || t('downloadFailed') || 'Download failed');
+                        alert(err.error || t('downloadFailed'));
                         setUrlDownloading(false);
                     }
                 } catch (error) {
                     console.error('Download from URL error:', error);
-                    alert(t('downloadFailed') || 'Download failed');
+                    alert(t('downloadFailed'));
                     setUrlDownloading(false);
                 }
             };
@@ -846,7 +846,7 @@
             
             const connectEsxiHost = async () => {
                 if (!esxiForm.host || !esxiForm.password) {
-                    alert(t('fillAllFields') || 'Please fill all fields');
+                    alert(t('fillAllFields'));
                     return;
                 }
                 setEsxiLoading(true);
@@ -872,7 +872,7 @@
             };
             
             const disconnectEsxiHost = async (hostId) => {
-                if (!confirm(t('confirmDisconnect') || 'Disconnect this ESXi host?')) return;
+                if (!confirm(t('confirmDisconnect'))) return;
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts/${hostId}`, {
                         method: 'DELETE'
@@ -969,13 +969,13 @@
                 const partial = isShared && Array.isArray(storage.active_on) && Array.isArray(storage.inactive_on)
                     && storage.active_on.length > 0 && storage.inactive_on.length > 0;
                 const partialHint = partial
-                    ? `${t('activeOn') || 'Active on'}: ${storage.active_on.join(', ')} — ${t('unreachableFrom') || 'unreachable from'}: ${storage.inactive_on.join(', ')}`
+                    ? `${t('activeOn')}: ${storage.active_on.join(', ')} — ${t('unreachableFrom')}: ${storage.inactive_on.join(', ')}`
                     : null;
 
                 let rowTitle;
-                if (isUnreachable) rowTitle = t('storageUnreachableHint') || `${storage.storage} is configured but not reachable from ${node || 'this node'} — check network / mount / credentials`;
+                if (isUnreachable) rowTitle = t('storageUnreachableHint');
                 else if (partial) rowTitle = partialHint;
-                else if (isRaw) rowTitle = t('storageRawHint') || `${storage.type} raw block storage — Proxmox does not report usage stats for this storage type`;
+                else if (isRaw) rowTitle = t('storageRawHint');
 
                 // NS Apr 2026 — when clicking a shared row, route content fetch through
                 // a node that can actually reach the storage (active_on[0]). Without this,
@@ -998,18 +998,18 @@
                                     {storage.storage}
                                     {isUnreachable && (
                                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30">
-                                            {t('storageUnreachable') || 'unreachable'}
+                                            {t('storageUnreachable')}
                                         </span>
                                     )}
                                     {!isUnreachable && partial && (
                                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
                                             title={partialHint}>
-                                            {storage.active_on.length}/{storage.active_on.length + storage.inactive_on.length} {t('nodes') || 'nodes'}
+                                            {storage.active_on.length}/{storage.active_on.length + storage.inactive_on.length} {t('nodes')}
                                         </span>
                                     )}
                                     {!isUnreachable && isRaw && (
                                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">
-                                            {t('storageRaw') || 'raw'}
+                                            {t('storageRaw')}
                                         </span>
                                     )}
                                 </div>
@@ -1021,11 +1021,11 @@
                         <div className="text-right">
                             {isUnreachable ? (
                                 <div className="text-xs text-gray-500 italic">
-                                    {t('storageUnreachableShort') || 'no data'}
+                                    {t('storageUnreachableShort')}
                                 </div>
                             ) : isRaw ? (
                                 <div className="text-xs text-gray-500 italic">
-                                    {t('storageRawNoUsage') || 'no usage stats'}
+                                    {t('storageRawNoUsage')}
                                 </div>
                             ) : (
                                 <>
@@ -1050,7 +1050,7 @@
                         <div className="corp-tab-strip">
                             <button onClick={() => setActiveTab('browse')} className={activeTab === 'browse' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
                                 <Icons.Folder style={{width: 14, height: 14, flexShrink: 0}} />
-                                <span>{t('browse') || 'Browse'}</span>
+                                <span>{t('browse')}</span>
                             </button>
                             <button onClick={() => { setActiveTab('balancing'); fetchStorageClusters(); }} className={activeTab === 'balancing' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
                                 <Icons.Zap style={{width: 14, height: 14, flexShrink: 0}} />
@@ -1060,13 +1060,13 @@
                                 setActiveTab('sync'); refreshSyncStatus();
                             }} className={activeTab === 'sync' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
                                 <Icons.RefreshCw style={{width: 14, height: 14, flexShrink: 0}} />
-                                <span>{t('isoSync') || 'ISO Sync'}</span>
+                                <span>{t('isoSync')}</span>
                             </button>
                             <button onClick={() => {
                                 setActiveTab('sla'); refreshSla();
                             }} className={activeTab === 'sla' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
                                 <Icons.Shield style={{width: 14, height: 14, flexShrink: 0}} />
-                                <span>{t('backupSla') || 'Backup SLA'}</span>
+                                <span>{t('backupSla')}</span>
                             </button>
                         </div>
                     ) : (
@@ -1078,7 +1078,7 @@
                             }`}
                         >
                             <Icons.Folder className="inline mr-2" />
-                            {t('browse') || 'Browse'}
+                            {t('browse')}
                         </button>
                         <button
                             onClick={() => { setActiveTab('balancing'); fetchStorageClusters(); }}
@@ -1098,7 +1098,7 @@
                             }`}
                         >
                             <Icons.RefreshCw className="inline mr-2" />
-                            {t('isoSync') || 'ISO Sync'}
+                            {t('isoSync')}
                         </button>
                         <button
                             onClick={() => { setActiveTab('sla'); refreshSla(); }}
@@ -1107,7 +1107,7 @@
                             }`}
                         >
                             <Icons.Shield className="inline mr-2" />
-                            {t('backupSla') || 'Backup SLA'}
+                            {t('backupSla')}
                         </button>
                     </div>
                     )}
@@ -1119,24 +1119,24 @@
                                 <div>
                                     <h3 className="text-lg font-semibold text-white flex items-center gap-2">
                                         <Icons.RefreshCw className="w-5 h-5" />
-                                        {t('isoSync') || 'ISO / Template Sync'}
+                                        {t('isoSync')}
                                     </h3>
-                                    <p className="text-sm text-gray-500 mt-1">{t('isoSyncDesc') || 'Distribute ISOs and templates across all cluster nodes. Useful for iSCSI-only setups without shared file storage.'}</p>
+                                    <p className="text-sm text-gray-500 mt-1">{t('isoSyncDesc')}</p>
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <select value={syncContentType} onChange={e => {
                                         setSyncContentType(e.target.value);
                                         setTimeout(refreshSyncStatus, 50);
                                     }} className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm text-white">
-                                        <option value="iso">{t('isos') || 'ISOs'}</option>
-                                        <option value="vztmpl">{t('templates') || 'Templates'}</option>
+                                        <option value="iso">{t('isos')}</option>
+                                        <option value="vztmpl">{t('templates')}</option>
                                     </select>
                                     <button onClick={triggerSyncAll} disabled={syncingFiles._all}
                                         className="px-4 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-1.5">
                                         {syncingFiles._all && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
-                                        {t('syncAll') || 'Sync All Missing'}
+                                        {t('syncAll')}
                                     </button>
-                                    <button onClick={refreshSyncStatus} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh') || 'Refresh'}>
+                                    <button onClick={refreshSyncStatus} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh')}>
                                         <Icons.RefreshCw className={`w-4 h-4 ${syncLoading ? 'animate-spin' : ''}`} />
                                     </button>
                                 </div>
@@ -1148,14 +1148,14 @@
                                         checked={localStorage.getItem(`autosync-${clusterId}`) === 'true'}
                                         onChange={e => { localStorage.setItem(`autosync-${clusterId}`, e.target.checked); addToast(
                                             e.target.checked
-                                                ? (t('autoSyncEnabled') || 'Auto-sync enabled — new uploads will be distributed automatically')
-                                                : (t('autoSyncDisabled') || 'Auto-sync disabled'),
+                                                ? (t('autoSyncEnabled'))
+                                                : (t('autoSyncDisabled')),
                                             'success'
                                         ); }}
                                     />
-                                    {t('autoSync') || 'Auto-Sync after Upload'}
+                                    {t('autoSync')}
                                 </label>
-                                <span className="text-xs text-gray-600">{t('autoSyncDesc') || 'Automatically distribute new ISOs/templates to all nodes after upload'}</span>
+                                <span className="text-xs text-gray-600">{t('autoSyncDesc')}</span>
                             </div>
 
                             {syncLoading && !syncStatus ? (
@@ -1190,14 +1190,14 @@
                                                         ))}
                                                         <td className="py-2 px-3 text-center">
                                                             {allSynced ? (
-                                                                <span className="text-xs text-green-400/70">{t('synced') || 'Synced'}</span>
+                                                                <span className="text-xs text-green-400/70">{t('synced')}</span>
                                                             ) : sourceNode ? (
                                                                 <button
                                                                     onClick={() => triggerSync(sourceNode, f.storage, f.name)}
                                                                     disabled={!!syncingFiles[f.name]}
                                                                     className="px-2 py-1 text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded transition-colors disabled:opacity-50 flex items-center gap-1"
                                                                 >
-                                                                    {syncingFiles[f.name] ? <><Icons.RotateCw className="w-3 h-3 animate-spin" /> {t('syncing') || 'Syncing'}...</> : (t('sync') || 'Sync')}
+                                                                    {syncingFiles[f.name] ? <><Icons.RotateCw className="w-3 h-3 animate-spin" /> {t('syncing')}...</> : (t('sync'))}
                                                                 </button>
                                                             ) : null}
                                                         </td>
@@ -1210,7 +1210,7 @@
                             ) : (
                                 <div className="text-center py-12 text-gray-500">
                                     <Icons.Folder className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                                    <p>{t('noFilesFound') || 'No ISOs or templates found on any node.'}</p>
+                                    <p>{t('noFilesFound')}</p>
                                 </div>
                             )}
                         </div>
@@ -1224,13 +1224,13 @@
                                 <div>
                                     <h3 className="text-lg font-semibold text-white flex items-center gap-2">
                                         <Icons.Shield className="w-5 h-5" />
-                                        {t('backupSla') || 'Backup SLA'}
+                                        {t('backupSla')}
                                     </h3>
                                     <p className="text-sm text-gray-500 mt-1">
-                                        {t('backupSlaDesc') || 'Define how recent each VM\'s backup must be. Aggregates across local vzdumps + PBS snapshots and flags VMs that fall behind.'}
+                                        {t('backupSlaDesc')}
                                     </p>
                                 </div>
-                                <button onClick={refreshSla} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh') || 'Refresh'}>
+                                <button onClick={refreshSla} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh')}>
                                     <Icons.RefreshCw className={`w-4 h-4 ${slaLoading ? 'animate-spin' : ''}`} />
                                 </button>
                             </div>
@@ -1238,7 +1238,7 @@
                             {/* Config row */}
                             <div className="flex items-center gap-3 p-4 bg-proxmox-dark border border-proxmox-border rounded-lg mb-4">
                                 <Icons.Clock className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                                <label className="text-sm text-gray-300">{t('maxBackupAge') || 'Max backup age (hours)'}</label>
+                                <label className="text-sm text-gray-300">{t('maxBackupAge')}</label>
                                 <input
                                     type="number"
                                     min="0"
@@ -1247,12 +1247,12 @@
                                     onChange={e => setSlaDraftHours(e.target.value)}
                                     className="w-24 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-sm"
                                 />
-                                <span className="text-xs text-gray-500">{t('zeroDisables') || '0 = disabled'}</span>
+                                <span className="text-xs text-gray-500">{t('zeroDisables')}</span>
                                 <div className="flex-1" />
                                 <button onClick={saveSlaConfig} disabled={slaSaving || !hasPerm('cluster.config')}
                                     className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded text-sm font-medium disabled:opacity-50 flex items-center gap-1.5">
                                     {slaSaving && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
-                                    {t('save') || 'Save'}
+                                    {t('save')}
                                 </button>
                             </div>
 
@@ -1260,11 +1260,11 @@
                             {slaData && (
                                 <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
                                     {[
-                                        { key: 'compliance_pct', label: t('compliance') || 'Compliance', val: slaData.summary?.compliance_pct === null ? '—' : `${slaData.summary?.compliance_pct ?? 0}%`, color: 'text-blue-400', bg: 'bg-blue-500/10', filter: 'all' },
-                                        { key: 'ok', label: t('compliant') || 'Compliant', val: slaData.summary?.ok ?? 0, color: 'text-green-400', bg: 'bg-green-500/10', filter: 'ok' },
-                                        { key: 'warning', label: t('warning') || 'Warning', val: slaData.summary?.warning ?? 0, color: 'text-yellow-400', bg: 'bg-yellow-500/10', filter: 'warning' },
-                                        { key: 'breached', label: t('breached') || 'Breached', val: slaData.summary?.breached ?? 0, color: 'text-red-400', bg: 'bg-red-500/10', filter: 'breached' },
-                                        { key: 'no_backup', label: t('noBackup') || 'No backup', val: slaData.summary?.no_backup ?? 0, color: 'text-orange-400', bg: 'bg-orange-500/10', filter: 'no-backup' },
+                                        { key: 'compliance_pct', label: t('compliance'), val: slaData.summary?.compliance_pct === null ? '—' : `${slaData.summary?.compliance_pct ?? 0}%`, color: 'text-blue-400', bg: 'bg-blue-500/10', filter: 'all' },
+                                        { key: 'ok', label: t('compliant'), val: slaData.summary?.ok ?? 0, color: 'text-green-400', bg: 'bg-green-500/10', filter: 'ok' },
+                                        { key: 'warning', label: t('warning'), val: slaData.summary?.warning ?? 0, color: 'text-yellow-400', bg: 'bg-yellow-500/10', filter: 'warning' },
+                                        { key: 'breached', label: t('breached'), val: slaData.summary?.breached ?? 0, color: 'text-red-400', bg: 'bg-red-500/10', filter: 'breached' },
+                                        { key: 'no_backup', label: t('noBackup'), val: slaData.summary?.no_backup ?? 0, color: 'text-orange-400', bg: 'bg-orange-500/10', filter: 'no-backup' },
                                     ].map(tile => (
                                         <button
                                             key={tile.key}
@@ -1282,12 +1282,12 @@
                             {!slaData && !slaLoading && (
                                 <div className="text-center py-12 text-gray-500">
                                     <Icons.Shield className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                                    <p>{t('slaLoadingPrompt') || 'Click refresh to load Backup SLA data.'}</p>
+                                    <p>{t('slaLoadingPrompt')}</p>
                                 </div>
                             )}
                             {slaData && !slaData.enabled && (
                                 <div className="p-4 bg-yellow-500/5 border border-yellow-500/20 rounded-lg mb-4 text-sm text-yellow-300">
-                                    {t('slaDisabledHint') || 'SLA tracking is disabled. Set a max backup age above to start evaluating.'}
+                                    {t('slaDisabledHint')}
                                 </div>
                             )}
 
@@ -1297,13 +1297,13 @@
                                     <table className="w-full text-sm">
                                         <thead className="bg-proxmox-card border-b border-proxmox-border">
                                             <tr className="text-left text-xs uppercase text-gray-400">
-                                                <th className="px-3 py-2">{t('vmid') || 'VMID'}</th>
-                                                <th className="px-3 py-2">{t('name') || 'Name'}</th>
-                                                <th className="px-3 py-2">{t('node') || 'Node'}</th>
-                                                <th className="px-3 py-2">{t('lastBackup') || 'Last backup'}</th>
-                                                <th className="px-3 py-2">{t('age') || 'Age'}</th>
-                                                <th className="px-3 py-2">{t('source') || 'Source'}</th>
-                                                <th className="px-3 py-2">{t('status') || 'Status'}</th>
+                                                <th className="px-3 py-2">{t('vmid')}</th>
+                                                <th className="px-3 py-2">{t('name')}</th>
+                                                <th className="px-3 py-2">{t('node')}</th>
+                                                <th className="px-3 py-2">{t('lastBackup')}</th>
+                                                <th className="px-3 py-2">{t('age')}</th>
+                                                <th className="px-3 py-2">{t('source')}</th>
+                                                <th className="px-3 py-2">{t('status')}</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1318,11 +1318,11 @@
                                                         'disabled': 'bg-gray-500/15 text-gray-400',
                                                     }[v.sla_status] || 'bg-gray-500/15 text-gray-400';
                                                     const statusLabel = {
-                                                        'ok': t('compliant') || 'Compliant',
-                                                        'warning': t('warning') || 'Warning',
-                                                        'breached': t('breached') || 'Breached',
-                                                        'no-backup': t('noBackup') || 'No backup',
-                                                        'disabled': t('disabled') || 'Disabled',
+                                                        'ok': t('compliant'),
+                                                        'warning': t('warning'),
+                                                        'breached': t('breached'),
+                                                        'no-backup': t('noBackup'),
+                                                        'disabled': t('disabled'),
                                                     }[v.sla_status] || v.sla_status;
                                                     return (
                                                         <tr key={`${v.type}-${v.vmid}`} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover">
@@ -1350,7 +1350,7 @@
                                 <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
                                     <h3 className="font-semibold flex items-center gap-2">
                                         <Icons.Database />
-                                        {t('datastores') || 'Datastores'}
+                                        {t('datastores')}
                                     </h3>
                                 </div>
                                 <div className="p-4 space-y-4 max-h-[600px] overflow-y-auto">
@@ -1363,7 +1363,7 @@
                                             >
                                                 <span className={`transform transition-transform ${expandedNodes.shared ? 'rotate-90' : ''}`}>▶</span>
                                                 <Icons.Globe />
-                                                <span className="font-medium text-yellow-400">{t('sharedStorage') || 'Shared Storage'}</span>
+                                                <span className="font-medium text-yellow-400">{t('sharedStorage')}</span>
                                                 <span className="text-xs text-gray-500 ml-auto">{datastores.shared.length}</span>
                                             </button>
                                             {expandedNodes.shared && (
@@ -1407,14 +1407,14 @@
                                             >
                                                 <span className={`transform transition-transform ${expandedNodes.esxi ? 'rotate-90' : ''}`}>▶</span>
                                                 <span className="text-lg">🖥️</span>
-                                                <span className="font-medium text-cyan-400">{t('esxiHosts') || 'ESXi Hosts'}</span>
+                                                <span className="font-medium text-cyan-400">{t('esxiHosts')}</span>
                                                 <span className="text-xs text-gray-500 ml-auto">{esxiHosts.length}</span>
                                             </button>
                                             {isAdmin && (
                                                 <button
                                                     onClick={() => setShowAddEsxi(true)}
                                                     className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-cyan-400"
-                                                    title={t('connectEsxi') || 'Connect ESXi'}
+                                                    title={t('connectEsxi')}
                                                 >
                                                     <Icons.Plus />
                                                 </button>
@@ -1423,7 +1423,7 @@
                                         {expandedNodes.esxi && (
                                             <div className="ml-6 space-y-2">
                                                 {esxiHosts.length === 0 ? (
-                                                    <p className="text-xs text-gray-500 py-2">{t('noEsxiHosts') || 'No ESXi hosts connected'}</p>
+                                                    <p className="text-xs text-gray-500 py-2">{t('noEsxiHosts')}</p>
                                                 ) : (
                                                     esxiHosts.map(host => (
                                                         <div 
@@ -1461,7 +1461,7 @@
                                         <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center">
                                             <h3 className="font-semibold flex items-center gap-2">
                                                 <span className="text-lg">🖥️</span>
-                                                {t('esxiVms') || 'ESXi VMs'}
+                                                {t('esxiVms')}
                                                 <span className="text-xs text-gray-500">({esxiHosts.find(h => h.id === selectedEsxi)?.host})</span>
                                             </h3>
                                             <button
@@ -1475,7 +1475,7 @@
                                             {/* Experimental hint */}
                                             <div className="p-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg mb-4 flex items-center gap-2">
                                                 <span>🧪</span>
-                                                <span className="text-xs text-cyan-400">{t('esxiExperimental') || 'ESXi integration is experimental'}</span>
+                                                <span className="text-xs text-cyan-400">{t('esxiExperimental')}</span>
                                             </div>
                                             
                                             {esxiVmsLoading ? (
@@ -1484,7 +1484,7 @@
                                                 </div>
                                             ) : esxiVms.length === 0 ? (
                                                 <div className="text-center py-12 text-gray-500">
-                                                    <p>{t('esxiNoVms') || 'No VMs on this ESXi host'}</p>
+                                                    <p>{t('esxiNoVms')}</p>
                                                 </div>
                                             ) : (
                                                 <div className="space-y-2">
@@ -1506,7 +1506,7 @@
                                                                 </div>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className="text-xs text-gray-500 italic">
-                                                                        {t('useVMwareMigration') || 'Use ESXi → Migration Wizard'}
+                                                                        {t('useVMwareMigration')}
                                                                     </span>
                                                                 </div>
                                                             </div>
@@ -1523,9 +1523,9 @@
                                             <h3 className="font-semibold flex items-center gap-2 flex-wrap">
                                                 <Icons.Folder />
                                                 {selectedStorage ? (
-                                                    <>{t('content') || 'Content'}: {selectedStorage.name}</>
+                                                    <>{t('content')}: {selectedStorage.name}</>
                                                 ) : (
-                                                    t('selectStorageToView') || 'Select a storage'
+                                                    t('selectStorageToView')
                                                 )}
                                                 {/* NS Apr 2026 — when a shared storage is reachable from multiple
                                                     nodes (and the row showed "1/2 nodes"), let the user pick which
@@ -1540,7 +1540,7 @@
                                                     if (!showSwitcher) return null;
                                                     return (
                                                         <span className="flex items-center gap-1.5 text-xs font-normal">
-                                                            <span className="text-gray-500">— {t('viewFromNode') || 'view from'}:</span>
+                                                            <span className="text-gray-500">— {t('viewFromNode')}:</span>
                                                             <select
                                                                 value={selectedStorage.node || activeOn[0]}
                                                                 onChange={e => loadStorageContent(selectedStorage.name, e.target.value)}
@@ -1550,7 +1550,7 @@
                                                                     <option key={n} value={n}>{n} ✓</option>
                                                                 ))}
                                                                 {inactiveOn.map(n => (
-                                                                    <option key={n} value={n} disabled>{n} ({t('storageUnreachable') || 'unreachable'})</option>
+                                                                    <option key={n} value={n} disabled>{n} ({t('storageUnreachable')})</option>
                                                                 ))}
                                                             </select>
                                                         </span>
@@ -1569,7 +1569,7 @@
                                                             onClick={() => { setShowTemplateModal(true); loadAvailableTemplates(); }}
                                                             className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm"
                                                         >
-                                                            <Icons.Download /> {t('templates') || 'Templates'}
+                                                            <Icons.Download /> {t('templates')}
                                                         </button>
                                                     )}
                                                     {/* NS: Download from URL - for ISO storage (like Proxmox) */}
@@ -1581,9 +1581,9 @@
                                                         <button
                                                             onClick={() => setDownloadUrlModalOpen(true)}
                                                             className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded-lg text-sm"
-                                                            title={t('downloadFromUrl') || 'Download from URL'}
+                                                            title={t('downloadFromUrl')}
                                                         >
-                                                            <Icons.Link /> {t('fromUrl') || 'From URL'}
+                                                            <Icons.Link /> {t('fromUrl')}
                                                         </button>
                                                     )}
                                                     {hasPerm('storage.upload') && canUploadTo(datastores.shared.find(s => s.storage === selectedStorage.name) ||
@@ -1592,7 +1592,7 @@
                                                             onClick={() => setUploadModalOpen(true)}
                                                             className="flex items-center gap-1 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                         >
-                                                            <Icons.Upload /> {t('upload') || 'Upload'}
+                                                            <Icons.Upload /> {t('upload')}
                                                         </button>
                                                     )}
                                                     {/* NS: Rescan button for iSCSI/LVM storage - Feb 2026 */}
@@ -1604,9 +1604,9 @@
                                                         <button
                                                             onClick={() => setShowRescanModal(true)}
                                                             className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm"
-                                                            title={t('rescanStorageTooltip') || 'Rescan storage to detect new LUNs/volumes'}
+                                                            title={t('rescanStorageTooltip')}
                                                         >
-                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('rescan') || 'Rescan'}
+                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('rescan')}
                                                         </button>
                                                     )}
                                                     <button
@@ -1626,22 +1626,22 @@
                                             ) : !selectedStorage ? (
                                                 <div className="text-center py-12 text-gray-500">
                                                     <Icons.Database className="mx-auto mb-2 opacity-50" />
-                                                    <p>{t('clickStorageToView') || 'Click on a storage to view its contents'}</p>
+                                                    <p>{t('clickStorageToView')}</p>
                                                 </div>
                                             ) : storageContent.length === 0 ? (
                                                 <div className="text-center py-12 text-gray-500">
                                                     <Icons.Folder className="mx-auto mb-2 opacity-50" />
-                                                    <p>{t('storageEmpty') || 'This storage is empty'}</p>
+                                                    <p>{t('storageEmpty')}</p>
                                                 </div>
                                             ) : (
                                                 <div className="space-y-1 max-h-[500px] overflow-y-auto">
                                                     <table className="w-full">
                                                         <thead className="sticky top-0 bg-proxmox-card">
                                                             <tr className="text-left text-xs text-gray-500 uppercase">
-                                                                <th className="p-2">{t('name') || 'Name'}</th>
-                                                                <th className="p-2">{t('type') || 'Type'}</th>
-                                                                <th className="p-2">{t('format') || 'Format'}</th>
-                                                        <th className="p-2 text-right">{t('size') || 'Size'}</th>
+                                                                <th className="p-2">{t('name')}</th>
+                                                                <th className="p-2">{t('type')}</th>
+                                                                <th className="p-2">{t('format')}</th>
+                                                        <th className="p-2 text-right">{t('size')}</th>
                                                         {hasPerm('storage.delete') && <th className="p-2 w-10"></th>}
                                                     </tr>
                                                 </thead>
@@ -1669,7 +1669,7 @@
                                                                     LVM or thick qcow2 where computing the real size is expensive. */}
                                                                 {item.size_is_approx && <span className="text-gray-500">~</span>}
                                                                 {item.size_human || formatSize(item.size)}
-                                                                {item.size_is_approx && <span className="text-[10px] text-gray-500 ml-1" title={t('approximateSizeHint') || 'Approximate — PVE 9.2 reported approximate-size, not exact size'}>≈</span>}
+                                                                {item.size_is_approx && <span className="text-[10px] text-gray-500 ml-1" title={t('approximateSizeHint')}>≈</span>}
                                                             </td>
                                                             {hasPerm('storage.delete') && (
                                                                 <td className="p-2">
@@ -1678,7 +1678,7 @@
                                                                         <button
                                                                             onClick={() => setDeleteConfirm(item)}
                                                                             className="p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
-                                                                            title={t('delete') || 'Delete'}
+                                                                            title={t('delete')}
                                                                         >
                                                                             <Icons.Trash />
                                                                         </button>
@@ -1703,8 +1703,8 @@
                     <div className="lg:col-span-3 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-center gap-3">
                         <span className="text-2xl">🧪</span>
                         <div>
-                            <p className="text-yellow-400 font-medium">{t('experimentalFeature') || 'Experimental Feature'}</p>
-                            <p className="text-yellow-300/70 text-sm">{t('storageBalancingExperimental') || 'Storage Balancing is still experimental. We appreciate your feedback!'}</p>
+                            <p className="text-yellow-400 font-medium">{t('experimentalFeature')}</p>
+                            <p className="text-yellow-300/70 text-sm">{t('storageBalancingExperimental')}</p>
                         </div>
                     </div>
                     
@@ -1713,13 +1713,13 @@
                                 <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center">
                                     <h3 className="font-semibold flex items-center gap-2">
                                         <Icons.Zap className="text-yellow-400" />
-                                        {t('storageClusters') || 'Storage Clusters'}
+                                        {t('storageClusters')}
                                     </h3>
                                     {hasPerm('storage.config') && (
                                         <button
                                             onClick={() => setShowCreateCluster(true)}
                                             className="p-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg"
-                                            title={t('createCluster') || 'Create Cluster'}
+                                            title={t('createCluster')}
                                         >
                                             <Icons.Plus />
                                         </button>
@@ -1729,8 +1729,8 @@
                                     {storageClusters.length === 0 ? (
                                         <div className="text-center py-8 text-gray-500">
                                             <Icons.Database className="mx-auto mb-2 opacity-50" />
-                                            <p>{t('noStorageClusters') || 'No storage clusters configured'}</p>
-                                            <p className="text-xs mt-1">{t('createStorageClusterHint') || 'Create a cluster to balance storage across multiple volumes'}</p>
+                                            <p>{t('noStorageClusters')}</p>
+                                            <p className="text-xs mt-1">{t('createStorageClusterHint')}</p>
                                         </div>
                                     ) : (
                                         storageClusters.map(sc => (
@@ -1758,7 +1758,7 @@
                                                     )}
                                                 </div>
                                                 <div className="text-xs text-gray-500 mt-1">
-                                                    {sc.storages?.length || 0} {t('storages') || 'storages'} • {t('threshold')}: {sc.threshold}%
+                                                    {sc.storages?.length || 0} {t('storages')} • {t('threshold')}: {sc.threshold}%
                                                 </div>
                                             </div>
                                         ))
@@ -1770,7 +1770,7 @@
                             <div className="lg:col-span-2 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                 <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
                                     <h3 className="font-semibold">
-                                        {clusterStatus ? clusterStatus.name : (t('selectStorageCluster') || 'Select a storage cluster')}
+                                        {clusterStatus ? clusterStatus.name : (t('selectStorageCluster'))}
                                     </h3>
                                 </div>
                                 <div className="p-4">
@@ -1781,7 +1781,7 @@
                                     ) : !clusterStatus ? (
                                         <div className="text-center py-12 text-gray-500">
                                             <Icons.Zap className="mx-auto mb-2 opacity-50" />
-                                            <p>{t('selectClusterToView') || 'Select a storage cluster to view balancing status'}</p>
+                                            <p>{t('selectClusterToView')}</p>
                                         </div>
                                     ) : (
                                         <div className="space-y-6">
@@ -1790,13 +1790,13 @@
                                                 <Toggle
                                                     checked={clusterStatus.enabled}
                                                     onChange={(v) => toggleClusterEnabled(clusterStatus.id, v)}
-                                                    label={t('enabled') || 'Enabled'}
+                                                    label={t('enabled')}
                                                 />
                                                 <div className="flex items-center gap-4">
                                                     <Toggle
                                                         checked={storageClusters.find(sc => sc.id === clusterStatus.id)?.auto_balance || false}
                                                         onChange={(v) => toggleAutoBalance(clusterStatus.id, v)}
-                                                        label={t('autoBalance') || 'Auto-Balance'}
+                                                        label={t('autoBalance')}
                                                     />
                                                     <button
                                                         onClick={() => loadClusterStatus(clusterStatus.id)}
@@ -1812,10 +1812,10 @@
                                                 <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
                                                     <div className="flex items-center gap-2 text-green-400 mb-2">
                                                         <Icons.Zap />
-                                                        <span className="font-medium">{t('autoBalanceActive') || 'Auto-Balance Active'}</span>
+                                                        <span className="font-medium">{t('autoBalanceActive')}</span>
                                                     </div>
                                                     <p className="text-sm text-gray-400">
-                                                        {t('autoBalanceDesc') || 'Disks will be automatically migrated when imbalance exceeds threshold. VMs with active snapshots/backups are skipped.'}
+                                                        {t('autoBalanceDesc')}
                                                     </p>
                                                 </div>
                                             )}
@@ -1823,8 +1823,8 @@
                                             {/* Threshold + Tolerance Sliders */}
                                             <div className="p-4 bg-proxmox-dark rounded-lg space-y-4">
                                                 <Slider
-                                                    label={t('balancingThreshold') || 'Balancing Threshold'}
-                                                    description={t('thresholdDesc') || 'Trigger balancing when imbalance exceeds this value'}
+                                                    label={t('balancingThreshold')}
+                                                    description={t('thresholdDesc')}
                                                     value={clusterStatus.threshold}
                                                     onChange={(v) => updateClusterThreshold(clusterStatus.id, v)}
                                                     min={5}
@@ -1832,8 +1832,8 @@
                                                     step={5}
                                                 />
                                                 <Slider
-                                                    label={t('migrationTolerance') || 'Tolerance'}
-                                                    description={t('migrationToleranceDesc') || 'Deadband to prevent ping-pong (0 = disabled)'}
+                                                    label={t('migrationTolerance')}
+                                                    description={t('migrationToleranceDesc')}
                                                     value={clusterStatus.tolerance ?? 5}
                                                     onChange={(v) => {
                                                         setClusterStatus(prev => prev ? {...prev, tolerance: v} : null);
@@ -1851,27 +1851,27 @@
                                             {/* Imbalance Status */}
                                             <div className="flex items-center gap-4 p-4 bg-proxmox-dark rounded-lg">
                                                 <div className="flex-1">
-                                                    <div className="text-sm text-gray-400">{t('currentImbalance') || 'Current Imbalance'}</div>
+                                                    <div className="text-sm text-gray-400">{t('currentImbalance')}</div>
                                                     <div className={`text-2xl font-bold ${clusterStatus.imbalance > clusterStatus.threshold ? 'text-yellow-400' : 'text-green-400'}`}>
                                                         {clusterStatus.imbalance}%
                                                     </div>
                                                 </div>
                                                 <div className={`px-4 py-2 rounded-lg ${clusterStatus.imbalance > clusterStatus.threshold ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'}`}>
-                                                    {clusterStatus.imbalance > clusterStatus.threshold ? '⚠️ ' + (t('actionRecommended') || 'Action Recommended') : '✓ ' + (t('balanced') || 'Balanced')}
+                                                    {clusterStatus.imbalance > clusterStatus.threshold ? '⚠️ ' + (t('actionRecommended')) : '✓ ' + (t('balanced'))}
                                                 </div>
                                             </div>
                                             
                                             {/* Storages in Cluster */}
                                             <div>
                                                 <div className="flex items-center justify-between mb-3">
-                                                    <h4 className="text-sm font-medium text-gray-400">{t('storagesInCluster') || 'Storages in Cluster'}</h4>
+                                                    <h4 className="text-sm font-medium text-gray-400">{t('storagesInCluster')}</h4>
                                                     {hasPerm('storage.config') && datastores.shared?.length > (clusterStatus.storages?.length || 0) && (
                                                         <select
                                                             className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-sm"
                                                             onChange={(e) => { if (e.target.value) { addStorageToCluster(clusterStatus.id, e.target.value); e.target.value = ''; }}}
                                                             defaultValue=""
                                                         >
-                                                            <option value="">{t('addStorage') || '+ Add Storage'}</option>
+                                                            <option value="">{t('addStorage')}</option>
                                                             {datastores.shared?.filter(s => !clusterStatus.storages?.some(cs => cs.storage === s.storage)).map(s => (
                                                                 <option key={s.storage} value={s.storage}>{s.storage}</option>
                                                             ))}
@@ -1891,7 +1891,7 @@
                                                                         <button
                                                                             onClick={() => removeStorageFromCluster(clusterStatus.id, storage.storage)}
                                                                             className="p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
-                                                                            title={t('remove') || 'Remove'}
+                                                                            title={t('remove')}
                                                                         >
                                                                             <Icons.X />
                                                                         </button>
@@ -1915,7 +1915,7 @@
                                             {/* Recommendations */}
                                             {clusterStatus.recommendations?.length > 0 && (
                                                 <div>
-                                                    <h4 className="text-sm font-medium text-gray-400 mb-3">{t('recommendations') || 'Recommendations'}</h4>
+                                                    <h4 className="text-sm font-medium text-gray-400 mb-3">{t('recommendations')}</h4>
                                                     <div className="space-y-2">
                                                         {clusterStatus.recommendations.map((rec, idx) => (
                                                             <div key={idx} className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg">
@@ -1933,7 +1933,7 @@
                                                                         onClick={() => executeMigration(rec)}
                                                                         className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                                     >
-                                                                        {t('migrate') || 'Migrate'}
+                                                                        {t('migrate')}
                                                                     </button>
                                                                 )}
                                                             </div>
@@ -1945,7 +1945,7 @@
                                             {clusterStatus.recommendations?.length === 0 && clusterStatus.imbalance <= clusterStatus.threshold && (
                                                 <div className="text-center py-6 text-gray-500">
                                                     <Icons.Check className="mx-auto mb-2 text-green-400" />
-                                                    <p>{t('storageBalanced') || 'Storage is well balanced. No action needed.'}</p>
+                                                    <p>{t('storageBalanced')}</p>
                                                 </div>
                                             )}
                                         </div>
@@ -1959,10 +1959,10 @@
                     {showCreateCluster && (
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-lg">
-                                <h3 className="text-lg font-semibold mb-4">{t('createStorageCluster') || 'Create Storage Cluster'}</h3>
+                                <h3 className="text-lg font-semibold mb-4">{t('createStorageCluster')}</h3>
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('clusterName') || 'Cluster Name'}</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('clusterName')}</label>
                                         <input
                                             type="text"
                                             value={newClusterName}
@@ -1972,7 +1972,7 @@
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('selectStorages') || 'Select Storages'} ({t('minTwo') || 'min. 2'})</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('selectStorages')} ({t('minTwo')})</label>
                                         <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto p-2 bg-proxmox-dark rounded-lg">
                                             {datastores.shared?.map(storage => (
                                                 <label key={storage.storage} className="flex items-center gap-2 p-2 hover:bg-proxmox-hover rounded cursor-pointer">
@@ -1994,13 +1994,13 @@
                                         </div>
                                         {datastores.shared?.length === 0 && (
                                             <div className="text-center py-4 text-gray-500 text-sm">
-                                                {t('noSharedStorages') || 'No shared storages available'}
+                                                {t('noSharedStorages')}
                                             </div>
                                         )}
                                     </div>
                                     <div>
                                         <Slider
-                                            label={t('balancingThreshold') || 'Balancing Threshold'}
+                                            label={t('balancingThreshold')}
                                             value={newClusterThreshold}
                                             onChange={setNewClusterThreshold}
                                             min={5}
@@ -2008,8 +2008,8 @@
                                             step={5}
                                         />
                                         <Slider
-                                            label={t('migrationTolerance') || 'Tolerance'}
-                                            description={t('migrationToleranceDesc') || 'Deadband to prevent ping-pong (0 = disabled)'}
+                                            label={t('migrationTolerance')}
+                                            description={t('migrationToleranceDesc')}
                                             value={newClusterTolerance}
                                             onChange={setNewClusterTolerance}
                                             min={0}
@@ -2022,14 +2022,14 @@
                                             onClick={() => { setShowCreateCluster(false); setNewClusterName(''); setNewClusterStorages([]); }}
                                             className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
                                         >
-                                            {t('cancel') || 'Cancel'}
+                                            {t('cancel')}
                                         </button>
                                         <button
                                             onClick={createStorageCluster}
                                             disabled={!newClusterName.trim() || newClusterStorages.length < 2}
                                             className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50"
                                         >
-                                            {t('create') || 'Create'}
+                                            {t('create')}
                                         </button>
                                     </div>
                                 </div>
@@ -2044,7 +2044,7 @@
                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                     <h3 className="text-lg font-semibold flex items-center gap-2">
                                         <Icons.Download />
-                                        {t('downloadTemplates') || 'Download Container Templates'}
+                                        {t('downloadTemplates')}
                                     </h3>
                                     <button
                                         onClick={() => setShowTemplateModal(false)}
@@ -2058,7 +2058,7 @@
                                 <div className="p-4 border-b border-proxmox-border">
                                     <input
                                         type="text"
-                                        placeholder={t('searchTemplates') || 'Search templates...'}
+                                        placeholder={t('searchTemplates')}
                                         value={templateFilter}
                                         onChange={(e) => setTemplateFilter(e.target.value)}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500"
@@ -2070,12 +2070,12 @@
                                     {templatesLoading ? (
                                         <div className="flex items-center justify-center py-12">
                                             <Icons.RotateCw className="animate-spin mr-2" />
-                                            {t('loadingTemplates') || 'Loading templates...'}
+                                            {t('loadingTemplates')}
                                         </div>
                                     ) : availableTemplates.length === 0 ? (
                                         <div className="text-center py-12 text-gray-500">
                                             <Icons.Package className="mx-auto mb-2 opacity-50" />
-                                            <p>{t('noTemplatesAvailable') || 'No templates available'}</p>
+                                            <p>{t('noTemplatesAvailable')}</p>
                                         </div>
                                     ) : (
                                         <div className="space-y-2">
@@ -2088,7 +2088,7 @@
                                                         t.os?.toLowerCase().includes(templateFilter.toLowerCase())
                                                     )
                                                     .reduce((acc, tmpl) => {
-                                                        const section = tmpl.section || t('otherTemplatesSection') || 'Other';
+                                                        const section = tmpl.section || t('otherTemplatesSection');
                                                         if (!acc[section]) acc[section] = [];
                                                         acc[section].push(tmpl);
                                                         return acc;
@@ -2127,7 +2127,7 @@
                                                                                 rel="noopener noreferrer"
                                                                                 className="text-blue-400 hover:underline"
                                                                             >
-                                                                                {t('info') || 'Info'}
+                                                                                {t('info')}
                                                                             </a>
                                                                         )}
                                                                     </div>
@@ -2140,7 +2140,7 @@
                                                                     {downloadingTemplate === tmpl.template ? (
                                                                         <><Icons.RotateCw className="animate-spin w-4 h-4" /> ...</>
                                                                     ) : (
-                                                                        <><Icons.Download className="w-4 h-4" /> {t('download') || 'Download'}</>
+                                                                        <><Icons.Download className="w-4 h-4" /> {t('download')}</>
                                                                     )}
                                                                 </button>
                                                             </div>
@@ -2155,10 +2155,10 @@
                                 {/* Footer */}
                                 <div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-between items-center text-sm text-gray-400">
                                     <span>
-                                        {availableTemplates.length} {t('templatesAvailable') || 'templates available'}
+                                        {availableTemplates.length} {t('templatesAvailable')}
                                     </span>
                                     <span>
-                                        {t('downloadTo') || 'Download to'}: <strong className="text-white">{selectedStorage?.name}</strong>
+                                        {t('downloadTo')}: <strong className="text-white">{selectedStorage?.name}</strong>
                                     </span>
                                 </div>
                             </div>
@@ -2172,7 +2172,7 @@
                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                     <h3 className="text-lg font-semibold flex items-center gap-2">
                                         <Icons.RefreshCw className="text-purple-400" />
-                                        {t('rescanStorage') || 'Rescan Storage'}
+                                        {t('rescanStorage')}
                                     </h3>
                                     <button
                                         onClick={() => setShowRescanModal(false)}
@@ -2184,7 +2184,7 @@
                                 </div>
                                 <div className="p-4 space-y-4">
                                     <p className="text-gray-400 text-sm">
-                                        {t('rescanStorageDesc') || `Rescan "${selectedStorage.name}" to detect changes.`}
+                                        {t('rescanStorageDesc')}
                                     </p>
                                     
                                     {/* Quick Rescan Option */}
@@ -2192,7 +2192,7 @@
                                         onClick={async () => {
                                             setRescanLoading(true);
                                             try {
-                                                addToast(t('rescanningStorage') || `Rescanning ${selectedStorage.name}...`, 'info');
+                                                addToast(t('rescanningStorage'), 'info');
                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/storage/${selectedStorage.name}/rescan`, {
                                                     method: 'POST',
                                                     headers: { 'Content-Type': 'application/json' },
@@ -2200,15 +2200,15 @@
                                                 });
                                                 const data = await res.json();
                                                 if (res.ok && data.success) {
-                                                    addToast(`${t('storageRescanSuccess') || 'Storage rescan completed'}: ${data.nodes_successful}/${data.nodes_scanned}`, 'success');
+                                                    addToast(`${t('storageRescanSuccess')}: ${data.nodes_successful}/${data.nodes_scanned}`, 'success');
                                                     fetchDatastores();
                                                     loadStorageContent(selectedStorage.name, selectedStorage.node);
                                                 } else {
-                                                    addToast(data.error || t('storageRescanError') || 'Failed to rescan storage', 'error');
+                                                    addToast(data.error || t('storageRescanError'), 'error');
                                                 }
                                             } catch (e) {
                                                 console.error('Rescan error:', e);
-                                                addToast(t('storageRescanError') || 'Failed to rescan storage', 'error');
+                                                addToast(t('storageRescanError'), 'error');
                                             } finally {
                                                 setRescanLoading(false);
                                                 setShowRescanModal(false);
@@ -2222,9 +2222,9 @@
                                                 <Icons.RefreshCw className="w-5 h-5 text-blue-400" />
                                             </div>
                                             <div>
-                                                <h4 className="font-medium text-white">{t('quickRescan') || 'Quick Rescan'}</h4>
+                                                <h4 className="font-medium text-white">{t('quickRescan')}</h4>
                                                 <p className="text-sm text-gray-400 mt-1">
-                                                    {t('quickRescanDesc') || 'Refresh storage status via API. Use for general status updates.'}
+                                                    {t('quickRescanDesc')}
                                                 </p>
                                             </div>
                                         </div>
@@ -2235,7 +2235,7 @@
                                         onClick={async () => {
                                             setRescanLoading(true);
                                             try {
-                                                addToast(t('deepRescanningStorage') || `Deep rescanning ${selectedStorage.name}...`, 'info');
+                                                addToast(t('deepRescanningStorage'), 'info');
                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/storage/${selectedStorage.name}/rescan`, {
                                                     method: 'POST',
                                                     headers: { 'Content-Type': 'application/json' },
@@ -2243,15 +2243,15 @@
                                                 });
                                                 const data = await res.json();
                                                 if (res.ok && data.success) {
-                                                    addToast(`${t('deepScanCompleted') || 'Deep scan completed'}: ${data.nodes_successful}/${data.nodes_scanned}`, 'success');
+                                                    addToast(`${t('deepScanCompleted')}: ${data.nodes_successful}/${data.nodes_scanned}`, 'success');
                                                     fetchDatastores();
                                                     loadStorageContent(selectedStorage.name, selectedStorage.node);
                                                 } else {
-                                                    addToast(data.error || t('deepScanFailed') || 'Deep scan failed', 'error');
+                                                    addToast(data.error || t('deepScanFailed'), 'error');
                                                 }
                                             } catch (e) {
                                                 console.error('Deep scan error:', e);
-                                                addToast(t('storageRescanError') || 'Failed to rescan storage', 'error');
+                                                addToast(t('storageRescanError'), 'error');
                                             } finally {
                                                 setRescanLoading(false);
                                                 setShowRescanModal(false);
@@ -2266,15 +2266,15 @@
                                             </div>
                                             <div>
                                                 <h4 className="font-medium text-white flex items-center gap-2">
-                                                    {t('deepRescan') || 'Deep Scan'}
-                                                    <span className="text-xs px-2 py-0.5 bg-purple-500/20 text-purple-400 rounded">{t('recommended') || 'Recommended'}</span>
+                                                    {t('deepRescan')}
+                                                    <span className="text-xs px-2 py-0.5 bg-purple-500/20 text-purple-400 rounded">{t('recommended')}</span>
                                                 </h4>
                                                 <p className="text-sm text-gray-400 mt-1">
-                                                    {t('deepRescanDesc') || 'SSH-based SCSI rescan + multipath reconfigure + automatic pvresize. Use after LUN expansion or adding new LUNs.'}
+                                                    {t('deepRescanDesc')}
                                                 </p>
                                                 <p className="text-xs text-yellow-500/80 mt-2 flex items-center gap-1">
                                                     <Icons.AlertTriangle className="w-3 h-3" />
-                                                    {t('deepRescanNote') || 'Requires SSH access to nodes'}
+                                                    {t('deepRescanNote')}
                                                 </p>
                                             </div>
                                         </div>
@@ -2283,7 +2283,7 @@
                                     {rescanLoading && (
                                         <div className="flex items-center justify-center gap-2 py-2 text-gray-400">
                                             <Icons.Loader className="w-4 h-4 animate-spin" />
-                                            {t('scanning') || 'Scanning...'}
+                                            {t('scanning')}
                                         </div>
                                     )}
                                 </div>
@@ -2293,7 +2293,7 @@
                                         disabled={rescanLoading}
                                         className="w-full px-4 py-2 bg-proxmox-border hover:bg-proxmox-hover rounded-lg text-sm transition-colors disabled:opacity-50"
                                     >
-                                        {t('cancel') || 'Cancel'}
+                                        {t('cancel')}
                                     </button>
                                 </div>
                             </div>
@@ -2304,10 +2304,10 @@
                     {uploadModalOpen && (
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
-                                <h3 className="text-lg font-semibold mb-4">{t('uploadFile') || 'Upload File'}</h3>
+                                <h3 className="text-lg font-semibold mb-4">{t('uploadFile')}</h3>
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('selectFile') || 'Select File'}</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('selectFile')}</label>
                                         <input
                                             type="file"
                                             accept=".iso,.img,.qcow2,.vmdk,.raw,.tar.gz,.tar.xz,.tar.zst"
@@ -2328,8 +2328,8 @@
                                             <div className="flex justify-between text-sm">
                                                 <span className="text-gray-400">
                                                     {uploadProgress < 100
-                                                        ? (t('uploading') || 'Uploading...')
-                                                        : (t('processing') || 'Processing...')}
+                                                        ? (t('uploading'))
+                                                        : (t('processing'))}
                                                 </span>
                                                 <span className="text-proxmox-orange font-mono">
                                                     {uploadProgress}%
@@ -2354,7 +2354,7 @@
                                             disabled={uploading}
                                             className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg disabled:opacity-50"
                                         >
-                                            {t('cancel') || 'Cancel'}
+                                            {t('cancel')}
                                         </button>
                                         <button
                                             onClick={handleUpload}
@@ -2369,7 +2369,7 @@
                                             ) : (
                                                 <>
                                                     <Icons.Upload className="w-4 h-4" />
-                                                    <span>{t('upload') || 'Upload'}</span>
+                                                    <span>{t('upload')}</span>
                                                 </>
                                             )}
                                         </button>
@@ -2385,11 +2385,11 @@
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-lg">
                                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                                     <Icons.Link className="w-5 h-5" />
-                                    {t('downloadFromUrl') || 'Download from URL'}
+                                    {t('downloadFromUrl')}
                                 </h3>
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('isoUrl') || 'ISO URL'}</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('isoUrl')}</label>
                                         <input
                                             type="url"
                                             value={downloadUrl}
@@ -2399,17 +2399,17 @@
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white disabled:opacity-50 text-sm"
                                         />
                                         <p className="text-xs text-gray-500 mt-1">
-                                            {t('isoUrlHint') || 'Direct link to ISO file (http/https)'}
+                                            {t('isoUrlHint')}
                                         </p>
                                     </div>
                                     
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('filename') || 'Filename'} ({t('optional') || 'optional'})</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('filename')} ({t('optional')})</label>
                                         <input
                                             type="text"
                                             value={downloadFilename}
                                             onChange={(e) => setDownloadFilename(e.target.value)}
-                                            placeholder={t('autoDetect') || 'Auto-detect from URL'}
+                                            placeholder={t('autoDetect')}
                                             disabled={urlDownloading}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white disabled:opacity-50 text-sm"
                                         />
@@ -2417,7 +2417,7 @@
                                     
                                     <div className="bg-proxmox-dark/50 rounded-lg p-3 text-sm">
                                         <p className="text-gray-400">
-                                            <strong>{t('storage') || 'Storage'}:</strong> {selectedStorage?.name}
+                                            <strong>{t('storage')}:</strong> {selectedStorage?.name}
                                             {selectedStorage?.node && <span className="text-gray-500"> ({selectedStorage.node})</span>}
                                         </p>
                                     </div>
@@ -2427,7 +2427,7 @@
                                         <div className="space-y-2">
                                             <div className="flex justify-between text-sm">
                                                 <span className="text-gray-400">
-                                                    {urlDownloadProgress.message || t('downloading') || 'Downloading...'}
+                                                    {urlDownloadProgress.message || t('downloading')}
                                                 </span>
                                                 {urlDownloadProgress.percent !== undefined && (
                                                     <span className="text-green-400 font-mono">
@@ -2456,7 +2456,7 @@
                                             disabled={urlDownloading}
                                             className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg disabled:opacity-50"
                                         >
-                                            {t('cancel') || 'Cancel'}
+                                            {t('cancel')}
                                         </button>
                                         <button
                                             onClick={handleDownloadFromUrl}
@@ -2466,12 +2466,12 @@
                                             {urlDownloading ? (
                                                 <>
                                                     <Icons.RotateCw className="animate-spin w-4 h-4" />
-                                                    <span>{t('downloading') || 'Downloading...'}</span>
+                                                    <span>{t('downloading')}</span>
                                                 </>
                                             ) : (
                                                 <>
                                                     <Icons.Download className="w-4 h-4" />
-                                                    <span>{t('download') || 'Download'}</span>
+                                                    <span>{t('download')}</span>
                                                 </>
                                             )}
                                         </button>
@@ -2485,9 +2485,9 @@
                     {deleteConfirm && (
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
-                                <h3 className="text-lg font-semibold mb-4 text-red-400">{t('confirmDelete') || 'Confirm Delete'}</h3>
+                                <h3 className="text-lg font-semibold mb-4 text-red-400">{t('confirmDelete')}</h3>
                                 <p className="text-gray-300 mb-4">
-                                    {t('deleteConfirmText') || 'Are you sure you want to delete'}:<br/>
+                                    {t('deleteConfirmText')}:<br/>
                                     <span className="font-mono text-sm">{deleteConfirm.volid?.split('/').pop()}</span>
                                 </p>
                                 <div className="flex gap-2 justify-end">
@@ -2495,13 +2495,13 @@
                                         onClick={() => setDeleteConfirm(null)}
                                         className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
                                     >
-                                        {t('cancel') || 'Cancel'}
+                                        {t('cancel')}
                                     </button>
                                     <button
                                         onClick={() => handleDelete(deleteConfirm)}
                                         className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg"
                                     >
-                                        {t('delete') || 'Delete'}
+                                        {t('delete')}
                                     </button>
                                 </div>
                             </div>
@@ -2514,18 +2514,18 @@
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
                                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                                     <span className="text-xl">🖥️</span>
-                                    {t('connectEsxi') || 'Connect ESXi Host'}
+                                    {t('connectEsxi')}
                                 </h3>
                                 
                                 {/* Experimental warning */}
                                 <div className="p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg mb-4 flex items-center gap-2">
                                     <span>🧪</span>
-                                    <span className="text-xs text-yellow-400">{t('esxiExperimental') || 'ESXi integration is experimental'}</span>
+                                    <span className="text-xs text-yellow-400">{t('esxiExperimental')}</span>
                                 </div>
                                 
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiHostname') || 'ESXi Hostname/IP'}</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiHostname')}</label>
                                         <input
                                             type="text"
                                             value={esxiForm.host}
@@ -2535,7 +2535,7 @@
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiUsername') || 'Username'}</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiUsername')}</label>
                                         <input
                                             type="text"
                                             value={esxiForm.username}
@@ -2545,7 +2545,7 @@
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiPassword') || 'Password'}</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiPassword')}</label>
                                         <input
                                             type="password"
                                             value={esxiForm.password}
@@ -2559,7 +2559,7 @@
                                             onClick={() => setShowAddEsxi(false)}
                                             className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
                                         >
-                                            {t('cancel') || 'Cancel'}
+                                            {t('cancel')}
                                         </button>
                                         <button
                                             onClick={connectEsxiHost}
@@ -2567,7 +2567,7 @@
                                             className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg disabled:opacity-50 flex items-center gap-2"
                                         >
                                             {esxiLoading && <Icons.RotateCw className="animate-spin w-4 h-4" />}
-                                            {t('connect') || 'Connect'}
+                                            {t('connect')}
                                         </button>
                                     </div>
                                 </div>

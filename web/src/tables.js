@@ -60,7 +60,7 @@
         }
 
         function getTemplateLabel(t) {
-            return t('template') || 'Template';
+            return t('template');
         }
 
         function getGuestTypeTitle(resource = {}, t) {
@@ -169,13 +169,13 @@
                                 <button
                                     onClick={() => openProxmoxObject(proxmoxTarget)}
                                     className="p-1.5 rounded-lg bg-proxmox-dark/80 text-gray-300 hover:text-white hover:bg-proxmox-hover transition-colors"
-                                    title={t('openInProxmox') || 'Open in Proxmox'}
+                                    title={t('openInProxmox')}
                                 >
                                     <Icons.ExternalLink className="w-4 h-4" />
                                 </button>
                             )}
                             <span className="px-2 py-1 bg-red-500 text-white text-xs font-bold rounded animate-pulse">
-                                {(t('offline') || 'Offline').toUpperCase()}
+                                {(t('offline')).toUpperCase()}
                             </span>
                         </div>
                         <div className="flex items-center gap-3 mb-4">
@@ -186,7 +186,7 @@
                                 <h3 className="font-semibold text-white">{name}</h3>
                                 <div className="flex items-center gap-2 mt-1">
                                     <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                                    <span className="text-xs text-red-400">{t('offline') || 'Offline'}</span>
+                                    <span className="text-xs text-red-400">{t('offline')}</span>
                                 </div>
                             </div>
                         </div>
@@ -209,7 +209,7 @@
                         {metrics.last_seen && (
                             <div className="mt-4 pt-3 border-t border-red-500/30 text-xs text-red-400">
                                 <Icons.AlertTriangle className="inline w-3 h-3 mr-1" />
-                                {t('lastSeen') || 'Last seen'}: {fmtDate(metrics.last_seen)}
+                                {t('lastSeen')}: {fmtDate(metrics.last_seen)}
                             </div>
                         )}
                     </div>
@@ -259,12 +259,12 @@
                                         }`}>
                                             {updateTask.phase === 'apt_update' ? 'apt update' :
                                              updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
-                                             updateTask.phase === 'reboot' ? (t('reboot') || 'Reboot') :
-                                             updateTask.phase === 'wait_online' ? (t('waitingForNode') || 'Waiting for node...') :
-                                             updateTask.phase === 'done' ? (t('done') || 'Done') :
-                                             updateTask.status === 'failed' ? (t('updateFailed') || 'Update failed') :
-                                             updateTask.status === 'completed' ? (t('updateCompleted') || 'Update completed!') :
-                                             updateTask.status === 'running' ? (t('updateRunning') || 'Update running') :
+                                             updateTask.phase === 'reboot' ? (t('reboot')) :
+                                             updateTask.phase === 'wait_online' ? (t('waitingForNode')) :
+                                             updateTask.phase === 'done' ? (t('done')) :
+                                             updateTask.status === 'failed' ? (t('updateFailed')) :
+                                             updateTask.status === 'completed' ? (t('updateCompleted')) :
+                                             updateTask.status === 'running' ? (t('updateRunning')) :
                                              updateTask.status}
                                         </span>
                                         {/* Dismiss button for completed/failed */}
@@ -281,9 +281,9 @@
                                                     } catch (e) {}
                                                 }}
                                                 className="text-xs text-gray-300 hover:text-white px-2 py-1 bg-proxmox-hover hover:bg-proxmox-border rounded transition-colors"
-                                                title={t('dismissUpdate') || 'Dismiss'}
+                                                title={t('dismissUpdate')}
                                             >
-                                                ✕ {t('dismiss') || 'Dismiss'}
+                                                ✕ {t('dismiss')}
                                             </button>
                                         )}
                                     </div>
@@ -364,7 +364,7 @@
                                         <div className="mb-2">
                                             <div className="flex justify-between text-xs text-gray-400 mb-1">
                                                 <span>{t('progress')}</span>
-                                                <span>{maintenanceTask.migrated_vms} / {maintenanceTask.total_vms} VMs</span>
+                                                <span>{maintenanceTask.migrated_vms} / {maintenanceTask.total_vms} {t('vms')}</span>
                                             </div>
                                             <div className="h-2 bg-proxmox-dark rounded-full overflow-hidden">
                                                 <div 
@@ -389,9 +389,9 @@
                                             <div className="flex items-start gap-2 text-orange-400 text-xs">
                                                 <Icons.AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
                                                 <div>
-                                                    <p className="font-medium">{t('migrationIncomplete') || 'Migration Incomplete'}</p>
+                                                    <p className="font-medium">{t('migrationIncomplete')}</p>
                                                     <p className="text-orange-300/80 mt-1">
-                                                        {t('someVmsOnLocalStorage') || 'Some VMs could not be migrated (likely local storage). They will be stopped during reboot.'}
+                                                        {t('someVmsOnLocalStorage')}
                                                     </p>
                                                 </div>
                                             </div>
@@ -400,7 +400,7 @@
                                         {/* Show which VMs failed */}
                                         {maintenanceTask?.failed_vms?.length > 0 && (
                                             <div className="p-2 bg-proxmox-dark rounded-lg">
-                                                <p className="text-xs text-gray-400 mb-1">{t('failedToMigrate') || 'Failed to migrate'}:</p>
+                                                <p className="text-xs text-gray-400 mb-1">{t('failedToMigrate')}:</p>
                                                 <div className="flex flex-wrap gap-1">
                                                     {maintenanceTask.failed_vms.slice(0, 5).map((vm, idx) => (
                                                         <span key={idx} className="px-2 py-0.5 bg-red-500/20 text-red-400 text-xs rounded font-mono">
@@ -409,7 +409,7 @@
                                                     ))}
                                                     {maintenanceTask.failed_vms.length > 5 && (
                                                         <span className="px-2 py-0.5 bg-gray-500/20 text-gray-400 text-xs rounded">
-                                                            +{maintenanceTask.failed_vms.length - 5} {t('more') || 'more'}
+                                                            +{maintenanceTask.failed_vms.length - 5} {t('more')}
                                                         </span>
                                                     )}
                                                 </div>
@@ -420,7 +420,7 @@
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={async () => {
-                                                    if (confirm(t('forceMaintenanceWarning') || '⚠️ WARNING: Proceeding will allow actions that may stop the remaining VMs. Continue?')) {
+                                                    if (confirm(t('forceMaintenanceWarning'))) {
                                                         // Acknowledge the warning - unlock full menu
                                                         try {
                                                             await fetch(`${API_URL}/clusters/${clusterId}/nodes/${name}/maintenance/acknowledge`, {
@@ -434,7 +434,7 @@
                                                 className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 bg-orange-500/20 hover:bg-orange-500/30 border border-orange-500/30 rounded-lg text-orange-400 text-xs font-medium transition-colors"
                                             >
                                                 <Icons.AlertTriangle />
-                                                {t('proceedAnyway') || 'Proceed Anyway'}
+                                                {t('proceedAnyway')}
                                             </button>
                                             <button
                                                 onClick={() => onMaintenanceToggle(name, false)}
@@ -453,7 +453,7 @@
                                         {maintenanceTask?.status === 'completed_with_errors' && maintenanceTask?.failed_vms?.length > 0 && (
                                             <div className="p-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-400 flex items-center gap-2">
                                                 <Icons.AlertTriangle className="w-3 h-3" />
-                                                {maintenanceTask.failed_vms.length} {t('vmsWillBeStopped') || 'VM(s) will be stopped during reboot'}
+                                                {maintenanceTask.failed_vms.length} {t('vmsWillBeStopped')}
                                             </div>
                                         )}
                                         <div className="flex gap-2">
@@ -497,14 +497,14 @@
                                                 className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-lg text-blue-400 text-xs font-medium transition-colors"
                                             >
                                                 <Icons.ArrowRight className="w-3 h-3" />
-                                                {t('moveNodeToCluster') || 'Move to Cluster'}
+                                                {t('moveNodeToCluster')}
                                             </button>
                                             <button
                                                 onClick={() => onRemoveNode && onRemoveNode(name)}
                                                 className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-red-400 text-xs font-medium transition-colors"
                                             >
                                                 <Icons.Trash className="w-3 h-3" />
-                                                {t('removeNodeFromCluster') || 'Remove'}
+                                                {t('removeNodeFromCluster')}
                                             </button>
                                         </div>
                                     </div>
@@ -595,7 +595,7 @@
                         </div>
                         {metrics.ksm && metrics.ksm.shared > 0 && (
                             <div className="flex items-center justify-between text-xs">
-                                <span className="text-gray-500">{t('ksmSharing') || 'KSM Sharing'}</span>
+                                <span className="text-gray-500">{t('ksmSharing')}</span>
                                 <span className="text-purple-400 font-mono">{formatBytes(metrics.ksm.shared)}</span>
                             </div>
                         )}
@@ -838,7 +838,7 @@
                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                     <div className="flex items-center gap-3">
                                         <Icons.Terminal />
-                                        <h2 className="font-bold text-white">Update Log - {name}</h2>
+                                        <h2 className="font-bold text-white">{t('updateLog')} - {name}</h2>
                                     </div>
                                     <button
                                         onClick={() => setShowUpdateLog(false)}
@@ -1034,12 +1034,12 @@
                                         border: `1px solid ${updateTask.status === 'failed' ? 'rgba(245,79,71,0.3)' : updateTask.status === 'completed' ? 'rgba(96,181,21,0.3)' : 'rgba(73,175,217,0.3)'}`
                                     }}>
                                         {updateTask.status === 'completed' ? '✓ ' : updateTask.status === 'failed' ? '✕ ' : '⟳ '}
-                                        {updateTask.status === 'failed' ? t('updateFailed') : updateTask.status === 'completed' ? t('updateCompleted') : `${t('updating') || 'Updating'}: ${
+                                        {updateTask.status === 'failed' ? t('updateFailed') : updateTask.status === 'completed' ? t('updateCompleted') : `${t('updating')}: ${
                                             updateTask.phase === 'apt_update' ? 'apt update' :
                                             updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
-                                            updateTask.phase === 'reboot' ? (t('reboot') || 'Reboot') :
-                                            updateTask.phase === 'wait_online' ? (t('waitingForNode') || 'Waiting for node...') :
-                                            updateTask.phase === 'done' ? (t('done') || 'Done') :
+                                            updateTask.phase === 'reboot' ? (t('reboot')) :
+                                            updateTask.phase === 'wait_online' ? (t('waitingForNode')) :
+                                            updateTask.phase === 'done' ? (t('done')) :
                                             updateTask.phase || '...'
                                         }`}
                                     </span>
@@ -1060,19 +1060,19 @@
                                 <span className="ml-3" style={{color: '#728b9a'}}>{formatUptime(metrics.uptime)}</span>
                                 <span className="flex-1"></span>
                                 {isInMaintenance && maintenanceTask && maintenanceTask.status === 'running' && (
-                                    <span className="text-[11px] mr-2" style={{color: '#efc006'}}>{maintenanceTask.migrated_count || 0}/{maintenanceTask.total_vms || '?'} VMs</span>
+                                    <span className="text-[11px] mr-2" style={{color: '#efc006'}}>{maintenanceTask.migrated_count || 0}/{maintenanceTask.total_vms || '?'} {t('vms')}</span>
                                 )}
                                 {proxmoxUrl && (
-                                    <button onClick={(e) => { e.stopPropagation(); openProxmoxObject(proxmoxTarget); }} className="p-0.5 hover:text-white" style={{color: '#49afd9'}} title={t('openInProxmox') || 'Open in Proxmox'}>
+                                    <button onClick={(e) => { e.stopPropagation(); openProxmoxObject(proxmoxTarget); }} className="p-0.5 hover:text-white" style={{color: '#49afd9'}} title={t('openInProxmox')}>
                                         <Icons.ExternalLink className="w-3.5 h-3.5" />
                                     </button>
                                 )}
-                                <button onClick={(e) => { e.stopPropagation(); onOpenNodeConfig && onOpenNodeConfig(name); }} className="p-0.5 hover:text-white" style={{color: '#728b9a'}} title={t('settings') || 'Settings'}>
+                                <button onClick={(e) => { e.stopPropagation(); onOpenNodeConfig && onOpenNodeConfig(name); }} className="p-0.5 hover:text-white" style={{color: '#728b9a'}} title={t('settings')}>
                                     <Icons.Settings className="w-3.5 h-3.5" />
                                 </button>
                             </>
                         ) : (
-                            <span className="text-[12px]" style={{color: '#f54f47'}}>{t('nodeUnreachable') || 'Node unreachable'}</span>
+                            <span className="text-[12px]" style={{color: '#f54f47'}}>{t('nodeUnreachable')}</span>
                         )}
                     </div>
 
@@ -1095,9 +1095,9 @@
                                             }: {
                                                 updateTask.phase === 'apt_update' ? 'apt update' :
                                                 updateTask.phase === 'apt_upgrade' ? 'apt upgrade' :
-                                                updateTask.phase === 'reboot' ? (t('reboot') || 'Reboot') :
-                                                updateTask.phase === 'wait_online' ? (t('waitingForNode') || 'Waiting for node...') :
-                                                updateTask.phase === 'done' ? (t('done') || 'Done') :
+                                                updateTask.phase === 'reboot' ? (t('reboot')) :
+                                                updateTask.phase === 'wait_online' ? (t('waitingForNode')) :
+                                                updateTask.phase === 'done' ? (t('done')) :
                                                 updateTask.phase || '...'
                                             }</span>
                                         </div>
@@ -1131,7 +1131,7 @@
                                                 maintenanceTask.status === 'completed_with_errors' ? t('completedWithErrors') :
                                                 maintenanceTask.status === 'evacuating' ? t('evacuating') :
                                                 maintenanceTask.status === 'failed' ? t('failed') :
-                                                maintenanceTask.status === 'running' ? t('running') || 'Running' :
+                                                maintenanceTask.status === 'running' ? t('running') :
                                                 maintenanceTask.status
                                             }</span>
                                         </div>
@@ -1153,7 +1153,7 @@
                                     {!metrics.maintenance_acknowledged && (maintenanceTask.status === 'completed_with_errors' || (maintenanceTask.failed_vms && maintenanceTask.failed_vms.length > 0)) && (
                                         <div className="mt-1.5 flex items-center gap-2">
                                             <button onClick={(e) => { e.stopPropagation();
-                                                if (confirm(t('forceMaintenanceWarning') || 'Proceeding may stop remaining VMs. Continue?')) {
+                                                if (confirm(t('forceMaintenanceWarning'))) {
                                                     fetch(`${API_URL}/clusters/${clusterId}/nodes/${name}/maintenance/acknowledge`, { method: 'POST', credentials: 'include', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' } }).catch(() => {});
                                                 }
                                             }} className="px-2 py-0.5 text-[11px] font-medium" style={{background: 'rgba(239,192,6,0.15)', color: '#efc006', border: '1px solid rgba(239,192,6,0.3)'}}>
@@ -1169,7 +1169,7 @@
                                     {metrics.maintenance_acknowledged && maintenanceTask.failed_vms && maintenanceTask.failed_vms.length > 0 && (
                                         <div className="mt-1.5 text-[11px]" style={{color: '#efc006'}}>
                                             <Icons.AlertTriangle className="w-2.5 h-2.5 inline mr-1" />
-                                            {maintenanceTask.failed_vms.length} {t('vmsWillBeStopped') || 'VM(s) will be stopped during reboot'}
+                                            {maintenanceTask.failed_vms.length} {t('vmsWillBeStopped')}
                                         </div>
                                     )}
                                 </div>
@@ -1183,7 +1183,7 @@
                                     <div className="corp-node-detail-sub">{metrics.disk_total ? `${formatBytes(metrics.disk_used || 0)} / ${formatBytes(metrics.disk_total)}` : '-'}</div>
                                 </div>
                                 <div className="corp-node-detail-card">
-                                    <div className="corp-node-detail-label">{t('load') || 'Load'}</div>
+                                    <div className="corp-node-detail-label">{t('load')}</div>
                                     <div className="corp-node-detail-value">{
                                         Array.isArray(metrics.loadavg) ? metrics.loadavg.map(l => typeof l === 'number' ? l.toFixed(2) : l).join(' / ') :
                                         typeof metrics.loadavg === 'number' ? metrics.loadavg.toFixed(2) : (metrics.loadavg || '-')
@@ -1206,12 +1206,12 @@
                     <div className="corp-toolbar flex flex-wrap items-center gap-1 pt-1" style={{borderTop: '1px solid var(--corp-divider)'}}>
                         {proxmoxUrl && (
                             <button onClick={() => openProxmoxObject(proxmoxTarget)}>
-                                <Icons.ExternalLink className="w-3 h-3" style={{color: '#49afd9'}} /> {t('openInProxmox') || 'Open in Proxmox'}
+                                <Icons.ExternalLink className="w-3 h-3" style={{color: '#49afd9'}} /> {t('openInProxmox')}
                             </button>
                         )}
                         {!isInMaintenance ? (
                             <button onClick={() => setShowMaintenanceConfirm(true)}>
-                                <Icons.Wrench className="w-3 h-3" style={{color: '#efc006'}} /> {t('enterMaintenance') || t('maintenance')}
+                                <Icons.Wrench className="w-3 h-3" style={{color: '#efc006'}} /> {t('enterMaintenance')}
                                     </button>
                                 ) : (
                                     <>
@@ -1245,11 +1245,11 @@
                     {showMaintenanceConfirm && (
                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                             <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border p-5">
-                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('enterMaintenance') || 'Enter Maintenance Mode'}</h3>
-                                <p className="text-[13px] mb-4" style={{color: '#adbbc4'}}>{t('maintenanceWarning') || `All VMs on ${name} will be migrated to other nodes.`}</p>
+                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('enterMaintenance')}</h3>
+                                <p className="text-[13px] mb-4" style={{color: '#adbbc4'}}>{t('maintenanceWarning')}</p>
                                 <div className="flex justify-end gap-2">
                                     <button onClick={() => setShowMaintenanceConfirm(false)} className="px-3 py-1.5 text-[13px] border border-proxmox-border hover:text-white" style={{color: '#adbbc4'}}>{t('cancel')}</button>
-                                    <button onClick={() => { onMaintenanceToggle && onMaintenanceToggle(name, true); setShowMaintenanceConfirm(false); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#efc006', border: '1px solid #d4a905'}}>{t('confirm') || 'Confirm'}</button>
+                                    <button onClick={() => { onMaintenanceToggle && onMaintenanceToggle(name, true); setShowMaintenanceConfirm(false); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#efc006', border: '1px solid #d4a905'}}>{t('confirm')}</button>
                                 </div>
                             </div>
                         </div>
@@ -1257,14 +1257,14 @@
                     {showUpdateConfirm && (
                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                             <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border p-5">
-                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('startUpdate') || 'Start Update'}</h3>
+                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('startUpdate')}</h3>
                                 <label className="flex items-center gap-2 text-[13px] mb-4" style={{color: '#adbbc4'}}>
                                     <input type="checkbox" checked={updateWithReboot} onChange={(e) => setUpdateWithReboot(e.target.checked)} />
-                                    {t('rebootAfterUpdate') || 'Reboot after update'}
+                                    {t('rebootAfterUpdate')}
                                 </label>
                                 <div className="flex justify-end gap-2">
                                     <button onClick={() => setShowUpdateConfirm(false)} className="px-3 py-1.5 text-[13px] border border-proxmox-border hover:text-white" style={{color: '#adbbc4'}}>{t('cancel')}</button>
-                                    <button onClick={() => { onStartUpdate && onStartUpdate(name, updateWithReboot); setShowUpdateConfirm(false); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#49afd9', border: '1px solid #3d9bc2'}}>{t('startUpdate') || 'Start'}</button>
+                                    <button onClick={() => { onStartUpdate && onStartUpdate(name, updateWithReboot); setShowUpdateConfirm(false); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#49afd9', border: '1px solid #3d9bc2'}}>{t('startUpdate')}</button>
                                 </div>
                             </div>
                         </div>
@@ -1272,8 +1272,8 @@
                     {showRebootConfirm && (
                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                             <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border p-5">
-                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('rebootNode') || `Reboot ${name}`}</h3>
-                                <p className="text-[13px] mb-4" style={{color: '#adbbc4'}}>{t('rebootWarning') || 'This will reboot the node. All VMs will be affected.'}</p>
+                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('rebootNode')}</h3>
+                                <p className="text-[13px] mb-4" style={{color: '#adbbc4'}}>{t('rebootWarning')}</p>
                                 <div className="flex justify-end gap-2">
                                     <button onClick={() => setShowRebootConfirm(false)} className="px-3 py-1.5 text-[13px] border border-proxmox-border hover:text-white" style={{color: '#adbbc4'}}>{t('cancel')}</button>
                                     <button onClick={() => { onNodeAction && onNodeAction(name, 'reboot'); setShowRebootConfirm(false); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#efc006', border: '1px solid #d4a905'}}>{t('reboot')}</button>
@@ -1284,8 +1284,8 @@
                     {showShutdownConfirm && (
                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                             <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border p-5">
-                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('shutdownNode') || `Shutdown ${name}`}</h3>
-                                <p className="text-[13px] mb-4" style={{color: '#adbbc4'}}>{t('shutdownWarning') || 'This will shut down the node.'}</p>
+                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('shutdownNode')}</h3>
+                                <p className="text-[13px] mb-4" style={{color: '#adbbc4'}}>{t('shutdownWarning')}</p>
                                 <div className="flex justify-end gap-2">
                                     <button onClick={() => setShowShutdownConfirm(false)} className="px-3 py-1.5 text-[13px] border border-proxmox-border hover:text-white" style={{color: '#adbbc4'}}>{t('cancel')}</button>
                                     <button onClick={() => { onNodeAction && onNodeAction(name, 'shutdown'); setShowShutdownConfirm(false); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#f54f47', border: '1px solid #d4433d'}}>{t('shutdown')}</button>
@@ -1429,7 +1429,7 @@
             };
 
             const itemsLabel = (count) => {
-                const base = t('items') || 'items';
+                const base = t('items');
                 if (base === 'elementy') {
                     const mod10 = count % 10;
                     const mod100 = count % 100;
@@ -1645,7 +1645,7 @@
                             <div style={{flex: 1}} />
                             {selectedVms.length > 0 && (
                                 <span className="text-[11px]" style={{color: '#49afd9'}}>
-                                    {selectedVms.length} {t('selectedItems') || 'selected'}
+                                    {selectedVms.length} {t('selectedItems')}
                                 </span>
                             )}
                         </div>
@@ -1692,7 +1692,7 @@
                                                 : 'bg-proxmox-dark text-gray-400 border border-proxmox-border'
                                         }`}
                                 >
-                                    <option value="all">{t('allNodes') || 'All Nodes'}</option>
+                                    <option value="all">{t('allNodes')}</option>
                                     {availableNodes.map(n => <option key={n} value={n}>{n}</option>)}
                                 </select>
                             )}
@@ -1708,7 +1708,7 @@
                                                 : 'bg-proxmox-dark text-gray-400 border border-proxmox-border'
                                         }`}
                                 >
-                                    <option value="all">{t('allTags') || 'All Tags'}</option>
+                                    <option value="all">{t('allTags')}</option>
                                     {availableTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}
                                 </select>
                             )}
@@ -1837,9 +1837,9 @@
                                                         : 'bg-red-500/10 text-red-400'
                                                 }`}>
                                                     {resource.status === 'running'
-                                                        ? (t('running') || 'Running')
+                                                        ? (t('running'))
                                                         : resource.status === 'stopped'
-                                                            ? (t('stopped') || 'Stopped')
+                                                            ? (t('stopped'))
                                                             : (resource.status || '-')}
                                                 </span>
                                             </div>
@@ -1863,7 +1863,7 @@
                                             {/* NS May 2026 — backup status pill */}
                                             {backupStatus && backupStatus[resource.vmid] && window.PegaProxBackupStatusPill && (
                                                 <div className="flex items-center justify-between text-sm">
-                                                    <span className="text-gray-500 text-xs">{t('backup') || 'Backup'}</span>
+                                                    <span className="text-gray-500 text-xs">{t('backup')}</span>
                                                     {React.createElement(window.PegaProxBackupStatusPill, {
                                                         status: backupStatus[resource.vmid].status,
                                                         lastAgeHours: backupStatus[resource.vmid].last_backup_age_hours,
@@ -1938,7 +1938,7 @@
                                                     <button
                                                         onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))}
                                                         className="p-1.5 rounded-lg hover:bg-cyan-500/20 text-gray-400 hover:text-cyan-400 transition-all"
-                                                        title={t('openInProxmox') || 'Open in Proxmox'}
+                                                        title={t('openInProxmox')}
                                                     >
                                                         <Icons.ExternalLink />
                                                     </button>
@@ -1985,7 +1985,7 @@
                                                     <button
                                                         onClick={() => onOpenSpice(resource)}
                                                         className="p-1.5 rounded-lg hover:bg-blue-500/20 text-gray-400 hover:text-blue-400 transition-all"
-                                                        title={t('spiceConsole') || 'SPICE'}
+                                                        title={t('spiceConsole')}
                                                     >
                                                         <Icons.ExternalLink />
                                                     </button>
@@ -2111,12 +2111,12 @@
                                             { key: 'vmid', label: 'ID' },
                                             { key: 'name', label: t('name') },
                                             { key: 'type', label: t('type') },
-                                            { key: 'node', label: t('node') || 'Node' },
+                                            { key: 'node', label: t('node') },
                                             { key: 'ip', label: 'IP' },
                                             { key: 'cpu_percent', label: 'CPU' },
                                             { key: 'mem', label: 'RAM' },
                                             { key: 'disk', label: t('disk') },
-                                            { key: 'status', label: t('status') || 'Status' },
+                                            { key: 'status', label: t('status') },
                                             { key: 'actions', label: t('actions') },
                                         ].map(col => (
                                             <th
@@ -2303,7 +2303,7 @@
                                                         <span className={`w-1.5 h-1.5 rounded-full ${
                                                             resource.status === 'running' ? 'bg-green-400' : 'bg-red-400'
                                                         }`} />
-                                                        {resource.status === 'running' ? (t('running') || 'Running') : resource.status === 'stopped' ? (t('stopped') || 'Stopped') : (resource.status || '-')}
+                                                        {resource.status === 'running' ? (t('running')) : resource.status === 'stopped' ? (t('stopped')) : (resource.status || '-')}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3" style={{whiteSpace:'nowrap'}}>
@@ -2311,7 +2311,7 @@
                                                     <div className="flex items-center gap-0">
                                                         {getProxmoxObjectUrl(getVmProxmoxTarget(resource)) && (
                                                             <>
-                                                                <button onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))} className="corp-action-btn" title={t('openInProxmox') || 'Open in Proxmox'}><Icons.ExternalLink className="w-3.5 h-3.5" /></button>
+                                                                <button onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))} className="corp-action-btn" title={t('openInProxmox')}><Icons.ExternalLink className="w-3.5 h-3.5" /></button>
                                                                 <span className="corp-toolbar-divider" style={{margin: '0 3px'}} />
                                                             </>
                                                         )}
@@ -2339,7 +2339,7 @@
                                                                 <button onClick={() => onOpenConsole(resource)} className="corp-action-btn" title={t('openConsole')}><Icons.Monitor className="w-3.5 h-3.5" /></button>
                                                             )}
                                                             {resource.status === 'running' && resource.type === 'qemu' && onOpenSpice && (
-                                                                <button onClick={() => onOpenSpice(resource)} className="corp-action-btn" title={t('spiceConsole') || 'SPICE'}><Icons.ExternalLink className="w-3.5 h-3.5" /></button>
+                                                                <button onClick={() => onOpenSpice(resource)} className="corp-action-btn" title={t('spiceConsole')}><Icons.ExternalLink className="w-3.5 h-3.5" /></button>
                                                             )}
                                                             <button onClick={() => onOpenConfig(resource)} className="corp-action-btn" title={t('configuration')}><Icons.Cog className="w-3.5 h-3.5" /></button>
                                                             <button onClick={() => setShowMigrateModal(resource)} className="corp-action-btn" title={t('migrate')}><Icons.ArrowRight className="w-3.5 h-3.5" /></button>
@@ -2354,7 +2354,7 @@
                                                             <button
                                                                 onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))}
                                                                 className="p-1.5 rounded-lg bg-proxmox-dark hover:bg-cyan-500/20 text-gray-400 hover:text-cyan-400 transition-all"
-                                                                title={t('openInProxmox') || 'Open in Proxmox'}
+                                                                title={t('openInProxmox')}
                                                             >
                                                                 <Icons.ExternalLink />
                                                             </button>
@@ -2409,7 +2409,7 @@
                                                             <button
                                                                 onClick={() => onOpenSpice(resource)}
                                                                 className="p-1.5 rounded-lg bg-proxmox-dark hover:bg-blue-500/20 text-gray-400 hover:text-blue-400 transition-all"
-                                                                title={t('spiceConsole') || 'SPICE'}
+                                                                title={t('spiceConsole')}
                                                             >
                                                                 <Icons.ExternalLink />
                                                             </button>
@@ -2496,7 +2496,7 @@
                                  style={{maxHeight: 'calc(100vh - 260px)', minHeight: '400px'}}>
                                 <div className="p-3 border-b border-proxmox-border bg-proxmox-dark/50 flex-shrink-0">
                                     <h3 className="text-sm font-medium text-gray-300">
-                                        {t('vms') || 'VMs'} & {t('containers') || 'Containers'} ({filteredResources.length})
+                                        {t('vms')} & {t('containers')} ({filteredResources.length})
                                     </h3>
                                 </div>
                                 <div className="flex-1 overflow-y-auto" style={{scrollbarWidth: 'thin'}}>
@@ -2549,7 +2549,7 @@
                                                         openProxmoxObject(getVmProxmoxTarget(resource));
                                                     }}
                                                     className="p-1.5 rounded-lg text-gray-500 hover:text-cyan-400 hover:bg-cyan-500/10 transition-all"
-                                                    title={t('openInProxmox') || 'Open in Proxmox'}
+                                                    title={t('openInProxmox')}
                                                 >
                                                     <Icons.ExternalLink className="w-4 h-4" />
                                                 </button>
@@ -2586,7 +2586,7 @@
                                     <div className="h-full flex items-center justify-center bg-proxmox-card border border-proxmox-border rounded-xl p-12">
                                         <div className="text-center text-gray-500">
                                             <Icons.Eye />
-                                            <p className="mt-2">{t('selectVmFromList') || 'Select a VM from the list'}</p>
+                                            <p className="mt-2">{t('selectVmFromList')}</p>
                                         </div>
                                     </div>
                                 )}
@@ -2622,7 +2622,7 @@
                                     onClick={() => setCurrentPage(1)}
                                     disabled={effectivePage === 1}
                                     className="px-2 py-1 rounded bg-proxmox-dark border border-proxmox-border disabled:opacity-30 hover:bg-proxmox-hover disabled:hover:bg-proxmox-dark"
-                                    title={t('firstPage') || 'First page'}
+                                    title={t('firstPage')}
                                 >
                                     ««
                                 </button>
@@ -2672,7 +2672,7 @@
                                     onClick={() => setCurrentPage(totalPages)}
                                     disabled={effectivePage === totalPages}
                                     className="px-2 py-1 rounded bg-proxmox-dark border border-proxmox-border disabled:opacity-30 hover:bg-proxmox-hover disabled:hover:bg-proxmox-dark"
-                                    title={t('lastPage') || 'Last page'}
+                                    title={t('lastPage')}
                                 >
                                     »»
                                 </button>
@@ -2682,10 +2682,10 @@
                         <span className="text-gray-500">
                             {Object.keys(groupedByNode).length} {
                                 Object.keys(groupedByNode).length === 1
-                                    ? (t('nodeSingular') || 'węzeł')
+                                    ? (t('nodeSingular'))
                                     : (Object.keys(groupedByNode).length % 10 >= 2 && Object.keys(groupedByNode).length % 10 <= 4 && !(Object.keys(groupedByNode).length % 100 >= 12 && Object.keys(groupedByNode).length % 100 <= 14)
-                                        ? (t('nodePluralFew') || 'nodes')
-                                        : (t('nodePluralMany') || 'nodes'))
+                                        ? (t('nodePluralFew'))
+                                        : (t('nodePluralMany')))
                             }
                         </span>
                     </div>

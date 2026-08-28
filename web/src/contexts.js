@@ -128,7 +128,7 @@
                             value={language}
                             onChange={(e) => switchLang(e.target.value)}
                             className="bg-transparent text-xs text-gray-200 border-0 p-0 pr-6 focus:ring-0 focus:outline-none"
-                            aria-label="Select language"
+                            aria-label={t('selectLanguage')}
                             title={activeLanguage.title}
                         >
                             {langs.map(l => (
@@ -149,7 +149,7 @@
                             value={language}
                             onChange={(e) => switchLang(e.target.value)}
                             className="bg-transparent text-xs text-gray-200 border-0 p-0 pr-5 focus:ring-0 focus:outline-none"
-                            aria-label="Select language"
+                            aria-label={t('selectLanguage')}
                             title={activeLanguage.title}
                         >
                             {langs.map(l => (
@@ -341,13 +341,11 @@
                         // leaking which users exist
                         const sec = data.retry_after || 0;
                         const mins = Math.ceil(sec / 60);
-                        setError(t('accountLocked')
-                            ? t('accountLocked').replace('{mins}', mins)
-                            : `Too many failed attempts. Try again in ~${mins} min.`);
+                        setError(t('accountLocked').replace('{mins}', mins));
                         return { success: false, locked: true, retry_after: sec };
                     }
                     if (resp.status === 429) {
-                        setError(data.error || 'Too many requests, slow down.');
+                        setError(data.error || t('tooManyRequestsSlowDown'));
                         return { success: false, locked: false };
                     }
                     
@@ -359,7 +357,7 @@
                     if (resp.ok && data.success) {
                         // portal_only users can't use main dashboard
                         if (data.portal_only && !window.location.pathname.startsWith('/portal')) {
-                            setError(t('portalOnlyAccount') || 'This account can only log in via the Client Portal (/portal)');
+                            setError(t('portalOnlyAccount'));
                             return { success: false, portal_only: true };
                         }
                         setUser(data.user);
@@ -395,18 +393,18 @@
                         // NS: Security warning for default password
                         if (data.security_warning === 'DEFAULT_PASSWORD') {
                             setTimeout(() => {
-                                alert('⚠️ SECURITY WARNING!\n\nYou are using the default admin password.\nPlease change it immediately in Settings ↑ Users!');
+                                alert(`⚠️ ${t('securityWarning')}\n\n${t('defaultPasswordWarning')}\n${t('defaultPasswordChangeImmediately')}`);
                             }, 500);
                         }
                         return { success: true };
                     } else {
-                        setError(data.error || 'Login failed');
+                        setError(data.error || t('loginError'));
                         return { success: false, error: data.error };
                     }
                 } catch (err) {
                     console.error('login err', err);
-                    setError('Connection error');
-                    return { success: false, error: 'Connection error' };
+                    setError(t('connectionError'));
+                    return { success: false, error: t('connectionError') };
                 }
             };
             

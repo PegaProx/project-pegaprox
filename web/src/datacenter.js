@@ -304,12 +304,12 @@
                     const data = res ? await res.json().catch(() => null) : null;
                     if (res && res.ok && data) {
                         setSwInstallResult(data);
-                        addToast(`StarWind: ${data.installed}/${data.total} ${t('nodes') || 'nodes'}`, data.success ? 'success' : 'error');
+                        addToast(`StarWind: ${data.installed}/${data.total} ${t('nodes')}`, data.success ? 'success' : 'error');
                     } else {
-                        addToast((data && data.error) || t('starwindInstallFailed') || 'Plugin install failed', 'error');
+                        addToast((data && data.error) || t('starwindInstallFailed'), 'error');
                     }
                 } catch (e) {
-                    addToast(t('starwindInstallFailed') || 'Plugin install failed', 'error');
+                    addToast(t('starwindInstallFailed'), 'error');
                 } finally {
                     setSwInstalling(false);
                 }
@@ -650,7 +650,7 @@
             const saveSubscriptionKey = async (node) => {
                 const key = (subscriptionKeys[node] || '').trim();
                 if (!key) {
-                    addToast(t('pleaseEnterLicenseKey') || 'Please enter license key', 'error');
+                    addToast(t('pleaseEnterLicenseKey'), 'error');
                     return;
                 }
 
@@ -1062,15 +1062,15 @@
                         // Refresh options from server to get latest state
                         await loadOptions();
                         setShowEditOptions(false);
-                        addToast(t('optionsSaved') || 'Options saved', 'success');
+                        addToast(t('optionsSaved'), 'success');
                     } else {
                         const err = await res.json();
                         console.error('Datacenter options error:', err);
-                        addToast(err.errors ? JSON.stringify(err.errors) : (err.error || 'Failed to save options'), 'error');
+                        addToast(err.errors ? JSON.stringify(err.errors) : (err.error || t('failedSaveOptions')), 'error');
                     }
                 } catch(e) {
                     console.error(e);
-                    addToast('Failed to save options', 'error');
+                    addToast(t('failedSaveOptions'), 'error');
                 }
             };
 
@@ -1097,24 +1097,24 @@
                 const missing = required.filter(f => !newStorage[f]);
 
                 if (!newStorage.storage) {
-                    addToast(t('storageIdRequired') || 'Storage ID is required', 'error');
+                    addToast(t('storageIdRequired'), 'error');
                     return;
                 }
 
                 // Validate storage ID format
                 if (!/^[a-zA-Z][a-zA-Z0-9\-\_\.]*$/.test(newStorage.storage)) {
-                    addToast(t('invalidStorageId') || 'Storage ID must start with a letter and contain only letters, numbers, -, _, .', 'error');
+                    addToast(t('invalidStorageId'), 'error');
                     return;
                 }
 
                 if (missing.length > 0) {
-                    addToast(`${t('missingFields') || 'Missing required fields'}: ${missing.join(', ')}`, 'error');
+                    addToast(`${t('missingFields')}: ${missing.join(', ')}`, 'error');
                     return;
                 }
 
                 // NS: Additional validation for Shared LVM - need base (storage:lun) when baseStorage is set
                 if (newStorage.type === 'lvm' && newStorage.baseStorage && !newStorage.base) {
-                    addToast('Please select a LUN for Shared LVM', 'error');
+                    addToast(t('selectLunContinue'), 'error');
                     return;
                 }
 
@@ -1160,17 +1160,17 @@
                         setShowAddStorage(false);
                         setNewStorage({ type: 'dir', storage: '', path: '', content: 'images,rootdir', enabled: true });
                         setScanResults([]); // Clear scan results
-                        addToast(t('storageCreated') || 'Storage created successfully', 'success');
+                        addToast(t('storageCreated'), 'success');
                         // NS: Only refresh storage list, not everything
                         await refreshStorage();
                     } else {
                         console.error('Storage creation failed:', data);
                         const errorMsg = data.error || data.message || 'Failed to create storage';
-                        addToast(`Error: ${errorMsg}`, 'error');
+                        addToast(`${t('error')}: ${errorMsg}`, 'error');
                     }
                 } catch(e) {
                     console.error('Create storage error:', e);
-                    addToast(`Error creating storage: ${e.message}`, 'error');
+                    addToast(`${t('errorCreatingStorage')}: ${e.message}`, 'error');
                 }
             };
 
@@ -1202,7 +1202,7 @@
                     } else if (type === 'zfs') {
                         // No extra params needed
                     } else {
-                        addToast(t('enterServerFirst') || 'Please enter server/portal address first', 'warning');
+                        addToast(t('enterServerFirst'), 'warning');
                         setScanning(false);
                         return;
                     }
@@ -1219,14 +1219,14 @@
                     if (res.ok && data.success) {
                         setScanResults(data.data || []);
                         if (data.data?.length === 0) {
-                            addToast(t('noTargetsFound') || 'No targets found', 'warning');
+                            addToast(t('noTargetsFound'), 'warning');
                         }
                     } else {
-                        addToast(`Scan failed: ${data.error}`, 'error');
+                        addToast(`${t('cloud.scanFailed')}: ${data.error}`, 'error');
                     }
                 } catch (e) {
                     console.error('Scan error:', e);
-                    addToast(`Scan error: ${e.message}`, 'error');
+                    addToast(`${t('errorScanLuns')}: ${e.message}`, 'error');
                 } finally {
                     setScanning(false);
                 }
@@ -1244,7 +1244,7 @@
                         setStorage(storage.filter(s => s.storage !== storageId));
                     }else{
                         const data = await res.json();
-                        alert(`Error: ${data.error || 'Failed to delete storage'}`);
+                        alert(`${t('error')}: ${data.error || t('failedDeleteStorage')}`);
                     }
                 } catch(e) {
                     console.error('Delete storage error:', e);
@@ -1311,7 +1311,7 @@
                         if(backupRes && backupRes.ok) setBackupJobs(await backupRes.json());
                     }else{
                         const err = await res.json();
-                        alert(err.error || 'Failed');
+                        alert(err.error || t('failed'));
                     }
                 } catch(e) {
                     console.error(e);
@@ -1342,12 +1342,12 @@
                         setEditBackupJob(null);
                         const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/backup`);
                         if (r && r.ok) setBackupJobs(await r.json());
-                        addToast(t('backupJobUpdated') || 'Backup job updated', 'success');
+                        addToast(t('backupJobUpdated'), 'success');
                     } else {
                         const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Failed to update', 'error');
+                        addToast(err.error || t('failedToUpdate'), 'error');
                     }
-                } catch (e) { addToast('Error: ' + e.message, 'error'); }
+                } catch (e) { addToast(t('error') + ': ' + e.message, 'error'); }
             };
 
             // NS: ZFS Replication CRUD - Issue #103
@@ -1378,7 +1378,7 @@
                             refreshReplication();
                         } else {
                             const err = await res.json().catch(() => ({}));
-                            addToast(err.error || 'Failed to create replication job', 'error');
+                            addToast(err.error || t('replicationJobCreateFailed'), 'error');
                         }
                     } else {
                         // snapshot-based via PegaProx DB
@@ -1410,19 +1410,19 @@
                             refreshReplication();
                         } else {
                             const err = await res.json().catch(() => ({}));
-                            addToast(err.error || 'Failed', 'error');
+                            addToast(err.error || t('failed'), 'error');
                         }
                     }
                 } catch(e) {
                     console.error('replication create err:', e);
-                    addToast('Connection error', 'error');
+                    addToast(t('connectionError'), 'error');
                 }
                 setReplLoading(false);
             };
 
             // delete ZFS native job
             const deleteReplicationJob = async (jobId) => {
-                if (!confirm(t('confirmDeleteReplication') || `Delete replication job ${jobId}?`)) return;
+                if (!confirm(t('confirmDeleteReplication'))) return;
                 try {
                     const res = await fetch(`${API_URL}/clusters/${clusterId}/replication/${jobId}`, {
                         method: 'DELETE', credentials: 'include',
@@ -1434,16 +1434,16 @@
                         setReplicationJobs(prev => prev.filter(j => j.id !== jobId));
                     } else {
                         const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Delete failed', 'error');
+                        addToast(err.error || t('deleteFailed'), 'error');
                     }
                 } catch(e) { console.error(e); }
             };
 
             // delete snapshot-based job
             const deleteSnapshotReplJob = async (jobId) => {
-                if (!confirm(t('confirmDeleteReplication') || `Delete replication job ${jobId}?`)) return;
+                if (!confirm(t('confirmDeleteReplication'))) return;
                 // #552 - optionally also remove the replica VM on the target node
-                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget'));
                 try {
                     // MK #564 — explicit choice; omitting it let the stored delete_target
                     // flag override "keep replica" and wedge the job on a failed teardown.
@@ -1456,7 +1456,7 @@
                         setSnapshotReplJobs(prev => prev.filter(j => j.id !== jobId));
                     } else {
                         const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Delete failed', 'error');
+                        addToast(err.error || t('deleteFailed'), 'error');
                     }
                 } catch(e) { console.error(e); }
             };
@@ -1471,7 +1471,7 @@
                         addToast(t('replicationStarted'), 'success');
                     } else {
                         const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Failed', 'error');
+                        addToast(err.error || t('failed'), 'error');
                     }
                 } catch(e) { console.error(e); }
             };
@@ -1487,7 +1487,7 @@
                         addToast(t('replicationStarted'), 'success');
                     } else {
                         const err = await res.json().catch(() => ({}));
-                        addToast(err.error || 'Failed', 'error');
+                        addToast(err.error || t('failed'), 'error');
                     }
                 } catch(e) { console.error(e); }
             };
@@ -1517,7 +1517,7 @@
                 return (
                     <div className="flex items-center justify-center h-64">
                         <Icons.RotateCw />
-                        <span className="ml-2">{t('loadingDatacenter') || 'Loading datacenter data / Lade Datacenter Daten...'}</span>
+                        <span className="ml-2">{t('loadingDatacenter')}</span>
                     </div>
                 );
             }
@@ -1529,69 +1529,69 @@
             // remains the single submit path.
             const crsBlock = (
                 <div className="border-t border-proxmox-border pt-4">
-                    <h4 className="text-sm font-medium text-gray-300 mb-3">{t('crsHeader') || 'Cluster Resource Scheduling (CRS)'}</h4>
+                    <h4 className="text-sm font-medium text-gray-300 mb-3">{t('crsHeader')}</h4>
                     <div className="grid grid-cols-2 gap-4">
                         <div>
-                            <label className="block text-sm text-gray-400 mb-1">{t('crsHaRebalanceOnStart') || 'HA Rebalance on Start'}</label>
+                            <label className="block text-sm text-gray-400 mb-1">{t('crsHaRebalanceOnStart')}</label>
                             <select value={editingOptions.crs_ha_rebalance || ''} onChange={e => setEditingOptions({...editingOptions, crs_ha_rebalance: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                <option value="">{t('disabled') || 'Disabled'}</option>
-                                <option value="1">{t('crsHaRebalanceOnStartHint') || 'Auto-rebalance HA resources on node start'}</option>
+                                <option value="">{t('disabled')}</option>
+                                <option value="1">{t('crsHaRebalanceOnStartHint')}</option>
                             </select>
                         </div>
                         <div>
                             <label className="block text-sm text-gray-400 mb-1">
-                                {t('crsSchedulingMode') || 'CRS Scheduling Mode'} <span className="text-[10px] text-gray-500">PVE &lt; 9.2</span>
+                                {t('crsSchedulingMode')} <span className="text-[10px] text-gray-500">PVE &lt; 9.2</span>
                             </label>
                             <select value={editingOptions.crs_mode || ''} onChange={e => setEditingOptions({...editingOptions, crs_mode: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
                                 <option value="">—</option>
                                 <option value="basic">{t('basic')}</option>
                                 <option value="static">{t('staticMode')}</option>
                             </select>
-                            <p className="text-[11px] text-gray-500 mt-1">{t('crsSchedulingModeRemoved') || 'Removed from schema in PVE 9.2 — backend silently drops the field on 9.2+ clusters so the rest of the form still saves.'}</p>
+                            <p className="text-[11px] text-gray-500 mt-1">{t('crsSchedulingModeRemoved')}</p>
                         </div>
                     </div>
                     <div className="mt-4 pt-3 border-t border-proxmox-border/50">
                         <p className="text-xs text-gray-500 mb-2">
-                            {t('crsAutoRebalanceTuning') || 'Auto-Rebalance tuning'} <span className="text-[10px] text-orange-400">PVE 9.2+</span>
+                            {t('crsAutoRebalanceTuning')} <span className="text-[10px] text-orange-400">PVE 9.2+</span>
                         </p>
                         <div className="grid grid-cols-2 gap-4">
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">{t('crsAutoRebalance') || 'Auto-Rebalance'}</label>
+                                <label className="block text-sm text-gray-400 mb-1">{t('crsAutoRebalance')}</label>
                                 <select value={editingOptions.crs_ha_auto_rebalance || ''} onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                    <option value="">{t('crsAutoRebalanceOff') || 'Disabled (PVE default)'}</option>
-                                    <option value="1">{t('crsAutoRebalanceOn') || 'Enabled — CRS rebalances HA resources continuously'}</option>
+                                    <option value="">{t('crsAutoRebalanceOff')}</option>
+                                    <option value="1">{t('crsAutoRebalanceOn')}</option>
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">{t('crsMethod') || 'Method'}</label>
+                                <label className="block text-sm text-gray-400 mb-1">{t('crsMethod')}</label>
                                 <select value={editingOptions.crs_ha_auto_rebalance_method || ''} onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_method: e.target.value})} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
-                                    <option value="">{(t('default') || 'Default') + ' (bruteforce)'}</option>
+                                    <option value="">{(t('default')) + ' (bruteforce)'}</option>
                                     <option value="bruteforce">bruteforce</option>
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">{t('crsThreshold') || 'Threshold (%)'}</label>
+                                <label className="block text-sm text-gray-400 mb-1">{t('crsThreshold')}</label>
                                 <input type="number" min="0" max="100" placeholder="30"
                                     value={editingOptions.crs_ha_auto_rebalance_threshold || ''}
                                     onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_threshold: e.target.value})}
                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
-                                <p className="text-[11px] text-gray-500 mt-1">{t('crsThresholdHint') || 'Imbalance threshold before CRS acts. Lower = more aggressive.'}</p>
+                                <p className="text-[11px] text-gray-500 mt-1">{t('crsThresholdHint')}</p>
                             </div>
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">{t('crsMargin') || 'Margin (%)'}</label>
+                                <label className="block text-sm text-gray-400 mb-1">{t('crsMargin')}</label>
                                 <input type="number" min="0" max="100" placeholder="10"
                                     value={editingOptions.crs_ha_auto_rebalance_margin || ''}
                                     onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_margin: e.target.value})}
                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
-                                <p className="text-[11px] text-gray-500 mt-1">{t('crsMarginHint') || 'Required improvement margin to justify a move.'}</p>
+                                <p className="text-[11px] text-gray-500 mt-1">{t('crsMarginHint')}</p>
                             </div>
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">{t('crsHoldDuration') || 'Hold Duration (cycles)'}</label>
+                                <label className="block text-sm text-gray-400 mb-1">{t('crsHoldDuration')}</label>
                                 <input type="number" min="0" placeholder="3"
                                     value={editingOptions.crs_ha_auto_rebalance_hold_duration || ''}
                                     onChange={e => setEditingOptions({...editingOptions, crs_ha_auto_rebalance_hold_duration: e.target.value})}
                                     className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
-                                <p className="text-[11px] text-gray-500 mt-1">{t('crsHoldDurationHint') || 'CRM cycles a VM stays pinned after being placed.'}</p>
+                                <p className="text-[11px] text-gray-500 mt-1">{t('crsHoldDurationHint')}</p>
                             </div>
                         </div>
                     </div>
@@ -1793,7 +1793,7 @@
                                     </div>
                                     <div className="px-4 pb-4">
                                         <p className="text-xs text-gray-500">
-                                            {t('nodeJoinHint') || 'To add a new node, run on the new node:'} <code className="bg-proxmox-dark px-1 rounded">pvecm add {joinInfo?.preferred_node || clusterNodes[0]?.ring0_addr || 'IP'}</code>
+                                            {t('nodeJoinHint')} <code className="bg-proxmox-dark px-1 rounded">pvecm add {joinInfo?.preferred_node || clusterNodes[0]?.ring0_addr || 'IP'}</code>
                                         </p>
                                     </div>
                                 </div>
@@ -1916,7 +1916,7 @@
                                                 </div>
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">{t('migrationNetwork')}</label>
-                                                    <input value={editingOptions.migration_network || ''} onChange={e => setEditingOptions({...editingOptions, migration_network: e.target.value})} placeholder="e.g. 10.0.0.0/24" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
+                                                    <input value={editingOptions.migration_network || ''} onChange={e => setEditingOptions({...editingOptions, migration_network: e.target.value})} placeholder={t('cidrPlaceholder')} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
                                                     <span className="text-xs text-gray-500">{t('migrationNetworkHint')}</span>
                                                 </div>
                                             </div>
@@ -2896,16 +2896,16 @@
                                                             <strong>{t('starwindSharedLvm')}:</strong> {t('starwindSharedLvmDesc')}
                                                         </div>
                                                         <div className="col-span-2 p-3 bg-amber-900/30 border border-amber-500/50 rounded text-xs text-amber-200">
-                                                            ⚠️ {t('starwindThirdPartyNote') || 'StarWind LVM is a third-party product by StarWind Software, not part of PegaProx. PegaProx gives no support or warranty for it — for problems, contact StarWind directly:'}{' '}
+                                                            ⚠️ {t('starwindThirdPartyNote')}{' '}
                                                             <a href="https://www.starwindsoftware.com/" target="_blank" rel="noopener noreferrer" className="underline text-amber-300 hover:text-amber-100">starwindsoftware.com</a>
                                                         </div>
                                                         <div className="col-span-2 flex items-center gap-3 flex-wrap">
                                                             <button type="button" onClick={installStarwindPlugin} disabled={swInstalling}
                                                                 className="px-3 py-1.5 text-sm rounded bg-teal-600 hover:bg-teal-700 disabled:opacity-50 flex items-center gap-2">
                                                                 {swInstalling ? <Icons.RotateCw className="w-4 h-4 animate-spin" /> : <Icons.Download className="w-4 h-4" />}
-                                                                {t('installStarwindPlugin') || 'Install plugin on all nodes'}
+                                                                {t('installStarwindPlugin')}
                                                             </button>
-                                                            <span className="text-xs text-gray-400">{t('installStarwindPluginHint') || 'Installs starwind-proxmox-plugin from the signed StarWind apt repo on every node.'}</span>
+                                                            <span className="text-xs text-gray-400">{t('installStarwindPluginHint')}</span>
                                                         </div>
                                                         {swInstallResult && (
                                                             <div className="col-span-2 text-xs space-y-1 max-h-40 overflow-auto">
@@ -2913,7 +2913,7 @@
                                                                     <div key={r.node} className="flex items-center gap-2">
                                                                         <span className={r.success ? 'text-green-400' : 'text-red-400'}>{r.success ? '✓' : '✗'}</span>
                                                                         <span className="font-mono">{r.node}</span>
-                                                                        <span className="text-gray-400">{r.success ? (r.already_installed ? (t('alreadyInstalled') || 'already installed') : (t('installedStatus') || 'installed')) : (r.error || '')}</span>
+                                                                        <span className="text-gray-400">{r.success ? (r.already_installed ? (t('alreadyInstalled')) : (t('installedStatus'))) : (r.error || '')}</span>
                                                                     </div>
                                                                 ))}
                                                             </div>
@@ -3407,7 +3407,7 @@
                                 {!sdnData.available ? (
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
                                         <Icons.Network className="w-12 h-12 mx-auto mb-4 text-gray-500" />
-                                        <h3 className="text-lg font-semibold mb-2">{t('sdnNotAvailable') || 'SDN Not Available'}</h3>
+                                        <h3 className="text-lg font-semibold mb-2">{t('sdnNotAvailable')}</h3>
                                         <p className="text-gray-400 text-sm mb-4">
                                             {sdnData.error || t('sdnNotConfigured') || 'Software Defined Networking is not configured on this cluster.'}
                                         </p>
@@ -3454,14 +3454,14 @@
                                                     <>
                                                         <Icons.AlertTriangle className="text-yellow-500" />
                                                         <span className="text-yellow-500">
-                                                            {t('sdnPendingChanges') || 'There are pending SDN changes that need to be applied.'}
+                                                            {t('sdnPendingChanges')}
                                                         </span>
                                                     </>
                                                 ) : (
                                                     <>
                                                         <Icons.CheckCircle className="text-green-500" />
                                                         <span className="text-gray-400">
-                                                            {t('sdnConfigSynced') || 'SDN configuration is in sync with all nodes.'}
+                                                            {t('sdnConfigSynced')}
                                                         </span>
                                                     </>
                                                 )}
@@ -3469,10 +3469,10 @@
                                             <button
                                                 onClick={async () => {
                                                     try {
-                                                        addToast(t('applyingSDN') || 'Applying SDN configuration to all nodes...', 'info');
+                                                        addToast(t('applyingSDN'), 'info');
                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/apply`, { method: 'POST' });
                                                         if (res.ok) {
-                                                            addToast(t('sdnApplied') || 'SDN configuration applied to all nodes', 'success');
+                                                            addToast(t('sdnApplied'), 'success');
                                                             // Short delay then refresh
                                                             setTimeout(() => fetchAllData(), 1000);
                                                         } else {
@@ -3490,7 +3490,7 @@
                                                 }`}
                                             >
                                                 <Icons.RefreshCw className="w-4 h-4" />
-                                                {t('applyChanges') || 'Apply / Reload'}
+                                                {t('applyChanges')}
                                             </button>
                                         </div>
 
@@ -3499,7 +3499,7 @@
                                             <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                                 <h3 className="font-semibold flex items-center gap-2">
                                                     <Icons.Layers className="w-5 h-5" />
-                                                    {t('sdnZones') || 'Zones'}
+                                                    {t('sdnZones')}
                                                 </h3>
                                                 <button
                                                     onClick={() => { setNewZone({ zone: '', type: 'simple' }); setShowAddZone(true); }}
@@ -3510,17 +3510,17 @@
                                             </div>
                                             {sdnData.zones.length === 0 ? (
                                                 <div className="p-8 text-center text-gray-500">
-                                                    <p>{t('noZones') || 'No zones configured'}</p>
+                                                    <p>{t('noZones')}</p>
                                                 </div>
                                             ) : (
                                                 <table className="w-full">
                                                     <thead className="bg-proxmox-dark">
                                                         <tr>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('zone') || 'Zone'}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('zone')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">MTU</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('nodes')}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('vnets') || 'VNets'}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('vnets')}</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
                                                         </tr>
                                                     </thead>
@@ -3549,11 +3549,11 @@
                                                                 <td className="p-3 text-right">
                                                                     <button
                                                                         onClick={async () => {
-                                                                            if (confirm(t('confirmDeleteZone') || `Delete zone "${zone.zone}"?`)) {
+                                                                            if (confirm(t('confirmDeleteZone'))) {
                                                                                 try {
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/zones/${zone.zone}`, { method: 'DELETE' });
                                                                                     if (res.ok) {
-                                                                                        addToast(t('zoneDeleted') || 'Zone deleted', 'success');
+                                                                                        addToast(t('zoneDeleted'), 'success');
                                                                                         addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                                         fetchAllData();
                                                                                     } else {
@@ -3583,7 +3583,7 @@
                                             <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                                 <h3 className="font-semibold flex items-center gap-2">
                                                     <Icons.Network className="w-5 h-5 text-purple-400" />
-                                                    {t('sdnVnets') || 'VNets'}
+                                                    {t('sdnVnets')}
                                                 </h3>
                                                 <button
                                                     onClick={() => {
@@ -3598,20 +3598,20 @@
                                             </div>
                                             {sdnData.vnets.length === 0 ? (
                                                 <div className="p-8 text-center text-gray-500">
-                                                    <p>{t('noVnets') || 'No VNets configured'}</p>
+                                                    <p>{t('noVnets')}</p>
                                                     {sdnData.zones.length === 0 && (
-                                                        <p className="text-sm mt-2">{t('createZoneFirst') || 'Create a zone first'}</p>
+                                                        <p className="text-sm mt-2">{t('createZoneFirst')}</p>
                                                     )}
                                                 </div>
                                             ) : (
                                                 <table className="w-full">
                                                     <thead className="bg-proxmox-dark">
                                                         <tr>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('vnet') || 'VNet'}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('zone') || 'Zone'}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('alias') || 'Alias'}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('vnet')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('zone')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('alias')}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('vlanTag')}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('subnets') || 'Subnets'}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('subnets')}</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
                                                         </tr>
                                                     </thead>
@@ -3648,7 +3648,7 @@
                                                                                     setShowAddSubnet(vnet.vnet);
                                                                                 }}
                                                                                 className="px-2 py-0.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded text-xs text-gray-400"
-                                                                                title={t('addSubnet') || 'Add Subnet'}
+                                                                                title={t('addSubnet')}
                                                                             >
                                                                                 +
                                                                             </button>
@@ -3657,11 +3657,11 @@
                                                                     <td className="p-3 text-right">
                                                                         <button
                                                                             onClick={async () => {
-                                                                                if (confirm(t('confirmDeleteVnet') || `Delete VNet "${vnet.vnet}"?`)) {
+                                                                                if (confirm(t('confirmDeleteVnet'))) {
                                                                                     try {
                                                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/sdn/vnets/${vnet.vnet}`, { method: 'DELETE' });
                                                                                         if (res.ok) {
-                                                                                            addToast(t('vnetDeleted') || 'VNet deleted', 'success');
+                                                                                            addToast(t('vnetDeleted'), 'success');
                                                                                             addToast(`💡 ${t('sdnApplyReloadDeployHint')}`, 'info');
                                                                                             fetchAllData();
                                                                                         } else {
@@ -3691,23 +3691,23 @@
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                             <h3 className="font-semibold mb-3 flex items-center gap-2">
                                                 <Icons.Info className="w-5 h-5 text-blue-400" />
-                                                {t('sdnInfo') || 'SDN Information'}
+                                                {t('sdnInfo')}
                                             </h3>
                                             <div className="grid grid-cols-2 md:grid-cols-6 gap-4 text-sm">
                                                 <div>
-                                                    <span className="text-gray-400">{t('zones') || 'Zones'}:</span>
+                                                    <span className="text-gray-400">{t('zones')}:</span>
                                                     <span className="ml-2 font-medium">{sdnData.zones.length}</span>
                                                 </div>
                                                 <div>
-                                                    <span className="text-gray-400">{t('vnets') || 'VNets'}:</span>
+                                                    <span className="text-gray-400">{t('vnets')}:</span>
                                                     <span className="ml-2 font-medium">{sdnData.vnets.length}</span>
                                                 </div>
                                                 <div>
-                                                    <span className="text-gray-400">{t('subnets') || 'Subnets'}:</span>
+                                                    <span className="text-gray-400">{t('subnets')}:</span>
                                                     <span className="ml-2 font-medium">{sdnData.subnets.length}</span>
                                                 </div>
                                                 <div>
-                                                    <span className="text-gray-400">{t('controllers') || 'Controllers'}:</span>
+                                                    <span className="text-gray-400">{t('controllers')}:</span>
                                                     <span className="ml-2 font-medium">{sdnData.controllers.length}</span>
                                                 </div>
                                                 <div>
@@ -3726,7 +3726,7 @@
                                             <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                                 <h3 className="font-semibold flex items-center gap-2">
                                                     <Icons.Cpu className="w-5 h-5 text-blue-400" />
-                                                    {t('controllers') || 'Controllers'}
+                                                    {t('controllers')}
                                                 </h3>
                                                 <button
                                                     onClick={() => { setNewController({ controller: '', type: 'evpn' }); setShowAddController(true); }}
@@ -3737,14 +3737,14 @@
                                             </div>
                                             {sdnData.controllers.length === 0 ? (
                                                 <div className="p-6 text-center text-gray-500 text-sm">
-                                                    {t('noControllers') || 'No controllers configured. Controllers are needed for EVPN/VXLAN zones.'}
+                                                    {t('noControllers')}
                                                 </div>
                                             ) : (
                                                 <table className="w-full">
                                                     <thead className="bg-proxmox-dark">
                                                         <tr>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name') || 'Name'}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">ASN</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">{t('peers')}</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
@@ -3811,14 +3811,14 @@
                                             </div>
                                             {(sdnData.ipams?.length || 0) === 0 ? (
                                                 <div className="p-6 text-center text-gray-500 text-sm">
-                                                    {t('noIpam') || 'No IPAM configured. IPAM provides IP address management for subnets.'}
+                                                    {t('noIpam')}
                                                 </div>
                                             ) : (
                                                 <table className="w-full">
                                                     <thead className="bg-proxmox-dark">
                                                         <tr>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name') || 'Name'}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">URL</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
                                                         </tr>
@@ -3883,14 +3883,14 @@
                                             </div>
                                             {(sdnData.dns?.length || 0) === 0 ? (
                                                 <div className="p-6 text-center text-gray-500 text-sm">
-                                                    {t('noDns') || 'No DNS configured. DNS integration enables automatic DNS registration for VMs.'}
+                                                    {t('noDns')}
                                                 </div>
                                             ) : (
                                                 <table className="w-full">
                                                     <thead className="bg-proxmox-dark">
                                                         <tr>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name') || 'Name'}</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
                                                             <th className="text-left p-3 text-sm text-gray-400">URL</th>
                                                             <th className="text-right p-3 text-sm text-gray-400">{t('actions')}</th>
                                                         </tr>
@@ -3940,12 +3940,12 @@
                                 {showAddZone && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
-                                            <h3 className="text-lg font-semibold mb-4">{t('addZone') || 'Add Zone'}</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addZone')}</h3>
                                             <div className="space-y-4">
                                                 {/* Basic Settings */}
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('zoneName') || 'Zone Name'} *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('zoneName')} *</label>
                                                         <input
                                                             type="text"
                                                             value={newZone.zone}
@@ -3955,7 +3955,7 @@
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('type') || 'Type'} *</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('type')} *</label>
                                                         <select
                                                             value={newZone.type}
                                                             onChange={e => setNewZone({...newZone, type: e.target.value})}
@@ -3970,11 +3970,11 @@
                                                     </div>
                                                 </div>
                                                 <p className="text-xs text-gray-500 -mt-2">
-                                                    {newZone.type === 'simple' && (t('simpleZoneDesc') || 'Isolated zone with simple bridging - each node has its own bridge')}
-                                                    {newZone.type === 'vlan' && (t('vlanZoneDesc') || 'VLAN-based zone using 802.1q tagging on a shared bridge')}
+                                                    {newZone.type === 'simple' && (t('simpleZoneDesc'))}
+                                                    {newZone.type === 'vlan' && (t('vlanZoneDesc'))}
                                                     {newZone.type === 'qinq' && t('qinqZoneDesc')}
-                                                    {newZone.type === 'vxlan' && (t('vxlanZoneDesc') || 'VXLAN overlay network - Layer 2 over Layer 3 using UDP encapsulation')}
-                                                    {newZone.type === 'evpn' && (t('evpnZoneDesc') || 'BGP EVPN with VXLAN - advanced datacenter fabric with BGP control plane')}
+                                                    {newZone.type === 'vxlan' && (t('vxlanZoneDesc'))}
+                                                    {newZone.type === 'evpn' && (t('evpnZoneDesc'))}
                                                 </p>
 
                                                 {/* Bridge (for VLAN/QinQ) */}
@@ -4138,7 +4138,7 @@
                                                 <button
                                                     onClick={async () => {
                                                         if (!newZone.zone) {
-                                                            addToast(t('zoneNameRequired') || 'Zone name is required', 'error');
+                                                            addToast(t('zoneNameRequired'), 'error');
                                                             return;
                                                         }
                                                         if ((newZone.type === 'vlan' || newZone.type === 'qinq') && !newZone.bridge) {
@@ -4159,8 +4159,8 @@
                                                                 body: JSON.stringify(payload)
                                                             });
                                                             if (res.ok) {
-                                                                addToast(t('zoneCreated') || 'Zone created', 'success');
-                                                                addToast(t('sdnApplyReminder') || '💡 Remember to click "Apply / Reload" to deploy changes', 'info');
+                                                                addToast(t('zoneCreated'), 'success');
+                                                                addToast(t('sdnApplyReminder'), 'info');
                                                                 setShowAddZone(false);
                                                                 setNewZone({ zone: '', type: 'simple', bridge: '', mtu: '', nodes: '', ipam: '', dns: '', dnszone: '', reversedns: '' });
                                                                 fetchAllData();
@@ -4185,10 +4185,10 @@
                                 {showAddVnet && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-md p-6">
-                                            <h3 className="text-lg font-semibold mb-4">{t('addVnet') || 'Add VNet'}</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addVnet')}</h3>
                                             <div className="space-y-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('vnetName') || 'VNet Name'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('vnetName')}</label>
                                                     <input
                                                         type="text"
                                                         value={newVnet.vnet}
@@ -4198,7 +4198,7 @@
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('zone') || 'Zone'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('zone')}</label>
                                                     <select
                                                         value={newVnet.zone}
                                                         onChange={e => setNewVnet({...newVnet, zone: e.target.value})}
@@ -4210,7 +4210,7 @@
                                                     </select>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('alias') || 'Alias'} ({t('optional')})</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('alias')} ({t('optional')})</label>
                                                     <input
                                                         type="text"
                                                         value={newVnet.alias}
@@ -4242,7 +4242,7 @@
                                                 <button
                                                     onClick={async () => {
                                                         if (!newVnet.vnet || !newVnet.zone) {
-                                                            addToast(t('vnetNameZoneRequired') || 'VNet name and zone are required', 'error');
+                                                            addToast(t('vnetNameZoneRequired'), 'error');
                                                             return;
                                                         }
                                                         try {
@@ -4256,8 +4256,8 @@
                                                                 body: JSON.stringify(payload)
                                                             });
                                                             if (res.ok) {
-                                                                addToast(t('vnetCreated') || 'VNet created', 'success');
-                                                                addToast(t('sdnApplyReminder') || '💡 Click "Apply / Reload" to deploy', 'info');
+                                                                addToast(t('vnetCreated'), 'success');
+                                                                addToast(t('sdnApplyReminder'), 'info');
                                                                 setShowAddVnet(false);
                                                                 fetchAllData();
                                                             } else {
@@ -4281,7 +4281,7 @@
                                 {showAddSubnet && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg p-6">
-                                            <h3 className="text-lg font-semibold mb-4">{t('addSubnet') || 'Add Subnet'} - {showAddSubnet}</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addSubnet')} - {showAddSubnet}</h3>
                                             <div className="space-y-4">
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">{t('subnetCidr')} *</label>
@@ -4295,7 +4295,7 @@
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('gateway') || 'Gateway'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('gateway')}</label>
                                                         <input
                                                             type="text"
                                                             value={newSubnet.gateway}
@@ -4334,7 +4334,7 @@
                                                             onChange={e => setNewSubnet({...newSubnet, snat: e.target.checked ? 1 : 0})}
                                                             className="w-4 h-4 rounded"
                                                         />
-                                                        <span className="text-sm">SNAT ({t('sourceNat') || 'Source NAT'})</span>
+                                                        <span className="text-sm">SNAT ({t('sourceNat')})</span>
                                                     </label>
                                                 </div>
                                             </div>
@@ -4348,7 +4348,7 @@
                                                 <button
                                                     onClick={async () => {
                                                         if (!newSubnet.subnet) {
-                                                            addToast(t('subnetRequired') || 'Subnet is required', 'error');
+                                                            addToast(t('subnetRequired'), 'error');
                                                             return;
                                                         }
                                                         try {
@@ -4364,8 +4364,8 @@
                                                                 body: JSON.stringify(payload)
                                                             });
                                                             if (res.ok) {
-                                                                addToast(t('subnetCreated') || 'Subnet created', 'success');
-                                                                addToast(t('sdnApplyReminder') || '💡 Click "Apply / Reload" to deploy', 'info');
+                                                                addToast(t('subnetCreated'), 'success');
+                                                                addToast(t('sdnApplyReminder'), 'info');
                                                                 setShowAddSubnet(null);
                                                                 setNewSubnet({ subnet: '', gateway: '', snat: 0, dhcp: 'none', 'dhcp-range': '' });
                                                                 fetchAllData();
@@ -4390,11 +4390,11 @@
                                 {showAddController && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg p-6">
-                                            <h3 className="text-lg font-semibold mb-4">{t('addController') || 'Add Controller'}</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addController')}</h3>
                                             <div className="space-y-4">
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
                                                         <input
                                                             type="text"
                                                             value={newController.controller}
@@ -4404,7 +4404,7 @@
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('type') || 'Type'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('type')}</label>
                                                         <select
                                                             value={newController.type}
                                                             onChange={e => setNewController({...newController, type: e.target.value})}
@@ -4532,11 +4532,11 @@
                                 {showAddIpam && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg p-6">
-                                            <h3 className="text-lg font-semibold mb-4">{t('addIpam') || 'Add IPAM'}</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addIpam')}</h3>
                                             <div className="space-y-4">
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
                                                         <input
                                                             type="text"
                                                             value={newIpam.ipam}
@@ -4546,7 +4546,7 @@
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('type') || 'Type'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('type')}</label>
                                                         <select
                                                             value={newIpam.type}
                                                             onChange={e => setNewIpam({...newIpam, type: e.target.value})}
@@ -4645,11 +4645,11 @@
                                 {showAddDns && (
                                     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg p-6">
-                                            <h3 className="text-lg font-semibold mb-4">{t('addDns') || 'Add DNS'}</h3>
+                                            <h3 className="text-lg font-semibold mb-4">{t('addDns')}</h3>
                                             <div className="space-y-4">
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
                                                         <input
                                                             type="text"
                                                             value={newDns.dns}
@@ -4659,7 +4659,7 @@
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('type') || 'Type'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('type')}</label>
                                                         <select
                                                             value={newDns.type}
                                                             onChange={e => setNewDns({...newDns, type: e.target.value})}
@@ -4826,12 +4826,12 @@
                                                                         });
                                                                         const j = await r.json();
                                                                         if (r.ok && j.upid && j.upid !== 'OK') {
-                                                                            addToast?.(t('backupRunning') || 'Backup started', 'success');
+                                                                            addToast?.(t('backupRunning'), 'success');
                                                                             window.dispatchEvent(new CustomEvent('pegaprox-show-backup-progress', {
                                                                                 detail: { upid: j.upid, node: j.node },
                                                                             }));
                                                                         } else if (r.ok) {
-                                                                            addToast?.(t('backupRunning') || 'Backup started', 'success');
+                                                                            addToast?.(t('backupRunning'), 'success');
                                                                         } else {
                                                                             addToast?.(j.error || `HTTP ${r.status}`, 'error');
                                                                         }
@@ -4839,7 +4839,7 @@
                                                                         addToast?.(String(e), 'error');
                                                                     }
                                                                 }}
-                                                                className="p-1 hover:bg-green-500/20 rounded text-green-400" title={t('runNow') || 'Run now'}>
+                                                                className="p-1 hover:bg-green-500/20 rounded text-green-400" title={t('runNow')}>
                                                                 {Icons.Play ? <Icons.Play className="w-4 h-4" /> : <span>▶</span>}
                                                             </button>
                                                             <button onClick={() => setEditBackupJob({...job})} className="p-1 hover:bg-blue-500/20 rounded text-blue-400" title={t('edit')}><Icons.Edit className="w-4 h-4" /></button>
@@ -4853,7 +4853,7 @@
                                 </div>
 
                                 {/* Edit Backup Job Modal - #207 */}
-                                {editBackupJob && (<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={() => setEditBackupJob(null)}><div className="w-full max-w-2xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}><div className="p-4 border-b border-proxmox-border bg-proxmox-dark"><h3 className="font-semibold text-white flex items-center gap-2"><Icons.Edit className="w-4 h-4" />{t('editBackupJob') || 'Edit Backup Job'}</h3></div><div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('storage')} *</label><select value={editBackupJob.storage || ''} onChange={e => setEditBackupJob({...editBackupJob, storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('selectStorage') || 'Select Storage'}</option>{(storage || []).filter(s => s.content?.includes('backup')).map(s => (<option key={s.storage} value={s.storage}>{s.storage}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('schedule')}</label><input type="text" value={editBackupJob.schedule || ''} onChange={e => setEditBackupJob({...editBackupJob, schedule: e.target.value})} placeholder={t('backupScheduleExampleShort')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('node')}</label><select value={editBackupJob.node || ''} onChange={e => setEditBackupJob({...editBackupJob, node: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('allNodes') || 'All Nodes'}</option>{(clusterNodes || []).map(n => (<option key={n.node} value={n.node}>{n.node}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('mode')}</label><select value={editBackupJob.mode || 'snapshot'} onChange={e => setEditBackupJob({...editBackupJob, mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="snapshot">{t('snapshot')}</option><option value="suspend">{t('suspend')}</option><option value="stop">{t('stop')}</option></select></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('compression') || 'Compression'}</label><select value={editBackupJob.compress || 'zstd'} onChange={e => setEditBackupJob({...editBackupJob, compress: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="0">{t('none')}</option><option value="gzip">GZIP</option><option value="lzo">LZO</option><option value="zstd">ZSTD</option></select></div><div><label className="block text-sm text-gray-400 mb-1">{t('vmIds')} ({t('optional')})</label><input type="text" value={editBackupJob.vmid || ''} onChange={e => setEditBackupJob({...editBackupJob, vmid: e.target.value})} placeholder={t('backupVmIdsPlaceholder')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('notification') || 'Notification'}</label><select value={editBackupJob.mailnotification || 'always'} onChange={e => setEditBackupJob({...editBackupJob, mailnotification: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="always">{t('always') || 'Always'}</option><option value="failure">{t('onFailure') || 'On Failure'}</option><option value="never">{t('never') || 'Never'}</option></select></div><div><label className="block text-sm text-gray-400 mb-1">{t('email')} ({t('optional')})</label><input type="email" value={editBackupJob.mailto || ''} onChange={e => setEditBackupJob({...editBackupJob, mailto: e.target.value})} placeholder="admin@example.com" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="flex items-center gap-2"><input type="checkbox" checked={editBackupJob.enabled !== 0} onChange={e => setEditBackupJob({...editBackupJob, enabled: e.target.checked ? 1 : 0})} className="rounded" /><label className="text-sm text-gray-300">{t('enabled')}</label></div></div><div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-end gap-3"><button onClick={() => setEditBackupJob(null)} className="px-4 py-2 text-gray-400 hover:text-white">{t('cancel')}</button><button onClick={updateBackupJob} disabled={!editBackupJob.storage} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50">{t('save') || 'Save'}</button></div></div></div>)}
+                                {editBackupJob && (<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={() => setEditBackupJob(null)}><div className="w-full max-w-2xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}><div className="p-4 border-b border-proxmox-border bg-proxmox-dark"><h3 className="font-semibold text-white flex items-center gap-2"><Icons.Edit className="w-4 h-4" />{t('editBackupJob')}</h3></div><div className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('storage')} *</label><select value={editBackupJob.storage || ''} onChange={e => setEditBackupJob({...editBackupJob, storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('selectStorage')}</option>{(storage || []).filter(s => s.content?.includes('backup')).map(s => (<option key={s.storage} value={s.storage}>{s.storage}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('schedule')}</label><input type="text" value={editBackupJob.schedule || ''} onChange={e => setEditBackupJob({...editBackupJob, schedule: e.target.value})} placeholder={t('backupScheduleExampleShort')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('node')}</label><select value={editBackupJob.node || ''} onChange={e => setEditBackupJob({...editBackupJob, node: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="">{t('allNodes')}</option>{(clusterNodes || []).map(n => (<option key={n.node} value={n.node}>{n.node}</option>))}</select></div><div><label className="block text-sm text-gray-400 mb-1">{t('mode')}</label><select value={editBackupJob.mode || 'snapshot'} onChange={e => setEditBackupJob({...editBackupJob, mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="snapshot">{t('snapshot')}</option><option value="suspend">{t('suspend')}</option><option value="stop">{t('stop')}</option></select></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('compression')}</label><select value={editBackupJob.compress || 'zstd'} onChange={e => setEditBackupJob({...editBackupJob, compress: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="0">{t('none')}</option><option value="gzip">GZIP</option><option value="lzo">LZO</option><option value="zstd">ZSTD</option></select></div><div><label className="block text-sm text-gray-400 mb-1">{t('vmIds')} ({t('optional')})</label><input type="text" value={editBackupJob.vmid || ''} onChange={e => setEditBackupJob({...editBackupJob, vmid: e.target.value})} placeholder={t('backupVmIdsPlaceholder')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('notification')}</label><select value={editBackupJob.mailnotification || 'always'} onChange={e => setEditBackupJob({...editBackupJob, mailnotification: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"><option value="always">{t('always')}</option><option value="failure">{t('onFailure')}</option><option value="never">{t('never')}</option></select></div><div><label className="block text-sm text-gray-400 mb-1">{t('email')} ({t('optional')})</label><input type="email" value={editBackupJob.mailto || ''} onChange={e => setEditBackupJob({...editBackupJob, mailto: e.target.value})} placeholder="admin@example.com" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" /></div></div><div className="flex items-center gap-2"><input type="checkbox" checked={editBackupJob.enabled !== 0} onChange={e => setEditBackupJob({...editBackupJob, enabled: e.target.checked ? 1 : 0})} className="rounded" /><label className="text-sm text-gray-300">{t('enabled')}</label></div></div><div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-end gap-3"><button onClick={() => setEditBackupJob(null)} className="px-4 py-2 text-gray-400 hover:text-white">{t('cancel')}</button><button onClick={updateBackupJob} disabled={!editBackupJob.storage} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50">{t('save')}</button></div></div></div>)}
 
                                 {/* Add Backup Job Modal */}
                                 {showAddBackupJob && (
@@ -4862,7 +4862,7 @@
                                             <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
                                                 <h3 className="font-semibold text-white flex items-center gap-2">
                                                     <Icons.Clock />
-                                                    {t('createBackupJob') || 'Create Backup Job'}
+                                                    {t('createBackupJob')}
                                                 </h3>
                                             </div>
                                             <div className="p-6 space-y-4">
@@ -4874,7 +4874,7 @@
                                                             onChange={e => setNewBackupJob({...newBackupJob, storage: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="">{t('selectStorage') || 'Select Storage'}</option>
+                                                            <option value="">{t('selectStorage')}</option>
                                                             {(storage || []).filter(s => s.content?.includes('backup')).map(s => (
                                                                 <option key={s.storage} value={s.storage}>{s.storage}</option>
                                                             ))}
@@ -4893,11 +4893,11 @@
                                                             }}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="hourly">{t('hourly') || 'Hourly'}</option>
-                                                            <option value="daily">{t('daily') || 'Daily'} (02:00)</option>
+                                                            <option value="hourly">{t('hourly')}</option>
+                                                            <option value="daily">{t('daily')} (02:00)</option>
                                                             <option value="weekly">{t('weekly')} ({t('backupWeeklySunday')})</option>
                                                             <option value="monthly">{t('monthly')} ({t('backupMonthlyFirst')})</option>
-                                                            <option value="custom">{t('custom') || 'Custom'}</option>
+                                                            <option value="custom">{t('custom')}</option>
                                                         </select>
                                                         {!['hourly', 'daily', 'weekly', 'monthly'].includes(newBackupJob.schedule) && (
                                                             <input
@@ -4918,7 +4918,7 @@
                                                             onChange={e => setNewBackupJob({...newBackupJob, node: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="">{t('allNodes') || 'All Nodes'}</option>
+                                                            <option value="">{t('allNodes')}</option>
                                                             {(clusterNodes || []).map(n => (
                                                                 <option key={n.node} value={n.node}>{n.node}</option>
                                                             ))}
@@ -4939,7 +4939,7 @@
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('compression') || 'Compression'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('compression')}</label>
                                                         <select
                                                             value={newBackupJob.compress}
                                                             onChange={e => setNewBackupJob({...newBackupJob, compress: e.target.value})}
@@ -4964,15 +4964,15 @@
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('notification') || 'Notification'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('notification')}</label>
                                                         <select
                                                             value={newBackupJob.mailnotification}
                                                             onChange={e => setNewBackupJob({...newBackupJob, mailnotification: e.target.value})}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                         >
-                                                            <option value="always">{t('always') || 'Always'}</option>
-                                                            <option value="failure">{t('onFailure') || 'On Failure'}</option>
-                                                            <option value="never">{t('never') || 'Never'}</option>
+                                                            <option value="always">{t('always')}</option>
+                                                            <option value="failure">{t('onFailure')}</option>
+                                                            <option value="never">{t('never')}</option>
                                                         </select>
                                                     </div>
                                                     <div>
@@ -5232,13 +5232,13 @@
                                     <div className="flex items-start gap-3">
                                         <Icons.Info className="w-5 h-5 text-blue-400 mt-0.5 flex-shrink-0" />
                                         <div>
-                                            <h4 className="text-blue-400 font-medium mb-1">{t('replicationInfoTitle') || 'VM Replication'}</h4>
+                                            <h4 className="text-blue-400 font-medium mb-1">{t('replicationInfoTitle')}</h4>
                                             <p className="text-sm text-gray-300">
-                                                {t('replicationInfoDesc') || 'Keep VM data synchronized between nodes for failover and disaster recovery. Two modes available:'}
+                                                {t('replicationInfoDesc')}
                                             </p>
                                             <ul className="text-sm text-gray-400 mt-2 space-y-1">
-                                                <li><span className="text-purple-400 font-medium">{t('zfsNativeLabel')}</span> — {t('zfsNativeDesc') || 'Incremental ZFS send/recv. Fast and efficient, requires ZFS on both nodes.'}</li>
-                                                <li><span className="text-blue-400 font-medium">{t('snapshot')}</span> — {t('snapshotDesc') || 'Clone + migrate approach. Works with any storage (LVM, dir, etc).'}</li>
+                                                <li><span className="text-purple-400 font-medium">{t('zfsNativeLabel')}</span> — {t('zfsNativeDesc')}</li>
+                                                <li><span className="text-blue-400 font-medium">{t('snapshot')}</span> — {t('snapshotDesc')}</li>
                                             </ul>
                                         </div>
                                     </div>
@@ -5249,7 +5249,7 @@
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.RefreshCw className="w-4 h-4 text-purple-400" />
-                                            <span>ZFS {t('replication') || 'Replication'}</span>
+                                            <span>ZFS {t('replication')}</span>
                                             <span className="text-xs text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">{t('native')}</span>
                                         </h3>
                                         <div className="flex items-center gap-2">
@@ -5269,7 +5269,7 @@
                                                 setShowAddReplication(true);
                                             }} className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm transition-colors">
                                                 <Icons.Plus className="w-4 h-4" />
-                                                {t('addReplication') || 'Add'}
+                                                {t('addReplication')}
                                             </button>
                                         </div>
                                     </div>
@@ -5280,18 +5280,18 @@
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('vmCt')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('jobId')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('source') || 'Source'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('target') || 'Target'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule') || 'Schedule'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('lastSync') || 'Last Sync'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('duration') || 'Duration'}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('source')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('target')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('lastSync')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('duration')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 {replicationJobs.length === 0 ? (
                                                     <tr><td colSpan="9" className="p-6 text-center text-gray-500 text-sm">
-                                                        {t('noReplicationJobs') || 'No Replication Jobs'}
+                                                        {t('noReplicationJobs')}
                                                         {clusterNodes.length < 2 && <span className="block text-xs text-yellow-600 mt-1">{t('replicationNeedsTwoNodes')}</span>}
                                                     </td></tr>
                                                 ) : replicationJobs.map((job, idx) => {
@@ -5320,7 +5320,7 @@
                                                             <td className="p-3 text-sm font-mono">{dur}</td>
                                                             <td className="p-3">
                                                                 <div className="flex items-center gap-1">
-                                                                    <button onClick={() => runReplicationNow(job.id)} className="p-1 text-gray-400 hover:text-blue-400 transition-colors" title={t('runNow') || 'Run Now'}>
+                                                                    <button onClick={() => runReplicationNow(job.id)} className="p-1 text-gray-400 hover:text-blue-400 transition-colors" title={t('runNow')}>
                                                                         <Icons.Play className="w-4 h-4" />
                                                                     </button>
                                                                     <button onClick={() => deleteReplicationJob(job.id)} className="p-1 text-gray-400 hover:text-red-400 transition-colors" title={t('delete')}>
@@ -5342,7 +5342,7 @@
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.Copy className="w-4 h-4 text-blue-400" />
                                             <span>{t('snapshot')} {t('replication')}</span>
-                                            <span className="text-xs text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">{t('anyStorage') || 'any storage'}</span>
+                                            <span className="text-xs text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">{t('anyStorage')}</span>
                                             <span className="text-xs text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded">+ {t('crossCluster')}</span>
                                         </h3>
                                         <div className="flex items-center gap-2">
@@ -5362,7 +5362,7 @@
                                                 setShowAddReplication(true);
                                             }} className="flex items-center gap-1.5 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm transition-colors">
                                                 <Icons.Plus className="w-4 h-4" />
-                                                {t('addReplication') || 'Add'}
+                                                {t('addReplication')}
                                             </button>
                                         </div>
                                     </div>
@@ -5371,11 +5371,11 @@
                                             <thead className="bg-proxmox-dark">
                                                 <tr>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('type') || 'Type'}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('vmCt')}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('target') || 'Target'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('storage') || 'Storage'}</th>
-                                                    <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule') || 'Schedule'}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('target')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('storage')}</th>
+                                                    <th className="text-left p-3 text-sm text-gray-400">{t('replicationSchedule')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('lastRun')}</th>
                                                     <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
                                                 </tr>
@@ -5383,7 +5383,7 @@
                                             <tbody>
                                                 {snapshotReplJobs.length === 0 ? (
                                                     <tr><td colSpan="8" className="p-6 text-center text-gray-500 text-sm">
-                                                        {t('noSnapshotReplJobs') || 'No snapshot replication jobs'}
+                                                        {t('noSnapshotReplJobs')}
                                                     </td></tr>
                                                 ) : snapshotReplJobs.map((job) => {
                                                     const st = job.last_status;
@@ -5400,14 +5400,14 @@
                                                                 ) : st === 'ok' ? (
                                                                     <span className="text-green-400 text-xs px-1.5 py-0.5 bg-green-500/10 rounded">OK</span>
                                                                 ) : (
-                                                                    <span className="text-gray-400 text-xs px-1.5 py-0.5 bg-gray-700/50 rounded">{t('pending') || 'Pending'}</span>
+                                                                    <span className="text-gray-400 text-xs px-1.5 py-0.5 bg-gray-700/50 rounded">{t('pending')}</span>
                                                                 )}
                                                             </td>
                                                             <td className="p-3">
                                                                 {isCrossCluster ? (
                                                                     <span className="text-xs px-1.5 py-0.5 bg-orange-500/10 text-orange-400 rounded">{t('crossCluster')}</span>
                                                                 ) : (
-                                                                    <span className="text-xs px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">{t('local') || 'Local'}</span>
+                                                                    <span className="text-xs px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">{t('local')}</span>
                                                                 )}
                                                             </td>
                                                             <td className="p-3 font-mono">{job.vmid}</td>
@@ -5426,7 +5426,7 @@
                                                             <td className="p-3 text-sm">{job.last_run ? new Date(job.last_run).toLocaleString() : '-'}</td>
                                                             <td className="p-3">
                                                                 <div className="flex items-center gap-1">
-                                                                    <button onClick={() => runSnapshotReplNow(job.id)} className="p-1 text-gray-400 hover:text-blue-400 transition-colors" title={t('runNow') || 'Run Now'}>
+                                                                    <button onClick={() => runSnapshotReplNow(job.id)} className="p-1 text-gray-400 hover:text-blue-400 transition-colors" title={t('runNow')}>
                                                                         <Icons.Play className="w-4 h-4" />
                                                                     </button>
                                                                     <button onClick={() => deleteSnapshotReplJob(job.id)} className="p-1 text-gray-400 hover:text-red-400 transition-colors" title={t('delete')}>
@@ -5449,7 +5449,7 @@
                                             <div className="p-4 border-b border-proxmox-border">
                                                 <h3 className="font-semibold flex items-center gap-2">
                                                     <Icons.RefreshCw className="w-4 h-4" />
-                                                    {t('createReplicationJob') || 'Create Replication Job'}
+                                                    {t('createReplicationJob')}
                                                     <span className={`text-xs px-1.5 py-0.5 rounded ${replType === 'zfs' ? 'text-purple-400 bg-purple-500/10' : 'text-blue-400 bg-blue-500/10'}`}>
                                                         {replType === 'zfs' ? t('zfsNativeLabel') : t('snapshot')}
                                                     </span>
@@ -5462,8 +5462,7 @@
                                                     be empty; users with multi-node clusters who actually wanted
                                                     cross-cluster replication never saw it. */}
                                                 <div className="bg-blue-500/10 border border-blue-500/30 text-blue-200 text-xs p-2 rounded">
-                                                    {t('intraClusterReplOnlyHint') ||
-                                                        'This dialog creates replication within the current cluster. For replication across clusters, open the VM → Configure → Replication → Cross-Cluster tab.'}
+                                                    {t('intraClusterReplOnlyHint')}
                                                 </div>
                                                 {/* VM select */}
                                                 <div>
@@ -5473,7 +5472,7 @@
                                                         onChange={e => setNewReplication({...newReplication, vmid: e.target.value})}
                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                     >
-                                                        <option value="">{t('selectVm') || '-- Select VM --'}</option>
+                                                        <option value="">{t('selectVm')}</option>
                                                         {replVms.map(vm => (
                                                             <option key={vm.vmid} value={vm.vmid}>
                                                                 {vm.vmid} - {vm.name || t('unnamed')} ({vm.type === 'qemu' ? 'VM' : 'CT'}) [{vm.node}]
@@ -5483,7 +5482,7 @@
                                                 </div>
                                                 {/* Target node */}
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetNode') || 'Target Node'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetNode')}</label>
                                                     {(() => {
                                                         const selectedVm = replVms.find(v => String(v.vmid) === String(newReplication.vmid));
                                                         const otherNodes = clusterNodes.filter(n => selectedVm ? n.name !== selectedVm.node : true);
@@ -5492,7 +5491,7 @@
                                                         if (newReplication.vmid && otherNodes.length === 0) {
                                                             return (
                                                                 <div className="bg-yellow-500/10 border border-yellow-500/30 text-yellow-300 text-xs p-2 rounded">
-                                                                    {t('noOtherNodeForRepl') || 'No other node available in this cluster. For replication across clusters, open the VM → Configure → Replication → Cross-Cluster tab.'}
+                                                                    {t('noOtherNodeForRepl')}
                                                                 </div>
                                                             );
                                                         }
@@ -5502,7 +5501,7 @@
                                                                 onChange={e => setNewReplication({...newReplication, target: e.target.value})}
                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                             >
-                                                                <option value="">{t('selectNode') || '-- Select Node --'}</option>
+                                                                <option value="">{t('selectNode')}</option>
                                                                 {otherNodes.map(n => (
                                                                     <option key={n.name} value={n.name}>{n.name}</option>
                                                                 ))}
@@ -5514,7 +5513,7 @@
                                                 {replType === 'snapshot' && (
                                                     <>
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('targetStorage') || 'Target Storage'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('targetStorage')}</label>
                                                         <select
                                                             value={newReplication.target_storage}
                                                             onChange={e => setNewReplication({...newReplication, target_storage: e.target.value})}
@@ -5528,17 +5527,17 @@
                                                     </div>
                                                     {/* #174 aderumier — replication transfer mode */}
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('replMode') || 'Transfer mode'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('replMode')}</label>
                                                         <select
                                                             value={newReplication.mode || 'full'}
                                                             onChange={e => setNewReplication({...newReplication, mode: e.target.value})}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                         >
-                                                            <option value="full">{t('replModeFull') || 'Full (clone + migrate every run)'}</option>
-                                                            <option value="incremental">{t('replModeIncremental') || 'Incremental (RBD/ZFS delta — scales for big VMs)'}</option>
+                                                            <option value="full">{t('replModeFull')}</option>
+                                                            <option value="incremental">{t('replModeIncremental')}</option>
                                                         </select>
                                                         <p className="text-xs text-gray-500 mt-1">
-                                                            {t('replModeHint') || 'Incremental ships only the changed blocks since the last snapshot when the VM\'s disks are Ceph RBD (or ZFS) on both clusters; otherwise it falls back to full.'}
+                                                            {t('replModeHint')}
                                                         </p>
                                                     </div>
                                                     </>
@@ -5546,20 +5545,20 @@
                                                 {/* Target VMID - snapshot mode only (#552) */}
                                                 {replType === 'snapshot' && (
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('targetVmidOptional')}</label>
                                                         <input
                                                             type="number"
                                                             min="100"
                                                             value={newReplication.target_vmid || ''}
                                                             onChange={e => setNewReplication({...newReplication, target_vmid: e.target.value})}
-                                                            placeholder={t('autoNextId') || 'auto'}
+                                                            placeholder={t('autoNextId')}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                         />
                                                     </div>
                                                 )}
                                                 {/* Schedule */}
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('replicationSchedule') || 'Schedule'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('replicationSchedule')}</label>
                                                     <select
                                                         value={replType === 'zfs'
                                                             ? (['*/1', '*/5', '*/15', '*/30', '0 */1 * * *', '0 */6 * * *', '0 0 * * *'].includes(newReplication.schedule) ? newReplication.schedule : 'custom')
@@ -5571,14 +5570,14 @@
                                                         }}
                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                     >
-                                                        {replType === 'zfs' && <option value="*/1">{t('everyMinute') || 'Every minute'}</option>}
-                                                        {replType === 'zfs' && <option value="*/5">{t('every5Min') || 'Every 5 minutes'}</option>}
-                                                        <option value="*/15">{t('every15Min') || 'Every 15 minutes'}{replType === 'zfs' ? ` (${t('default')})` : ''}</option>
-                                                        <option value="*/30">{t('every30Min') || 'Every 30 minutes'}</option>
-                                                        <option value="0 */1 * * *">{t('everyHour') || 'Every hour'}</option>
-                                                        <option value="0 */6 * * *">{t('every6Hours') || 'Every 6 hours'}{replType === 'snapshot' ? ` (${t('default')})` : ''}</option>
-                                                        <option value="0 0 * * *">{t('daily') || 'Daily'}</option>
-                                                        <option value="custom">{t('custom') || 'Custom'}</option>
+                                                        {replType === 'zfs' && <option value="*/1">{t('everyMinute')}</option>}
+                                                        {replType === 'zfs' && <option value="*/5">{t('every5Min')}</option>}
+                                                        <option value="*/15">{t('every15Min')}{replType === 'zfs' ? ` (${t('default')})` : ''}</option>
+                                                        <option value="*/30">{t('every30Min')}</option>
+                                                        <option value="0 */1 * * *">{t('everyHour')}</option>
+                                                        <option value="0 */6 * * *">{t('every6Hours')}{replType === 'snapshot' ? ` (${t('default')})` : ''}</option>
+                                                        <option value="0 0 * * *">{t('daily')}</option>
+                                                        <option value="custom">{t('custom')}</option>
                                                     </select>
                                                     {!['*/1', '*/5', '*/15', '*/30', '0 */1 * * *', '0 */6 * * *', '0 0 * * *'].includes(newReplication.schedule) && (
                                                         <input
@@ -5593,12 +5592,12 @@
                                                 {/* Rate limit - ZFS only */}
                                                 {replType === 'zfs' && (
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('rateLimit') || 'Rate Limit (MB/s)'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('rateLimit')}</label>
                                                         <input
                                                             type="number"
                                                             value={newReplication.rate}
                                                             onChange={e => setNewReplication({...newReplication, rate: e.target.value})}
-                                                            placeholder={t('unlimited') || 'Unlimited'}
+                                                            placeholder={t('unlimited')}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                             min="1"
                                                         />
@@ -5607,12 +5606,12 @@
                                                 {/* Comment - ZFS only */}
                                                 {replType === 'zfs' && (
                                                     <div>
-                                                        <label className="block text-sm text-gray-400 mb-1">{t('comment') || 'Comment'}</label>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('comment')}</label>
                                                         <input
                                                             type="text"
                                                             value={newReplication.comment}
                                                             onChange={e => setNewReplication({...newReplication, comment: e.target.value})}
-                                                            placeholder={t('commentPlaceholder') || 'e.g. DR replication'}
+                                                            placeholder={t('commentPlaceholder')}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                         />
                                                     </div>
@@ -5621,8 +5620,8 @@
                                                 <div className={`p-3 rounded-lg text-xs ${replType === 'zfs' ? 'bg-purple-500/10 border border-purple-500/20 text-purple-300' : 'bg-blue-500/10 border border-blue-500/20 text-blue-300'}`}>
                                                     <Icons.Info className="w-3 h-3 inline mr-1" />
                                                     {replType === 'zfs'
-                                                        ? (t('zfsRequired') || 'Both source and target node must use ZFS storage for the replicated VM disk.')
-                                                        : (t('snapshotReplNote') || 'Creates a full clone of the VM and migrates it to the target node. The previous replica is replaced on each run.')
+                                                        ? (t('zfsRequired'))
+                                                        : (t('snapshotReplNote'))
                                                     }
                                                 </div>
                                             </div>
@@ -5656,9 +5655,9 @@
                                                 <Icons.Cpu className="w-8 h-8 text-purple-400" />
                                             </div>
                                             <div className="flex-1">
-                                                <h3 className="text-lg font-semibold text-white mb-1">{t('autoDetectedRecommendation') || 'Auto-Detected Recommendation'}</h3>
+                                                <h3 className="text-lg font-semibold text-white mb-1">{t('autoDetectedRecommendation')}</h3>
                                                 <p className="text-sm text-gray-300 mb-3">
-                                                    {t('basedOnClusterCpus') || 'Based on the CPUs detected in your cluster, we recommend:'}
+                                                    {t('basedOnClusterCpus')}
                                                 </p>
                                                 <div className="flex items-center gap-3">
                                                     <code className="text-xl font-bold text-purple-400 bg-proxmox-dark px-4 py-2 rounded-lg">
@@ -5670,7 +5669,7 @@
                                                         }}
                                                         className="px-3 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded-lg text-sm transition-colors"
                                                     >
-                                                        {t('copy') || 'Copy'}
+                                                        {t('copy')}
                                                     </button>
                                                 </div>
                                             </div>
@@ -5684,33 +5683,33 @@
                                             <Icons.Cpu className="text-purple-400" />
                                         </div>
                                         <div>
-                                            <h3 className="font-semibold text-white">{t('cpuCompatibilityMode') || 'CPU Compatibility Mode'}</h3>
-                                            <p className="text-sm text-gray-400">{t('cpuCompatibilityDesc') || 'Ensure live migration compatibility across different CPU generations'}</p>
+                                            <h3 className="font-semibold text-white">{t('cpuCompatibilityMode')}</h3>
+                                            <p className="text-sm text-gray-400">{t('cpuCompatibilityDesc')}</p>
                                         </div>
                                     </div>
 
                                     <div className="p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg mb-6">
                                         <h4 className="text-blue-400 font-medium mb-2 flex items-center gap-2">
                                             <Icons.AlertTriangle className="w-4 h-4" />
-                                            {t('whatIsCpuCompat') || 'What is CPU Compatibility Mode?'}
+                                            {t('whatIsCpuCompat')}
                                         </h4>
                                         <p className="text-sm text-gray-300 mb-2">
-                                            {t('cpuCompatExplain') || 'When you have nodes with different CPU generations (e.g., Haswell and Skylake), live migration may fail because newer CPUs expose features that older CPUs don\'t support.'}
+                                            {t('cpuCompatExplain')}
                                         </p>
                                         <p className="text-sm text-gray-300">
-                                            {t('cpuCompatSolution') || 'By setting all VMs to use a common CPU type, you ensure they can migrate between any node in the cluster.'}
+                                            {t('cpuCompatSolution')}
                                         </p>
                                     </div>
 
                                     <div className="space-y-4">
-                                        <h4 className="font-medium text-white">{t('availableLevels') || 'Available Compatibility Levels'}</h4>
+                                        <h4 className="font-medium text-white">{t('availableLevels')}</h4>
 
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                             {[
-                                                { id: 'x86-64-v2-AES', label: 'x86-64-v2-AES', color: 'green', tag: t('safest') || 'Safest', desc: t('broadCompatibility') || 'Broad compatibility - works with most CPUs from 2008+' },
-                                                { id: 'x86-64-v3', label: 'x86-64-v3', color: 'blue', tag: t('modern') || 'Modern', desc: t('haswell') || 'Haswell and newer (2013+)' },
-                                                { id: 'x86-64-v4', label: 'x86-64-v4', color: 'yellow', tag: t('newest') || 'Newest', desc: t('skylakeAvx') || 'Skylake-X with AVX-512 (2017+)' },
-                                                { id: 'host', label: 'host', color: 'red', tag: t('noMigration') || 'No Migration', desc: t('hostDesc') || 'Pass-through host CPU - best performance, no migration' }
+                                                { id: 'x86-64-v2-AES', label: 'x86-64-v2-AES', color: 'green', tag: t('safest'), desc: t('broadCompatibility') },
+                                                { id: 'x86-64-v3', label: 'x86-64-v3', color: 'blue', tag: t('modern'), desc: t('haswell') },
+                                                { id: 'x86-64-v4', label: 'x86-64-v4', color: 'yellow', tag: t('newest'), desc: t('skylakeAvx') },
+                                                { id: 'host', label: 'host', color: 'red', tag: t('noMigration'), desc: t('hostDesc') }
                                             ].map(level => (
                                                 <div
                                                     key={level.id}
@@ -5726,7 +5725,7 @@
                                                         <div className="flex items-center gap-2">
                                                             {recommendedCpu === level.id && (
                                                                 <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-400 rounded">
-                                                                    {t('recommended') || 'Recommended'}
+                                                                    {t('recommended')}
                                                                 </span>
                                                             )}
                                                             <span className={`text-xs px-2 py-1 rounded bg-${level.color}-500/20 text-${level.color}-400`}>
@@ -5745,7 +5744,7 @@
                                     <div className="mt-6 pt-6 border-t border-proxmox-border">
                                         <h4 className="font-medium text-white mb-4 flex items-center gap-2">
                                             <Icons.Server className="w-4 h-4" />
-                                            {t('detectedClusterCpus') || 'Detected Cluster CPUs'}
+                                            {t('detectedClusterCpus')}
                                         </h4>
                                         {cpuInfo.length > 0 ? (
                                             <div className="space-y-2">
@@ -5774,7 +5773,7 @@
                                         ) : (
                                             <div className="text-center py-6 text-gray-500">
                                                 <Icons.Cpu className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                {t('loadingCpuInfo') || 'Loading CPU information...'}
+                                                {t('loadingCpuInfo')}
                                             </div>
                                         )}
                                     </div>
@@ -5782,13 +5781,13 @@
                                     <div className="mt-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
                                         <h4 className="text-yellow-400 font-medium mb-2 flex items-center gap-2">
                                             <Icons.AlertTriangle className="w-4 h-4" />
-                                            {t('howToApply') || 'How to Apply'}
+                                            {t('howToApply')}
                                         </h4>
                                         <ol className="text-sm text-gray-300 space-y-1 list-decimal list-inside">
-                                            <li>{t('cpuStep1') || 'Go to each VM\'s Hardware tab'}</li>
-                                            <li>{t('cpuStep2') || 'Edit the CPU setting'}</li>
-                                            <li>{t('cpuStep3') || 'Change "Type" to your chosen compatibility level'}</li>
-                                            <li>{t('cpuStep4') || 'Restart the VM for changes to take effect'}</li>
+                                            <li>{t('cpuStep1')}</li>
+                                            <li>{t('cpuStep2')}</li>
+                                            <li>{t('cpuStep3')}</li>
+                                            <li>{t('cpuStep4')}</li>
                                         </ol>
                                     </div>
                                 </div>
@@ -5806,17 +5805,17 @@
                                     <div className="flex items-center justify-between mb-2">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.Activity className="w-4 h-4" />
-                                            {t('crsCardTitle') || 'CRS & Auto-Rebalance'}
-                                            <span className="text-[11px] text-gray-500 font-normal">{t('crsCardSubtitle') || '(same config as Datacenter → Options)'}</span>
+                                            {t('crsCardTitle')}
+                                            <span className="text-[11px] text-gray-500 font-normal">{t('crsCardSubtitle')}</span>
                                         </h3>
                                         <div className="flex gap-2">
                                             <button onClick={() => setEditingOptions(parseOptionsForEdit(dcOptions))}
                                                 className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded text-xs">
-                                                {t('revert') || 'Revert'}
+                                                {t('revert')}
                                             </button>
                                             <button onClick={saveOptions}
                                                 className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded text-xs text-white">
-                                                {t('save') || 'Save'}
+                                                {t('save')}
                                             </button>
                                         </div>
                                     </div>
@@ -6168,7 +6167,7 @@
                                                         clusters ignore the field (backend version-gates). */}
                                                     <div>
                                                         <label className="block text-sm text-gray-400 mb-1">
-                                                            {t('crsAutoRebalance') || 'Auto-Rebalance'} <span className="text-xs text-gray-500">PVE 9.2+</span>
+                                                            {t('crsAutoRebalance')} <span className="text-xs text-gray-500">PVE 9.2+</span>
                                                         </label>
                                                         <select
                                                             value={newHaResource.auto_rebalance === null ? '' :
@@ -6180,9 +6179,9 @@
                                                             }}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
                                                         >
-                                                            <option value="">{t('autoRebalanceClusterDefault') || '-- cluster default --'}</option>
-                                                            <option value="1">{t('autoRebalanceVmOn') || 'Enabled — CRS may move this VM'}</option>
-                                                            <option value="0">{t('autoRebalanceVmOff') || 'Disabled — pin to assigned node'}</option>
+                                                            <option value="">{t('autoRebalanceClusterDefault')}</option>
+                                                            <option value="1">{t('autoRebalanceVmOn')}</option>
+                                                            <option value="0">{t('autoRebalanceVmOff')}</option>
                                                         </select>
                                                     </div>
                                                 </div>
@@ -6688,24 +6687,24 @@
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
                                             <Icons.FileKey />
-                                            {t('subscriptions') || 'Subscriptions'}
+                                            {t('subscriptions')}
                                         </h3>
                                         <div className="flex items-center gap-2">
                                             <button
                                                 onClick={exportSubscriptionsCsv}
                                                 disabled={subscriptionsExporting}
                                                 className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border disabled:opacity-50 rounded-lg text-sm transition-colors"
-                                                title={t('exportCsv') || 'Export CSV'}
+                                                title={t('exportCsv')}
                                             >
                                                 <Icons.Download className="w-4 h-4" />
-                                                {subscriptionsExporting ? (t('exporting') || 'Exporting...') : (t('export') || 'Export')}
+                                                {subscriptionsExporting ? (t('exporting')) : (t('export'))}
                                             </button>
                                             <button
                                                 onClick={loadSubscriptions}
                                                 className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm transition-colors"
                                             >
                                                 <Icons.RefreshCw className={`w-4 h-4 ${subscriptionsLoading ? 'animate-spin' : ''}`} />
-                                                {t('refresh') || 'Refresh'}
+                                                {t('refresh')}
                                             </button>
                                         </div>
                                     </div>
@@ -6725,7 +6724,7 @@
                                             </thead>
                                             <tbody>
                                                 {subscriptionsLoading && (!subscriptions || subscriptions.length === 0) ? (
-                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">{t('loading') || 'Loading'}...</td></tr>
+                                                    <tr><td colSpan="8" className="p-8 text-center text-gray-500">{t('loading')}...</td></tr>
                                                 ) : (!subscriptions || subscriptions.length === 0) ? (
                                                     <tr><td colSpan="8" className="p-8 text-center text-gray-500">{t('noSubscriptionDataAvailable')}</td></tr>
                                                 ) : subscriptions.map((sub) => {
@@ -6780,7 +6779,7 @@
                                                                         onClick={() => checkSubscription(sub.node)}
                                                                         disabled={isBusy}
                                                                         className="p-2 hover:bg-proxmox-border disabled:opacity-50 rounded transition-colors"
-                                                                        title={t('refreshStatus') || 'Refresh Status'}
+                                                                        title={t('refreshStatus')}
                                                                     >
                                                                         <Icons.RefreshCw className={`w-4 h-4 ${isBusy ? 'animate-spin' : ''}`} />
                                                                     </button>
@@ -6788,7 +6787,7 @@
                                                                         onClick={() => deleteSubscriptionKey(sub.node)}
                                                                         disabled={isBusy}
                                                                         className="p-2 hover:bg-red-500/20 disabled:opacity-50 rounded text-red-400 transition-colors"
-                                                                        title={t('delete') || 'Delete'}
+                                                                        title={t('delete')}
                                                                     >
                                                                         <Icons.Trash className="w-4 h-4" />
                                                                     </button>
@@ -6813,9 +6812,9 @@
                                 ) : !cephData || !cephData.available ? (
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
                                         <Icons.Database className="w-12 h-12 mx-auto text-gray-600 mb-4" />
-                                        <h3 className="text-lg font-semibold mb-2">{t('cephNotInstalled') || 'Ceph Not Installed'}</h3>
-                                        <p className="text-gray-400 mb-4">{t('cephNotInstalledDesc') || 'No Ceph cluster has been configured on this Proxmox cluster.'}</p>
-                                        <p className="text-gray-500 text-sm">{t('cephInstallHint') || 'To set up Ceph, open a node and use the Ceph tab to initialize.'}</p>
+                                        <h3 className="text-lg font-semibold mb-2">{t('cephNotInstalled')}</h3>
+                                        <p className="text-gray-400 mb-4">{t('cephNotInstalledDesc')}</p>
+                                        <p className="text-gray-500 text-sm">{t('cephInstallHint')}</p>
                                     </div>
                                 ) : (
                                     <>
@@ -6834,12 +6833,12 @@
                                                             : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'
                                                     }`}
                                                 >
-                                                    {st === 'status' ? t('cephStatus') || 'Status' :
+                                                    {st === 'status' ? t('cephStatus') :
                                                      st === 'osds' ? 'OSDs' :
-                                                     st === 'monitors' ? t('cephMons') || 'Monitors' :
-                                                     st === 'pools' ? t('cephPools') || 'Pools' :
+                                                     st === 'monitors' ? t('cephMons') :
+                                                     st === 'pools' ? t('cephPools') :
                                                      st === 'fs' ? 'CephFS' :
-                                                     t('cephMirroring') || 'Mirroring'}
+                                                     t('cephMirroring')}
                                                 </button>
                                             ))}
                                         </div>
@@ -6851,7 +6850,7 @@
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
                                                     <h3 className="font-semibold mb-4 flex items-center gap-2">
                                                         <Icons.Activity />
-                                                        {t('cephHealth') || 'Cluster Health'}
+                                                        {t('cephHealth')}
                                                     </h3>
                                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                                         <div className="bg-proxmox-dark rounded-lg p-4">
@@ -6883,7 +6882,7 @@
                                                             </div>
                                                         </div>
                                                         <div className="bg-proxmox-dark rounded-lg p-4">
-                                                            <div className="text-sm text-gray-400 mb-1">{t('cephCapacity') || 'Capacity'}</div>
+                                                            <div className="text-sm text-gray-400 mb-1">{t('cephCapacity')}</div>
                                                             {(() => {
                                                                 const total = cephData.status?.pgmap?.bytes_total || 0;
                                                                 const used = cephData.status?.pgmap?.bytes_used || 0;
@@ -6936,10 +6935,10 @@
                                                             }}
                                                             className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
                                                         >
-                                                            <Icons.Plus /> {t('cephCreateOsd') || 'Create OSD'}
+                                                            <Icons.Plus /> {t('cephCreateOsd')}
                                                         </button>
                                                         <button onClick={fetchCephData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
-                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('refresh')}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -7039,7 +7038,7 @@
                                             <>
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                    <h3 className="font-semibold">{t('cephMons') || 'Monitors'} ({(cephData.mon || []).length})</h3>
+                                                    <h3 className="font-semibold">{t('cephMons')} ({(cephData.mon || []).length})</h3>
                                                     <div className="flex gap-2">
                                                         <button
                                                             onClick={() => setShowCreateMon(true)}
@@ -7088,7 +7087,7 @@
                                                                                 try {
                                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${host}/ceph/mon/${mon.name}`, { method: 'DELETE' });
                                                                                     if (res?.ok) {
-                                                                                        addToast(t('cephMonDeleted') || `Monitor "${mon.name}" deleted`, 'success');
+                                                                                        addToast(t('cephMonDeleted'), 'success');
                                                                                         fetchCephData();
                                                                                     } else {
                                                                                         const err = await res.json().catch(() => ({}));
@@ -7112,7 +7111,7 @@
                                             {/* NS 2026-07-17: Managers (mgr) — a Ceph cluster needs >=1 active mgr */}
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden mt-4">
                                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                    <h3 className="font-semibold">{t('cephMgrs') || 'Managers'} ({(cephData.mgr || []).length})</h3>
+                                                    <h3 className="font-semibold">{t('cephMgrs')} ({(cephData.mgr || []).length})</h3>
                                                     <button
                                                         onClick={() => { const n = cephNode || (clusterNodes || []).filter(nn => nn.online !== 0)[0]?.name || ''; setCephNode(n); setShowCreateMgr(true); }}
                                                         className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
@@ -7121,7 +7120,7 @@
                                                     </button>
                                                 </div>
                                                 {(!cephData.mgr || cephData.mgr.length === 0) ? (
-                                                    <div className="p-6 text-center text-gray-500 text-sm">{t('cephNoMgr') || 'No managers — a Ceph cluster needs at least one active manager'}</div>
+                                                    <div className="p-6 text-center text-gray-500 text-sm">{t('cephNoMgr')}</div>
                                                 ) : (
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full">
@@ -7157,7 +7156,7 @@
                                                                                     try {
                                                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${host}/ceph/mgr/${mgr.name}`, { method: 'DELETE' });
                                                                                         if (res?.ok) {
-                                                                                            addToast(t('cephMgrDeleted') || `Manager "${mgr.name}" deleted`, 'success');
+                                                                                            addToast(t('cephMgrDeleted'), 'success');
                                                                                             fetchCephData();
                                                                                         } else {
                                                                                             const err = await res.json().catch(() => ({}));
@@ -7184,13 +7183,13 @@
                                         {cephSubTab === 'pools' && (
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                 <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                    <h3 className="font-semibold">{t('cephPools') || 'Pools'} ({(cephData.pools || []).length})</h3>
+                                                    <h3 className="font-semibold">{t('cephPools')} ({(cephData.pools || []).length})</h3>
                                                     <div className="flex gap-2">
                                                         <button
                                                             onClick={() => setShowCreatePool(true)}
                                                             className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
                                                         >
-                                                            <Icons.Plus /> {t('cephCreatePool') || 'Create Pool'}
+                                                            <Icons.Plus /> {t('cephCreatePool')}
                                                         </button>
                                                         <button onClick={fetchCephData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
                                                             <Icons.RefreshCw className="w-4 h-4" />
@@ -7236,7 +7235,7 @@
                                                                                         body: JSON.stringify({ confirm_name: name })
                                                                                     });
                                                                                     if (res?.ok) {
-                                                                                        addToast(t('cephPoolDeleted') || `Pool "${name}" deleted`, 'success');
+                                                                                        addToast(t('cephPoolDeleted'), 'success');
                                                                                         fetchCephData();
                                                                                     } else {
                                                                                         const err = await res.json().catch(() => ({}));
@@ -7268,18 +7267,18 @@
                                                         <button
                                                             onClick={() => { const n = cephNode || (clusterNodes || []).filter(nn => nn.online !== 0)[0]?.name || ''; setCephNode(n); setShowCreateMds(true); }}
                                                             className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors"
-                                                            title={t('cephCreateMdsHint') || 'A CephFS needs at least one running MDS'}
+                                                            title={t('cephCreateMdsHint')}
                                                         >
-                                                            <Icons.Plus /> {t('cephCreateMds') || 'Create MDS'}
+                                                            <Icons.Plus /> {t('cephCreateMds')}
                                                         </button>
                                                         <button
                                                             onClick={() => { const n = cephNode || (clusterNodes || []).filter(nn => nn.online !== 0)[0]?.name || ''; setCephNode(n); setNewFs({ name: '', pg_num: 128, add_storage: true }); setShowCreateFs(true); }}
                                                             className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
                                                         >
-                                                            <Icons.Plus /> {t('cephCreateFs') || 'Create CephFS'}
+                                                            <Icons.Plus /> {t('cephCreateFs')}
                                                         </button>
                                                         <button onClick={fetchCephData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
-                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('refresh')}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -7336,7 +7335,7 @@
                                                 {cephData.mds && (
                                                     <div className="border-t border-proxmox-border">
                                                         <div className="p-4 bg-proxmox-dark">
-                                                            <h4 className="font-medium text-sm">{t('cephMds') || 'Metadata Servers'}</h4>
+                                                            <h4 className="font-medium text-sm">{t('cephMds')}</h4>
                                                         </div>
                                                         <div className="divide-y divide-proxmox-border">
                                                             {(cephData.mds?.data || []).map((mds, idx) => (
@@ -7375,9 +7374,9 @@
                                                     <div className="space-y-4">
                                                         <div className="flex items-center gap-3">
                                                             <button onClick={() => { setMirrorPoolDetail(null); setMirrorImages([]); }} className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors flex items-center gap-1">
-                                                                <Icons.ChevronLeft className="w-4 h-4" /> {t('cephMirrorBackToOverview') || 'Back'}
+                                                                <Icons.ChevronLeft className="w-4 h-4" /> {t('cephMirrorBackToOverview')}
                                                             </button>
-                                                            <h3 className="font-semibold">{t('cephMirrorImages') || 'Images'}: {mirrorPoolDetail}</h3>
+                                                            <h3 className="font-semibold">{t('cephMirrorImages')}: {mirrorPoolDetail}</h3>
                                                             <button onClick={() => fetchMirrorImages(mirrorPoolDetail)} className="ml-auto px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
                                                                 <Icons.RefreshCw className="w-4 h-4" />
                                                             </button>
@@ -7392,8 +7391,8 @@
                                                                         <tr className="border-b border-proxmox-border text-left text-gray-400">
                                                                             <th className="p-3">{t('cephMirrorImage')}</th>
                                                                             <th className="p-3">{t('status')}</th>
-                                                                            <th className="p-3">{t('cephMirrorMode') || 'Mode'}</th>
-                                                                            <th className="p-3">{t('cephMirrorSyncStatus') || 'Sync'}</th>
+                                                                            <th className="p-3">{t('cephMirrorMode')}</th>
+                                                                            <th className="p-3">{t('cephMirrorSyncStatus')}</th>
                                                                             <th className="p-3">{t('actions')}</th>
                                                                         </tr>
                                                                     </thead>
@@ -7439,7 +7438,7 @@
                                                                                                         onClick={() => { setMirrorForm(f => ({...f, image: img.name, force: false})); setShowMirrorModal('promote'); }}
                                                                                                         className="px-2 py-1 text-xs bg-blue-500/20 hover:bg-blue-500/30 rounded text-blue-400 transition-colors"
                                                                                                         title={t('cephMirrorPromote')}
-                                                                                                    >{t('cephMirrorPromote') || 'Promote'}</button>
+                                                                                                    >{t('cephMirrorPromote')}</button>
                                                                                                     <button
                                                                                                         onClick={async () => {
                                                                                                             if (!confirm(`${t('cephMirrorConfirmDemote')} ${img.name}?`)) return;
@@ -7449,7 +7448,7 @@
                                                                                                             } catch(e) {}
                                                                                                         }}
                                                                                                         className="px-2 py-1 text-xs bg-yellow-500/20 hover:bg-yellow-500/30 rounded text-yellow-400 transition-colors"
-                                                                                                    >{t('cephMirrorDemote') || 'Demote'}</button>
+                                                                                                    >{t('cephMirrorDemote')}</button>
                                                                                                     <button
                                                                                                         onClick={async () => {
                                                                                                             if (!confirm(`${t('cephMirrorConfirmResync')} ${img.name}? ${t('cephMirrorResyncWarning')}`)) return;
@@ -7459,7 +7458,7 @@
                                                                                                             } catch(e) {}
                                                                                                         }}
                                                                                                         className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
-                                                                                                    >{t('cephMirrorResync') || 'Resync'}</button>
+                                                                                                    >{t('cephMirrorResync')}</button>
                                                                                                     <button
                                                                                                         onClick={async () => {
                                                                                                             if (!confirm(`${t('cephMirrorConfirmDisableImage')} ${img.name}?`)) return;
@@ -7489,10 +7488,10 @@
                                                             return (
                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                                                        <h4 className="font-semibold text-sm">{t('cephMirrorSchedules') || 'Snapshot Schedules'}</h4>
+                                                                        <h4 className="font-semibold text-sm">{t('cephMirrorSchedules')}</h4>
                                                                         <button onClick={() => { setMirrorForm(f => ({...f, interval: '1h'})); setShowMirrorModal('schedule'); }}
                                                                             className="flex items-center gap-1 px-3 py-1.5 bg-proxmox-orange text-white rounded-lg text-xs hover:bg-orange-600 transition-colors">
-                                                                            <Icons.Plus className="w-3 h-3" /> {t('cephMirrorAddSchedule') || 'Add'}
+                                                                            <Icons.Plus className="w-3 h-3" /> {t('cephMirrorAddSchedule')}
                                                                         </button>
                                                                     </div>
                                                                     <div className="p-4 text-sm text-gray-400">
@@ -7506,9 +7505,9 @@
                                                     /* Overview: all pools with mirroring status */
                                                     <div className="space-y-4">
                                                         <div className="flex justify-between items-center">
-                                                            <h3 className="font-semibold">{t('cephMirroring') || 'RBD Mirroring'}</h3>
+                                                            <h3 className="font-semibold">{t('cephMirroring')}</h3>
                                                             <button onClick={fetchMirrorData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
-                                                                <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                                <Icons.RefreshCw className="w-4 h-4" /> {t('refresh')}
                                                             </button>
                                                         </div>
 
@@ -7520,20 +7519,20 @@
 
                                                         {/* NS: hint about SSH requirement */}
                                                         <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-blue-300 text-xs">
-                                                            {t('cephMirrorSshRequired') || 'RBD Mirroring requires SSH access to the cluster'}
+                                                            {t('cephMirrorSshRequired')}
                                                         </div>
 
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             {(!mirrorData?.pools || mirrorData.pools.length === 0) ? (
-                                                                <div className="p-8 text-center text-gray-500">{t('cephMirrorNoPoolsEnabled') || 'No pools found'}</div>
+                                                                <div className="p-8 text-center text-gray-500">{t('cephMirrorNoPoolsEnabled')}</div>
                                                             ) : (
                                                                 <table className="w-full text-sm">
                                                                     <thead>
                                                                         <tr className="border-b border-proxmox-border text-left text-gray-400">
                                                                             <th className="p-3">{t('name')}</th>
-                                                                            <th className="p-3">{t('cephMirrorMode') || 'Mode'}</th>
-                                                                            <th className="p-3">{t('cephMirrorPeers') || 'Peers'}</th>
-                                                                            <th className="p-3">{t('cephMirrorHealth') || 'Health'}</th>
+                                                                            <th className="p-3">{t('cephMirrorMode')}</th>
+                                                                            <th className="p-3">{t('cephMirrorPeers')}</th>
+                                                                            <th className="p-3">{t('cephMirrorHealth')}</th>
                                                                             <th className="p-3">{t('actions')}</th>
                                                                         </tr>
                                                                     </thead>
@@ -7585,17 +7584,17 @@
                                                                                         {pool.mode === 'disabled' ? (
                                                                                             <button onClick={() => { setMirrorForm(f => ({...f, mode: 'image', _pool: pool.name})); setShowMirrorModal('enable'); }}
                                                                                                 className="px-2 py-1 text-xs bg-proxmox-orange/20 hover:bg-proxmox-orange/30 rounded text-orange-400 transition-colors">
-                                                                                                {t('cephMirrorEnable') || 'Enable'}
+                                                                                                {t('cephMirrorEnable')}
                                                                                             </button>
                                                                                         ) : (
                                                                                             <>
                                                                                                 <button onClick={() => { setMirrorPoolDetail(pool.name); fetchMirrorImages(pool.name); }}
                                                                                                     className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors">
-                                                                                                    {t('cephMirrorImages') || 'Images'}
+                                                                                                    {t('cephMirrorImages')}
                                                                                                 </button>
                                                                                                 <button onClick={() => { setMirrorForm(f => ({...f, _pool: pool.name, client: 'client.admin', site_name: '', mon_host: ''})); setShowMirrorModal('peer'); }}
                                                                                                     className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors">
-                                                                                                    {t('cephMirrorAddPeer') || 'Add Peer'}
+                                                                                                    {t('cephMirrorAddPeer')}
                                                                                                 </button>
                                                                                                 <button onClick={async () => {
                                                                                                     if (!confirm(`${t('cephMirrorConfirmDisablePool')} "${pool.name}"?`)) return;
@@ -7604,7 +7603,7 @@
                                                                                                         fetchMirrorData();
                                                                                                     } catch(e) {}
                                                                                                 }} className="px-2 py-1 text-xs hover:bg-red-500/20 rounded text-red-400 transition-colors">
-                                                                                                    {t('cephMirrorDisable') || 'Disable'}
+                                                                                                    {t('cephMirrorDisable')}
                                                                                                 </button>
                                                                                             </>
                                                                                         )}
@@ -7624,19 +7623,19 @@
                                                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
                                                         <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
                                                             <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorEnable') || 'Enable Mirroring'}: {mirrorForm._pool}</h3>
+                                                                <h3 className="font-semibold">{t('cephMirrorEnable')}: {mirrorForm._pool}</h3>
                                                             </div>
                                                             <div className="p-4 space-y-4">
                                                                 <div>
-                                                                    <label className="text-sm text-gray-400 mb-2 block">{t('cephMirrorMode') || 'Mode'}</label>
+                                                                    <label className="text-sm text-gray-400 mb-2 block">{t('cephMirrorMode')}</label>
                                                                     <div className="space-y-2">
                                                                         <label className="flex items-center gap-2 cursor-pointer">
                                                                             <input type="radio" name="mirrorMode" value="image" checked={mirrorForm.mode === 'image'} onChange={() => setMirrorForm(f => ({...f, mode: 'image'}))} className="text-proxmox-orange" />
-                                                                            <span className="text-sm">{t('cephMirrorModeImage') || 'Image (individual)'}</span>
+                                                                            <span className="text-sm">{t('cephMirrorModeImage')}</span>
                                                                         </label>
                                                                         <label className="flex items-center gap-2 cursor-pointer">
                                                                             <input type="radio" name="mirrorMode" value="pool" checked={mirrorForm.mode === 'pool'} onChange={() => setMirrorForm(f => ({...f, mode: 'pool'}))} className="text-proxmox-orange" />
-                                                                            <span className="text-sm">{t('cephMirrorModePool') || 'Pool (all images)'}</span>
+                                                                            <span className="text-sm">{t('cephMirrorModePool')}</span>
                                                                         </label>
                                                                     </div>
                                                                     <p className="text-xs text-gray-500 mt-2">
@@ -7667,7 +7666,7 @@
                                                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
                                                         <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
                                                             <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorAddPeer') || 'Add Peer'}: {mirrorForm._pool}</h3>
+                                                                <h3 className="font-semibold">{t('cephMirrorAddPeer')}: {mirrorForm._pool}</h3>
                                                             </div>
                                                             <div className="p-4 space-y-4">
                                                                 <div>
@@ -7676,7 +7675,7 @@
                                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="client.admin" />
                                                                 </div>
                                                                 <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorSiteName') || 'Site Name'}</label>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorSiteName')}</label>
                                                                     <input type="text" value={mirrorForm.site_name} onChange={e => setMirrorForm(f => ({...f, site_name: e.target.value}))}
                                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="remote-site" />
                                                                 </div>
@@ -7711,11 +7710,11 @@
                                                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
                                                         <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
                                                             <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorAddSchedule') || 'Add Schedule'}: {mirrorPoolDetail}</h3>
+                                                                <h3 className="font-semibold">{t('cephMirrorAddSchedule')}: {mirrorPoolDetail}</h3>
                                                             </div>
                                                             <div className="p-4 space-y-4">
                                                                 <div>
-                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorInterval') || 'Interval'}</label>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorInterval')}</label>
                                                                     <select value={mirrorForm.interval} onChange={e => setMirrorForm(f => ({...f, interval: e.target.value}))}
                                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm">
                                                                         <option value="5m">{t('cephMirrorSchedule5m')}</option>
@@ -7749,13 +7748,13 @@
                                                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
                                                         <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
                                                             <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="font-semibold">{t('cephMirrorPromote') || 'Promote'}: {mirrorForm.image}</h3>
+                                                                <h3 className="font-semibold">{t('cephMirrorPromote')}: {mirrorForm.image}</h3>
                                                             </div>
                                                             <div className="p-4 space-y-4">
                                                                 <p className="text-sm text-yellow-400">{t('cephMirrorPromoteHint')}</p>
                                                                 <label className="flex items-center gap-2 cursor-pointer">
                                                                     <input type="checkbox" checked={mirrorForm.force} onChange={e => setMirrorForm(f => ({...f, force: e.target.checked}))} className="rounded" />
-                                                                    <span className="text-sm text-red-400">{t('cephMirrorForcePromote') || 'Force promote (may cause data loss!)'}</span>
+                                                                    <span className="text-sm text-red-400">{t('cephMirrorForcePromote')}</span>
                                                                 </label>
                                                             </div>
                                                             <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
@@ -7769,7 +7768,7 @@
                                                                         if (res?.ok) { setShowMirrorModal(null); fetchMirrorImages(mirrorPoolDetail); }
                                                                     } catch(e) {}
                                                                 }} className={`px-4 py-2 rounded-lg text-white transition-colors ${mirrorForm.force ? 'bg-red-600 hover:bg-red-700' : 'bg-proxmox-orange hover:bg-orange-600'}`}>
-                                                                    {t('cephMirrorPromote') || 'Promote'}
+                                                                    {t('cephMirrorPromote')}
                                                                 </button>
                                                             </div>
                                                         </div>
@@ -7783,7 +7782,7 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreatePool(false)}>
                                                 <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="p-4 border-b border-proxmox-border">
-                                                        <h3 className="font-semibold">{t('cephCreatePool') || 'Create Pool'}</h3>
+                                                        <h3 className="font-semibold">{t('cephCreatePool')}</h3>
                                                     </div>
                                                     <div className="p-4 space-y-4">
                                                         <div>
@@ -7835,7 +7834,7 @@
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                         >
-                                                            {t('create') || 'Create'}
+                                                            {t('create')}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -7847,7 +7846,7 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateMon(false)}>
                                                 <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="p-4 border-b border-proxmox-border">
-                                                        <h3 className="font-semibold">{t('cephCreateMon') || 'Create Monitor'}</h3>
+                                                        <h3 className="font-semibold">{t('cephCreateMon')}</h3>
                                                     </div>
                                                     <div className="p-4 space-y-4">
                                                         <div>
@@ -7864,7 +7863,7 @@
                                                         <button
                                                             onClick={async () => {
                                                                 if (!cephNode) {
-                                                                    addToast(t('selectNodeFirst') || 'Select a node first', 'error');
+                                                                    addToast(t('selectNodeFirst'), 'error');
                                                                     return;
                                                                 }
                                                                 // MK May 2026 (#407): silent catch swallowed all errors — modal
@@ -7874,7 +7873,7 @@
                                                                 try {
                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/mon/${cephNode}`, { method: 'POST' });
                                                                     if (res?.ok) {
-                                                                        addToast(t('cephMonCreated') || `Monitor created on ${cephNode}`, 'success');
+                                                                        addToast(t('cephMonCreated'), 'success');
                                                                         setShowCreateMon(false);
                                                                         fetchCephData();
                                                                     } else {
@@ -7887,7 +7886,7 @@
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
                                                         >
-                                                            {t('create') || 'Create'}
+                                                            {t('create')}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -7899,7 +7898,7 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateOsd(false)}>
                                                 <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="p-4 border-b border-proxmox-border">
-                                                        <h3 className="font-semibold">{t('cephCreateOsd') || 'Create OSD'}</h3>
+                                                        <h3 className="font-semibold">{t('cephCreateOsd')}</h3>
                                                     </div>
                                                     <div className="p-4 space-y-4">
                                                         <div>
@@ -7909,12 +7908,12 @@
                                                             </select>
                                                         </div>
                                                         <div>
-                                                            <label className="text-sm text-gray-400 mb-1 block">{t('cephOsdDisk') || 'Disk'}</label>
+                                                            <label className="text-sm text-gray-400 mb-1 block">{t('cephOsdDisk')}</label>
                                                             {disksLoading ? (
-                                                                <div className="text-sm text-gray-500 p-2">{t('loading') || 'Loading…'}</div>
+                                                                <div className="text-sm text-gray-500 p-2">{t('loading')}</div>
                                                             ) : (
                                                                 <select value={osdForm.dev} onChange={e => setOsdForm(f => ({ ...f, dev: e.target.value }))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
-                                                                    <option value="">{t('cephSelectDisk') || 'Select a disk…'}</option>
+                                                                    <option value="">{t('cephSelectDisk')}</option>
                                                                     {(nodeDisks || []).map(d => {
                                                                         const gb = d.size ? `${(d.size / 1e9).toFixed(0)} GB` : '';
                                                                         const busy = d.used ? ` — ${t('inUse')}: ${d.used}` : (d.osdid >= 0 ? ` — osd.${d.osdid}` : '');
@@ -7922,7 +7921,7 @@
                                                                     })}
                                                                 </select>
                                                             )}
-                                                            <div className="text-xs text-gray-500 mt-1">{t('cephOsdDiskHint') || 'In-use disks are disabled. Creating an OSD erases the disk.'}</div>
+                                                            <div className="text-xs text-gray-500 mt-1">{t('cephOsdDiskHint')}</div>
                                                         </div>
                                                     </div>
                                                     <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
@@ -7936,12 +7935,12 @@
                                                                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                                                                         body: JSON.stringify({ dev: osdForm.dev })
                                                                     });
-                                                                    if (res?.ok) { addToast(t('cephOsdCreated') || `OSD created on ${osdForm.dev}`, 'success'); setShowCreateOsd(false); fetchCephData(); }
+                                                                    if (res?.ok) { addToast(t('cephOsdCreated'), 'success'); setShowCreateOsd(false); fetchCephData(); }
                                                                     else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephOsd')} (HTTP ${res?.status || '?'})`, 'error'); }
                                                                 } catch (e) { addToast(`${t('failedCreateCephOsd')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
-                                                        >{t('create') || 'Create'}</button>
+                                                        >{t('create')}</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -7952,7 +7951,7 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateMgr(false)}>
                                                 <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="p-4 border-b border-proxmox-border">
-                                                        <h3 className="font-semibold">{t('cephCreateMgr') || 'Create Manager'}</h3>
+                                                        <h3 className="font-semibold">{t('cephCreateMgr')}</h3>
                                                     </div>
                                                     <div className="p-4 space-y-4">
                                                         <div>
@@ -7966,15 +7965,15 @@
                                                         <button onClick={() => setShowCreateMgr(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
                                                         <button
                                                             onClick={async () => {
-                                                                if (!cephNode) { addToast(t('selectNodeFirst') || 'Select a node first', 'error'); return; }
+                                                                if (!cephNode) { addToast(t('selectNodeFirst'), 'error'); return; }
                                                                 try {
                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/mgr/${cephNode}`, { method: 'POST' });
-                                                                    if (res?.ok) { addToast(t('cephMgrCreated') || `Manager created on ${cephNode}`, 'success'); setShowCreateMgr(false); fetchCephData(); }
+                                                                    if (res?.ok) { addToast(t('cephMgrCreated'), 'success'); setShowCreateMgr(false); fetchCephData(); }
                                                                     else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephManager')} (HTTP ${res?.status || '?'})`, 'error'); }
                                                                 } catch (e) { addToast(`${t('failedCreateCephManager')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
-                                                        >{t('create') || 'Create'}</button>
+                                                        >{t('create')}</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -7985,7 +7984,7 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateMds(false)}>
                                                 <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="p-4 border-b border-proxmox-border">
-                                                        <h3 className="font-semibold">{t('cephCreateMds') || 'Create MDS'}</h3>
+                                                        <h3 className="font-semibold">{t('cephCreateMds')}</h3>
                                                     </div>
                                                     <div className="p-4 space-y-4">
                                                         <div>
@@ -7993,22 +7992,22 @@
                                                             <select value={cephNode} onChange={e => setCephNode(e.target.value)} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2">
                                                                 {(clusterNodes || []).filter(n => n.online !== 0).map(n => (<option key={n.name} value={n.name}>{n.name}</option>))}
                                                             </select>
-                                                            <div className="text-xs text-gray-500 mt-1">{t('cephCreateMdsHint') || 'A CephFS needs at least one running MDS.'}</div>
+                                                            <div className="text-xs text-gray-500 mt-1">{t('cephCreateMdsHint')}</div>
                                                         </div>
                                                     </div>
                                                     <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
                                                         <button onClick={() => setShowCreateMds(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
                                                         <button
                                                             onClick={async () => {
-                                                                if (!cephNode) { addToast(t('selectNodeFirst') || 'Select a node first', 'error'); return; }
+                                                                if (!cephNode) { addToast(t('selectNodeFirst'), 'error'); return; }
                                                                 try {
                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/mds/${cephNode}`, { method: 'POST' });
-                                                                    if (res?.ok) { addToast(t('cephMdsCreated') || `MDS created on ${cephNode}`, 'success'); setShowCreateMds(false); fetchCephData(); }
+                                                                    if (res?.ok) { addToast(t('cephMdsCreated'), 'success'); setShowCreateMds(false); fetchCephData(); }
                                                                     else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephMds')} (HTTP ${res?.status || '?'})`, 'error'); }
                                                                 } catch (e) { addToast(`${t('failedCreateCephMds')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
-                                                        >{t('create') || 'Create'}</button>
+                                                        >{t('create')}</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -8019,7 +8018,7 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowCreateFs(false)}>
                                                 <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="p-4 border-b border-proxmox-border">
-                                                        <h3 className="font-semibold">{t('cephCreateFs') || 'Create CephFS'}</h3>
+                                                        <h3 className="font-semibold">{t('cephCreateFs')}</h3>
                                                     </div>
                                                     <div className="p-4 space-y-4">
                                                         <div>
@@ -8034,26 +8033,26 @@
                                                         </div>
                                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                                             <input type="checkbox" checked={newFs.add_storage} onChange={e => setNewFs(f => ({ ...f, add_storage: e.target.checked }))} />
-                                                            {t('cephFsAddStorage') || 'Add as PVE storage'}
+                                                            {t('cephFsAddStorage')}
                                                         </label>
-                                                        <div className="text-xs text-gray-500">{t('cephCreateFsHint') || 'Creates <name>_data + <name>_metadata pools. Requires a running MDS.'}</div>
+                                                        <div className="text-xs text-gray-500">{t('cephCreateFsHint')}</div>
                                                     </div>
                                                     <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
                                                         <button onClick={() => setShowCreateFs(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
                                                         <button
                                                             onClick={async () => {
-                                                                if (!newFs.name || !cephNode) { addToast(t('cephFsNameRequired') || 'Enter a name', 'error'); return; }
+                                                                if (!newFs.name || !cephNode) { addToast(t('cephFsNameRequired'), 'error'); return; }
                                                                 try {
                                                                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${cephNode}/ceph/fs`, {
                                                                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                                                                         body: JSON.stringify({ name: newFs.name, 'add-storage': newFs.add_storage ? 1 : 0, pg_num: newFs.pg_num })
                                                                     });
-                                                                    if (res?.ok) { addToast(t('cephFsCreated') || `CephFS "${newFs.name}" created`, 'success'); setShowCreateFs(false); fetchCephData(); }
+                                                                    if (res?.ok) { addToast(t('cephFsCreated'), 'success'); setShowCreateFs(false); fetchCephData(); }
                                                                     else { const err = await res.json().catch(() => ({})); addToast(err.error || `${t('failedCreateCephFs')} (HTTP ${res?.status || '?'})`, 'error'); }
                                                                 } catch (e) { addToast(`${t('failedCreateCephFs')}: ${e.message || e}`, 'error'); }
                                                             }}
                                                             className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
-                                                        >{t('create') || 'Create'}</button>
+                                                        >{t('create')}</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -8069,19 +8068,19 @@
                                 {isCorporate ? (
                                     <div style={{ background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border)', borderRadius: 4 }}>
                                         <div className="flex justify-between items-center px-3 py-2" style={{ borderBottom: '1px solid var(--corp-border)' }}>
-                                            <span className="text-xs font-semibold" style={{ color: 'var(--corp-text)' }}>Metric Servers</span>
-                                            <button onClick={loadMetricServers} className="corp-action-btn" title="Refresh">
+                                            <span className="text-xs font-semibold" style={{ color: 'var(--corp-text)' }}>{t('cloud.metricServers')}</span>
+                                            <button onClick={loadMetricServers} className="corp-action-btn" title={t('refresh')}>
                                                 <Icons.RefreshCw style={{ width: 14, height: 14 }} />
                                             </button>
                                         </div>
                                         {metricServers.length === 0 ? (
-                                            <div className="p-4 text-center text-xs text-gray-500">No metric servers configured</div>
+                                            <div className="p-4 text-center text-xs text-gray-500">{t('cloud.noMetricServers')}</div>
                                         ) : metricServers.map((s, idx) => (
                                             <div key={idx} className="px-3 py-2 flex items-center gap-3 text-xs" style={{ borderBottom: idx < metricServers.length - 1 ? '1px solid var(--corp-border)' : 'none' }}>
                                                 <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${s.type === 'influxdb' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>{s.type}</span>
                                                 <span className="font-medium" style={{ color: 'var(--corp-text)' }}>{s.id}</span>
                                                 <span className="text-gray-400">{s.server}:{s.port}</span>
-                                                <span className={`ml-auto px-1.5 py-0.5 rounded text-xs ${s.disable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'}`}>{s.disable ? 'Disabled' : 'Enabled'}</span>
+                                                <span className={`ml-auto px-1.5 py-0.5 rounded text-xs ${s.disable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'}`}>{s.disable ? t('cloud.disabled') : t('enabled')}</span>
                                             </div>
                                         ))}
                                     </div>
@@ -8090,24 +8089,24 @@
                                         <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                             <h3 className="font-semibold flex items-center gap-2">
                                                 <Icons.BarChart className="w-5 h-5 text-proxmox-orange" />
-                                                Metric Servers
+                                                {t('cloud.metricServers')}
                                             </h3>
                                             <button onClick={loadMetricServers} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg text-sm transition-colors">
-                                                <Icons.RefreshCw className="w-4 h-4" /> Refresh
+                                                <Icons.RefreshCw className="w-4 h-4" /> {t('refresh')}
                                             </button>
                                         </div>
                                         {metricServers.length === 0 ? (
-                                            <div className="p-8 text-center text-gray-500">No metric servers configured</div>
+                                            <div className="p-8 text-center text-gray-500">{t('cloud.noMetricServers')}</div>
                                         ) : (
                                             <div className="overflow-x-auto">
                                                 <table className="w-full">
                                                     <thead className="bg-proxmox-dark">
                                                         <tr>
-                                                            <th className="text-left p-3 text-sm text-gray-400">Name</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">Type</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">Server</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">Port</th>
-                                                            <th className="text-left p-3 text-sm text-gray-400">Status</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('server')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('port')}</th>
+                                                            <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody>
@@ -8123,7 +8122,7 @@
                                                                 <td className="p-3 text-gray-300 font-mono text-sm">{s.port}</td>
                                                                 <td className="p-3">
                                                                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${s.disable ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'}`}>
-                                                                        {s.disable ? 'Disabled' : 'Enabled'}
+                                                                        {s.disable ? t('cloud.disabled') : t('enabled')}
                                                                     </span>
                                                                 </td>
                                                             </tr>

@@ -861,13 +861,22 @@
                         const data = await res.json();
                         setAuditIntegrity(data);
                         if (data.potentially_tampered > 0) {
-                            addToast(`⚠️ WARNING: ${data.potentially_tampered} audit entries may have been tampered!`, 'error');
+                            addToast(
+                                (t('auditIntegrityTamperWarning') || '⚠️ WARNING: possible audit-log tampering — suspicious entries: {count}')
+                                    .replace('{count}', data.potentially_tampered),
+                                'error'
+                            );
                         } else {
-                            addToast(`✓ Audit log integrity verified: ${data.verified}/${data.total_entries} entries`, 'success');
+                            addToast(
+                                (t('auditIntegrityVerified') || '✓ Audit log integrity verified: {verified}/{total}')
+                                    .replace('{verified}', data.verified)
+                                    .replace('{total}', data.total_entries),
+                                'success'
+                            );
                         }
                     }
                 } catch (e) {
-                    addToast('Failed to check audit integrity', 'error');
+                    addToast(t('auditIntegrityCheckFailed') || 'Failed to check audit log integrity', 'error');
                 } finally {
                     setChecking(false);
                 }
@@ -2404,7 +2413,7 @@
                         setTimeout(() => getRollingStatus(), 500);
                         setTimeout(() => getRollingStatus(), 1500);
                     } else {
-                        addToast(data.error || 'Error starting rolling update', 'error');
+                        addToast(data.error || t('rollingUpdateStartFailed') || 'Failed to start rolling update', 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -2439,10 +2448,10 @@
                     });
                     const data = await response.json();
                     if (data.success) {
-                        addToast('Rolling Update resumed', 'success');
+                        addToast(t('rollingUpdateResumed') || 'Rolling Update resumed', 'success');
                         setTimeout(() => getRollingStatus(), 500);
                     } else {
-                        addToast(data.error || 'Failed to resume', 'error');
+                        addToast(data.error || t('rollingUpdateResumeFailed') || 'Failed to resume rolling update', 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
@@ -2654,7 +2663,7 @@
                                 <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
                                     <span className="text-red-400">⚠️</span>
                                     <div>
-                                        <p className="text-red-400 text-sm font-medium">Kernel Update Available</p>
+                                        <p className="text-red-400 text-sm font-medium">{t('kernelUpdateDetected') || 'Kernel update detected'}</p>
                                         <p className="text-red-300/70 text-xs">{t('includeRebootHint')}</p>
                                     </div>
                                 </div>
@@ -2765,11 +2774,11 @@
                                                                                         </td>
                                                                                         <td className="p-2">
                                                                                             {isKernelPkg ? (
-                                                                                                <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded">Kernel</span>
+                                                                                                <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded">{t('packageKernel') || 'Kernel'}</span>
                                                                                             ) : isSecurityPkg ? (
-                                                                                                <span className="px-1.5 py-0.5 bg-orange-500/20 text-orange-400 rounded">Security</span>
+                                                                                                <span className="px-1.5 py-0.5 bg-orange-500/20 text-orange-400 rounded">{t('packageSecurity') || 'Security'}</span>
                                                                                             ) : (
-                                                                                                <span className="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">Update</span>
+                                                                                                <span className="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">{t('update') || 'Update'}</span>
                                                                                             )}
                                                                                         </td>
                                                                                     </tr>
@@ -3000,8 +3009,14 @@
                                     {(rollingUpdate.completed_nodes?.length > 0 || rollingUpdate.failed_nodes?.length > 0) && (
                                         <p className="text-xs text-gray-400 mt-2">
                                             {rollingUpdate.completed_nodes?.length || 0}/{rollingUpdate.nodes?.length || '?'} {t('nodesUpdated') || 'nodes updated'}
-                                            {rollingUpdate.failed_nodes?.length > 0 && `, ${rollingUpdate.failed_nodes.length} failed`}
-                                            {rollingUpdate.skipped_nodes?.length > 0 && `, ${rollingUpdate.skipped_nodes.length} skipped`}
+                                            {rollingUpdate.failed_nodes?.length > 0 && (
+                                                (t('rollingUpdateFailedNodeCount') || ', failed nodes: {count}')
+                                                    .replace('{count}', rollingUpdate.failed_nodes.length)
+                                            )}
+                                            {rollingUpdate.skipped_nodes?.length > 0 && (
+                                                (t('rollingUpdateSkippedNodeCount') || ', skipped nodes: {count}')
+                                                    .replace('{count}', rollingUpdate.skipped_nodes.length)
+                                            )}
                                         </p>
                                     )}
                                 </div>
@@ -3015,7 +3030,7 @@
                                         <div className="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4 space-y-3">
                                             <div className="flex items-center gap-2">
                                                 <Icons.AlertTriangle className="w-5 h-5 text-yellow-400" />
-                                                <span className="text-yellow-400 font-semibold text-lg">Rolling Update Paused</span>
+                                                <span className="text-yellow-400 font-semibold text-lg">{t('rollingUpdatePaused') || 'Rolling Update Paused'}</span>
                                             </div>
                                             {rollingUpdate.paused_details && (
                                                 <div className="text-sm text-yellow-200/80">
@@ -3025,7 +3040,7 @@
                                             {/* Show failed VMs if evacuation failure */}
                                             {rollingUpdate.paused_reason === 'evacuation_failures' && rollingUpdate.paused_details?.failed_vms && (
                                                 <div className="space-y-1 mt-2">
-                                                    <p className="text-xs text-yellow-400 font-medium">Failed VMs:</p>
+                                                    <p className="text-xs text-yellow-400 font-medium">{t('failedVms') || 'Failed VMs'}:</p>
                                                     {rollingUpdate.paused_details.failed_vms.map((vm, i) => (
                                                         <div key={i} className="flex items-center gap-2 text-xs text-red-400 bg-red-900/20 rounded px-2 py-1">
                                                             <Icons.XCircle className="w-3 h-3" />
@@ -3041,14 +3056,14 @@
                                                     className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
                                                 >
                                                     <Icons.Play className="w-4 h-4" />
-                                                    Continue Update
+                                                    {t('resume') || 'Resume'}
                                                 </button>
                                                 <button
                                                     onClick={cancelRollingUpdate}
                                                     className="px-4 py-2 bg-red-600/30 hover:bg-red-600/50 text-red-400 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
                                                 >
                                                     <Icons.X className="w-4 h-4" />
-                                                    Cancel Update
+                                                    {t('cancelRollingUpdate') || 'Cancel Rolling Update'}
                                                 </button>
                                             </div>
                                         </div>
@@ -3063,7 +3078,9 @@
                                                 <div className="animate-spin w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full"></div>
                                             )}
                                             <span className={`${rollingUpdate.status === 'paused' ? 'text-yellow-400' : 'text-blue-400'} font-semibold text-lg`}>
-                                                {rollingUpdate.status === 'paused' ? 'Update Paused' : t('rollingUpdateInProgress')}
+                                                {rollingUpdate.status === 'paused'
+                                                    ? (t('rollingUpdatePaused') || 'Rolling Update Paused')
+                                                    : t('rollingUpdateInProgress')}
                                             </span>
                                         </div>
                                         {rollingUpdate.status === 'running' && (
@@ -3145,7 +3162,10 @@
                                                     <Icons.Terminal className="w-4 h-4" />
                                                     {t('updateLogs')}
                                                 </span>
-                                                <span className="text-xs text-gray-500">{rollingUpdate.logs.length} entries</span>
+                                                <span className="text-xs text-gray-500">
+                                                    {(t('rollingUpdateLogEntries') || 'Log entries: {count}')
+                                                        .replace('{count}', rollingUpdate.logs.length)}
+                                                </span>
                                             </div>
                                             <div className="max-h-48 overflow-y-auto p-3 font-mono text-xs space-y-1">
                                                 {rollingUpdate.logs.map((log, idx) => (

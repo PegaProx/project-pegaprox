@@ -121,8 +121,8 @@
 
         function CloudConnChip({ connected, t }) {
             return connected
-                ? <CloudPill color="#1bbf8a" bg="rgba(45,212,167,0.16)" border="rgba(45,212,167,0.42)" dot>{(t && t('cloud.online')) || 'Online'}</CloudPill>
-                : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{(t && t('cloud.offline')) || 'Offline'}</CloudPill>;
+                ? <CloudPill color="#1bbf8a" bg="rgba(45,212,167,0.16)" border="rgba(45,212,167,0.42)" dot>{t('cloud.online')}</CloudPill>
+                : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{t('cloud.offline')}</CloudPill>;
         }
 
         // circular conic gauge
@@ -283,9 +283,9 @@
             const to = Math.min(total, (page + 1) * pageSize);
             return (
                 <div className="cloud-pager">
-                    <span className="cloud-pager-text">{from}–{to} {t('cloud.of') || 'of'} {total}</span>
-                    <button type="button" className="cloud-icon-btn" disabled={page <= 0} onClick={() => onPage(page - 1)} title={t('cloud.previous') || 'Previous'}><Icons.ChevronLeft /></button>
-                    <button type="button" className="cloud-icon-btn" disabled={page >= pages - 1} onClick={() => onPage(page + 1)} title={t('cloud.next') || 'Next'}><Icons.ChevronRight /></button>
+                    <span className="cloud-pager-text">{from}–{to} {t('cloud.of')} {total}</span>
+                    <button type="button" className="cloud-icon-btn" disabled={page <= 0} onClick={() => onPage(page - 1)} title={t('cloud.previous')}><Icons.ChevronLeft /></button>
+                    <button type="button" className="cloud-icon-btn" disabled={page >= pages - 1} onClick={() => onPage(page + 1)} title={t('cloud.next')}><Icons.ChevronRight /></button>
                 </div>
             );
         }
@@ -328,7 +328,7 @@
             const max = Math.max(1, ...rows.map(r => Number(r.value) || 0));
             return (
                 <div className="cloud-barchart">
-                    {rows.length === 0 && <div className="cloud-empty">{t('cloud.noData') || 'No data.'}</div>}
+                    {rows.length === 0 && <div className="cloud-empty">{t('cloud.noData')}</div>}
                     {rows.map((r, i) => (
                         <div className="cloud-bar-row" key={i}>
                             <span className="cloud-bar-label" title={r.label}>{r.label}</span>
@@ -346,88 +346,88 @@
             const paused = r.status === 'paused' || r.status === 'suspended';
             const isCt = r.type === 'lxc';
             return [
-                (!running && !paused) && { label: t('start') || 'Start', icon: 'Play', onClick: () => act.vmAction(r, 'start') },
-                paused && { label: t('resume') || 'Resume', icon: 'PlayCircle', onClick: () => act.vmAction(r, 'resume') },
-                running && { label: t('shutdown') || 'Shutdown', icon: 'Power', onClick: () => act.vmAction(r, 'shutdown') },
-                running && { label: t('reboot') || 'Reboot', icon: 'RotateCw', onClick: () => act.vmAction(r, 'reboot') },
-                (running && !isCt) && { label: t('suspend') || 'Suspend', icon: 'Pause', onClick: () => act.vmAction(r, 'suspend') },
-                running && { label: t('stop') || 'Stop', icon: 'Square', onClick: () => act.vmAction(r, 'stop') },
-                running && { label: t('forceStop') || 'Force stop', icon: 'StopCircle', danger: true, onClick: () => act.forceStop(r) },
+                (!running && !paused) && { label: t('start'), icon: 'Play', onClick: () => act.vmAction(r, 'start') },
+                paused && { label: t('resume'), icon: 'PlayCircle', onClick: () => act.vmAction(r, 'resume') },
+                running && { label: t('shutdown'), icon: 'Power', onClick: () => act.vmAction(r, 'shutdown') },
+                running && { label: t('reboot'), icon: 'RotateCw', onClick: () => act.vmAction(r, 'reboot') },
+                (running && !isCt) && { label: t('suspend'), icon: 'Pause', onClick: () => act.vmAction(r, 'suspend') },
+                running && { label: t('stop'), icon: 'Square', onClick: () => act.vmAction(r, 'stop') },
+                running && { label: t('forceStop'), icon: 'StopCircle', danger: true, onClick: () => act.forceStop(r) },
                 { divider: true },
-                { label: t('console') || 'Console', icon: 'Monitor', onClick: () => act.openConsole(r) },
-                (running && !isCt) && { label: t('spiceConsole') || 'SPICE', icon: 'ExternalLink', onClick: () => act.openSpice(r) },
-                isCt && { label: t('shell') || 'Shell', icon: 'Terminal', onClick: () => act.openLxcShell(r) },
-                { label: t('snapshots') || 'Snapshot', icon: 'Camera', onClick: () => act.snapshot(r) },
-                { label: t('metrics') || 'Metrics', icon: 'BarChart', onClick: () => act.openMetrics(r) },
+                { label: t('console'), icon: 'Monitor', onClick: () => act.openConsole(r) },
+                (running && !isCt) && { label: t('spiceConsole'), icon: 'ExternalLink', onClick: () => act.openSpice(r) },
+                isCt && { label: t('shell'), icon: 'Terminal', onClick: () => act.openLxcShell(r) },
+                { label: t('snapshots'), icon: 'Camera', onClick: () => act.snapshot(r) },
+                { label: t('metrics'), icon: 'BarChart', onClick: () => act.openMetrics(r) },
                 { divider: true },
-                { label: t('edit') || 'Edit / Hardware', icon: 'Cog', onClick: () => act.openConfig(r) },
-                { label: t('migrate') || 'Migrate', icon: 'Send', onClick: () => act.migrate(r) },
-                act.multiCluster && { label: t('cloud.crossMigrate') || 'Migrate to cluster…', icon: 'Send', onClick: () => act.crossMigrate(r) },
-                { label: t('clone') || 'Clone', icon: 'Copy', onClick: () => act.clone(r) },
+                { label: t('edit'), icon: 'Cog', onClick: () => act.openConfig(r) },
+                { label: t('migrate'), icon: 'Send', onClick: () => act.migrate(r) },
+                act.multiCluster && { label: t('cloud.crossMigrate'), icon: 'Send', onClick: () => act.crossMigrate(r) },
+                { label: t('clone'), icon: 'Copy', onClick: () => act.clone(r) },
                 { divider: true },
-                { label: t('delete') || 'Delete', icon: 'Trash2', danger: true, onClick: () => act.del(r) },
+                { label: t('delete'), icon: 'Trash2', danger: true, onClick: () => act.del(r) },
             ].filter(Boolean);
         }
 
         // ── side nav (collapsible, grouped) ────────────────────────
         function CloudSideNav({ active, onSelect, isAdmin, collapsed, onToggle, t }) {
             const groups = [
-                { label: t('cloud.navDashboard') || 'Dashboard', items: [{ id: 'overview', label: t('cloud.overview') || 'Overview', icon: 'Grid' }] },
-                { label: t('cloud.navCompute') || 'Compute', items: [
-                    { id: 'vms', label: t('cloud.vms') || 'Virtual Machines', icon: 'Server' },
-                    { id: 'containers', label: t('cloud.containers') || 'Containers', icon: 'Box' },
+                { label: t('cloud.navDashboard'), items: [{ id: 'overview', label: t('cloud.overview'), icon: 'Grid' }] },
+                { label: t('cloud.navCompute'), items: [
+                    { id: 'vms', label: t('cloud.vms'), icon: 'Server' },
+                    { id: 'containers', label: t('cloud.containers'), icon: 'Box' },
                 ] },
-                { label: t('cloud.navStorage') || 'Storage', items: [
-                    { id: 'datastores', label: t('cloud.datastores') || 'Datastores', icon: 'Database' },
-                    { id: 'storage', label: t('cloud.storageConfig') || 'Storage Config', icon: 'HardDrive' },
-                    { id: 'pools', label: t('cloud.pools') || 'Resource Pools', icon: 'Layers' },
-                    { id: 'ceph', label: t('cloud.ceph') || 'Ceph', icon: 'Database' },
+                { label: t('cloud.navStorage'), items: [
+                    { id: 'datastores', label: t('cloud.datastores'), icon: 'Database' },
+                    { id: 'storage', label: t('cloud.storageConfig'), icon: 'HardDrive' },
+                    { id: 'pools', label: t('cloud.pools'), icon: 'Layers' },
+                    { id: 'ceph', label: t('cloud.ceph'), icon: 'Database' },
                 ] },
-                { label: t('cloud.navNetwork') || 'Network', items: [
-                    { id: 'networks', label: t('cloud.networks') || 'Networks', icon: 'Network' },
-                    { id: 'sdn', label: t('cloud.sdn') || 'SDN', icon: 'Globe' },
-                    { id: 'firewall', label: t('cloud.firewall') || 'Firewall', icon: 'Lock' },
-                    { id: 'topology', label: t('cloud.topology') || 'Topology', icon: 'Share2' },
+                { label: t('cloud.navNetwork'), items: [
+                    { id: 'networks', label: t('cloud.networks'), icon: 'Network' },
+                    { id: 'sdn', label: t('cloud.sdn'), icon: 'Globe' },
+                    { id: 'firewall', label: t('cloud.firewall'), icon: 'Lock' },
+                    { id: 'topology', label: t('cloud.topology'), icon: 'Share2' },
                 ] },
-                { label: t('cloud.navDataProtection') || 'Data Protection', items: [
-                    { id: 'backups', label: t('cloud.backups') || 'Backups', icon: 'Archive' },
-                    { id: 'replication', label: t('cloud.replication') || 'Replication', icon: 'Copy' },
-                    { id: 'pbs', label: t('cloud.pbs') || 'Backup Servers', icon: 'Server' },
-                    { id: 'siterecovery', label: t('cloud.siteRecovery') || 'Site Recovery', icon: 'LifeBuoy' },
+                { label: t('cloud.navDataProtection'), items: [
+                    { id: 'backups', label: t('cloud.backups'), icon: 'Archive' },
+                    { id: 'replication', label: t('cloud.replication'), icon: 'Copy' },
+                    { id: 'pbs', label: t('cloud.pbs'), icon: 'Server' },
+                    { id: 'siterecovery', label: t('cloud.siteRecovery'), icon: 'LifeBuoy' },
                 ] },
-                { label: t('cloud.navAutomation') || 'Automation', items: [
-                    { id: 'schedules', label: t('scheduledActions') || 'Schedules', icon: 'Clock' },
-                    { id: 'scripts', label: t('customScripts') || 'Scripts', icon: 'Terminal' },
-                    { id: 'snapshotpolicies', label: t('cloud.snapshotPolicies') || 'Snapshot Policies', icon: 'Camera' },
-                    { id: 'templates', label: t('cloud.templates') || 'Templates', icon: 'Copy' },
-                    { id: 'alerts', label: t('alertChannels') || 'Alert Channels', icon: 'Bell' },
+                { label: t('cloud.navAutomation'), items: [
+                    { id: 'schedules', label: t('scheduledActions'), icon: 'Clock' },
+                    { id: 'scripts', label: t('customScripts'), icon: 'Terminal' },
+                    { id: 'snapshotpolicies', label: t('cloud.snapshotPolicies'), icon: 'Camera' },
+                    { id: 'templates', label: t('cloud.templates'), icon: 'Copy' },
+                    { id: 'alerts', label: t('alertChannels'), icon: 'Bell' },
                 ] },
-                { label: t('cloud.navInfrastructure') || 'Infrastructure', items: [
-                    { id: 'clusters', label: t('cloud.clustersTitle') || 'Clusters', icon: 'Cloud' },
-                    { id: 'nodes', label: t('cloud.hosts') || 'Hosts', icon: 'Cpu' },
-                    { id: 'ha', label: t('cloud.ha') || 'High Availability', icon: 'Shield' },
-                    { id: 'updates', label: t('updateManager') || 'Update Manager', icon: 'Download' },
+                { label: t('cloud.navInfrastructure'), items: [
+                    { id: 'clusters', label: t('cloud.clustersTitle'), icon: 'Cloud' },
+                    { id: 'nodes', label: t('cloud.hosts'), icon: 'Cpu' },
+                    { id: 'ha', label: t('cloud.ha'), icon: 'Shield' },
+                    { id: 'updates', label: t('updateManager'), icon: 'Download' },
                 ] },
-                { label: t('cloud.navMonitoring') || 'Monitoring', items: [{ id: 'monitoring', label: t('cloud.monitoring') || 'Monitoring', icon: 'Activity' }] },
-                { label: t('cloud.navReports') || 'Reports', items: [
-                    { id: 'insights', label: t('insights') || 'Insights', icon: 'Zap' },
-                    { id: 'costs', label: t('costDashboard') || 'Costs', icon: 'DollarSign' },
-                    { id: 'power', label: t('powerTitle') || 'Power & Carbon', icon: 'Zap' },
-                    { id: 'apihealth', label: t('apiHealth') || 'API Health', icon: 'Activity' },
-                    { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: 'Shield' },
+                { label: t('cloud.navMonitoring'), items: [{ id: 'monitoring', label: t('cloud.monitoring'), icon: 'Activity' }] },
+                { label: t('cloud.navReports'), items: [
+                    { id: 'insights', label: t('insights'), icon: 'Zap' },
+                    { id: 'costs', label: t('costDashboard'), icon: 'DollarSign' },
+                    { id: 'power', label: t('powerTitle'), icon: 'Zap' },
+                    { id: 'apihealth', label: t('apiHealth'), icon: 'Activity' },
+                    { id: 'cve', label: t('cveScanner'), icon: 'Shield' },
                 ] },
-                { label: t('cloud.navActivity') || 'Activity', items: [{ id: 'tasks', label: t('cloud.tasks') || 'Tasks', icon: 'ClipboardList' }] },
+                { label: t('cloud.navActivity'), items: [{ id: 'tasks', label: t('cloud.tasks'), icon: 'ClipboardList' }] },
             ];
             if (isAdmin) {
-                groups.push({ label: t('cloud.navGovernance') || 'Governance', items: [
-                    { id: 'compliance', label: t('compliance') || 'Compliance', icon: 'Shield' },
-                    { id: 'drift', label: t('cloud.configDrift') || 'Config Drift', icon: 'Activity' },
-                    { id: 'siem', label: t('siem') || 'SIEM', icon: 'AlertTriangle' },
+                groups.push({ label: t('cloud.navGovernance'), items: [
+                    { id: 'compliance', label: t('compliance'), icon: 'Shield' },
+                    { id: 'drift', label: t('cloud.configDrift'), icon: 'Activity' },
+                    { id: 'siem', label: t('siem'), icon: 'AlertTriangle' },
                 ] });
-                groups.push({ label: t('cloud.navSystem') || 'System', items: [
-                    { id: 'plugins', label: t('plugins') || 'Plugins', icon: 'Box' },
-                    { id: 'users', label: t('cloud.users') || 'Users', icon: 'Users' },
-                    { id: 'settings', label: t('cloud.settings') || 'Settings', icon: 'Settings' },
+                groups.push({ label: t('cloud.navSystem'), items: [
+                    { id: 'plugins', label: t('plugins'), icon: 'Box' },
+                    { id: 'users', label: t('cloud.users'), icon: 'Users' },
+                    { id: 'settings', label: t('cloud.settings'), icon: 'Settings' },
                 ] });
             }
             return (
@@ -447,7 +447,7 @@
                             <span className="cloud-nav-brand-fallback" style={{ display: 'none' }}><Icons.Cloud /></span>
                         </span>
                         {!collapsed && <span className="cloud-nav-brand-text">PegaProx</span>}
-                        {!collapsed && <span className="cloud-chip cloud-chip-preview">{t('cloud.preview') || 'Preview'}</span>}
+                        {!collapsed && <span className="cloud-chip cloud-chip-preview">{t('cloud.preview')}</span>}
                     </div>
                     <div className="cloud-nav-scroll">
                         {groups.map(group => (
@@ -472,7 +472,7 @@
                             </div>
                         ))}
                     </div>
-                    <button type="button" className="cloud-nav-collapse" onClick={onToggle} title={collapsed ? (t('cloud.expand') || 'Expand') : (t('cloud.collapse') || 'Collapse')}>
+                    <button type="button" className="cloud-nav-collapse" onClick={onToggle} title={collapsed ? (t('cloud.expand')) : (t('cloud.collapse'))}>
                         {collapsed ? <Icons.ChevronRight /> : <Icons.ChevronLeft />}
                     </button>
                 </nav>
@@ -491,11 +491,11 @@
             const uname = (currentUser && (currentUser.username || currentUser.name)) || 'User';
             const initial = (uname[0] || 'U').toUpperCase();
             const userMenu = [
-                { label: t('cloud.profile') || 'Profile & preferences', icon: 'User', onClick: () => onOpenProfile && onOpenProfile() },
-                isAdmin && { label: t('cloud.settings') || 'Settings', icon: 'Settings', onClick: () => onOpenSettings && onOpenSettings() },
+                { label: t('cloud.profile'), icon: 'User', onClick: () => onOpenProfile && onOpenProfile() },
+                isAdmin && { label: t('cloud.settings'), icon: 'Settings', onClick: () => onOpenSettings && onOpenSettings() },
                 { divider: true },
-                (typeof onExitCloud === 'function') && { label: t('cloud.exit') || 'Exit Cloud (Modern view)', icon: 'Grid', onClick: onExitCloud },
-                (typeof onLogout === 'function') && { label: t('logout') || 'Sign out', icon: 'LogOut', danger: true, onClick: onLogout },
+                (typeof onExitCloud === 'function') && { label: t('cloud.exit'), icon: 'Grid', onClick: onExitCloud },
+                (typeof onLogout === 'function') && { label: t('logout'), icon: 'LogOut', danger: true, onClick: onLogout },
             ].filter(Boolean);
 
             return (
@@ -515,15 +515,15 @@
                                 <select className="cloud-cluster-select" value={selId != null ? String(selId) : ''} onChange={onChange}>
                                     {safe.map(c => {
                                         const cid = c && (c.id != null ? c.id : c.name);
-                                        return <option key={String(cid)} value={String(cid)}>{(c && (c.display_name || c.name)) || 'cluster'}</option>;
+                                        return <option key={String(cid)} value={String(cid)}>{(c && (c.display_name || c.name)) || t('clusterSingular')}</option>;
                                     })}
                                 </select>
                             </div>
                         )}
                         <div className="cloud-lang"><LanguageSwitcher /></div>
-                        <CloudIconBtn icon={theme === 'light' ? 'Moon' : 'Sun'} title={theme === 'light' ? (t('cloud.darkTheme') || 'Dark theme') : (t('cloud.lightTheme') || 'Light theme')} onClick={onToggleTheme} />
-                        <CloudIconBtn icon="RefreshCw" title={t('cloud.refresh') || 'Refresh'} onClick={onRefresh} />
-                        {isAdmin && <CloudIconBtn icon="Settings" title={t('cloud.settings') || 'Settings'} onClick={() => onOpenSettings && onOpenSettings()} />}
+                        <CloudIconBtn icon={theme === 'light' ? 'Moon' : 'Sun'} title={theme === 'light' ? (t('cloud.darkTheme')) : (t('cloud.lightTheme'))} onClick={onToggleTheme} />
+                        <CloudIconBtn icon="RefreshCw" title={t('cloud.refresh')} onClick={onRefresh} />
+                        {isAdmin && <CloudIconBtn icon="Settings" title={t('cloud.settings')} onClick={() => onOpenSettings && onOpenSettings()} />}
                         <CloudActionMenu t={t}
                             items={userMenu}
                             label={uname}
@@ -574,19 +574,19 @@
             const recentTasks = (Array.isArray(tasks) ? tasks : []).slice(0, 6);
 
             const kpis = [
-                { icon: 'Server', value: vms.length, label: t('cloud.vms') || 'Virtual Machines', accent: '#6366f1', sub: `${t('cloud.running') || 'Running'}: ${vms.filter(v => v.status === 'running').length}`, nav: 'vms' },
-                { icon: 'Box', value: cts.length, label: t('cloud.containers') || 'Containers', accent: '#14b8a6', sub: `${t('cloud.running') || 'Running'}: ${cts.filter(v => v.status === 'running').length}`, nav: 'containers' },
-                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts') || 'Hosts', accent: '#a855f7', sub: `${t('cloud.clustersTitle') || 'Clusters'}: ${connected}/${safeClusters.length}`, nav: 'nodes' },
-                { icon: 'Activity', value: running.length, label: t('cloud.runningGuests') || 'Running guests', accent: '#22c55e', sub: `${t('cloud.total') || 'Total'}: ${safeRes.length}`, nav: null },
-                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpuAllocated') || 'vCPU allocated', accent: '#0ea5e9', sub: null, nav: null },
-                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ramAllocated') || 'RAM allocated', accent: '#f59e0b', sub: null, nav: null },
+                { icon: 'Server', value: vms.length, label: t('cloud.vms'), accent: '#6366f1', sub: `${t('cloud.running')}: ${vms.filter(v => v.status === 'running').length}`, nav: 'vms' },
+                { icon: 'Box', value: cts.length, label: t('cloud.containers'), accent: '#14b8a6', sub: `${t('cloud.running')}: ${cts.filter(v => v.status === 'running').length}`, nav: 'containers' },
+                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts'), accent: '#a855f7', sub: `${t('cloud.clustersTitle')}: ${connected}/${safeClusters.length}`, nav: 'nodes' },
+                { icon: 'Activity', value: running.length, label: t('cloud.runningGuests'), accent: '#22c55e', sub: `${t('cloud.total')}: ${safeRes.length}`, nav: null },
+                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpuAllocated'), accent: '#0ea5e9', sub: null, nav: null },
+                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ramAllocated'), accent: '#f59e0b', sub: null, nav: null },
             ];
 
             return (
                 <div className="cloud-body">
                     <CloudPageHeader
-                        title={t('cloud.overview') || 'Overview'}
-                        sub={`${connected} / ${safeClusters.length} ${t('cloud.clustersConnected') || 'clusters connected'} · ${safeRes.length} ${t('cloud.guestsCount') || 'guests'}`}
+                        title={t('cloud.overview')}
+                        sub={`${connected} / ${safeClusters.length} ${t('cloud.clustersConnected')} · ${safeRes.length} ${t('cloud.guestsCount')}`}
                     />
                     <div className="cloud-kpi-grid">
                         {kpis.map((k, i) => (
@@ -597,41 +597,41 @@
 
                     <div className="cloud-dash-grid">
                         <div className="cloud-card cloud-util-card">
-                            <CloudSectionTitle>{t('cloud.utilization') || 'Cluster utilization'}</CloudSectionTitle>
+                            <CloudSectionTitle>{t('cloud.utilization')}</CloudSectionTitle>
                             <div className="cloud-util-body">
                                 <div className="cloud-util-gauges">
-                                    <CloudGauge pct={cpuAvg} color="var(--cloud-accent)" label={t('cloud.avgCpu') || 'Avg CPU'} sub={`${t('cloud.hosts') || 'Hosts'}: ${nodeNames.length}`} />
-                                    <CloudGauge pct={memAvg} color="#a855f7" label={t('cloud.avgRam') || 'Avg RAM'} sub={dcStatus?.resources?.memory ? cloudFmtBytes(dcStatus.resources.memory.used) : null} />
+                                    <CloudGauge pct={cpuAvg} color="var(--cloud-accent)" label={t('cloud.avgCpu')} sub={`${t('cloud.hosts')}: ${nodeNames.length}`} />
+                                    <CloudGauge pct={memAvg} color="#a855f7" label={t('cloud.avgRam')} sub={dcStatus?.resources?.memory ? cloudFmtBytes(dcStatus.resources.memory.used) : null} />
                                 </div>
                                 <div className="cloud-util-breakdown">
-                                    <div className="cloud-util-row"><span>{t('cloud.running') || 'Running'}</span><span>{running.length} / {safeRes.length}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.vcpuAllocated') || 'vCPU allocated'}</span><span>{vcpu}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.ramAllocated') || 'RAM allocated'}</span><span>{cloudBytesToGiB(ramAllocB).toFixed(1)} GiB</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.running')}</span><span>{running.length} / {safeRes.length}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.vcpuAllocated')}</span><span>{vcpu}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.ramAllocated')}</span><span>{cloudBytesToGiB(ramAllocB).toFixed(1)} GiB</span></div>
                                     {dcStatus?.resources?.storage && (
-                                        <div className="cloud-util-row"><span>{t('cloud.storageUsed') || 'Storage used'}</span><span>{cloudFmtBytes(dcStatus.resources.storage.used)} / {cloudFmtBytes(dcStatus.resources.storage.total)}</span></div>
+                                        <div className="cloud-util-row"><span>{t('cloud.storageUsed')}</span><span>{cloudFmtBytes(dcStatus.resources.storage.used)} / {cloudFmtBytes(dcStatus.resources.storage.total)}</span></div>
                                     )}
                                 </div>
                             </div>
                         </div>
 
                         <div className="cloud-card">
-                            <CloudSectionTitle>{t('cloud.topMem') || 'Top memory consumers'}</CloudSectionTitle>
+                            <CloudSectionTitle>{t('cloud.topMem')}</CloudSectionTitle>
                             <CloudBarChart t={t} rows={topMem} color="#6366f1" />
                         </div>
                     </div>
 
                     <div className="cloud-card">
-                        <CloudSectionTitle right={<button type="button" className="cloud-link-btn" onClick={() => onNav('tasks')}>{t('cloud.viewAll') || 'View all'}</button>}>
-                            {t('cloud.recentTasks') || 'Recent activity'}
+                        <CloudSectionTitle right={<button type="button" className="cloud-link-btn" onClick={() => onNav('tasks')}>{t('cloud.viewAll')}</button>}>
+                            {t('cloud.recentTasks')}
                         </CloudSectionTitle>
                         {recentTasks.length === 0 ? (
-                            <div className="cloud-empty">{t('cloud.noRecentTasks') || 'No recent tasks.'}</div>
+                            <div className="cloud-empty">{t('cloud.noRecentTasks')}</div>
                         ) : (
                             <div className="cloud-tasklist">
                                 {recentTasks.map((tk, i) => (
                                     <div className="cloud-task-row" key={tk.upid || i}>
                                         <span className={'cloud-task-dot ' + (tk.status === 'running' ? 'is-run' : tk.status === 'OK' ? 'is-ok' : 'is-err')} />
-                                        <span className="cloud-task-type">{tk.type || 'task'}</span>
+                                        <span className="cloud-task-type">{tk.type || t('taskLabel')}</span>
                                         <span className="cloud-task-target">{tk.id || ''}</span>
                                         <span className="cloud-task-node">{tk.node || ''}</span>
                                         <span className="cloud-task-time">{cloudRelTime(tk.starttime, t)}</span>
@@ -657,7 +657,7 @@
             // (without clusterId here a same-VMID guest in another cluster would inherit the selection)
             React.useEffect(() => { setChecked({}); setPage(0); }, [kind, clusterId]);
 
-            const title = kind === 'lxc' ? (t('cloud.containers') || 'Containers') : (t('cloud.vms') || 'Virtual Machines');
+            const title = kind === 'lxc' ? (t('cloud.containers')) : (t('cloud.vms'));
             const RowIcon = kind === 'lxc' ? (Icons.Box || Icons.Container) : Icons.Server;
 
             const q = query.trim().toLowerCase();
@@ -706,9 +706,9 @@
 
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={title} sub={`${safe.length} ${kind === 'lxc' ? (t('cloud.containersCount') || 'containers') : (t('cloud.vmsCount') || 'virtual machines')}`}>
+                    <CloudPageHeader title={title} sub={`${safe.length} ${kind === 'lxc' ? (t('cloud.containersCount')) : (t('cloud.vmsCount'))}`}>
                         <button type="button" className="cloud-btn cloud-btn-primary" onClick={() => onCreate(kind === 'lxc' ? 'lxc' : 'qemu')}>
-                            <Icons.Plus /> {kind === 'lxc' ? (t('newContainer') || 'New Container') : (t('newVm') || 'New VM')}
+                            <Icons.Plus /> {kind === 'lxc' ? (t('newContainer')) : (t('newVm'))}
                         </button>
                     </CloudPageHeader>
 
@@ -717,12 +717,12 @@
                             <div className="cloud-toolbar-left">
                                 {selCount > 0 ? (
                                     <div className="cloud-bulkbar">
-                                        <span className="cloud-sel-note">{selCount} {t('cloud.selected') || 'selected'}</span>
-                                        <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => bulk('start')}><Icons.Play /> {t('start') || 'Start'}</button>
-                                        <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => bulk('shutdown')}><Icons.Power /> {t('shutdown') || 'Shutdown'}</button>
-                                        <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => bulk('reboot')}><Icons.RotateCw /> {t('reboot') || 'Reboot'}</button>
-                                        <button type="button" className="cloud-btn cloud-btn-sm cloud-btn-danger" onClick={() => bulk('stop')}><Icons.Square /> {t('stop') || 'Stop'}</button>
-                                        <button type="button" className="cloud-sel-clear" onClick={() => setChecked({})}>{t('cloud.clear') || 'Clear'}</button>
+                                        <span className="cloud-sel-note">{selCount} {t('cloud.selected')}</span>
+                                        <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => bulk('start')}><Icons.Play /> {t('start')}</button>
+                                        <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => bulk('shutdown')}><Icons.Power /> {t('shutdown')}</button>
+                                        <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => bulk('reboot')}><Icons.RotateCw /> {t('reboot')}</button>
+                                        <button type="button" className="cloud-btn cloud-btn-sm cloud-btn-danger" onClick={() => bulk('stop')}><Icons.Square /> {t('stop')}</button>
+                                        <button type="button" className="cloud-sel-clear" onClick={() => setChecked({})}>{t('cloud.clear')}</button>
                                     </div>
                                 ) : (
                                     <>
@@ -730,7 +730,7 @@
                                         <div className="cloud-segment">
                                             {['all', 'running', 'stopped'].map(s => (
                                                 <button type="button" key={s} className={'cloud-segment-btn' + (statusFilter === s ? ' is-active' : '')} onClick={() => { setStatusFilter(s); setPage(0); }}>
-                                                    {s === 'all' ? (t('cloud.all') || 'All') : s === 'running' ? (t('cloud.running') || 'Running') : (t('cloud.stopped') || 'Stopped')}
+                                                    {s === 'all' ? (t('cloud.all')) : s === 'running' ? (t('cloud.running')) : (t('cloud.stopped'))}
                                                 </button>
                                             ))}
                                         </div>
@@ -738,7 +738,7 @@
                                 )}
                             </div>
                             <div className="cloud-toolbar-right">
-                                <CloudSearch t={t} value={query} onChange={(v) => { setQuery(v); setPage(0); }} placeholder={t('cloud.searchGuests') || 'Search name, ID, host…'} />
+                                <CloudSearch t={t} value={query} onChange={(v) => { setQuery(v); setPage(0); }} placeholder={t('cloud.searchGuests')} />
                             </div>
                         </div>
 
@@ -746,28 +746,28 @@
                             <div className="cloud-filterchips">
                                 {statusFilter !== 'all' && (
                                     <span className="cloud-filterchip">
-                                        {(t('cloud.colStatus') || 'Status')}: {statusFilter === 'running' ? (t('cloud.running') || 'Running') : (t('cloud.stopped') || 'Stopped')}
-                                        <button type="button" onClick={() => { setStatusFilter('all'); setPage(0); }} aria-label={t('cloud.removeFilter') || 'Remove filter'}><Icons.X /></button>
+                                        {(t('cloud.colStatus'))}: {statusFilter === 'running' ? (t('cloud.running')) : (t('cloud.stopped'))}
+                                        <button type="button" onClick={() => { setStatusFilter('all'); setPage(0); }} aria-label={t('cloud.removeFilter')}><Icons.X /></button>
                                     </span>
                                 )}
                                 {q && (
                                     <span className="cloud-filterchip">
-                                        {(t('cloud.search') || 'Search')}: “{query}”
-                                        <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label={t('cloud.removeFilter') || 'Remove filter'}><Icons.X /></button>
+                                        {(t('cloud.search'))}: “{query}”
+                                        <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label={t('cloud.removeFilter')}><Icons.X /></button>
                                     </span>
                                 )}
-                                <button type="button" className="cloud-clearfilters" onClick={() => { setStatusFilter('all'); setQuery(''); setPage(0); }}>{t('cloud.clearFilters') || 'Clear all filters'}</button>
+                                <button type="button" className="cloud-clearfilters" onClick={() => { setStatusFilter('all'); setQuery(''); setPage(0); }}>{t('cloud.clearFilters')}</button>
                             </div>
                         )}
 
                         {total === 0 ? (
                             <CloudEmpty
                                 icon={kind === 'lxc' ? 'Box' : 'Server'}
-                                title={(q || statusFilter !== 'all') ? (t('cloud.noMatch') || 'No matches') : (kind === 'lxc' ? (t('cloud.noContainers') || 'No containers yet') : (t('cloud.noVms') || 'No virtual machines yet'))}
-                                text={(q || statusFilter !== 'all') ? (t('cloud.adjustFilters') || 'Try adjusting your search or filters.') : null}
+                                title={(q || statusFilter !== 'all') ? (t('cloud.noMatch')) : (kind === 'lxc' ? (t('cloud.noContainers')) : (t('cloud.noVms')))}
+                                text={(q || statusFilter !== 'all') ? (t('cloud.adjustFilters')) : null}
                                 action={!(q || statusFilter !== 'all') ? (
                                     <button type="button" className="cloud-btn cloud-btn-primary" onClick={() => onCreate(kind === 'lxc' ? 'lxc' : 'qemu')}>
-                                        <Icons.Plus /> {kind === 'lxc' ? (t('newContainer') || 'New Container') : (t('newVm') || 'New VM')}
+                                        <Icons.Plus /> {kind === 'lxc' ? (t('newContainer')) : (t('newVm'))}
                                     </button>
                                 ) : null}
                             />
@@ -776,13 +776,13 @@
                                 <table className="cloud-table cloud-table-selectable">
                                     <thead>
                                         <tr>
-                                            <th className="cloud-th-check"><input type="checkbox" checked={pageAllOn} onChange={toggleAllPage} aria-label={t('cloud.selectPage') || 'Select page'} /></th>
-                                            <SortTh k="name">{t('cloud.colName') || 'Name'}</SortTh>
-                                            <SortTh k="vmid">{t('cloud.colId') || 'ID'}</SortTh>
-                                            <SortTh k="status">{t('cloud.colStatus') || 'Status'}</SortTh>
-                                            <SortTh k="node">{t('cloud.colNode') || 'Host'}</SortTh>
-                                            <SortTh k="cpu">{t('cloud.colCpu') || 'CPU'}</SortTh>
-                                            <SortTh k="mem">{t('cloud.colRam') || 'RAM'}</SortTh>
+                                            <th className="cloud-th-check"><input type="checkbox" checked={pageAllOn} onChange={toggleAllPage} aria-label={t('cloud.selectPage')} /></th>
+                                            <SortTh k="name">{t('cloud.colName')}</SortTh>
+                                            <SortTh k="vmid">{t('cloud.colId')}</SortTh>
+                                            <SortTh k="status">{t('cloud.colStatus')}</SortTh>
+                                            <SortTh k="node">{t('cloud.colNode')}</SortTh>
+                                            <SortTh k="cpu">{t('cloud.colCpu')}</SortTh>
+                                            <SortTh k="mem">{t('cloud.colRam')}</SortTh>
                                             <th className="cloud-th-actions"></th>
                                         </tr>
                                     </thead>
@@ -795,7 +795,7 @@
                                             return (
                                                 <tr key={k} className={'cloud-table-row' + (isChecked ? ' cloud-table-row-checked' : '')} onClick={() => onOpen(r)}>
                                                     <td className="cloud-td-check" onClick={(e) => { e.stopPropagation(); toggleOne(k); }}>
-                                                        <input type="checkbox" checked={isChecked} onChange={() => {}} tabIndex={-1} aria-label={t('cloud.selectItem') || 'Select'} />
+                                                        <input type="checkbox" checked={isChecked} onChange={() => {}} tabIndex={-1} aria-label={t('cloud.selectItem')} />
                                                     </td>
                                                     <td>
                                                         <span className="cloud-table-name">
@@ -849,29 +849,29 @@
             const tags = cloudTagList(r.tags);
 
             const tabs = [
-                { id: 'info', label: t('cloud.tabInfo') || 'Info' },
-                { id: 'capacity', label: t('cloud.tabCapacity') || 'Capacity' },
-                { id: 'network', label: t('cloud.tabNetwork') || 'Network' },
+                { id: 'info', label: t('cloud.tabInfo') },
+                { id: 'capacity', label: t('cloud.tabCapacity') },
+                { id: 'network', label: t('cloud.tabNetwork') },
             ];
 
             // primary action buttons in the bar (contextual) + full kebab
             const primary = running
                 ? [
-                    { label: t('shutdown') || 'Shutdown', icon: 'Power', onClick: () => act.vmAction(r, 'shutdown') },
-                    { label: t('reboot') || 'Reboot', icon: 'RotateCw', onClick: () => act.vmAction(r, 'reboot') },
+                    { label: t('shutdown'), icon: 'Power', onClick: () => act.vmAction(r, 'shutdown') },
+                    { label: t('reboot'), icon: 'RotateCw', onClick: () => act.vmAction(r, 'reboot') },
                 ]
-                : [{ label: t('start') || 'Start', icon: 'Play', primary: true, onClick: () => act.vmAction(r, 'start') }];
+                : [{ label: t('start'), icon: 'Play', primary: true, onClick: () => act.vmAction(r, 'start') }];
 
             return (
                 <div className="cloud-body">
                     <div className="cloud-detail-head">
-                        <button type="button" className="cloud-icon-btn cloud-back-btn" onClick={onBack} title={t('cloud.back') || 'Back'}><Icons.ArrowLeft /></button>
+                        <button type="button" className="cloud-icon-btn cloud-back-btn" onClick={onBack} title={t('cloud.back')}><Icons.ArrowLeft /></button>
                         <span className="cloud-detail-icon">{isCt ? <Icons.Box /> : <Icons.Server />}</span>
                         <div className="cloud-detail-titlewrap">
                             <h1 className="cloud-detail-title">{r.name || ('guest-' + (r.vmid != null ? r.vmid : ''))}</h1>
                             <div className="cloud-detail-meta">
                                 <CloudStatusChip t={t} status={r.status} />
-                                <span className="cloud-detail-id">#{r.vmid} · {isCt ? (t('cloud.typeContainer') || 'Container') : (t('cloud.typeVm') || 'VM')} · {r.node || '—'}</span>
+                                <span className="cloud-detail-id">#{r.vmid} · {isCt ? (t('cloud.typeContainer')) : (t('cloud.typeVm'))} · {r.node || '—'}</span>
                             </div>
                         </div>
                         <div className="cloud-detail-actions">
@@ -880,11 +880,11 @@
                                     {React.createElement(Icons[b.icon] || Icons.Box)} {b.label}
                                 </button>
                             ))}
-                            <button type="button" className="cloud-btn" onClick={() => act.openConsole(r)}><Icons.Monitor /> {t('console') || 'Console'}</button>
+                            <button type="button" className="cloud-btn" onClick={() => act.openConsole(r)}><Icons.Monitor /> {t('console')}</button>
                             {r.status === 'running' && r.type === 'qemu' && (
-                                <button type="button" className="cloud-btn" onClick={() => act.openSpice(r)} title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'}><Icons.ExternalLink /> {t('spiceConsole') || 'SPICE'}</button>
+                                <button type="button" className="cloud-btn" onClick={() => act.openSpice(r)} title={t('spiceConsoleHint')}><Icons.ExternalLink /> {t('spiceConsole')}</button>
                             )}
-                            <CloudActionMenu t={t} items={cloudVmActionItems(r, act, t)} triggerLabel={t('cloud.actions') || 'Actions'} label={t('cloud.actions') || 'Actions'} />
+                            <CloudActionMenu t={t} items={cloudVmActionItems(r, act, t)} triggerLabel={t('cloud.actions')} label={t('cloud.actions')} />
                         </div>
                     </div>
 
@@ -896,29 +896,29 @@
 
                     {tab === 'info' && (
                         <div className="cloud-kv-grid">
-                            <CloudKVPanel title={t('cloud.information') || 'Information'}>
-                                <CloudKVRow label={t('cloud.colId') || 'ID'} value={r.vmid} />
-                                <CloudKVRow label={t('cloud.colName') || 'Name'} value={r.name} />
-                                <CloudKVRow label={t('cloud.type') || 'Type'} value={isCt ? (t('cloud.typeContainerLxc') || 'Container (LXC)') : (t('cloud.typeVirtualMachine') || 'Virtual Machine')} />
-                                <CloudKVRow label={t('cloud.colStatus') || 'Status'} value={<CloudStatusChip t={t} status={r.status} />} />
-                                <CloudKVRow label={t('cloud.colNode') || 'Host'} value={r.node} />
-                                <CloudKVRow label={t('cloud.uptime') || 'Uptime'} value={cloudFmtUptime(r.uptime)} />
-                                {r.pool && <CloudKVRow label={t('cloud.pool') || 'Pool'} value={r.pool} />}
-                                {r.template ? <CloudKVRow label={t('cloud.template') || 'Template'} value={t('cloud.yes') || 'Yes'} /> : null}
+                            <CloudKVPanel title={t('cloud.information')}>
+                                <CloudKVRow label={t('cloud.colId')} value={r.vmid} />
+                                <CloudKVRow label={t('cloud.colName')} value={r.name} />
+                                <CloudKVRow label={t('cloud.type')} value={isCt ? (t('cloud.typeContainerLxc')) : (t('cloud.typeVirtualMachine'))} />
+                                <CloudKVRow label={t('cloud.colStatus')} value={<CloudStatusChip t={t} status={r.status} />} />
+                                <CloudKVRow label={t('cloud.colNode')} value={r.node} />
+                                <CloudKVRow label={t('cloud.uptime')} value={cloudFmtUptime(r.uptime)} />
+                                {r.pool && <CloudKVRow label={t('cloud.pool')} value={r.pool} />}
+                                {r.template ? <CloudKVRow label={t('cloud.template')} value={t('cloud.yes')} /> : null}
                             </CloudKVPanel>
-                            <CloudKVPanel title={t('cloud.tabCapacity') || 'Capacity'}>
-                                <CloudKVRow label={t('cloud.vcpu') || 'vCPU'} value={Number(r.maxcpu) || '—'} />
-                                <CloudKVRow label={t('cloud.colCpuUsage') || 'CPU usage'} value={cpuP + '%'} />
-                                <CloudKVRow label={t('cloud.memory') || 'Memory'} value={memMax ? cloudFmtBytes(memMax) : '—'} />
-                                <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={`${cloudFmtBytes(memUse)} (${memP}%)`} />
-                                {diskMax > 0 && <CloudKVRow label={t('cloud.disk') || 'Disk'} value={`${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}`} />}
+                            <CloudKVPanel title={t('cloud.tabCapacity')}>
+                                <CloudKVRow label={t('cloud.vcpu')} value={Number(r.maxcpu) || '—'} />
+                                <CloudKVRow label={t('cloud.colCpuUsage')} value={cpuP + '%'} />
+                                <CloudKVRow label={t('cloud.memory')} value={memMax ? cloudFmtBytes(memMax) : '—'} />
+                                <CloudKVRow label={t('cloud.ramInUse')} value={`${cloudFmtBytes(memUse)} (${memP}%)`} />
+                                {diskMax > 0 && <CloudKVRow label={t('cloud.disk')} value={`${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}`} />}
                             </CloudKVPanel>
-                            <CloudKVPanel title={t('cloud.tabNetwork') || 'Network'}>
-                                <CloudKVRow label={t('cloud.ip') || 'IP address'} value={r.ip || (Array.isArray(r.ip_addresses) ? r.ip_addresses[0] : null)} />
-                                <CloudKVRow label={t('cloud.colNode') || 'Host'} value={r.node} />
+                            <CloudKVPanel title={t('cloud.tabNetwork')}>
+                                <CloudKVRow label={t('cloud.ip')} value={r.ip || (Array.isArray(r.ip_addresses) ? r.ip_addresses[0] : null)} />
+                                <CloudKVRow label={t('cloud.colNode')} value={r.node} />
                             </CloudKVPanel>
                             {tags.length > 0 && (
-                                <CloudKVPanel title={t('cloud.tags') || 'Tags'}>
+                                <CloudKVPanel title={t('cloud.tags')}>
                                     <div className="cloud-tag-wrap">
                                         {tags.map((tg, i) => <span className="cloud-chip cloud-chip-tag" key={i}><Icons.Tag /> {tg}</span>)}
                                     </div>
@@ -930,36 +930,36 @@
                     {tab === 'capacity' && (
                         <div className="cloud-card">
                             <div className="cloud-meter-block">
-                                <div className="cloud-meter-label">{t('cloud.colCpu') || 'CPU'} · {cpuP}%</div>
+                                <div className="cloud-meter-label">{t('cloud.colCpu')} · {cpuP}%</div>
                                 <div className="cloud-meter cloud-meter-lg"><div style={{ width: cpuP + '%', background: 'var(--cloud-accent)' }} /></div>
-                                <div className="cloud-meter-sub">{Number(r.maxcpu) || 0} {t('cloud.cores') || 'vCPU'}</div>
+                                <div className="cloud-meter-sub">{Number(r.maxcpu) || 0} {t('cloud.cores')}</div>
                             </div>
                             <div className="cloud-meter-block">
-                                <div className="cloud-meter-label">{t('cloud.memory') || 'Memory'} · {memP}%</div>
+                                <div className="cloud-meter-label">{t('cloud.memory')} · {memP}%</div>
                                 <div className="cloud-meter cloud-meter-lg"><div style={{ width: memP + '%', background: '#a855f7' }} /></div>
                                 <div className="cloud-meter-sub">{cloudFmtBytes(memUse)} / {cloudFmtBytes(memMax)}</div>
                             </div>
                             {diskMax > 0 && (
                                 <div className="cloud-meter-block">
-                                    <div className="cloud-meter-label">{t('cloud.disk') || 'Disk'} · {Math.round(diskUse / diskMax * 100)}%</div>
+                                    <div className="cloud-meter-label">{t('cloud.disk')} · {Math.round(diskUse / diskMax * 100)}%</div>
                                     <div className="cloud-meter cloud-meter-lg"><div style={{ width: Math.round(diskUse / diskMax * 100) + '%', background: '#0ea5e9' }} /></div>
                                     <div className="cloud-meter-sub">{cloudFmtBytes(diskUse)} / {cloudFmtBytes(diskMax)}</div>
                                 </div>
                             )}
-                            <button type="button" className="cloud-btn" onClick={() => act.openMetrics(r)} style={{ marginTop: 'var(--space-md)' }}><Icons.BarChart /> {t('cloud.openMetrics') || 'Open detailed metrics'}</button>
+                            <button type="button" className="cloud-btn" onClick={() => act.openMetrics(r)} style={{ marginTop: 'var(--space-md)' }}><Icons.BarChart /> {t('cloud.openMetrics')}</button>
                         </div>
                     )}
 
                     {tab === 'network' && (
                         <div className="cloud-card">
                             <div className="cloud-kv-panel">
-                                <CloudKVRow label={t('cloud.ip') || 'IP address'} value={r.ip || (t('cloud.noIp') || 'Not reported (guest agent required)')} />
+                                <CloudKVRow label={t('cloud.ip')} value={r.ip || (t('cloud.noIp'))} />
                                 {Array.isArray(r.ip_addresses) && r.ip_addresses.length > 1 && (
-                                    <CloudKVRow label={t('cloud.allIps') || 'All IPs'} value={r.ip_addresses.join(', ')} />
+                                    <CloudKVRow label={t('cloud.allIps')} value={r.ip_addresses.join(', ')} />
                                 )}
-                                <CloudKVRow label={t('cloud.colNode') || 'Host'} value={r.node} />
+                                <CloudKVRow label={t('cloud.colNode')} value={r.node} />
                             </div>
-                            <button type="button" className="cloud-btn" onClick={() => act.openConfig(r)} style={{ marginTop: 'var(--space-md)' }}><Icons.Cog /> {t('cloud.editHardware') || 'Edit network hardware'}</button>
+                            <button type="button" className="cloud-btn" onClick={() => act.openConfig(r)} style={{ marginTop: 'var(--space-md)' }}><Icons.Cog /> {t('cloud.editHardware')}</button>
                         </div>
                     )}
                 </div>
@@ -980,18 +980,18 @@
 
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.datastores') || 'Datastores'} sub={`${list.length} ${t('cloud.datastoresCount') || 'datastores'}`} />
+                    <CloudPageHeader title={t('cloud.datastores')} sub={`${list.length} ${t('cloud.datastoresCount')}`} />
                     <div className="cloud-card cloud-table-card">
                         <div className="cloud-toolbar">
-                            <div className="cloud-toolbar-left"><span className="cloud-toolbar-icon"><Icons.Database /></span><span className="cloud-toolbar-title">{t('cloud.datastores') || 'Datastores'}</span><span className="cloud-count-chip">{view.length}</span></div>
-                            <div className="cloud-toolbar-right"><CloudSearch t={t} value={query} onChange={setQuery} placeholder={t('cloud.searchStorage') || 'Search storage…'} /></div>
+                            <div className="cloud-toolbar-left"><span className="cloud-toolbar-icon"><Icons.Database /></span><span className="cloud-toolbar-title">{t('cloud.datastores')}</span><span className="cloud-count-chip">{view.length}</span></div>
+                            <div className="cloud-toolbar-right"><CloudSearch t={t} value={query} onChange={setQuery} placeholder={t('cloud.searchStorage')} /></div>
                         </div>
-                        {view.length === 0 ? <CloudEmpty icon="Database" title={t('cloud.noDatastores') || 'No datastores'} /> : (
+                        {view.length === 0 ? <CloudEmpty icon="Database" title={t('cloud.noDatastores')} /> : (
                             <div className="cloud-table-scroll">
                                 <table className="cloud-table">
                                     <thead><tr>
-                                        <th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colScope') || 'Scope'}</th>
-                                        <th>{t('cloud.colContent') || 'Content'}</th><th>{t('cloud.colUsage') || 'Usage'}</th><th>{t('cloud.colStatus') || 'Status'}</th>
+                                        <th>{t('cloud.colName')}</th><th>{t('cloud.colType')}</th><th>{t('cloud.colScope')}</th>
+                                        <th>{t('cloud.colContent')}</th><th>{t('cloud.colUsage')}</th><th>{t('cloud.colStatus')}</th>
                                     </tr></thead>
                                     <tbody>
                                         {view.map((d, i) => {
@@ -1000,7 +1000,7 @@
                                                 <tr className="cloud-table-row cloud-table-row-static" key={(d.storage || 'ds') + '-' + i}>
                                                     <td><span className="cloud-table-name"><span className="cloud-table-name-icon"><Icons.HardDrive /></span>{d.storage || '—'}</span></td>
                                                     <td className="cloud-table-mono">{d.type || '—'}</td>
-                                                    <td>{d.scope === 'shared' ? <span className="cloud-chip cloud-chip-soft">{t('cloud.shared') || 'Shared'}</span> : <span className="cloud-chip cloud-chip-soft">{d._node || (t('cloud.local') || 'local')}</span>}</td>
+                                                    <td>{d.scope === 'shared' ? <span className="cloud-chip cloud-chip-soft">{t('cloud.shared')}</span> : <span className="cloud-chip cloud-chip-soft">{d._node || (t('cloud.local'))}</span>}</td>
                                                     <td className="cloud-cell-muted">{d.content || '—'}</td>
                                                     <td style={{ minWidth: 220 }}>
                                                         {Number(d.total) > 0 ? <CloudUsageBar pct={pct} leftLabel={cloudFmtBytes(d.used)} rightLabel={cloudFmtBytes(d.total)} /> : <span className="cloud-cell-muted">—</span>}
@@ -1026,18 +1026,18 @@
             const view = q ? list.filter(n => (n.name || '').toLowerCase().includes(q) || (n.type || '').toLowerCase().includes(q)) : list;
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.networks') || 'Networks'} sub={`${list.length} ${t('cloud.networksCount') || 'networks'}`} />
+                    <CloudPageHeader title={t('cloud.networks')} sub={`${list.length} ${t('cloud.networksCount')}`} />
                     <div className="cloud-card cloud-table-card">
                         <div className="cloud-toolbar">
-                            <div className="cloud-toolbar-left"><span className="cloud-toolbar-icon"><Icons.Network /></span><span className="cloud-toolbar-title">{t('cloud.networks') || 'Networks'}</span><span className="cloud-count-chip">{view.length}</span></div>
-                            <div className="cloud-toolbar-right"><CloudSearch t={t} value={query} onChange={setQuery} placeholder={t('cloud.searchNet') || 'Search bridge…'} /></div>
+                            <div className="cloud-toolbar-left"><span className="cloud-toolbar-icon"><Icons.Network /></span><span className="cloud-toolbar-title">{t('cloud.networks')}</span><span className="cloud-count-chip">{view.length}</span></div>
+                            <div className="cloud-toolbar-right"><CloudSearch t={t} value={query} onChange={setQuery} placeholder={t('cloud.searchNet')} /></div>
                         </div>
-                        {view.length === 0 ? <CloudEmpty icon="Network" title={t('cloud.noNetworks') || 'No networks'} /> : (
+                        {view.length === 0 ? <CloudEmpty icon="Network" title={t('cloud.noNetworks')} /> : (
                             <div className="cloud-table-scroll">
                                 <table className="cloud-table">
                                     <thead><tr>
-                                        <th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colCidr') || 'CIDR'}</th>
-                                        <th>{t('cloud.colGateway') || 'Gateway'}</th><th>{t('cloud.colGuests') || 'Guests'}</th><th>{t('cloud.hosts') || 'Hosts'}</th><th>{t('cloud.colStatus') || 'Status'}</th>
+                                        <th>{t('cloud.colName')}</th><th>{t('cloud.colType')}</th><th>{t('cloud.colCidr')}</th>
+                                        <th>{t('cloud.colGateway')}</th><th>{t('cloud.colGuests')}</th><th>{t('cloud.hosts')}</th><th>{t('cloud.colStatus')}</th>
                                     </tr></thead>
                                     <tbody>
                                         {view.map((nw, i) => (
@@ -1066,8 +1066,8 @@
             const res = Array.isArray(resources) ? resources : [];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.clustersTitle') || 'Clusters'} sub={`${safe.filter(c => c.connected).length} / ${safe.length} ${t('cloud.online') || 'online'}`} />
-                    {safe.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Cloud" title={t('cloud.noClusters') || 'No clusters configured'} /></div> : (
+                    <CloudPageHeader title={t('cloud.clustersTitle')} sub={`${safe.filter(c => c.connected).length} / ${safe.length} ${t('cloud.online')}`} />
+                    {safe.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Cloud" title={t('cloud.noClusters')} /></div> : (
                         <div className="cloud-card-grid">
                             {safe.map(c => {
                                 const cid = c && (c.id != null ? c.id : c.name);
@@ -1079,22 +1079,22 @@
                                 return (
                                     <div className="cloud-card cloud-cluster-card" key={String(cid)}>
                                         <div className="cloud-cluster-head">
-                                            <span className="cloud-cluster-name"><Icons.Cloud /> {(c && (c.display_name || c.name)) || 'cluster'}</span>
+                                            <span className="cloud-cluster-name"><Icons.Cloud /> {(c && (c.display_name || c.name)) || t('clusterSingular')}</span>
                                             <CloudConnChip connected={!!(c && c.connected)} t={t} />
                                         </div>
                                         <div className="cloud-cluster-host">{(c && c.host) || '—'}</div>
                                         <div className="cloud-cluster-badges">
                                             <span className="cloud-chip cloud-chip-soft">{cloudClusterTypeLabel(c && c.cluster_type)}</span>
-                                            {dc?.cluster?.quorate === true && <span className="cloud-chip cloud-chip-soft">{t('cloud.quorate') || 'Quorate'}</span>}
-                                            {dc?.cluster?.quorate === false && <span className="cloud-chip cloud-chip-warn">{t('cloud.noQuorum') || 'No quorum'}</span>}
-                                            {dc?.cluster?.standalone && <span className="cloud-chip cloud-chip-soft">{t('cloud.standalone') || 'Standalone'}</span>}
-                                            {dc?.hardware?.health === 'critical' && <span className="cloud-chip cloud-chip-err">{(t && t('degradedHardware')) || 'Degraded HW'}{dc.hardware.degraded ? ` (${dc.hardware.degraded})` : ''}</span>}
-                                            {dc?.hardware?.health === 'warning' && <span className="cloud-chip cloud-chip-warn">{(t && t('degradedHardware')) || 'Degraded HW'}{dc.hardware.degraded ? ` (${dc.hardware.degraded})` : ''}</span>}
+                                            {dc?.cluster?.quorate === true && <span className="cloud-chip cloud-chip-soft">{t('cloud.quorate')}</span>}
+                                            {dc?.cluster?.quorate === false && <span className="cloud-chip cloud-chip-warn">{t('cloud.noQuorum')}</span>}
+                                            {dc?.cluster?.standalone && <span className="cloud-chip cloud-chip-soft">{t('cloud.standalone')}</span>}
+                                            {dc?.hardware?.health === 'critical' && <span className="cloud-chip cloud-chip-err">{t('degradedHardware')}{dc.hardware.degraded ? ` (${dc.hardware.degraded})` : ''}</span>}
+                                            {dc?.hardware?.health === 'warning' && <span className="cloud-chip cloud-chip-warn">{t('degradedHardware')}{dc.hardware.degraded ? ` (${dc.hardware.degraded})` : ''}</span>}
                                         </div>
                                         <div className="cloud-cluster-stats">
-                                            <div><span className="cloud-cluster-stat-num">{nodes ? nodes.online : '—'}{nodes ? `/${nodes.total}` : ''}</span><span className="cloud-cluster-stat-lbl">{t('cloud.hosts') || 'Hosts'}</span></div>
-                                            <div><span className="cloud-cluster-stat-num">{dcGuests != null ? dcGuests : '—'}</span><span className="cloud-cluster-stat-lbl">{t('cloud.guestsShort') || 'Guests'}</span></div>
-                                            {dc?.resources?.memory && <div><span className="cloud-cluster-stat-num">{Math.round(dc.resources.memory.percent)}%</span><span className="cloud-cluster-stat-lbl">{t('cloud.ram') || 'RAM'}</span></div>}
+                                            <div><span className="cloud-cluster-stat-num">{nodes ? nodes.online : '—'}{nodes ? `/${nodes.total}` : ''}</span><span className="cloud-cluster-stat-lbl">{t('cloud.hosts')}</span></div>
+                                            <div><span className="cloud-cluster-stat-num">{dcGuests != null ? dcGuests : '—'}</span><span className="cloud-cluster-stat-lbl">{t('cloud.guestsShort')}</span></div>
+                                            {dc?.resources?.memory && <div><span className="cloud-cluster-stat-num">{Math.round(dc.resources.memory.percent)}%</span><span className="cloud-cluster-stat-lbl">{t('cloud.ram')}</span></div>}
                                         </div>
                                     </div>
                                 );
@@ -1118,12 +1118,12 @@
                     : (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14))
                         ? 'cloud.coreFew'
                         : 'cloud.coreMany';
-                return `${count} ${t(key) || (n === 1 ? 'core' : 'cores')}`;
+                return `${count} ${t(key)}`;
             };
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.hosts') || 'Hosts'} sub={`${names.length} ${t('cloud.hostsCount') || 'hosts'}`} />
-                    {names.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Cpu" title={t('cloud.noNodes') || 'No host data'} text={t('cloud.selectCluster') || 'Select a connected cluster.'} /></div> : (
+                    <CloudPageHeader title={t('cloud.hosts')} sub={`${names.length} ${t('cloud.hostsCount')}`} />
+                    {names.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Cpu" title={t('cloud.noNodes')} text={t('cloud.selectCluster')} /></div> : (
                         <div className="cloud-card-grid cloud-card-grid-wide">
                             {names.map(name => {
                                 const m = map[name] || {};
@@ -1133,30 +1133,30 @@
                                 const diskP = Math.round(Number(m.disk_percent) || 0);
                                 const maint = m.maintenance_mode;
                                 const nodeActions = isAdmin ? [
-                                    { label: t('cloud.manageHost') || 'Manage host', icon: 'Cog', onClick: () => act.configNode(name) },
+                                    { label: t('cloud.manageHost'), icon: 'Cog', onClick: () => act.configNode(name) },
                                     { divider: true },
                                     maint
-                                        ? { label: t('disableMaintenance') || 'Disable maintenance', icon: 'Wrench', onClick: () => act.maintenanceToggle(name, false) }
-                                        : { label: t('startingMaintenanceMode') || 'Maintenance mode', icon: 'Wrench', onClick: () => act.maintenanceToggle(name, true) },
-                                    { label: t('cloud.update') || 'Update (apt)', icon: 'Download', onClick: () => act.startUpdate(name, false) },
+                                        ? { label: t('disableMaintenance'), icon: 'Wrench', onClick: () => act.maintenanceToggle(name, false) }
+                                        : { label: t('startingMaintenanceMode'), icon: 'Wrench', onClick: () => act.maintenanceToggle(name, true) },
+                                    { label: t('cloud.update'), icon: 'Download', onClick: () => act.startUpdate(name, false) },
                                     { divider: true },
-                                    { label: t('rebootNode') || 'Reboot', icon: 'RotateCw', danger: true, onClick: () => act.nodeAction(name, 'reboot') },
-                                    { label: t('shutdownNode') || 'Shutdown', icon: 'Power', danger: true, onClick: () => act.nodeAction(name, 'shutdown') },
+                                    { label: t('rebootNode'), icon: 'RotateCw', danger: true, onClick: () => act.nodeAction(name, 'reboot') },
+                                    { label: t('shutdownNode'), icon: 'Power', danger: true, onClick: () => act.nodeAction(name, 'shutdown') },
                                 ] : [];
                                 return (
                                     <div className="cloud-card cloud-node-card" key={name}>
                                         <div className="cloud-node-head">
                                             <span className="cloud-node-name"><Icons.Cpu /> {name}</span>
                                             <div className="cloud-node-head-right">
-                                                {maint ? <span className="cloud-chip cloud-chip-warn">{t('cloud.maintenance') || 'Maintenance'}</span> : null}
+                                                {maint ? <span className="cloud-chip cloud-chip-warn">{t('cloud.maintenance')}</span> : null}
                                                 <CloudConnChip connected={online} t={t} />
                                                 {isAdmin && <CloudActionMenu t={t} items={nodeActions} />}
                                             </div>
                                         </div>
                                         <div className="cloud-node-meters">
-                                            <CloudUsageBar pct={cpuP} leftLabel={`${t('cloud.colCpu') || 'CPU'}`} rightLabel={`${cpuP}%`} />
-                                            <CloudUsageBar pct={memP} color="#a855f7" leftLabel={`${t('cloud.ram') || 'RAM'}`} rightLabel={m.mem_total ? `${cloudFmtBytes(m.mem_used)} / ${cloudFmtBytes(m.mem_total)}` : `${memP}%`} />
-                                            {m.disk_total ? <CloudUsageBar pct={diskP} color="#0ea5e9" leftLabel={`${t('cloud.disk') || 'Disk'}`} rightLabel={`${cloudFmtBytes(m.disk_used)} / ${cloudFmtBytes(m.disk_total)}`} /> : null}
+                                            <CloudUsageBar pct={cpuP} leftLabel={`${t('cloud.colCpu')}`} rightLabel={`${cpuP}%`} />
+                                            <CloudUsageBar pct={memP} color="#a855f7" leftLabel={`${t('cloud.ram')}`} rightLabel={m.mem_total ? `${cloudFmtBytes(m.mem_used)} / ${cloudFmtBytes(m.mem_total)}` : `${memP}%`} />
+                                            {m.disk_total ? <CloudUsageBar pct={diskP} color="#0ea5e9" leftLabel={`${t('cloud.disk')}`} rightLabel={`${cloudFmtBytes(m.disk_used)} / ${cloudFmtBytes(m.disk_total)}`} /> : null}
                                         </div>
                                         <div className="cloud-node-foot">
                                             {m.uptime ? <span><Icons.Clock /> {cloudFmtUptime(m.uptime)}</span> : null}
@@ -1177,17 +1177,17 @@
             const list = Array.isArray(pools) ? pools : [];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.pools') || 'Resource Pools'} sub={`${list.length} ${t('cloud.poolsCountLabel') || 'pools'}`} />
-                    {list.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Layers" title={t('cloud.noPools') || 'No resource pools'} /></div> : (
+                    <CloudPageHeader title={t('cloud.pools')} sub={`${list.length} ${t('cloud.poolsCountLabel')}`} />
+                    {list.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Layers" title={t('cloud.noPools')} /></div> : (
                         <div className="cloud-card-grid">
                             {list.map((p, i) => (
                                 <div className="cloud-card cloud-pool-card" key={(p.poolid || 'pool') + '-' + i}>
                                     <div className="cloud-cluster-head"><span className="cloud-cluster-name"><Icons.Layers /> {p.poolid || '—'}</span></div>
                                     {p.comment ? <div className="cloud-cluster-host" style={{ fontFamily: 'inherit' }}>{p.comment}</div> : null}
                                     <div className="cloud-cluster-stats">
-                                        <div><span className="cloud-cluster-stat-num">{p.vms != null ? p.vms : 0}</span><span className="cloud-cluster-stat-lbl">{t('cloud.guestsShort') || 'Guests'}</span></div>
-                                        <div><span className="cloud-cluster-stat-num">{p.storage != null ? p.storage : 0}</span><span className="cloud-cluster-stat-lbl">{t('cloud.storage') || 'Storage'}</span></div>
-                                        <div><span className="cloud-cluster-stat-num">{p.member_count != null ? p.member_count : (Array.isArray(p.members) ? p.members.length : 0)}</span><span className="cloud-cluster-stat-lbl">{t('cloud.members') || 'Members'}</span></div>
+                                        <div><span className="cloud-cluster-stat-num">{p.vms != null ? p.vms : 0}</span><span className="cloud-cluster-stat-lbl">{t('cloud.guestsShort')}</span></div>
+                                        <div><span className="cloud-cluster-stat-num">{p.storage != null ? p.storage : 0}</span><span className="cloud-cluster-stat-lbl">{t('cloud.storage')}</span></div>
+                                        <div><span className="cloud-cluster-stat-num">{p.member_count != null ? p.member_count : (Array.isArray(p.members) ? p.members.length : 0)}</span><span className="cloud-cluster-stat-lbl">{t('cloud.members')}</span></div>
                                     </div>
                                 </div>
                             ))}
@@ -1205,18 +1205,18 @@
             const view = q ? list.filter(tk => (tk.type || '').toLowerCase().includes(q) || (tk.id || '').toLowerCase().includes(q) || (tk.node || '').toLowerCase().includes(q)) : list;
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.tasks') || 'Tasks'} sub={`${list.length} ${t('cloud.recent') || 'recent'}`} />
+                    <CloudPageHeader title={t('cloud.tasks')} sub={`${list.length} ${t('cloud.recent')}`} />
                     <div className="cloud-card cloud-table-card">
                         <div className="cloud-toolbar">
-                            <div className="cloud-toolbar-left"><span className="cloud-toolbar-icon"><Icons.ClipboardList /></span><span className="cloud-toolbar-title">{t('cloud.tasks') || 'Tasks'}</span><span className="cloud-count-chip">{view.length}</span></div>
-                            <div className="cloud-toolbar-right"><CloudSearch t={t} value={query} onChange={setQuery} placeholder={t('cloud.searchTasks') || 'Search task…'} /></div>
+                            <div className="cloud-toolbar-left"><span className="cloud-toolbar-icon"><Icons.ClipboardList /></span><span className="cloud-toolbar-title">{t('cloud.tasks')}</span><span className="cloud-count-chip">{view.length}</span></div>
+                            <div className="cloud-toolbar-right"><CloudSearch t={t} value={query} onChange={setQuery} placeholder={t('cloud.searchTasks')} /></div>
                         </div>
-                        {view.length === 0 ? <CloudEmpty icon="ClipboardList" title={t('cloud.noTasks') || 'No tasks'} /> : (
+                        {view.length === 0 ? <CloudEmpty icon="ClipboardList" title={t('cloud.noTasks')} /> : (
                             <div className="cloud-table-scroll">
                                 <table className="cloud-table">
                                     <thead><tr>
-                                        <th>{t('cloud.colStatus') || 'Status'}</th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colTarget') || 'Target'}</th>
-                                        <th>{t('cloud.colNode') || 'Host'}</th><th>{t('cloud.colUser') || 'User'}</th><th>{t('cloud.colStarted') || 'Started'}</th>
+                                        <th>{t('cloud.colStatus')}</th><th>{t('cloud.colType')}</th><th>{t('cloud.colTarget')}</th>
+                                        <th>{t('cloud.colNode')}</th><th>{t('cloud.colUser')}</th><th>{t('cloud.colStarted')}</th>
                                     </tr></thead>
                                     <tbody>
                                         {view.map((tk, i) => {
@@ -1224,9 +1224,9 @@
                                             const run = tk.status === 'running';
                                             return (
                                                 <tr className="cloud-table-row cloud-table-row-static" key={tk.upid || i}>
-                                                    <td>{run ? <CloudPill color="#2f9fe0" bg="rgba(56,189,248,0.14)" border="rgba(56,189,248,0.36)" dot>{t('cloud.running') || 'Running'}</CloudPill>
+                                                    <td>{run ? <CloudPill color="#2f9fe0" bg="rgba(56,189,248,0.14)" border="rgba(56,189,248,0.36)" dot>{t('cloud.running')}</CloudPill>
                                                         : ok ? <CloudPill color="#1bbf8a" bg="rgba(45,212,167,0.16)" border="rgba(45,212,167,0.42)" dot>OK</CloudPill>
-                                                        : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{tk.status ? tk.status : (t('cloud.error') || 'Error')}</CloudPill>}</td>
+                                                        : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{tk.status ? tk.status : (t('cloud.error'))}</CloudPill>}</td>
                                                     <td className="cloud-table-mono">{tk.type || '—'}</td>
                                                     <td className="cloud-table-mono">{tk.id || '—'}</td>
                                                     <td>{tk.node || '—'}</td>
@@ -1254,7 +1254,7 @@
                         <div className="cloud-launcher-icon"><Ico /></div>
                         <div className="cloud-launcher-text">{text}</div>
                         {typeof onExit === 'function' && (
-                            <button type="button" className="cloud-btn cloud-btn-primary" onClick={onExit}><Icons.ExternalLink /> {t('cloud.openClassic') || 'Open in classic layout'}</button>
+                            <button type="button" className="cloud-btn cloud-btn-primary" onClick={onExit}><Icons.ExternalLink /> {t('cloud.openClassic')}</button>
                         )}
                     </div>
                 </div>
@@ -1283,8 +1283,8 @@
             return { data, loading, err, reload };
         }
         function CloudSectionState({ loading, err, empty, emptyIcon, emptyTitle, emptyText, t, children }) {
-            if (loading) return <div className="cloud-card"><div className="cloud-empty">{t('loading') || 'Loading…'}</div></div>;
-            if (err) return <div className="cloud-card"><CloudEmpty icon="AlertTriangle" title={t('cloud.loadFail') || 'Could not load'} text={err} /></div>;
+            if (loading) return <div className="cloud-card"><div className="cloud-empty">{t('loading')}</div></div>;
+            if (err) return <div className="cloud-card"><CloudEmpty icon="AlertTriangle" title={t('cloud.loadFail')} text={err} /></div>;
             if (empty) return <div className="cloud-card"><CloudEmpty icon={emptyIcon || 'Box'} title={emptyTitle} text={emptyText} /></div>;
             return children;
         }
@@ -1302,7 +1302,7 @@
                 fetch(path, opts)
                     .then(r => r.ok ? r.json().catch(() => ({})) : Promise.reject(new Error('HTTP ' + r.status)))
                     .then(() => { setBusy(''); if (reload) reload(); })
-                    .catch(e => { setBusy(''); window.alert((t('cloud.actionFailedPrefix') || 'Action failed:') + ' ' + (e && e.message || e)); });
+                    .catch(e => { setBusy(''); window.alert((t('cloud.actionFailedPrefix')) + ' ' + (e && e.message || e)); });
             }, [reload]);
             return { busy, run };
         }
@@ -1316,35 +1316,35 @@
             const active = jobs.filter(j => Number(j.enabled) === 1 || j.enabled === true).length;
             const failed = jobs.filter(j => (j['last-run-status'] || '').toLowerCase().indexOf('err') >= 0).length;
             const kpis = [
-                { icon: 'Archive', value: jobs.length, label: t('cloud.bkpJobs') || 'Backup jobs', accent: '#6366f1' },
-                { icon: 'CheckCircle', value: active, label: t('cloud.bkpActive') || 'Enabled', accent: '#22c55e' },
-                { icon: failed ? 'XCircle' : 'Shield', value: failed, label: t('cloud.bkpFailed') || 'Failed last run', accent: failed ? '#ef4444' : '#14b8a6' },
+                { icon: 'Archive', value: jobs.length, label: t('cloud.bkpJobs'), accent: '#6366f1' },
+                { icon: 'CheckCircle', value: active, label: t('cloud.bkpActive'), accent: '#22c55e' },
+                { icon: failed ? 'XCircle' : 'Shield', value: failed, label: t('cloud.bkpFailed'), accent: failed ? '#ef4444' : '#14b8a6' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.backups') || 'Backups'} sub={t('cloud.backupsSub') || 'Scheduled backup jobs'}>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.backups')} sub={t('cloud.backupsSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!jobs.length} emptyIcon="Archive" emptyTitle={t('cloud.noBackups') || 'No backup jobs configured'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!jobs.length} emptyIcon="Archive" emptyTitle={t('cloud.noBackups')} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Archive />, title: t('cloud.backups') || 'Backups', count: jobs.length })}
+                            {cloudHead({ icon: <Icons.Archive />, title: t('cloud.backups'), count: jobs.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colGuests') || 'Guests'}</th><th>{t('cloud.colStorage') || 'Storage'}</th><th>{t('cloud.colMode') || 'Mode'}</th><th>{t('cloud.colStatus') || 'Status'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
+                                <thead><tr><th>{t('cloud.colSchedule')}</th><th>{t('cloud.colGuests')}</th><th>{t('cloud.colStorage')}</th><th>{t('cloud.colMode')}</th><th>{t('cloud.colStatus')}</th><th>{t('cloud.colState')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                 <tbody>{jobs.map((j, i) => {
                                     const st = (j['last-run-status'] || '').toLowerCase();
                                     const ok = st === 'ok' || st === 'OK'.toLowerCase();
                                     return (<tr className="cloud-table-row cloud-table-row-static" key={j.id || i}>
                                         <td className="cloud-table-mono">{j.schedule || '—'}</td>
-                                        <td>{(Number(j.all) === 1) ? <span className="cloud-chip cloud-chip-soft">{t('cloud.allGuests') || 'All guests'}</span> : <span className="cloud-table-mono">{j.vmid || '—'}</span>}</td>
+                                        <td>{(Number(j.all) === 1) ? <span className="cloud-chip cloud-chip-soft">{t('cloud.allGuests')}</span> : <span className="cloud-table-mono">{j.vmid || '—'}</span>}</td>
                                         <td>{j.storage || '—'}</td>
                                         <td className="cloud-cell-muted">{j.mode || 'snapshot'}{j.compress && j.compress !== '0' ? ' · ' + j.compress : ''}</td>
                                         <td>{st ? (ok ? <span className="cloud-chip cloud-chip-ok">OK</span> : <span className="cloud-chip cloud-chip-err">{j['last-run-status']}</span>) : <span className="cloud-cell-muted">—</span>}</td>
                                         <td>{(Number(j.enabled) === 1 || j.enabled === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
                                         <CloudRowActions>
-                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + j.id, 'POST', `/api/clusters/${clusterId}/datacenter/backup/${j.id}/run`)} />
-                                            <CloudIconBtn icon="Power" title={(Number(j.enabled) === 1 || j.enabled === true) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + j.id, 'PUT', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, { enabled: (Number(j.enabled) === 1 || j.enabled === true) ? 0 : 1 })} />
-                                            <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + j.id, 'DELETE', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, undefined, (t('cloud.confirmDelBackup') || 'Delete this backup job?'))} />
+                                            <CloudIconBtn icon="Play" title={t('cloud.runNow')} onClick={() => mut.run('r' + j.id, 'POST', `/api/clusters/${clusterId}/datacenter/backup/${j.id}/run`)} />
+                                            <CloudIconBtn icon="Power" title={(Number(j.enabled) === 1 || j.enabled === true) ? (t('disable')) : (t('enable'))} onClick={() => mut.run('t' + j.id, 'PUT', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, { enabled: (Number(j.enabled) === 1 || j.enabled === true) ? 0 : 1 })} />
+                                            <CloudIconBtn icon="Trash2" danger title={t('delete')} onClick={() => mut.run('d' + j.id, 'DELETE', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, undefined, (t('cloud.confirmDelBackup')))} />
                                         </CloudRowActions>
                                     </tr>);
                                 })}</tbody>
@@ -1363,37 +1363,37 @@
             const inn = rules.filter(r => (r.type || '').toLowerCase() === 'in').length;
             const out = rules.filter(r => (r.type || '').toLowerCase() === 'out').length;
             const kpis = [
-                { icon: 'Shield', value: rules.length, label: t('cloud.fwRules') || 'Rules', accent: '#6366f1' },
-                { icon: 'Lock', value: inn, label: t('cloud.fwIn') || 'Inbound', accent: '#0ea5e9' },
-                { icon: 'Globe', value: out, label: t('cloud.fwOut') || 'Outbound', accent: '#a855f7' },
+                { icon: 'Shield', value: rules.length, label: t('cloud.fwRules'), accent: '#6366f1' },
+                { icon: 'Lock', value: inn, label: t('cloud.fwIn'), accent: '#0ea5e9' },
+                { icon: 'Globe', value: out, label: t('cloud.fwOut'), accent: '#a855f7' },
             ];
             const actChip = a => { const u = (a || '').toUpperCase(); const cls = u === 'ACCEPT' ? 'cloud-chip-ok' : (u === 'DROP' || u === 'REJECT') ? 'cloud-chip-err' : 'cloud-chip-soft'; return <span className={'cloud-chip ' + cls}>{u || '—'}</span>; };
             const [showNew, setShowNew] = React.useState(false);
             const [form, setForm] = React.useState({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
             const submitNew = () => {
-                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
+                if (!clusterId) { window.alert(t('cloud.noClusterSel')); return; }
                 const body = { type: form.type, action: form.action, enable: 1 };
                 ['proto', 'dport', 'source', 'dest', 'comment'].forEach(k => { if (String(form[k]).trim()) body[k] = String(form[k]).trim(); });
                 // Guard against an unconstrained ACCEPT rule (no proto/port/source/dest = allow-all).
                 const constrained = ['proto', 'dport', 'source', 'dest'].some(k => body[k]);
                 if (form.action === 'ACCEPT' && !constrained) {
-                    if (!window.confirm(t('cloud.fwAllowAllWarn') || 'This ACCEPT rule matches ALL traffic (no protocol, port, source or destination set). Create this allow-all rule anyway?')) return;
+                    if (!window.confirm(t('cloud.fwAllowAllWarn'))) return;
                 }
                 mut.run('newrule', 'POST', `/api/clusters/${clusterId}/datacenter/firewall/rules`, body);
                 setShowNew(false); setForm({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
             };
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.firewall') || 'Firewall'} sub={t('cloud.firewallSub') || 'Datacenter firewall rules'}>
-                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newRule') || 'New rule'}</button>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.firewall')} sub={t('cloud.firewallSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newRule')}</button>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!rules.length} emptyIcon="Shield" emptyTitle={t('cloud.noFwRules') || 'No datacenter firewall rules'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!rules.length} emptyIcon="Shield" emptyTitle={t('cloud.noFwRules')} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Shield />, title: t('cloud.firewall') || 'Firewall', count: rules.length })}
+                            {cloudHead({ icon: <Icons.Shield />, title: t('cloud.firewall'), count: rules.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>#</th><th>{t('cloud.colDir') || 'Dir'}</th><th>{t('cloud.colAction') || 'Action'}</th><th>{t('cloud.colProto') || 'Proto'}</th><th>{t('cloud.colPort') || 'Port'}</th><th>{t('cloud.colSource') || 'Source'}</th><th>{t('cloud.colDest') || 'Dest'}</th><th>{t('cloud.colComment') || 'Comment'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
+                                <thead><tr><th>#</th><th>{t('cloud.colDir')}</th><th>{t('cloud.colAction')}</th><th>{t('cloud.colProto')}</th><th>{t('cloud.colPort')}</th><th>{t('cloud.colSource')}</th><th>{t('cloud.colDest')}</th><th>{t('cloud.colComment')}</th><th>{t('cloud.colState')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                 <tbody>{rules.map((r, i) => (<tr className="cloud-table-row cloud-table-row-static" key={r.pos != null ? r.pos : i}>
                                     <td className="cloud-cell-muted">{r.pos != null ? r.pos : i}</td>
                                     <td><span className="cloud-chip cloud-chip-soft">{(r.type || '').toUpperCase() || '—'}</span></td>
@@ -1405,28 +1405,28 @@
                                     <td className="cloud-cell-muted">{r.comment || ''}</td>
                                     <td>{(Number(r.enable) === 1 || r.enable === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
                                     <CloudRowActions>
-                                        <CloudIconBtn icon="Power" title={(Number(r.enable) === 1 || r.enable === true) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + r.pos, 'PUT', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, { enable: (Number(r.enable) === 1 || r.enable === true) ? 0 : 1 })} />
-                                        <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + r.pos, 'DELETE', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, undefined, (t('cloud.confirmDelRule') || 'Delete this firewall rule?'))} />
+                                        <CloudIconBtn icon="Power" title={(Number(r.enable) === 1 || r.enable === true) ? (t('disable')) : (t('enable'))} onClick={() => mut.run('t' + r.pos, 'PUT', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, { enable: (Number(r.enable) === 1 || r.enable === true) ? 0 : 1 })} />
+                                        <CloudIconBtn icon="Trash2" danger title={t('delete')} onClick={() => mut.run('d' + r.pos, 'DELETE', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, undefined, (t('cloud.confirmDelRule')))} />
                                     </CloudRowActions>
                                 </tr>))}</tbody>
                             </table></div>
                         </div>
                     </CloudSectionState>
                     {showNew && (
-                        <CloudModal title={t('cloud.newFirewallRule') || 'New firewall rule'} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create') || 'Create'} t={t}>
+                        <CloudModal title={t('cloud.newFirewallRule')} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create')} t={t}>
                             <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('cloud.colDirection') || 'Direction'}><select className="cloud-input" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="in">{t('cloud.fwIn') || 'Inbound'}</option><option value="out">{t('cloud.fwOut') || 'Outbound'}</option></select></CloudField>
-                                <CloudField label={t('cloud.colAction') || 'Action'}><select className="cloud-input" value={form.action} onChange={e => setForm({ ...form, action: e.target.value })}>{['ACCEPT', 'DROP', 'REJECT'].map(a => <option key={a} value={a}>{a}</option>)}</select></CloudField>
+                                <CloudField label={t('cloud.colDirection')}><select className="cloud-input" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="in">{t('cloud.fwIn')}</option><option value="out">{t('cloud.fwOut')}</option></select></CloudField>
+                                <CloudField label={t('cloud.colAction')}><select className="cloud-input" value={form.action} onChange={e => setForm({ ...form, action: e.target.value })}>{['ACCEPT', 'DROP', 'REJECT'].map(a => <option key={a} value={a}>{a}</option>)}</select></CloudField>
                             </div>
                             <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('cloud.colProtocol') || 'Protocol'}><input className="cloud-input" value={form.proto} onChange={e => setForm({ ...form, proto: e.target.value })} placeholder="tcp" /></CloudField>
-                                <CloudField label={t('cloud.colDestPort') || 'Dest port'}><input className="cloud-input" value={form.dport} onChange={e => setForm({ ...form, dport: e.target.value })} placeholder="22" /></CloudField>
+                                <CloudField label={t('cloud.colProtocol')}><input className="cloud-input" value={form.proto} onChange={e => setForm({ ...form, proto: e.target.value })} placeholder="tcp" /></CloudField>
+                                <CloudField label={t('cloud.colDestPort')}><input className="cloud-input" value={form.dport} onChange={e => setForm({ ...form, dport: e.target.value })} placeholder="22" /></CloudField>
                             </div>
                             <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('cloud.colSource') || 'Source'}><input className="cloud-input" value={form.source} onChange={e => setForm({ ...form, source: e.target.value })} placeholder="0.0.0.0/0" /></CloudField>
-                                <CloudField label={t('cloud.colDest') || 'Dest'}><input className="cloud-input" value={form.dest} onChange={e => setForm({ ...form, dest: e.target.value })} /></CloudField>
+                                <CloudField label={t('cloud.colSource')}><input className="cloud-input" value={form.source} onChange={e => setForm({ ...form, source: e.target.value })} placeholder="0.0.0.0/0" /></CloudField>
+                                <CloudField label={t('cloud.colDest')}><input className="cloud-input" value={form.dest} onChange={e => setForm({ ...form, dest: e.target.value })} /></CloudField>
                             </div>
-                            <CloudField label={t('cloud.colComment') || 'Comment'}><input className="cloud-input" value={form.comment} onChange={e => setForm({ ...form, comment: e.target.value })} /></CloudField>
+                            <CloudField label={t('cloud.colComment')}><input className="cloud-input" value={form.comment} onChange={e => setForm({ ...form, comment: e.target.value })} /></CloudField>
                         </CloudModal>
                     )}
                 </div>
@@ -1440,27 +1440,27 @@
             const shared = list.filter(s => Number(s.shared) === 1 || s.shared === true).length;
             const types = new Set(list.map(s => s.type).filter(Boolean));
             const kpis = [
-                { icon: 'Database', value: list.length, label: t('cloud.stStorages') || 'Storages', accent: '#6366f1' },
-                { icon: 'Layers', value: shared, label: t('cloud.stShared') || 'Shared', accent: '#14b8a6' },
-                { icon: 'HardDrive', value: types.size, label: t('cloud.stTypes') || 'Types', accent: '#a855f7' },
+                { icon: 'Database', value: list.length, label: t('cloud.stStorages'), accent: '#6366f1' },
+                { icon: 'Layers', value: shared, label: t('cloud.stShared'), accent: '#14b8a6' },
+                { icon: 'HardDrive', value: types.size, label: t('cloud.stTypes'), accent: '#a855f7' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.storageConfig') || 'Storage'} sub={t('cloud.storageConfigSub') || 'Datacenter storage configuration'}>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.storageConfig')} sub={t('cloud.storageConfigSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="Database" emptyTitle={t('cloud.noStorage') || 'No storage configured'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="Database" emptyTitle={t('cloud.noStorage')} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Database />, title: t('cloud.storageConfig') || 'Storage', count: list.length })}
+                            {cloudHead({ icon: <Icons.Database />, title: t('cloud.storageConfig'), count: list.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colContent') || 'Content'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colShared') || 'Shared'}</th><th>{t('cloud.colState') || 'State'}</th></tr></thead>
+                                <thead><tr><th>{t('cloud.colName')}</th><th>{t('cloud.colType')}</th><th>{t('cloud.colContent')}</th><th>{t('cloud.colTarget')}</th><th>{t('cloud.colShared')}</th><th>{t('cloud.colState')}</th></tr></thead>
                                 <tbody>{list.map((s, i) => (<tr className="cloud-table-row cloud-table-row-static" key={s.storage || i}>
                                     <td><span className="cloud-table-name"><span className="cloud-table-name-icon"><Icons.HardDrive /></span>{s.storage || '—'}</span></td>
                                     <td className="cloud-table-mono">{s.type || '—'}</td>
                                     <td className="cloud-cell-muted">{s.content || '—'}</td>
                                     <td className="cloud-table-mono">{s.path || s.export || s.target || s.pool || s.server || '—'}</td>
-                                    <td>{(Number(s.shared) === 1 || s.shared === true) ? <span className="cloud-chip cloud-chip-soft">{t('cloud.shared') || 'Shared'}</span> : <span className="cloud-cell-muted">{t('cloud.local') || 'local'}</span>}</td>
+                                    <td>{(Number(s.shared) === 1 || s.shared === true) ? <span className="cloud-chip cloud-chip-soft">{t('cloud.shared')}</span> : <span className="cloud-cell-muted">{t('cloud.local')}</span>}</td>
                                     <td>{(Number(s.disable) === 1 || s.disable === true) ? <CloudConnChip connected={false} t={t} /> : <CloudConnChip connected={true} t={t} />}</td>
                                 </tr>))}</tbody>
                             </table></div>
@@ -1476,15 +1476,15 @@
             const list = Array.isArray(data) ? data : [];
             const online = list.filter(p => p.connected).length;
             const kpis = [
-                { icon: 'Server', value: list.length, label: t('cloud.pbsServers') || 'PBS servers', accent: '#6366f1' },
-                { icon: online === list.length && list.length ? 'CheckCircle' : 'AlertTriangle', value: `${online}/${list.length}`, label: t('cloud.pbsOnline') || 'Online', accent: online === list.length ? '#22c55e' : '#f59e0b' },
+                { icon: 'Server', value: list.length, label: t('cloud.pbsServers'), accent: '#6366f1' },
+                { icon: online === list.length && list.length ? 'CheckCircle' : 'AlertTriangle', value: `${online}/${list.length}`, label: t('cloud.pbsOnline'), accent: online === list.length ? '#22c55e' : '#f59e0b' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.pbs') || 'Backup Servers'} sub={t('cloud.pbsSub') || 'Proxmox Backup Server targets'}>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.pbs')} sub={t('cloud.pbsSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="Server" emptyTitle={t('cloud.noPbs') || 'No backup servers configured'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="Server" emptyTitle={t('cloud.noPbs')} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         <div className="cloud-card-grid">{list.map((p, i) => (
                             <div className="cloud-card" key={p.id || i}>
@@ -1494,9 +1494,9 @@
                                     <span style={{ marginLeft: 'auto' }}><CloudConnChip connected={!!p.connected} t={t} /></span>
                                 </div>
                                 <div className="cloud-util-breakdown">
-                                    <div className="cloud-util-row"><span>{t('cloud.colHost') || 'Host'}</span><span className="cloud-table-mono">{p.host || '—'}:{p.port || 8007}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.colClusters') || 'Linked clusters'}</span><span>{Array.isArray(p.linked_clusters) ? p.linked_clusters.length : (p.linked_clusters || 0)}</span></div>
-                                    {p.last_error ? <div className="cloud-util-row"><span>{t('cloud.colError') || 'Last error'}</span><span className="cloud-cell-muted" style={{ color: '#ef4444' }}>{String(p.last_error).slice(0, 60)}</span></div> : null}
+                                    <div className="cloud-util-row"><span>{t('cloud.colHost')}</span><span className="cloud-table-mono">{p.host || '—'}:{p.port || 8007}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.colClusters')}</span><span>{Array.isArray(p.linked_clusters) ? p.linked_clusters.length : (p.linked_clusters || 0)}</span></div>
+                                    {p.last_error ? <div className="cloud-util-row"><span>{t('cloud.colError')}</span><span className="cloud-cell-muted" style={{ color: '#ef4444' }}>{String(p.last_error).slice(0, 60)}</span></div> : null}
                                 </div>
                             </div>
                         ))}</div>
@@ -1511,28 +1511,28 @@
             const list = Array.isArray(data) ? data : [];
             const auto = list.filter(p => p.auto_failover).length;
             const kpis = [
-                { icon: 'LifeBuoy', value: list.length, label: t('cloud.srPlans') || 'Recovery plans', accent: '#6366f1' },
-                { icon: 'RefreshCw', value: auto, label: t('cloud.srAuto') || 'Auto-failover', accent: '#f59e0b' },
+                { icon: 'LifeBuoy', value: list.length, label: t('cloud.srPlans'), accent: '#6366f1' },
+                { icon: 'RefreshCw', value: auto, label: t('cloud.srAuto'), accent: '#f59e0b' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.siteRecovery') || 'Site Recovery'} sub={t('cloud.siteRecoverySub') || 'Disaster-recovery plans'}>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.siteRecovery')} sub={t('cloud.siteRecoverySub')}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="LifeBuoy" emptyTitle={t('cloud.noSrPlans') || 'No recovery plans'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="LifeBuoy" emptyTitle={t('cloud.noSrPlans')} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         <div className="cloud-card-grid">{list.map((p, i) => (
                             <div className="cloud-card" key={p.id || i}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                                     <span style={{ display: 'inline-flex' }}><Icons.LifeBuoy /></span>
                                     <strong>{p.name || ('plan-' + i)}</strong>
-                                    {p.auto_failover ? <span className="cloud-chip cloud-chip-soft" style={{ marginLeft: 'auto' }}>{t('cloud.auto') || 'Auto'}</span> : null}
+                                    {p.auto_failover ? <span className="cloud-chip cloud-chip-soft" style={{ marginLeft: 'auto' }}>{t('cloud.auto')}</span> : null}
                                 </div>
                                 <div className="cloud-util-breakdown">
-                                    <div className="cloud-util-row"><span>{t('cloud.colSource') || 'Source'}</span><span className="cloud-table-mono">{p.source_cluster || '—'}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.srTimeout') || 'Failover timeout'}</span><span>{p.failover_timeout != null ? p.failover_timeout + 's' : '—'}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.srLastTest') || 'Last test'}</span><span>{p.last_test ? cloudRelTime(p.last_test, t) : (t('cloud.never') || 'never')}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.srLastFailover') || 'Last failover'}</span><span>{p.last_failover ? cloudRelTime(p.last_failover, t) : (t('cloud.never') || 'never')}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.colSource')}</span><span className="cloud-table-mono">{p.source_cluster || '—'}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.srTimeout')}</span><span>{p.failover_timeout != null ? p.failover_timeout + 's' : '—'}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.srLastTest')}</span><span>{p.last_test ? cloudRelTime(p.last_test, t) : (t('cloud.never'))}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.srLastFailover')}</span><span>{p.last_failover ? cloudRelTime(p.last_failover, t) : (t('cloud.never'))}</span></div>
                                 </div>
                             </div>
                         ))}</div>
@@ -1566,28 +1566,28 @@
             const healthCode = String(health || 'unknown').toUpperCase();
             const healthDisplay =
                 healthCode === 'HEALTH_OK' || healthCode === 'OK' ? 'OK' :
-                healthCode === 'HEALTH_WARN' ? (t('warning') || 'Warning') :
-                healthCode === 'HEALTH_ERR' || healthCode === 'ERROR' ? (t('error') || 'Error') :
-                healthCode === 'UNKNOWN' ? (t('cloud.unknown') || 'Unknown') :
+                healthCode === 'HEALTH_WARN' ? (t('warning')) :
+                healthCode === 'HEALTH_ERR' || healthCode === 'ERROR' ? (t('error')) :
+                healthCode === 'UNKNOWN' ? (t('cloud.unknown')) :
                 healthCode;
             const kpis = [
-                { icon: 'Heart', value: healthDisplay, label: t('cloud.cephHealth') || 'Health', accent: /HEALTH_OK|OK|HEALTHY/.test(healthCode) ? '#22c55e' : '#f59e0b' },
-                { icon: 'Database', value: mons.length, label: t('cloud.cephMons') || 'Monitors', accent: '#6366f1' },
-                { icon: 'HardDrive', value: `${osdUp}/${osds.length}`, label: t('cloud.cephOsds') || 'OSDs up', accent: '#0ea5e9' },
-                { icon: 'Layers', value: pools.length, label: t('cloud.cephPools') || 'Pools', accent: '#a855f7' },
+                { icon: 'Heart', value: healthDisplay, label: t('cloud.cephHealth'), accent: /HEALTH_OK|OK|HEALTHY/.test(healthCode) ? '#22c55e' : '#f59e0b' },
+                { icon: 'Database', value: mons.length, label: t('cloud.cephMons'), accent: '#6366f1' },
+                { icon: 'HardDrive', value: `${osdUp}/${osds.length}`, label: t('cloud.cephOsds'), accent: '#0ea5e9' },
+                { icon: 'Layers', value: pools.length, label: t('cloud.cephPools'), accent: '#a855f7' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.ceph') || 'Ceph'} sub={t('cloud.cephSub') || 'Distributed storage'}>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.ceph')} sub={t('cloud.cephSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={notAvail} emptyIcon="Database" emptyTitle={t('cloud.cephNA') || 'Ceph is not configured on this cluster'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={notAvail} emptyIcon="Database" emptyTitle={t('cloud.cephNA')} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         {pools.length ? (
                             <div className="cloud-card cloud-table-card">
-                                {cloudHead({ icon: <Icons.Layers />, title: t('cloud.cephPools') || 'Pools', count: pools.length })}
+                                {cloudHead({ icon: <Icons.Layers />, title: t('cloud.cephPools'), count: pools.length })}
                                 <div className="cloud-table-scroll"><table className="cloud-table">
-                                    <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colSize') || 'Size'}</th><th>PG</th><th>{t('cloud.colUsage') || 'Usage'}</th></tr></thead>
+                                    <thead><tr><th>{t('cloud.colName')}</th><th>{t('cloud.colSize')}</th><th>PG</th><th>{t('cloud.colUsage')}</th></tr></thead>
                                     <tbody>{pools.map((p, i) => (<tr className="cloud-table-row cloud-table-row-static" key={p.pool_name || p.name || i}>
                                         <td>{p.pool_name || p.name || '—'}</td>
                                         <td className="cloud-table-mono">{p.size != null ? p.size : '—'}</td>
@@ -1608,12 +1608,12 @@
             return (
                 <div className="cloud-modal-overlay" style={{ position: 'fixed', inset: 0, zIndex: 70, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)' }} onClick={onClose}>
                     <div className="cloud-card" style={{ width: 'min(460px,92vw)', padding: 0 }} onClick={e => e.stopPropagation()}>
-                        {cloudHead({ icon: <Icons.Plus />, title, right: <CloudIconBtn icon="X" title={t('close') || 'Close'} onClick={onClose} /> })}
+                        {cloudHead({ icon: <Icons.Plus />, title, right: <CloudIconBtn icon="X" title={t('close')} onClick={onClose} /> })}
                         <form onSubmit={(e) => { e.preventDefault(); onSubmit(); }}>
                             <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>{children}</div>
                             <div className="cloud-modal-footer" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '12px 16px', borderTop: '1px solid var(--cloud-divider)' }}>
-                                <button type="button" className="cloud-link-btn" onClick={onClose}>{t('cancel') || 'Cancel'}</button>
-                                <button type="submit" className="cloud-btn-primary">{submitLabel || (t('create') || 'Create')}</button>
+                                <button type="button" className="cloud-link-btn" onClick={onClose}>{t('cancel')}</button>
+                                <button type="submit" className="cloud-btn-primary">{submitLabel || (t('create'))}</button>
                             </div>
                         </form>
                     </div>
@@ -1638,7 +1638,7 @@
             const [zForm, setZForm] = React.useState({ zone: '', type: 'vlan', bridge: '', peers: '', controller: '' });
             const [vForm, setVForm] = React.useState({ vnet: '', zone: '' });
             const submitZone = () => {
-                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
+                if (!clusterId) { window.alert(t('cloud.noClusterSel')); return; }
                 const body = { zone: zForm.zone.trim(), type: zForm.type };
                 if (zForm.type === 'vlan' || zForm.type === 'qinq') body.bridge = zForm.bridge.trim();
                 if (zForm.type === 'vxlan') body.peers = zForm.peers.trim();
@@ -1647,13 +1647,13 @@
                 mut.run('addzone', 'POST', `${base}/zones`, body); setModal(null); setZForm({ zone: '', type: 'vlan', bridge: '', peers: '', controller: '' });
             };
             const submitVnet = () => {
-                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
+                if (!clusterId) { window.alert(t('cloud.noClusterSel')); return; }
                 if (!vForm.vnet.trim() || !vForm.zone) return;
                 mut.run('addvnet', 'POST', `${base}/vnets`, { vnet: vForm.vnet.trim(), zone: vForm.zone }); setModal(null); setVForm({ vnet: '', zone: '' });
             };
             const [sForm, setSForm] = React.useState({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
             const submitSubnet = () => {
-                if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
+                if (!clusterId) { window.alert(t('cloud.noClusterSel')); return; }
                 if (!sForm.vnet || !sForm.subnet.trim()) return;
                 const body = { subnet: sForm.subnet.trim(), snat: sForm.snat ? 1 : 0 };
                 if (sForm.gateway.trim()) body.gateway = sForm.gateway.trim();
@@ -1661,85 +1661,85 @@
                 mut.run('addsubnet', 'POST', `${base}/vnets/${sForm.vnet}/subnets`, body); setModal(null); setSForm({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
             };
             const kpis = [
-                { icon: 'Globe', value: zones.length, label: t('cloud.sdnZones') || 'Zones', accent: '#6366f1' },
-                { icon: 'Network', value: vnets.length, label: t('cloud.sdnVnets') || 'VNets', accent: '#14b8a6' },
-                { icon: 'Layers', value: subnets.length, label: t('cloud.sdnSubnets') || 'Subnets', accent: '#a855f7' },
-                { icon: 'Settings', value: controllers.length, label: t('cloud.sdnControllers') || 'Controllers', accent: '#0ea5e9' },
+                { icon: 'Globe', value: zones.length, label: t('cloud.sdnZones'), accent: '#6366f1' },
+                { icon: 'Network', value: vnets.length, label: t('cloud.sdnVnets'), accent: '#14b8a6' },
+                { icon: 'Layers', value: subnets.length, label: t('cloud.sdnSubnets'), accent: '#a855f7' },
+                { icon: 'Settings', value: controllers.length, label: t('cloud.sdnControllers'), accent: '#0ea5e9' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.sdn') || 'SDN'} sub={t('cloud.sdnSub') || 'Software-defined networking'}>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.sdn')} sub={t('cloud.sdnSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={notAvail} emptyIcon="Network" emptyTitle={t('cloud.sdnNA') || 'SDN is not configured on this cluster'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={notAvail} emptyIcon="Network" emptyTitle={t('cloud.sdnNA')} t={t}>
                         {s.pending ? (
                             <div className="cloud-card" style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderLeft: '3px solid #eab308' }}>
                                 <Icons.AlertTriangle />
-                                <span style={{ flex: 1 }}>{t('cloud.sdnPending') || 'You have unapplied SDN changes.'}</span>
-                                <button type="button" className="cloud-btn-primary" onClick={() => mut.run('apply', 'POST', `${base}/apply`)}>{t('cloud.applySDN') || 'Apply'}</button>
+                                <span style={{ flex: 1 }}>{t('cloud.sdnPending')}</span>
+                                <button type="button" className="cloud-btn-primary" onClick={() => mut.run('apply', 'POST', `${base}/apply`)}>{t('cloud.applySDN')}</button>
                             </div>
                         ) : null}
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
 
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Globe />, title: t('cloud.sdnZones') || 'Zones', count: zones.length, right: <button type="button" className="cloud-link-btn" onClick={() => setModal('zone')}><Icons.Plus /> {t('cloud.addZone') || 'Add zone'}</button> })}
+                            {cloudHead({ icon: <Icons.Globe />, title: t('cloud.sdnZones'), count: zones.length, right: <button type="button" className="cloud-link-btn" onClick={() => setModal('zone')}><Icons.Plus /> {t('cloud.addZone')}</button> })}
                             {zones.length ? <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colType') || 'Type'}</th><th>MTU</th><th>{t('cloud.colNodes') || 'Nodes'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <thead><tr><th>{t('cloud.colName')}</th><th>{t('cloud.colType')}</th><th>MTU</th><th>{t('cloud.colNodes')}</th><th>{t('cloud.colState')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                 <tbody>{zones.map((z, i) => (<tr className="cloud-table-row cloud-table-row-static" key={z.zone || i}>
                                     <td>{z.zone || z.name || '—'}</td><td className="cloud-table-mono">{z.type || '—'}</td><td className="cloud-cell-muted">{z.mtu || '—'}</td><td className="cloud-cell-muted">{z.nodes || '—'}</td>
                                     <td><span className="cloud-chip cloud-chip-soft">{z.state || z.status || 'ok'}</span></td>
-                                    <CloudRowActions><CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('dz' + (z.zone), 'DELETE', `${base}/zones/${z.zone}`, undefined, (t('cloud.confirmDelZone') || 'Delete this zone?'))} /></CloudRowActions>
+                                    <CloudRowActions><CloudIconBtn icon="Trash2" danger title={t('delete')} onClick={() => mut.run('dz' + (z.zone), 'DELETE', `${base}/zones/${z.zone}`, undefined, (t('cloud.confirmDelZone')))} /></CloudRowActions>
                                 </tr>))}</tbody>
-                            </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.noZones') || 'No zones.'}</div>}
+                            </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.noZones')}</div>}
                         </div>
 
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Network />, title: t('cloud.sdnVnets') || 'VNets', count: vnets.length, right: <button type="button" className="cloud-link-btn" onClick={() => setModal('vnet')}><Icons.Plus /> {t('cloud.addVnet') || 'Add VNet'}</button> })}
+                            {cloudHead({ icon: <Icons.Network />, title: t('cloud.sdnVnets'), count: vnets.length, right: <button type="button" className="cloud-link-btn" onClick={() => setModal('vnet')}><Icons.Plus /> {t('cloud.addVnet')}</button> })}
                             {vnets.length ? <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.sdnZone') || 'Zone'}</th><th>{t('cloud.colTag') || 'Tag'}</th><th>{t('cloud.colAlias') || 'Alias'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <thead><tr><th>{t('cloud.colName')}</th><th>{t('cloud.sdnZone')}</th><th>{t('cloud.colTag')}</th><th>{t('cloud.colAlias')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                 <tbody>{vnets.map((v, i) => (<tr className="cloud-table-row cloud-table-row-static" key={v.vnet || i}>
                                     <td>{v.vnet || '—'}</td><td className="cloud-cell-muted">{v.zone || '—'}</td><td className="cloud-table-mono">{v.tag || '—'}</td><td className="cloud-cell-muted">{v.alias || '—'}</td>
-                                    <CloudRowActions><CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('dv' + v.vnet, 'DELETE', `${base}/vnets/${v.vnet}`, undefined, (t('cloud.confirmDelVnet') || 'Delete this VNet?'))} /></CloudRowActions>
+                                    <CloudRowActions><CloudIconBtn icon="Trash2" danger title={t('delete')} onClick={() => mut.run('dv' + v.vnet, 'DELETE', `${base}/vnets/${v.vnet}`, undefined, (t('cloud.confirmDelVnet')))} /></CloudRowActions>
                                 </tr>))}</tbody>
-                            </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.noVnets') || 'No VNets.'}</div>}
+                            </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.noVnets')}</div>}
                         </div>
 
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Layers />, title: t('cloud.sdnSubnets') || 'Subnets', count: subnets.length, right: vnets.length ? <button type="button" className="cloud-link-btn" onClick={() => setModal('subnet')}><Icons.Plus /> {t('cloud.addSubnet') || 'Add subnet'}</button> : null })}
+                            {cloudHead({ icon: <Icons.Layers />, title: t('cloud.sdnSubnets'), count: subnets.length, right: vnets.length ? <button type="button" className="cloud-link-btn" onClick={() => setModal('subnet')}><Icons.Plus /> {t('cloud.addSubnet')}</button> : null })}
                             {subnets.length ? <div className="cloud-table-scroll"><table className="cloud-table">
-                                    <thead><tr><th>CIDR</th><th>{t('cloud.colGateway') || 'Gateway'}</th><th>DHCP</th><th>SNAT</th><th>{t('cloud.sdnVnet') || 'VNet'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                    <thead><tr><th>CIDR</th><th>{t('cloud.colGateway')}</th><th>DHCP</th><th>SNAT</th><th>{t('cloud.sdnVnet')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                     <tbody>{subnets.map((sn, i) => (<tr className="cloud-table-row cloud-table-row-static" key={(sn.subnet || i)}>
-                                        <td className="cloud-table-mono">{sn.subnet || sn.cidr || '—'}</td><td className="cloud-cell-muted">{sn.gateway || '—'}</td><td className="cloud-cell-muted">{sn.dhcp || 'none'}</td>
-                                        <td>{(Number(sn.snat) === 1 || sn.snat === true) ? <span className="cloud-chip cloud-chip-ok">{t('cloud.enabled') || 'Enabled'}</span> : <span className="cloud-cell-muted">{t('cloud.disabled') || 'Disabled'}</span>}</td>
+                                        <td className="cloud-table-mono">{sn.subnet || sn.cidr || '—'}</td><td className="cloud-cell-muted">{sn.gateway || '—'}</td><td className="cloud-cell-muted">{sn.dhcp && sn.dhcp !== 'none' ? sn.dhcp : t('cloud.none')}</td>
+                                        <td>{(Number(sn.snat) === 1 || sn.snat === true) ? <span className="cloud-chip cloud-chip-ok">{t('cloud.enabled')}</span> : <span className="cloud-cell-muted">{t('cloud.disabled')}</span>}</td>
                                         <td className="cloud-cell-muted">{sn.vnet || '—'}</td>
-                                        <CloudRowActions>{sn.vnet ? <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('ds' + (sn.subnet), 'DELETE', `${base}/vnets/${sn.vnet}/subnets/${encodeURIComponent(sn.subnet)}`, undefined, (t('cloud.confirmDelSubnet') || 'Delete this subnet?'))} /> : null}</CloudRowActions>
+                                        <CloudRowActions>{sn.vnet ? <CloudIconBtn icon="Trash2" danger title={t('delete')} onClick={() => mut.run('ds' + (sn.subnet), 'DELETE', `${base}/vnets/${sn.vnet}/subnets/${encodeURIComponent(sn.subnet)}`, undefined, (t('cloud.confirmDelSubnet')))} /> : null}</CloudRowActions>
                                     </tr>))}</tbody>
-                                </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{vnets.length ? (t('cloud.noSubnets') || 'No subnets.') : (t('cloud.subnetsNeedVnet') || 'Create a VNet first.')}</div>}
+                                </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{vnets.length ? (t('cloud.noSubnets')) : (t('cloud.subnetsNeedVnet'))}</div>}
                         </div>
                     </CloudSectionState>
 
                     {modal === 'zone' && (
-                        <CloudModal title={t('cloud.addZone') || 'Add zone'} onClose={() => setModal(null)} onSubmit={submitZone} submitLabel={t('create') || 'Create'} t={t}>
-                            <CloudField label={t('cloud.zoneName') || 'Zone ID'}><input className="cloud-input" value={zForm.zone} onChange={e => setZForm({ ...zForm, zone: e.target.value })} placeholder="zone1" maxLength={8} /></CloudField>
-                            <CloudField label={t('cloud.colType') || 'Type'}><select className="cloud-input" value={zForm.type} onChange={e => setZForm({ ...zForm, type: e.target.value })}>{['simple', 'vlan', 'qinq', 'vxlan', 'evpn'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
-                            {(zForm.type === 'vlan' || zForm.type === 'qinq') && <CloudField label={t('cloud.zoneBridge') || 'Bridge'}><input className="cloud-input" value={zForm.bridge} onChange={e => setZForm({ ...zForm, bridge: e.target.value })} placeholder="vmbr0" /></CloudField>}
-                            {zForm.type === 'vxlan' && <CloudField label={t('cloud.zonePeers') || 'Peers (comma-sep IPs)'}><input className="cloud-input" value={zForm.peers} onChange={e => setZForm({ ...zForm, peers: e.target.value })} placeholder="10.0.0.1,10.0.0.2" /></CloudField>}
-                            {zForm.type === 'evpn' && <CloudField label={t('cloud.zoneController') || 'Controller'}><input className="cloud-input" value={zForm.controller} onChange={e => setZForm({ ...zForm, controller: e.target.value })} /></CloudField>}
+                        <CloudModal title={t('cloud.addZone')} onClose={() => setModal(null)} onSubmit={submitZone} submitLabel={t('create')} t={t}>
+                            <CloudField label={t('cloud.zoneName')}><input className="cloud-input" value={zForm.zone} onChange={e => setZForm({ ...zForm, zone: e.target.value })} placeholder="zone1" maxLength={8} /></CloudField>
+                            <CloudField label={t('cloud.colType')}><select className="cloud-input" value={zForm.type} onChange={e => setZForm({ ...zForm, type: e.target.value })}>{['simple', 'vlan', 'qinq', 'vxlan', 'evpn'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
+                            {(zForm.type === 'vlan' || zForm.type === 'qinq') && <CloudField label={t('cloud.zoneBridge')}><input className="cloud-input" value={zForm.bridge} onChange={e => setZForm({ ...zForm, bridge: e.target.value })} placeholder="vmbr0" /></CloudField>}
+                            {zForm.type === 'vxlan' && <CloudField label={t('cloud.zonePeers')}><input className="cloud-input" value={zForm.peers} onChange={e => setZForm({ ...zForm, peers: e.target.value })} placeholder="10.0.0.1,10.0.0.2" /></CloudField>}
+                            {zForm.type === 'evpn' && <CloudField label={t('cloud.zoneController')}><input className="cloud-input" value={zForm.controller} onChange={e => setZForm({ ...zForm, controller: e.target.value })} /></CloudField>}
                         </CloudModal>
                     )}
                     {modal === 'vnet' && (
-                        <CloudModal title={t('cloud.addVnet') || 'Add VNet'} onClose={() => setModal(null)} onSubmit={submitVnet} submitLabel={t('create') || 'Create'} t={t}>
-                            <CloudField label={t('cloud.vnetName') || 'VNet ID'}><input className="cloud-input" value={vForm.vnet} onChange={e => setVForm({ ...vForm, vnet: e.target.value })} placeholder="vnet1" maxLength={8} /></CloudField>
-                            <CloudField label={t('cloud.sdnZone') || 'Zone'}><select className="cloud-input" value={vForm.zone} onChange={e => setVForm({ ...vForm, zone: e.target.value })}><option value="">—</option>{zones.map(z => <option key={z.zone} value={z.zone}>{z.zone}</option>)}</select></CloudField>
+                        <CloudModal title={t('cloud.addVnet')} onClose={() => setModal(null)} onSubmit={submitVnet} submitLabel={t('create')} t={t}>
+                            <CloudField label={t('cloud.vnetName')}><input className="cloud-input" value={vForm.vnet} onChange={e => setVForm({ ...vForm, vnet: e.target.value })} placeholder="vnet1" maxLength={8} /></CloudField>
+                            <CloudField label={t('cloud.sdnZone')}><select className="cloud-input" value={vForm.zone} onChange={e => setVForm({ ...vForm, zone: e.target.value })}><option value="">—</option>{zones.map(z => <option key={z.zone} value={z.zone}>{z.zone}</option>)}</select></CloudField>
                         </CloudModal>
                     )}
                     {modal === 'subnet' && (
-                        <CloudModal title={t('cloud.addSubnet') || 'Add subnet'} onClose={() => setModal(null)} onSubmit={submitSubnet} submitLabel={t('create') || 'Create'} t={t}>
-                            <CloudField label={t('cloud.sdnVnet') || 'VNet'}><select className="cloud-input" value={sForm.vnet} onChange={e => setSForm({ ...sForm, vnet: e.target.value })}><option value="">—</option>{vnets.map(v => <option key={v.vnet} value={v.vnet}>{v.vnet}</option>)}</select></CloudField>
+                        <CloudModal title={t('cloud.addSubnet')} onClose={() => setModal(null)} onSubmit={submitSubnet} submitLabel={t('create')} t={t}>
+                            <CloudField label={t('cloud.sdnVnet')}><select className="cloud-input" value={sForm.vnet} onChange={e => setSForm({ ...sForm, vnet: e.target.value })}><option value="">—</option>{vnets.map(v => <option key={v.vnet} value={v.vnet}>{v.vnet}</option>)}</select></CloudField>
                             <CloudField label={'CIDR'}><input className="cloud-input" value={sForm.subnet} onChange={e => setSForm({ ...sForm, subnet: e.target.value })} placeholder="10.0.10.0/24" /></CloudField>
                             <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('cloud.colGateway') || 'Gateway'}><input className="cloud-input" value={sForm.gateway} onChange={e => setSForm({ ...sForm, gateway: e.target.value })} placeholder="10.0.10.1" /></CloudField>
-                                <CloudField label={'DHCP'}><select className="cloud-input" value={sForm.dhcp} onChange={e => setSForm({ ...sForm, dhcp: e.target.value })}>{['none', 'dnsmasq'].map(x => <option key={x} value={x}>{x === 'none' ? (t('cloud.none') || 'None') : x}</option>)}</select></CloudField>
+                                <CloudField label={t('cloud.colGateway')}><input className="cloud-input" value={sForm.gateway} onChange={e => setSForm({ ...sForm, gateway: e.target.value })} placeholder="10.0.10.1" /></CloudField>
+                                <CloudField label={'DHCP'}><select className="cloud-input" value={sForm.dhcp} onChange={e => setSForm({ ...sForm, dhcp: e.target.value })}>{['none', 'dnsmasq'].map(x => <option key={x} value={x}>{x === 'none' ? (t('cloud.none')) : x}</option>)}</select></CloudField>
                             </div>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '.85rem', color: 'var(--cloud-text-secondary)' }}><input type="checkbox" checked={sForm.snat} onChange={e => setSForm({ ...sForm, snat: e.target.checked })} /> SNAT</label>
                         </CloudModal>
@@ -1762,33 +1762,33 @@
                 fair: 'cloud.healthFair',
                 poor: 'cloud.healthPoor',
             })[String(band).toLowerCase()];
-            const bandLabel = bandKey ? (t(bandKey) || band) : band;
+            const bandLabel = bandKey ? t(bandKey) : band;
             const issues = Array.isArray(h.issues) ? h.issues : [];
             const kpis = [
-                { icon: 'Heart', value: score != null ? score + '%' : '—', label: (t('cloud.healthScore') || 'Health score') + (bandLabel ? ' · ' + bandLabel : ''), accent: score == null ? '#64748b' : score >= 85 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444' },
-                { icon: 'AlertTriangle', value: issues.length, label: t('cloud.issues') || 'Issues', accent: issues.length ? '#f59e0b' : '#14b8a6' },
-                { icon: 'BarChart', value: srv.length, label: t('cloud.metricServers') || 'Metric servers', accent: '#6366f1' },
+                { icon: 'Heart', value: score != null ? score + '%' : '—', label: (t('cloud.healthScore')) + (bandLabel ? ' · ' + bandLabel : ''), accent: score == null ? '#64748b' : score >= 85 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444' },
+                { icon: 'AlertTriangle', value: issues.length, label: t('cloud.issues'), accent: issues.length ? '#f59e0b' : '#14b8a6' },
+                { icon: 'BarChart', value: srv.length, label: t('cloud.metricServers'), accent: '#6366f1' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.monitoring') || 'Monitoring'} sub={t('cloud.monitoringSub') || 'Cluster health & metric export'}>
-                        <button type="button" className="cloud-link-btn" onClick={() => { health.reload(); servers.reload(); }}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.monitoring')} sub={t('cloud.monitoringSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={() => { health.reload(); servers.reload(); }}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
                     <CloudSectionState loading={health.loading} err={health.err} empty={false} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         {issues.length ? (
                             <div className="cloud-card">
-                                <CloudSectionTitle>{t('cloud.healthIssues') || 'Health issues'}</CloudSectionTitle>
+                                <CloudSectionTitle>{t('cloud.healthIssues')}</CloudSectionTitle>
                                 <div className="cloud-util-breakdown">{issues.slice(0, 12).map((iss, i) => (
                                     <div className="cloud-util-row" key={i}><span>{(iss && (iss.message || iss.title || iss.factor)) || String(iss)}</span><span className="cloud-cell-muted">{iss && (iss.severity || iss.impact) || ''}</span></div>
                                 ))}</div>
                             </div>
                         ) : null}
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.BarChart />, title: t('cloud.metricServers') || 'Metric servers', count: srv.length })}
-                            {srv.length === 0 ? <CloudEmpty icon="BarChart" title={t('cloud.noMetricServers') || 'No external metric servers configured'} /> : (
+                            {cloudHead({ icon: <Icons.BarChart />, title: t('cloud.metricServers'), count: srv.length })}
+                            {srv.length === 0 ? <CloudEmpty icon="BarChart" title={t('cloud.noMetricServers')} /> : (
                                 <div className="cloud-table-scroll"><table className="cloud-table">
-                                    <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colTarget') || 'Target'}</th></tr></thead>
+                                    <thead><tr><th>{t('cloud.colName')}</th><th>{t('cloud.colType')}</th><th>{t('cloud.colTarget')}</th></tr></thead>
                                     <tbody>{srv.map((m, i) => (<tr className="cloud-table-row cloud-table-row-static" key={m.id || i}>
                                         <td>{m.id || m.name || '—'}</td>
                                         <td className="cloud-table-mono">{m.type || '—'}</td>
@@ -1811,30 +1811,30 @@
             const cjobs = Array.isArray(cross.data) ? cross.data : [];
             const failing = njobs.filter(j => Number(j.fail_count) > 0 || (j.error && String(j.error).trim())).length;
             const kpis = [
-                { icon: 'Copy', value: njobs.length, label: t('cloud.nativeJobs') || 'Native jobs', accent: '#6366f1' },
-                { icon: 'Cloud', value: cjobs.length, label: t('cloud.replCross') || 'Cross-cluster', accent: '#14b8a6' },
-                { icon: failing ? 'XCircle' : 'CheckCircle', value: failing, label: t('cloud.replFailing') || 'Failing', accent: failing ? '#ef4444' : '#22c55e' },
+                { icon: 'Copy', value: njobs.length, label: t('cloud.nativeJobs'), accent: '#6366f1' },
+                { icon: 'Cloud', value: cjobs.length, label: t('cloud.replCross'), accent: '#14b8a6' },
+                { icon: failing ? 'XCircle' : 'CheckCircle', value: failing, label: t('cloud.replFailing'), accent: failing ? '#ef4444' : '#22c55e' },
             ];
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.replication') || 'Replication'} sub={t('cloud.replicationSub') || 'Storage replication jobs'}>
-                        <button type="button" className="cloud-link-btn" onClick={() => { native.reload(); cross.reload(); }}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('cloud.replication')} sub={t('cloud.replicationSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={() => { native.reload(); cross.reload(); }}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={native.loading} err={native.err} empty={!njobs.length && !cjobs.length} emptyIcon="Copy" emptyTitle={t('cloud.noRepl') || 'No replication jobs'} t={t}>
+                    <CloudSectionState loading={native.loading} err={native.err} empty={!njobs.length && !cjobs.length} emptyIcon="Copy" emptyTitle={t('cloud.noRepl')} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         {njobs.length ? (
                             <div className="cloud-card cloud-table-card">
-                                {cloudHead({ icon: <Icons.Copy />, title: t('cloud.replNative') || 'Native replication', count: njobs.length })}
+                                {cloudHead({ icon: <Icons.Copy />, title: t('cloud.replNative'), count: njobs.length })}
                                 <div className="cloud-table-scroll"><table className="cloud-table">
-                                    <thead><tr><th>{t('cloud.colJob') || 'Job'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colLastSync') || 'Last sync'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
+                                    <thead><tr><th>{t('cloud.colJob')}</th><th>{t('cloud.colTarget')}</th><th>{t('cloud.colSchedule')}</th><th>{t('cloud.colLastSync')}</th><th>{t('cloud.colState')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                     <tbody>{njobs.map((j, i) => (<tr className="cloud-table-row cloud-table-row-static" key={j.id || i}>
                                         <td className="cloud-table-mono">{j.id || '—'}</td>
                                         <td className="cloud-table-mono">{j.target || '—'}</td>
                                         <td className="cloud-table-mono">{j.schedule || '—'}</td>
                                         <td>{j.last_sync ? cloudRelTime(j.last_sync, t) : '—'}</td>
-                                        <td>{(j.error && String(j.error).trim()) ? <span className="cloud-chip cloud-chip-err">{t('cloud.error') || 'Error'}</span> : (Number(j.disable) === 1 ? <CloudConnChip connected={false} t={t} /> : <CloudConnChip connected={true} t={t} />)}</td>
+                                        <td>{(j.error && String(j.error).trim()) ? <span className="cloud-chip cloud-chip-err">{t('cloud.error')}</span> : (Number(j.disable) === 1 ? <CloudConnChip connected={false} t={t} /> : <CloudConnChip connected={true} t={t} />)}</td>
                                         <CloudRowActions>
-                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + j.id, 'POST', `/api/clusters/${clusterId}/replication/${j.id}/run`)} />
+                                            <CloudIconBtn icon="Play" title={t('cloud.runNow')} onClick={() => mut.run('r' + j.id, 'POST', `/api/clusters/${clusterId}/replication/${j.id}/run`)} />
                                         </CloudRowActions>
                                     </tr>))}</tbody>
                                 </table></div>
@@ -1842,15 +1842,15 @@
                         ) : null}
                         {cjobs.length ? (
                             <div className="cloud-card cloud-table-card">
-                                {cloudHead({ icon: <Icons.Cloud />, title: t('cloud.replCross') || 'Cross-cluster', count: cjobs.length })}
+                                {cloudHead({ icon: <Icons.Cloud />, title: t('cloud.replCross'), count: cjobs.length })}
                                 <div className="cloud-table-scroll"><table className="cloud-table">
-                                    <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colSource') || 'Source'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colStatus') || 'Status'}</th></tr></thead>
+                                    <thead><tr><th>{t('cloud.colName')}</th><th>{t('cloud.colSource')}</th><th>{t('cloud.colTarget')}</th><th>{t('cloud.colSchedule')}</th><th>{t('cloud.colStatus')}</th></tr></thead>
                                     <tbody>{cjobs.map((j, i) => (<tr className="cloud-table-row cloud-table-row-static" key={j.id || i}>
                                         <td>{j.name || j.id || '—'}</td>
                                         <td className="cloud-table-mono">{j.source_cluster || '—'}</td>
                                         <td className="cloud-table-mono">{j.target_cluster || '—'}</td>
                                         <td className="cloud-table-mono">{j.schedule || '—'}</td>
-                                        <td><span className="cloud-chip cloud-chip-soft">{j.status || (j.enabled ? 'enabled' : 'disabled')}</span></td>
+                                        <td><span className="cloud-chip cloud-chip-soft">{j.status || (j.enabled ? t('cloud.enabled') : t('cloud.disabled'))}</span></td>
                                     </tr>))}</tbody>
                                 </table></div>
                             </div>
@@ -1892,48 +1892,48 @@
                     : { borderLeft: '3px solid #64748b', background: 'rgba(100,116,139,0.08)' };
             const stratIcon = strat === 'wait' ? <Icons.AlertTriangle /> : strat === 'quorum' ? <Icons.Shield /> : <Icons.Activity />;
             const kpis = [
-                { icon: enabled ? 'Shield' : 'XCircle', value: enabled ? (t('haEnabled') || 'Enabled') : (t('haDisabled') || 'Disabled'), label: t('cloud.haState') || 'HA state', accent: enabled ? '#22c55e' : '#64748b' },
-                { icon: sbp.have_quorum ? 'CheckCircle' : 'XCircle', value: sbp.have_quorum ? (t('quorumOk') || 'Quorum OK') : (t('quorumLost') || 'No quorum'), label: t('cloud.quorum') || 'Quorum', accent: sbp.have_quorum ? '#14b8a6' : '#ef4444' },
-                { icon: 'Server', value: installed ? (t('cloud.installed') || 'Installed') : (t('notInstalled') || 'Not installed'), label: t('cloud.fenceAgents') || 'Self-fence agents', accent: installed ? '#6366f1' : '#f59e0b' },
-                { icon: 'Activity', value: `${health.online_nodes != null ? health.online_nodes : '—'} / ${health.total_nodes != null ? health.total_nodes : '—'}`, label: t('cloud.nodesOnline') || 'Hosts online', accent: '#0ea5e9' },
+                { icon: enabled ? 'Shield' : 'XCircle', value: enabled ? (t('haEnabled')) : (t('haDisabled')), label: t('cloud.haState'), accent: enabled ? '#22c55e' : '#64748b' },
+                { icon: sbp.have_quorum ? 'CheckCircle' : 'XCircle', value: sbp.have_quorum ? (t('quorumOk')) : (t('quorumLost')), label: t('cloud.quorum'), accent: sbp.have_quorum ? '#14b8a6' : '#ef4444' },
+                { icon: 'Server', value: installed ? (t('cloud.installed')) : (t('notInstalled')), label: t('cloud.fenceAgents'), accent: installed ? '#6366f1' : '#f59e0b' },
+                { icon: 'Activity', value: `${health.online_nodes != null ? health.online_nodes : '—'} / ${health.total_nodes != null ? health.total_nodes : '—'}`, label: t('cloud.nodesOnline'), accent: '#0ea5e9' },
             ];
             return (
                 <div className="cloud-body">
                     <CloudPageHeader
-                        title={t('cloud.ha') || 'High Availability'}
-                        sub={enabled ? (t('cloud.haOn') || 'Split-brain protection active') : (t('cloud.haOff') || 'High availability is disabled for this cluster')}
+                        title={t('cloud.ha')}
+                        sub={enabled ? (t('cloud.haOn')) : (t('cloud.haOff'))}
                     >
-                        <button type="button" className="cloud-link-btn" onClick={load}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                        <button type="button" className="cloud-link-btn" onClick={load}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
                     {loading ? (
-                        <div className="cloud-card"><div className="cloud-empty">{t('loading') || 'Loading…'}</div></div>
+                        <div className="cloud-card"><div className="cloud-empty">{t('loading')}</div></div>
                     ) : err ? (
-                        <div className="cloud-card"><CloudEmpty icon="AlertTriangle" title={t('cloud.haLoadFail') || 'Could not load HA status'} text={err} /></div>
+                        <div className="cloud-card"><CloudEmpty icon="AlertTriangle" title={t('cloud.haLoadFail')} text={err} /></div>
                     ) : (
                         <React.Fragment>
                             {(fs.strategy || fs.reason) && (
                                 <div className="cloud-card" style={bannerStyle}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                                         <span style={{ display: 'inline-flex' }}>{stratIcon}</span>
-                                        <strong>{t('fenceStrategyLabel') || 'Fence strategy'}: <span style={{ textTransform: 'uppercase' }}>{strat}</span></strong>
-                                        {fs.expected_votes != null && <span style={{ marginLeft: 'auto', opacity: 0.7, fontSize: 12 }}>{fs.expected_votes} votes · qdevice: {fs.has_qdevice ? 'yes' : 'no'}</span>}
+                                        <strong>{t('fenceStrategyLabel')}: <span style={{ textTransform: 'uppercase' }}>{strat}</span></strong>
+                                        {fs.expected_votes != null && <span style={{ marginLeft: 'auto', opacity: 0.7, fontSize: 12 }}>{fs.expected_votes} {t('dashboardVotesQdevice')} {fs.has_qdevice ? t('cloud.yes') : t('cloud.no')}</span>}
                                     </div>
                                     {sbp.fence_strategy_warning && <p style={{ fontSize: 13, margin: '4px 0' }}>{sbp.fence_strategy_warning}</p>}
                                     {fs.reason && <p style={{ fontSize: 12, opacity: 0.8, margin: '2px 0' }}>{fs.reason}</p>}
-                                    {fs.detected_at && <p style={{ fontSize: 12, opacity: 0.7, margin: '2px 0' }}>{t('detectedAt') || 'Detected at'}: {fs.detected_at}</p>}
+                                    {fs.detected_at && <p style={{ fontSize: 12, opacity: 0.7, margin: '2px 0' }}>{t('detectedAt')}: {fs.detected_at}</p>}
                                 </div>
                             )}
                             <div className="cloud-kpi-grid">
                                 {kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}
                             </div>
                             <div className="cloud-card">
-                                <CloudSectionTitle>{t('cloud.haConfig') || 'Configuration'}</CloudSectionTitle>
+                                <CloudSectionTitle>{t('cloud.haConfig')}</CloudSectionTitle>
                                 <div className="cloud-util-breakdown">
-                                    <div className="cloud-util-row"><span>{t('quorumEnabled') || 'Quorum check'}</span><span>{sbp.quorum_enabled ? (t('enabled') || 'Enabled') : (t('disabled') || 'Disabled')}</span></div>
-                                    <div className="cloud-util-row"><span>{t('selfFence') || 'Self-fencing'}</span><span>{sbp.self_fence_enabled ? (t('enabled') || 'Enabled') : (t('disabled') || 'Disabled')}</span></div>
-                                    <div className="cloud-util-row"><span>{t('twoNodeMode') || '2-node mode'}</span><span>{sbp.two_node_mode ? (t('cloud.yes') || 'Yes') : (t('cloud.no') || 'No')}</span></div>
-                                    <div className="cloud-util-row"><span>{t('storageHeartbeat') || 'Storage heartbeat'}</span><span>{sbp.storage_heartbeat_enabled ? (sbp.storage_heartbeat_path || (t('enabled') || 'Enabled')) : (t('disabled') || 'Disabled')}</span></div>
-                                    <div className="cloud-util-row"><span>{t('recoveryDelay') || 'Recovery delay'}</span><span>{sbp.recovery_delay != null ? sbp.recovery_delay + 's' : '—'}</span></div>
+                                    <div className="cloud-util-row"><span>{t('quorumEnabled')}</span><span>{sbp.quorum_enabled ? (t('enabled')) : (t('disabled'))}</span></div>
+                                    <div className="cloud-util-row"><span>{t('selfFence')}</span><span>{sbp.self_fence_enabled ? (t('enabled')) : (t('disabled'))}</span></div>
+                                    <div className="cloud-util-row"><span>{t('twoNodeMode')}</span><span>{sbp.two_node_mode ? (t('cloud.yes')) : (t('cloud.no'))}</span></div>
+                                    <div className="cloud-util-row"><span>{t('storageHeartbeat')}</span><span>{sbp.storage_heartbeat_enabled ? (sbp.storage_heartbeat_path || (t('enabled'))) : (t('disabled'))}</span></div>
+                                    <div className="cloud-util-row"><span>{t('recoveryDelay')}</span><span>{sbp.recovery_delay != null ? sbp.recovery_delay + 's' : '—'}</span></div>
                                     {sbp.pegaprox_vmid ? <div className="cloud-util-row"><span>PegaProx VM</span><span>#{sbp.pegaprox_vmid}</span></div> : null}
                                 </div>
                             </div>
@@ -1955,8 +1955,8 @@
                         {[1, 2, 3, 4, 5, 6, 7, 8].map(num => <SponsorSlot key={num} num={num} />)}
                     </div>
                     <div style={{ marginTop: 14 }}>
-                        <a href="https://opencollective.com/pegaprox" target="_blank" rel="noopener noreferrer" title={t('cloud.contributeOpenCollective') || 'Contribute on Open Collective'}>
-                            <img src="/images/oc_contribute_button.png" alt={t('cloud.contributeOpenCollective') || 'Contribute on Open Collective'} style={{ height: 26, opacity: 0.9 }} />
+                        <a href="https://opencollective.com/pegaprox" target="_blank" rel="noopener noreferrer" title={t('cloud.contributeOpenCollective')}>
+                            <img src="/images/oc_contribute_button.png" alt={t('cloud.contributeOpenCollective')} style={{ height: 26, opacity: 0.9 }} />
                         </a>
                     </div>
                 </footer>
@@ -1974,16 +1974,16 @@
             const cur = list.find(p => p.id === sel) || null;
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('plugins') || 'Plugins'} sub={list.length + ' ' + (t('plugins') || 'plugins')}>
-                        <button type="button" className="cloud-link-btn" onClick={() => mut.run('rescan', 'POST', '/api/plugins/rescan')}><Icons.Search /> {t('rescan') || 'Rescan'}</button>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('plugins')} sub={list.length + ' ' + (t('plugins'))}>
+                        <button type="button" className="cloud-link-btn" onClick={() => mut.run('rescan', 'POST', '/api/plugins/rescan')}><Icons.Search /> {t('rescan')}</button>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="Box" emptyTitle={t('noPlugins') || 'No plugins enabled'} emptyText={t('cloud.pluginsHint') || 'Enable plugins in Settings → Plugins.'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!list.length} emptyIcon="Box" emptyTitle={t('noPlugins')} emptyText={t('cloud.pluginsHint')} t={t}>
                         <div className="cloud-kpi-grid">
                             {list.map(p => (
                                 <CloudKpiCard key={p.id} icon="Box" value={p.name || p.id}
                                     label={'v' + (p.version || '?') + (p.author ? ' · ' + p.author : '')}
-                                    sub={p.loaded ? (t('loaded') || 'Loaded') : (p.error ? (t('error') || 'Error') : (t('unloaded') || 'Unloaded'))}
+                                    sub={p.loaded ? (t('loaded')) : (p.error ? (t('error')) : (t('unloaded')))}
                                     accent={(cur && cur.id === p.id) ? 'var(--cloud-accent)' : (p.loaded ? '#22c55e' : '#ef4444')}
                                     onClick={() => setSel(p.id)} />
                             ))}
@@ -1992,8 +1992,8 @@
                             <div className="cloud-card cloud-table-card" style={{ padding: 0, overflow: 'hidden' }}>
                                 {cloudHead({ icon: <Icons.Box />, title: cur.name || cur.id, count: (cur.routes && cur.routes.length) || null, right: (
                                     <div style={{ display: 'flex', gap: 4 }}>
-                                        <CloudIconBtn icon="RotateCw" title={t('reload') || 'Reload'} onClick={() => mut.run('rl' + cur.id, 'POST', `/api/plugins/${cur.id}/reload`)} />
-                                        <CloudIconBtn icon="Power" danger title={t('disable') || 'Disable'} onClick={() => mut.run('ds' + cur.id, 'POST', `/api/plugins/${cur.id}/disable`)} />
+                                        <CloudIconBtn icon="RotateCw" title={t('reload')} onClick={() => mut.run('rl' + cur.id, 'POST', `/api/plugins/${cur.id}/reload`)} />
+                                        <CloudIconBtn icon="Power" danger title={t('disable')} onClick={() => mut.run('ds' + cur.id, 'POST', `/api/plugins/${cur.id}/disable`)} />
                                     </div>
                                 ) })}
                                 {cur.has_frontend && cur.frontend_route
@@ -2001,7 +2001,7 @@
                                     : <div style={{ padding: 16 }}>
                                         {cur.description && <p className="cloud-cell-muted" style={{ marginBottom: 8 }}>{cur.description}</p>}
                                         {cur.error && <div className="cloud-chip cloud-chip-err" style={{ marginBottom: 8 }}>{cur.error}</div>}
-                                        <div className="cloud-cell-muted" style={{ fontSize: '.8rem' }}>{(cur.routes || []).length ? (t('cloud.routesPrefix') || 'Routes:') + ' ' + cur.routes.join(', ') : (t('cloud.pluginNoUi') || 'This plugin has no frontend UI.')}</div>
+                                        <div className="cloud-cell-muted" style={{ fontSize: '.8rem' }}>{(cur.routes || []).length ? (t('cloud.routesPrefix')) + ' ' + cur.routes.join(', ') : (t('cloud.pluginNoUi'))}</div>
                                     </div>}
                             </div>
                         )}
@@ -2021,8 +2021,8 @@
             const [pw, setPw] = React.useState('');
             const viewOutput = (s) => {
                 fetch(`/api/clusters/${clusterId}/scripts/${s.id}/output`).then(r => r.ok ? r.json() : null)
-                    .then(d => setOut({ name: s.name, text: (d && (d.output || d.stdout || d.result)) || (t('cloud.noOutput') || '(no output)') }))
-                    .catch(() => setOut({ name: s.name, text: t('cloud.outputLoadFailed') || 'Failed to load output.' }));
+                    .then(d => setOut({ name: s.name, text: (d && (d.output || d.stdout || d.result)) || (t('cloud.noOutput')) }))
+                    .catch(() => setOut({ name: s.name, text: t('cloud.outputLoadFailed') }));
             };
             const submitNew = () => {
                 if (!form.name.trim() || !form.content.trim()) return;
@@ -2032,28 +2032,28 @@
             const submitRun = () => { if (!pw) return; mut.run('run' + runFor.id, 'POST', `/api/clusters/${clusterId}/scripts/${runFor.id}/run`, { password: pw }); setRunFor(null); setPw(''); };
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('customScripts') || 'Scripts'} sub={t('cloud.scriptsSub') || 'Custom cluster scripts'}>
-                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newScript') || 'New script'}</button>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('customScripts')} sub={t('cloud.scriptsSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newScript')}</button>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Terminal" emptyTitle={t('cloud.noScripts') || 'No scripts'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Terminal" emptyTitle={t('cloud.noScripts')} t={t}>
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Terminal />, title: t('customScripts') || 'Scripts', count: rows.length })}
+                            {cloudHead({ icon: <Icons.Terminal />, title: t('customScripts'), count: rows.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>{t('name') || 'Name'}</th><th>{t('type') || 'Type'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colLastRun') || 'Last run'}</th><th>{t('cloud.colStatus') || 'Status'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>{t('cloud.colTarget')}</th><th>{t('cloud.colLastRun')}</th><th>{t('cloud.colStatus')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                 <tbody>{rows.map((s, i) => {
                                     const st = String(s.last_status || '').toLowerCase();
                                     const ok = st.indexOf('ok') >= 0 || st.indexOf('success') >= 0;
                                     return (<tr className="cloud-table-row cloud-table-row-static" key={s.id || i}>
                                         <td>{s.name}{s.description ? <div className="cloud-cell-muted" style={{ fontSize: '.75rem' }}>{s.description}</div> : null}</td>
                                         <td><span className="cloud-chip cloud-chip-soft">{s.type || 'bash'}</span></td>
-                                        <td className="cloud-cell-muted">{s.target_nodes || 'all'}</td>
+                                        <td className="cloud-cell-muted">{s.target_nodes || t('cloud.all')}</td>
                                         <td className="cloud-cell-muted">{s.last_run || '—'}</td>
                                         <td>{s.last_status ? (ok ? <span className="cloud-chip cloud-chip-ok">{s.last_status}</span> : <span className="cloud-chip cloud-chip-err">{s.last_status}</span>) : <span className="cloud-cell-muted">—</span>}</td>
                                         <CloudRowActions>
-                                            <CloudIconBtn icon="Play" title={t('cloud.run') || 'Run'} onClick={() => setRunFor(s)} />
-                                            <CloudIconBtn icon="FileText" title={t('cloud.viewOutput') || 'Output'} onClick={() => viewOutput(s)} />
-                                            <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/clusters/${clusterId}/scripts/${s.id}`, undefined, (t('cloud.confirmDelScript') || 'Delete this script?'))} />
+                                            <CloudIconBtn icon="Play" title={t('cloud.run')} onClick={() => setRunFor(s)} />
+                                            <CloudIconBtn icon="FileText" title={t('cloud.viewOutput')} onClick={() => viewOutput(s)} />
+                                            <CloudIconBtn icon="Trash2" danger title={t('delete')} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/clusters/${clusterId}/scripts/${s.id}`, undefined, (t('cloud.confirmDelScript')))} />
                                         </CloudRowActions>
                                     </tr>);
                                 })}</tbody>
@@ -2061,26 +2061,26 @@
                         </div>
                         {out && (
                             <div className="cloud-card" style={{ padding: 12 }}>
-                                <CloudSectionTitle right={<CloudIconBtn icon="X" title={t('close') || 'Close'} onClick={() => setOut(null)} />}>{out.name} — {t('cloud.output') || 'Output'}</CloudSectionTitle>
+                                <CloudSectionTitle right={<CloudIconBtn icon="X" title={t('close')} onClick={() => setOut(null)} />}>{out.name} — {t('cloud.output')}</CloudSectionTitle>
                                 <pre style={{ whiteSpace: 'pre-wrap', fontSize: '.8rem', maxHeight: '40vh', overflow: 'auto', background: 'var(--cloud-surface-2)', padding: 10, borderRadius: 6, marginTop: 8 }}>{out.text}</pre>
                             </div>
                         )}
                     </CloudSectionState>
                     {showNew && (
-                        <CloudModal title={t('cloud.newScript') || 'New script'} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create') || 'Create'} t={t}>
-                            <CloudField label={t('name') || 'Name'}><input className="cloud-input" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="cleanup-logs" /></CloudField>
-                            <CloudField label={t('description') || 'Description'}><input className="cloud-input" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></CloudField>
+                        <CloudModal title={t('cloud.newScript')} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create')} t={t}>
+                            <CloudField label={t('name')}><input className="cloud-input" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="cleanup-logs" /></CloudField>
+                            <CloudField label={t('description')}><input className="cloud-input" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></CloudField>
                             <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('type') || 'Type'}><select className="cloud-input" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="bash">bash</option><option value="python">python</option></select></CloudField>
-                                <CloudField label={t('cloud.colTargetNodes') || 'Target nodes'}><input className="cloud-input" value={form.target_nodes} onChange={e => setForm({ ...form, target_nodes: e.target.value })} placeholder="all" /></CloudField>
+                                <CloudField label={t('type')}><select className="cloud-input" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="bash">bash</option><option value="python">python</option></select></CloudField>
+                                <CloudField label={t('cloud.colTargetNodes')}><input className="cloud-input" value={form.target_nodes} onChange={e => setForm({ ...form, target_nodes: e.target.value })} placeholder="all" /></CloudField>
                             </div>
-                            <CloudField label={t('cloud.scriptContent') || 'Script'}><textarea className="cloud-input" style={{ minHeight: 140, fontFamily: 'monospace' }} value={form.content} onChange={e => setForm({ ...form, content: e.target.value })} placeholder={form.type === 'python' ? '#!/usr/bin/env python3' : '#!/bin/bash'} /></CloudField>
+                            <CloudField label={t('cloud.scriptContent')}><textarea className="cloud-input" style={{ minHeight: 140, fontFamily: 'monospace' }} value={form.content} onChange={e => setForm({ ...form, content: e.target.value })} placeholder={form.type === 'python' ? '#!/usr/bin/env python3' : '#!/bin/bash'} /></CloudField>
                         </CloudModal>
                     )}
                     {runFor && (
-                        <CloudModal title={(t('cloud.run') || 'Run') + ' — ' + runFor.name} onClose={() => { setRunFor(null); setPw(''); }} onSubmit={submitRun} submitLabel={t('cloud.run') || 'Run'} t={t}>
-                            <div className="cloud-cell-muted" style={{ fontSize: '.8rem' }}>{t('cloud.runScriptHint') || 'Runs on the target nodes over SSH. Confirm with the node root password.'}</div>
-                            <CloudField label={t('password') || 'Node password'}><input className="cloud-input" type="password" value={pw} onChange={e => setPw(e.target.value)} autoFocus /></CloudField>
+                        <CloudModal title={(t('cloud.run')) + ' — ' + runFor.name} onClose={() => { setRunFor(null); setPw(''); }} onSubmit={submitRun} submitLabel={t('cloud.run')} t={t}>
+                            <div className="cloud-cell-muted" style={{ fontSize: '.8rem' }}>{t('cloud.runScriptHint')}</div>
+                            <CloudField label={t('password')}><input className="cloud-input" type="password" value={pw} onChange={e => setPw(e.target.value)} autoFocus /></CloudField>
                         </CloudModal>
                     )}
                 </div>
@@ -2104,26 +2104,26 @@
             };
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('scheduledActions') || 'Schedules'} sub={t('cloud.schedulesSub') || 'Time-based VM actions'}>
-                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newSchedule') || 'New schedule'}</button>
-                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    <CloudPageHeader title={t('scheduledActions')} sub={t('cloud.schedulesSub')}>
+                        <button type="button" className="cloud-link-btn" onClick={() => setShowNew(true)}><Icons.Plus /> {t('cloud.newSchedule')}</button>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh')}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Clock" emptyTitle={t('cloud.noSchedules') || 'No schedules'} t={t}>
+                    <CloudSectionState loading={loading} err={err} empty={!rows.length} emptyIcon="Clock" emptyTitle={t('cloud.noSchedules')} t={t}>
                         <div className="cloud-card cloud-table-card">
-                            {cloudHead({ icon: <Icons.Clock />, title: t('scheduledActions') || 'Schedules', count: rows.length })}
+                            {cloudHead({ icon: <Icons.Clock />, title: t('scheduledActions'), count: rows.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
-                                <thead><tr><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colAction') || 'Action'}</th><th>{t('cloud.colWhen') || 'When'}</th><th>{t('cloud.colLastRun') || 'Last run'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+                                <thead><tr><th>{t('cloud.colTarget')}</th><th>{t('cloud.colAction')}</th><th>{t('cloud.colWhen')}</th><th>{t('cloud.colLastRun')}</th><th>{t('cloud.colState')}</th><th style={{ textAlign: 'right' }}></th></tr></thead>
                                 <tbody>{rows.map((s, i) => (
                                     <tr className="cloud-table-row cloud-table-row-static" key={s.id || i}>
                                         <td className="cloud-table-mono">{s.vmid ? '#' + s.vmid : (s.target || '—')}{s.vm_type ? ' · ' + s.vm_type : ''}</td>
-                                        <td><span className="cloud-chip cloud-chip-soft">{({start:t('cloud.actionStart')||'Start',stop:t('cloud.actionStop')||'Stop',shutdown:t('cloud.actionShutdown')||'Shutdown',reboot:t('cloud.actionReboot')||'Reboot',snapshot:t('cloud.actionSnapshot')||'Snapshot'})[s.action] || s.action || '—'}</span></td>
+                                        <td><span className="cloud-chip cloud-chip-soft">{({start:t('cloud.actionStart'),stop:t('cloud.actionStop'),shutdown:t('cloud.actionShutdown'),reboot:t('cloud.actionReboot'),snapshot:t('cloud.actionSnapshot')})[s.action] || s.action || '—'}</span></td>
                                         <td className="cloud-cell-muted">{[s.schedule_type, s.time, s.date, s.cron].filter(Boolean).join(' ') || '—'}</td>
                                         <td className="cloud-cell-muted">{s.last_run || s.last_run_at || '—'}</td>
                                         <td><CloudConnChip connected={isOn(s)} t={t} /></td>
                                         <CloudRowActions>
-                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + s.id, 'POST', `/api/schedules/${s.id}/run`)} />
-                                            <CloudIconBtn icon="Power" title={isOn(s) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + s.id, 'PUT', `/api/schedules/${s.id}`, { enabled: isOn(s) ? 0 : 1 })} />
-                                            <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/schedules/${s.id}`, undefined, (t('cloud.confirmDelSchedule') || 'Delete this schedule?'))} />
+                                            <CloudIconBtn icon="Play" title={t('cloud.runNow')} onClick={() => mut.run('r' + s.id, 'POST', `/api/schedules/${s.id}/run`)} />
+                                            <CloudIconBtn icon="Power" title={isOn(s) ? (t('disable')) : (t('enable'))} onClick={() => mut.run('t' + s.id, 'PUT', `/api/schedules/${s.id}`, { enabled: isOn(s) ? 0 : 1 })} />
+                                            <CloudIconBtn icon="Trash2" danger title={t('delete')} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/schedules/${s.id}`, undefined, (t('cloud.confirmDelSchedule')))} />
                                         </CloudRowActions>
                                     </tr>
                                 ))}</tbody>
@@ -2131,17 +2131,17 @@
                         </div>
                     </CloudSectionState>
                     {showNew && (
-                        <CloudModal title={t('cloud.newSchedule') || 'New schedule'} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create') || 'Create'} t={t}>
+                        <CloudModal title={t('cloud.newSchedule')} onClose={() => setShowNew(false)} onSubmit={submitNew} submitLabel={t('create')} t={t}>
                             <div style={{ display: 'flex', gap: 10 }}>
                                 <CloudField label={'VMID'}><input className="cloud-input" type="number" value={form.vmid} onChange={e => setForm({ ...form, vmid: e.target.value })} placeholder="100" /></CloudField>
-                                <CloudField label={t('type') || 'Type'}><select className="cloud-input" value={form.vm_type} onChange={e => setForm({ ...form, vm_type: e.target.value })}><option value="qemu">qemu</option><option value="lxc">lxc</option></select></CloudField>
+                                <CloudField label={t('type')}><select className="cloud-input" value={form.vm_type} onChange={e => setForm({ ...form, vm_type: e.target.value })}><option value="qemu">qemu</option><option value="lxc">lxc</option></select></CloudField>
                             </div>
-                            <CloudField label={t('cloud.colAction') || 'Action'}><select className="cloud-input" value={form.action} onChange={e => setForm({ ...form, action: e.target.value })}>{['start', 'stop', 'shutdown', 'reboot', 'snapshot'].map(a => <option key={a} value={a}>{({start:t('cloud.actionStart')||'Start',stop:t('cloud.actionStop')||'Stop',shutdown:t('cloud.actionShutdown')||'Shutdown',reboot:t('cloud.actionReboot')||'Reboot',snapshot:t('cloud.actionSnapshot')||'Snapshot'})[a] || a}</option>)}</select></CloudField>
+                            <CloudField label={t('cloud.colAction')}><select className="cloud-input" value={form.action} onChange={e => setForm({ ...form, action: e.target.value })}>{['start', 'stop', 'shutdown', 'reboot', 'snapshot'].map(a => <option key={a} value={a}>{({start:t('cloud.actionStart'),stop:t('cloud.actionStop'),shutdown:t('cloud.actionShutdown'),reboot:t('cloud.actionReboot'),snapshot:t('cloud.actionSnapshot')})[a] || a}</option>)}</select></CloudField>
                             <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('cloud.colSchedule') || 'Schedule'}><select className="cloud-input" value={form.schedule_type} onChange={e => setForm({ ...form, schedule_type: e.target.value })}>{['once', 'daily', 'weekly', 'weekdays', 'weekends'].map(x => <option key={x} value={x}>{({once:t('cloud.scheduleOnce')||'Once',daily:t('cloud.scheduleDaily')||'Daily',weekly:t('cloud.scheduleWeekly')||'Weekly',weekdays:t('cloud.scheduleWeekdays')||'Weekdays',weekends:t('cloud.scheduleWeekends')||'Weekends'})[x] || x}</option>)}</select></CloudField>
-                                <CloudField label={t('cloud.colTime') || 'Time'}><input className="cloud-input" type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} /></CloudField>
+                                <CloudField label={t('cloud.colSchedule')}><select className="cloud-input" value={form.schedule_type} onChange={e => setForm({ ...form, schedule_type: e.target.value })}>{['once', 'daily', 'weekly', 'weekdays', 'weekends'].map(x => <option key={x} value={x}>{({once:t('cloud.scheduleOnce'),daily:t('cloud.scheduleDaily'),weekly:t('cloud.scheduleWeekly'),weekdays:t('cloud.scheduleWeekdays'),weekends:t('cloud.scheduleWeekends')})[x] || x}</option>)}</select></CloudField>
+                                <CloudField label={t('cloud.colTime')}><input className="cloud-input" type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} /></CloudField>
                             </div>
-                            {form.schedule_type === 'once' && <CloudField label={t('cloud.colDate') || 'Date'}><input className="cloud-input" type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></CloudField>}
+                            {form.schedule_type === 'once' && <CloudField label={t('cloud.colDate')}><input className="cloud-input" type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></CloudField>}
                         </CloudModal>
                     )}
                 </div>
@@ -2169,17 +2169,17 @@
             const totalVulns = nodes.reduce((a, n) => a + (((n.packages || n.vulnerabilities || n.cves || []).length) || Number(n.count) || 0), 0);
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cveScanner') || 'CVE Scanner'} sub={t('cloud.cveSub') || 'Package vulnerability scan (debsecan)'}>
-                        <button type="button" className="cloud-btn-primary" onClick={scan} disabled={busy}>{busy ? (t('cloud.scanning') || 'Scanning…') : (t('cloud.runScan') || 'Run scan')}</button>
+                    <CloudPageHeader title={t('cveScanner')} sub={t('cloud.cveSub')}>
+                        <button type="button" className="cloud-btn-primary" onClick={scan} disabled={busy}>{busy ? (t('cloud.scanning')) : (t('cloud.runScan'))}</button>
                     </CloudPageHeader>
-                    {err && <div className="cloud-card"><CloudEmpty icon="AlertTriangle" title={t('cloud.scanFailed') || 'Scan failed'} text={err} /></div>}
-                    {!res && !busy && !err && <div className="cloud-card"><CloudEmpty icon="Shield" title={t('cloud.cveIdle') || 'No scan yet'} text={t('cloud.cveHint') || 'Run a scan to check node packages for known CVEs (needs debsecan on the nodes).'} /></div>}
-                    {busy && <div className="cloud-card"><div className="cloud-empty">{t('cloud.scanningNodes') || 'Scanning nodes…'}</div></div>}
+                    {err && <div className="cloud-card"><CloudEmpty icon="AlertTriangle" title={t('cloud.scanFailed')} text={err} /></div>}
+                    {!res && !busy && !err && <div className="cloud-card"><CloudEmpty icon="Shield" title={t('cloud.cveIdle')} text={t('cloud.cveHint')} /></div>}
+                    {busy && <div className="cloud-card"><div className="cloud-empty">{t('cloud.scanningNodes')}</div></div>}
                     {res && !busy && (
                         <React.Fragment>
                             <div className="cloud-kpi-grid">
-                                <CloudKpiCard icon="Cpu" value={nodes.length} label={t('cloud.colNodes') || 'Nodes'} accent="#6366f1" />
-                                <CloudKpiCard icon={totalVulns ? 'AlertTriangle' : 'Shield'} value={totalVulns} label={t('cloud.cveVulns') || 'Vulnerabilities'} accent={totalVulns ? '#ef4444' : '#22c55e'} />
+                                <CloudKpiCard icon="Cpu" value={nodes.length} label={t('cloud.colNodes')} accent="#6366f1" />
+                                <CloudKpiCard icon={totalVulns ? 'AlertTriangle' : 'Shield'} value={totalVulns} label={t('cloud.cveVulns')} accent={totalVulns ? '#ef4444' : '#22c55e'} />
                             </div>
                             {nodes.map((n, i) => {
                                 const pkgs = n.packages || n.vulnerabilities || n.cves || [];
@@ -2187,14 +2187,14 @@
                                     <div className="cloud-card cloud-table-card" key={n.node || i}>
                                         {cloudHead({ icon: <Icons.Cpu />, title: n.node || ('node ' + i), count: pkgs.length })}
                                         {n.error ? <div className="cloud-empty" style={{ padding: 14 }}>{n.error}</div> : (pkgs.length ? <div className="cloud-table-scroll"><table className="cloud-table">
-                                            <thead><tr><th>{t('cloud.colPackage') || 'Package'}</th><th>{t('cloud.colInstalled') || 'Installed'}</th><th>CVE</th><th>{t('cloud.colSeverity') || 'Severity'}</th></tr></thead>
+                                            <thead><tr><th>{t('cloud.colPackage')}</th><th>{t('cloud.colInstalled')}</th><th>CVE</th><th>{t('cloud.colSeverity')}</th></tr></thead>
                                             <tbody>{pkgs.slice(0, 200).map((p, j) => { const sev = String(p.severity || '').toLowerCase(); return (<tr className="cloud-table-row cloud-table-row-static" key={j}>
                                                 <td className="cloud-table-mono">{p.package || p.pkg || p.name || '—'}</td>
                                                 <td className="cloud-cell-muted">{p.installed || p.version || '—'}</td>
                                                 <td className="cloud-table-mono">{p.cve || p.id || '—'}</td>
                                                 <td>{p.severity ? <span className={'cloud-chip ' + (sev.indexOf('high') >= 0 || sev.indexOf('crit') >= 0 ? 'cloud-chip-err' : 'cloud-chip-soft')}>{p.severity}</span> : <span className="cloud-cell-muted">—</span>}</td>
                                             </tr>); })}</tbody>
-                                        </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.cveClean') || 'No known vulnerabilities.'}</div>)}
+                                        </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.cveClean')}</div>)}
                                     </div>
                                 );
                             })}

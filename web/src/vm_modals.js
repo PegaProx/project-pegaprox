@@ -62,7 +62,7 @@
                                     </div>
                                     <div>
                                         <div className="font-medium text-white">{displayName}</div>
-                                        <div className="text-xs text-gray-500">ID: {vm.vmid} · Node: {vm.node}</div>
+                                        <div className="text-xs text-gray-500">ID: {vm.vmid} · {t('node')}: {vm.node}</div>
                                     </div>
                                     <span className={`ml-auto px-2 py-1 rounded text-xs ${
                                         vm.status === 'running' 
@@ -357,7 +357,7 @@
                                         onChange={(e) => setCloneConfig({...cloneConfig, target_storage: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
                                     >
-                                        <option value="">{t('sourceStorageDefault') || 'Source storage (default)'}</option>
+                                        <option value="">{t('sourceStorageDefault')}</option>
                                         {storageList.map(s => {
                                             const availGb = s.avail ? Math.round(s.avail / 1073741824) : '?';
                                             return(
@@ -382,35 +382,35 @@
                                         <div className="space-y-3 p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('user') || 'User'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('user')}</label>
                                                     <input type="text" value={cloneConfig.ciuser} onChange={e => setCloneConfig({...cloneConfig, ciuser: e.target.value})}
                                                         placeholder="root" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('passwordLabel') || 'Password'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('passwordLabel')}</label>
                                                     <input type="password" value={cloneConfig.cipassword} onChange={e => setCloneConfig({...cloneConfig, cipassword: e.target.value})}
                                                         placeholder="••••••" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
                                                 </div>
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-gray-400 mb-1">IP Config</label>
+                                                <label className="block text-xs text-gray-400 mb-1">{t('ipConfig')}</label>
                                                 <input type="text" value={cloneConfig.ipconfig0} onChange={e => setCloneConfig({...cloneConfig, ipconfig0: e.target.value})}
                                                     placeholder="ip=dhcp  or  ip=192.168.1.100/24,gw=192.168.1.1" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono" />
                                             </div>
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">DNS Server</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('dnsServer')}</label>
                                                     <input type="text" value={cloneConfig.nameserver} onChange={e => setCloneConfig({...cloneConfig, nameserver: e.target.value})}
                                                         placeholder="8.8.8.8" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">Search Domain</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('searchDomain')}</label>
                                                     <input type="text" value={cloneConfig.searchdomain} onChange={e => setCloneConfig({...cloneConfig, searchdomain: e.target.value})}
                                                         placeholder="example.com" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
                                                 </div>
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-gray-400 mb-1">SSH Public Keys</label>
+                                                <label className="block text-xs text-gray-400 mb-1">{t('sshPublicKeys')}</label>
                                                 <textarea value={cloneConfig.sshkeys} onChange={e => setCloneConfig({...cloneConfig, sshkeys: e.target.value})}
                                                     placeholder="ssh-ed25519 AAAA... user@host" rows="2"
                                                     className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono resize-none" />
@@ -453,6 +453,7 @@
 
         // VM Detail Modal Component
         function VmDetailModal({ vm, clusterId, onAction, onOpenConsole, onOpenConfig, onMigrate, onClone, onForceStop, onDelete, onClose }) {
+            const { t } = useTranslation();
             const [loading, setLoading] = useState({});
             const isQemu = vm.type === 'qemu';
             const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
@@ -546,7 +547,7 @@
                                             ? 'bg-green-500/20 text-green-400' 
                                             : 'bg-red-500/20 text-red-400'
                                     }`}>
-                                        {vm.status === 'running' ? t('running') || 'Running' : t('stopped') || 'Stopped'}
+                                        {vm.status === 'running' ? t('running') : t('stopped')}
                                     </span>
                                     <button onClick={onClose} className="p-2 hover:bg-proxmox-dark rounded-lg text-gray-400 hover:text-white">
                                         <Icons.X />
@@ -560,7 +561,7 @@
                             <div className="bg-proxmox-dark rounded-lg p-4">
                                 <div className="text-xs text-gray-500 mb-1">CPU</div>
                                 <div className="text-lg font-bold text-white">{(vm.cpu_percent || 0).toFixed(1)}%</div>
-                                <div className="text-xs text-gray-500">{vm.maxcpu || 1} Cores</div>
+                                <div className="text-xs text-gray-500">{vm.maxcpu || 1} {t('cores')}</div>
                                 <div className="mt-2 h-1.5 rounded-full bg-proxmox-border overflow-hidden">
                                     <div 
                                         className="h-full rounded-full transition-all"
@@ -586,12 +587,12 @@
                                 </div>
                             </div>
                             <div className="bg-proxmox-dark rounded-lg p-4">
-                                <div className="text-xs text-gray-500 mb-1">Disk</div>
+                                <div className="text-xs text-gray-500 mb-1">{t('disk')}</div>
                                 <div className="text-lg font-bold text-white">{vm.disk > 0 ? formatBytes(vm.disk) : formatBytes(vm.maxdisk || 0)}</div>
-                                <div className="text-xs text-gray-500">{vm.disk > 0 ? `von ${formatBytes(vm.maxdisk || 0)}` : t('allocated') || 'allocated'}</div>
+                                <div className="text-xs text-gray-500">{vm.disk > 0 ? `${t('of')} ${formatBytes(vm.maxdisk || 0)}` : t('allocated')}</div>
                             </div>
                             <div className="bg-proxmox-dark rounded-lg p-4">
-                                <div className="text-xs text-gray-500 mb-1">Uptime</div>
+                                <div className="text-xs text-gray-500 mb-1">{t('uptime')}</div>
                                 <div className="text-lg font-bold text-white">{formatUptime(vm.uptime)}</div>
                                 <div className="text-xs text-gray-500">{vm.status === 'running' ? t('sinceStart') : t('offline')}</div>
                             </div>
@@ -609,7 +610,7 @@
                                     </span>
                                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
                                         <Icons.Monitor className="w-3 h-3 text-amber-400" />
-                                        <span className="text-gray-400">Machine:</span>
+                                        <span className="text-gray-400">{t('machine')}:</span>
                                         <span className="text-white font-medium">{vmHwInfo.machine}</span>
                                     </span>
                                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
@@ -650,7 +651,7 @@
                                                 <Icons.Globe className="w-4 h-4 text-cyan-400" />
                                             </div>
                                             <div className="min-w-0">
-                                                <div className="text-xs text-gray-500">{t('ipAddress') || 'IP Address'}</div>
+                                                <div className="text-xs text-gray-500">{t('ipAddress')}</div>
                                                 <div className="text-sm font-semibold text-white font-mono truncate" title={guestInfo.ip_addresses.join(', ')}>{guestInfo.ip_addresses.join(', ')}</div>
                                             </div>
                                         </div>
@@ -661,7 +662,7 @@
                                                 <Icons.Monitor className="w-4 h-4 text-cyan-400" />
                                             </div>
                                             <div>
-                                                <div className="text-xs text-gray-500">Hostname</div>
+                                                <div className="text-xs text-gray-500">{t('hostname')}</div>
                                                 <div className="text-sm font-semibold text-white font-mono">{guestInfo.hostname}</div>
                                             </div>
                                         </div>
@@ -683,14 +684,14 @@
                                                 <Icons.Terminal className="w-4 h-4 text-purple-400" />
                                             </div>
                                             <div>
-                                                <div className="text-xs text-gray-500">Kernel</div>
+                                                <div className="text-xs text-gray-500">{t('kernel')}</div>
                                                 <div className="text-sm font-semibold text-gray-300 font-mono">{guestInfo.os_kernel}</div>
                                             </div>
                                         </div>
                                     )}
                                     <div className="flex items-center gap-1.5 md:col-span-3 pt-2 border-t border-gray-700/30">
                                         <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                                        <span className="text-xs text-cyan-400/70">{isQemu ? 'QEMU Guest Agent' : 'Live container info (Proxmox)'}</span>
+                                        <span className="text-xs text-cyan-400/70">{isQemu ? t('qemuGuestAgent') : t('liveContainerInfo')}</span>
                                     </div>
                                 </div>
                             </div>
@@ -730,7 +731,7 @@
                                             className="flex items-center justify-center gap-2 p-3 bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/30 rounded-lg text-yellow-400 transition-all disabled:opacity-50"
                                         >
                                             {loading.shutdown ? <Icons.RotateCw /> : <Icons.Power />}
-                                            Shutdown
+                                            {t('shutdown')}
                                         </button>
                                         <button
                                             onClick={() => handleAction('reboot')}
@@ -738,7 +739,7 @@
                                             className="flex items-center justify-center gap-2 p-3 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded-lg text-orange-400 transition-all disabled:opacity-50"
                                         >
                                             {loading.reboot ? <Icons.RotateCw /> : <Icons.RefreshCw />}
-                                            Reboot
+                                            {t('reboot')}
                                         </button>
                                     </>
                                 )}
@@ -747,14 +748,14 @@
                                     className="flex items-center justify-center gap-2 p-3 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg text-blue-400 transition-all"
                                 >
                                     <Icons.Monitor />
-                                    Konsole
+                                    {t('console')}
                                 </button>
                                 <button
                                     onClick={() => { onClose(); onOpenConfig(vm); }}
                                     className="flex items-center justify-center gap-2 p-3 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-gray-300 transition-all"
                                 >
                                     <Icons.Cog />
-                                    Konfiguration
+                                    {t('configuration')}
                                 </button>
                             </div>
                         </div>
@@ -768,14 +769,14 @@
                                     className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-sm text-gray-300 transition-all"
                                 >
                                     <Icons.ArrowRight />
-                                    Migrieren
+                                    {t('migrate')}
                                 </button>
                                 <button
                                     onClick={() => { onClose(); onClone(vm); }}
                                     className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-sm text-gray-300 transition-all"
                                 >
                                     <Icons.Copy />
-                                    Klonen
+                                    {t('clone')}
                                 </button>
                                 {vm.status === 'running' && (
                                     <>
@@ -811,7 +812,7 @@
                         {/* Tags */}
                         {vm.tags && (
                             <div className="px-6 pb-6">
-                                <div className="text-xs text-gray-500 mb-2">Tags</div>
+                                <div className="text-xs text-gray-500 mb-2">{t('tags')}</div>
                                 <div className="flex flex-wrap gap-2">
                                     {(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                         <span key={tag} className="px-2 py-1 bg-proxmox-dark rounded text-xs text-gray-400">
@@ -929,15 +930,15 @@
                     });
                     if (response && response.ok) {
                         const data = await response.json();
-                        if (addToast) addToast(t('vmUnlocked') || `VM ${vm.vmid} unlocked successfully`, 'success');
+                        if (addToast) addToast(t('vmUnlocked'), 'success');
                         setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
                         setShowUnlockConfirm(false);
                     } else {
                         const err = await response.json();
-                        if (addToast) addToast(err.error || 'Unlock failed', 'error');
+                        if (addToast) addToast(err.error || t('unlockFailed'), 'error');
                     }
                 } catch (error) {
-                    if (addToast) addToast('Unlock failed', 'error');
+                    if (addToast) addToast(t('unlockFailed'), 'error');
                 }
                 setUnlockLoading(false);
             };
@@ -1075,7 +1076,7 @@
                                     <button
                                         onClick={() => window.open(proxmoxUrl, '_blank', 'noopener,noreferrer')}
                                         className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors"
-                                        title={t('openInProxmox') || 'Open in Proxmox'}
+                                        title={t('openInProxmox')}
                                     >
                                         <Icons.ExternalLink className="w-4 h-4" />
                                     </button>
@@ -1116,12 +1117,12 @@
                                     <div className="p-2 rounded-lg bg-red-500/20">
                                         <Icons.AlertTriangle className="text-red-400" />
                                     </div>
-                                    <h3 className="text-lg font-bold text-white">{t('unlockVm') || 'Unlock VM'}</h3>
+                                    <h3 className="text-lg font-bold text-white">{t('unlockVm')}</h3>
                                 </div>
                                 
                                 <div className="space-y-4">
                                     <div className="bg-proxmox-dark rounded-lg p-4">
-                                        <div className="text-sm text-gray-400 mb-2">{t('lockReason') || 'Lock Reason'}:</div>
+                                        <div className="text-sm text-gray-400 mb-2">{t('lockReason')}:</div>
                                         <div className="text-white font-medium">{lockInfo?.lock_description || 'Unknown'}</div>
                                         <div className="text-xs text-gray-500 mt-1">({lockInfo?.lock_reason || 'unknown'})</div>
                                     </div>
@@ -1130,13 +1131,13 @@
                                         <div className="flex items-start gap-2">
                                             <Icons.AlertTriangle className="text-yellow-400 mt-0.5 flex-shrink-0" />
                                             <div className="text-sm text-yellow-300">
-                                                {t('unlockWarning') || 'Warning: Unlocking a VM during an active operation may cause data corruption or other issues. Only proceed if you are sure the operation has failed or been cancelled.'}
+                                                {t('unlockWarning')}
                                             </div>
                                         </div>
                                     </div>
                                     
                                     <div className="bg-proxmox-dark rounded-lg p-3">
-                                        <div className="text-xs text-gray-500 mb-1">CLI {t('command') || 'Command'}:</div>
+                                        <div className="text-xs text-gray-500 mb-1">CLI {t('command')}:</div>
                                         <code className="text-sm text-green-400 font-mono">{lockInfo?.unlock_command || `qm unlock ${vm.vmid}`}</code>
                                     </div>
                                 </div>
@@ -1154,7 +1155,7 @@
                                         className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
                                     >
                                         {unlockLoading ? <Icons.RotateCw className="animate-spin" /> : <Icons.Unlock />}
-                                        {t('unlock') || 'Unlock'}
+                                        {t('unlock')}
                                     </button>
                                 </div>
                             </div>
@@ -1192,9 +1193,9 @@
                             </div>
                         </div>
                         <div className="bg-proxmox-dark rounded-lg p-4">
-                            <div className="text-xs text-gray-500 mb-1">Disk</div>
+                            <div className="text-xs text-gray-500 mb-1">{t('disk')}</div>
                             <div className="text-lg font-bold text-white">{vm.disk > 0 ? formatBytes(vm.disk) : formatBytes(vm.maxdisk || 0)}</div>
-                            <div className="text-xs text-gray-500">{vm.disk > 0 ? `${t('of')} ${formatBytes(vm.maxdisk || 0)}` : t('allocated') || 'allocated'}</div>
+                            <div className="text-xs text-gray-500">{vm.disk > 0 ? `${t('of')} ${formatBytes(vm.maxdisk || 0)}` : t('allocated')}</div>
                         </div>
                         <div className="bg-proxmox-dark rounded-lg p-4">
                             <div className="text-xs text-gray-500 mb-1">{t('uptime')}</div>
@@ -1215,7 +1216,7 @@
                                 </span>
                                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
                                     <Icons.Monitor className="w-3 h-3 text-amber-400" />
-                                    <span className="text-gray-400">Machine:</span>
+                                    <span className="text-gray-400">{t('machine')}:</span>
                                     <span className="text-white font-medium">{vmHwInfo.machine}</span>
                                 </span>
                                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
@@ -1258,7 +1259,7 @@
                                             <Icons.Monitor className="w-4 h-4 text-cyan-400" />
                                         </div>
                                         <div>
-                                            <div className="text-xs text-gray-500">Hostname</div>
+                                            <div className="text-xs text-gray-500">{t('hostname')}</div>
                                             <div className="text-sm font-semibold text-white font-mono">{guestInfo.hostname}</div>
                                         </div>
                                     </div>
@@ -1280,7 +1281,7 @@
                                             <Icons.Terminal className="w-4 h-4 text-purple-400" />
                                         </div>
                                         <div>
-                                            <div className="text-xs text-gray-500">Kernel</div>
+                                            <div className="text-xs text-gray-500">{t('kernel')}</div>
                                             <div className="text-sm font-semibold text-gray-300 font-mono">{guestInfo.os_kernel}</div>
                                         </div>
                                     </div>
@@ -1292,7 +1293,7 @@
                                             <Icons.Globe className="w-4 h-4 text-blue-400" />
                                         </div>
                                         <div className="min-w-0">
-                                            <div className="text-xs text-gray-500">{t('ipAddress') || 'IP Address'}</div>
+                                            <div className="text-xs text-gray-500">{t('ipAddress')}</div>
                                             <div className="text-sm font-semibold text-white font-mono truncate" title={guestInfo.ip_addresses.join(', ')}>{guestInfo.ip_addresses.join(', ')}</div>
                                         </div>
                                     </div>
@@ -1314,7 +1315,7 @@
                                 <div className="flex items-center justify-between mb-1.5">
                                     <div className="flex items-center gap-1.5">
                                         <Icons.HardDrive className="w-3.5 h-3.5 text-proxmox-orange" />
-                                        <span className="text-[12px] font-medium text-white">{t('guestFilesystems') || 'Filesystem Usage'}</span>
+                                        <span className="text-[12px] font-medium text-white">{t('guestFilesystems')}</span>
                                     </div>
                                     <span className="text-[10px] text-gray-500">{fsInfo.filesystems.length}</span>
                                 </div>
@@ -1398,11 +1399,11 @@
                             {isQemu && onOpenSpice && (
                                 <button
                                     onClick={() => onOpenSpice(vm)}
-                                    title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'}
+                                    title={t('spiceConsoleHint')}
                                     className="flex items-center justify-center gap-2 p-3 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg text-blue-400 transition-all"
                                 >
                                     <Icons.ExternalLink />
-                                    {t('spiceConsole') || 'SPICE'}
+                                    {t('spiceConsole')}
                                 </button>
                             )}
                             <button
@@ -1459,7 +1460,7 @@
                                             className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded-lg text-sm text-orange-400 transition-all disabled:opacity-50"
                                         >
                                             {actionLoading?.[`${vm.vmid}-reset`] ? <Icons.RotateCw className="animate-spin" /> : <Icons.Zap />}
-                                            {t('forceReset') || 'Force Reset'}
+                                            {t('forceReset')}
                                         </button>
                                     )}
                                     <button
@@ -1522,11 +1523,11 @@
                             {haEnabled && (
                                 <div className="mt-3 pt-3 border-t border-gray-700/50 grid grid-cols-2 gap-4 text-xs">
                                     <div>
-                                        <span className="text-gray-500">Max. Restarts:</span>
+                                        <span className="text-gray-500">{t('maxRestart')}:</span>
                                         <span className="ml-2 text-white">3</span>
                                     </div>
                                     <div>
-                                        <span className="text-gray-500">Max. Relocate:</span>
+                                        <span className="text-gray-500">{t('maxRelocate')}:</span>
                                         <span className="ml-2 text-white">3</span>
                                     </div>
                                 </div>
@@ -1537,7 +1538,7 @@
                     {/* Tags */}
                     {vm.tags && (
                         <div className="px-6 pb-6">
-                            <div className="text-xs text-gray-500 mb-2">Tags</div>
+                            <div className="text-xs text-gray-500 mb-2">{t('tags')}</div>
                             <div className="flex flex-wrap gap-2">
                                 {(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                     <span key={tag} className="px-2 py-1 bg-proxmox-dark rounded text-xs text-gray-400">
@@ -1629,12 +1630,12 @@
             };
             const promptForVmWebUrl = () => {
                 const cur = vmWebUrl || '';
-                const next = window.prompt(t('setVmWebLinkPrompt') || `Web URL for ${displayName} (leave empty to remove):`, cur);
+                const next = window.prompt(t('setVmWebLinkPrompt'), cur);
                 if (next === null) return;  // cancelled
                 let n = next.trim();
                 if (n && !/^https?:\/\//i.test(n)) n = 'http://' + n;  // allow bare host:port
                 saveVmWebUrl(n);
-                addToast?.(n ? (t('vmWebLinkSaved') || 'Web link saved') : (t('vmWebLinkCleared') || 'Web link removed'), 'success');
+                addToast?.(n ? t('vmWebLinkSaved') : t('vmWebLinkCleared'), 'success');
             };
             const openVmWebUrl = () => {
                 if (!vmWebUrl) { promptForVmWebUrl(); return; }
@@ -1674,33 +1675,33 @@
                         method: 'POST', headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({ snapname: snapName, description: snapDesc, vmstate: snapRam ? 1 : 0 })
                     });
-                    if (r?.ok) { addToast?.(t('snapshotCreated') || 'Snapshot created'); setShowCreateSnap(false); setSnapName(''); setSnapDesc(''); setSnapRam(false); fetchSnapshots(); }
-                    else addToast?.('Snapshot failed', 'error');
+                    if (r?.ok) { addToast?.(t('snapshotCreated')); setShowCreateSnap(false); setSnapName(''); setSnapDesc(''); setSnapRam(false); fetchSnapshots(); }
+                    else addToast?.(t('snapshotFailed'), 'error');
                 } catch(e) { addToast?.(e.message, 'error'); }
             };
 
             const handleDeleteSnap = async (name) => {
-                if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
+                if (!confirm(`${t('deleteSnapshot')} "${name}"?`)) return;
                 const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}`, { method: 'DELETE' });
-                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                if (r?.ok) { addToast?.(t('snapshotDeleted')); fetchSnapshots(); }
             };
 
             const handleRollbackSnap = async (name) => {
-                if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
+                if (!confirm(`${t('rollback')} "${name}"?`)) return;
                 const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}/rollback`, { method: 'POST' });
-                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                if (r?.ok) addToast?.(t('rollbackStarted'));
             };
 
             const handleDeleteEfficientSnap = async (id, name) => {
-                if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
+                if (!confirm(`${t('deleteSnapshot')} "${name}"?`)) return;
                 const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}`, { method: 'DELETE' });
-                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                if (r?.ok) { addToast?.(t('snapshotDeleted')); fetchSnapshots(); }
             };
 
             const handleRollbackEfficientSnap = async (id, name) => {
-                if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
+                if (!confirm(`${t('rollback')} "${name}"?`)) return;
                 const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}/rollback`, { method: 'POST' });
-                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                if (r?.ok) addToast?.(t('rollbackStarted'));
             };
 
             const formatBytes = b => {
@@ -1768,14 +1769,14 @@
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/unlock`, { method: 'POST' });
                     if (response && response.ok) {
-                        if (addToast) addToast(t('vmUnlocked') || `VM ${vm.vmid} unlocked successfully`, 'success');
+                        if (addToast) addToast(t('vmUnlocked'), 'success');
                         setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
                         setShowUnlockConfirm(false);
                     } else {
                         const err = await response.json();
-                        if (addToast) addToast(err.error || 'Unlock failed', 'error');
+                        if (addToast) addToast(err.error || t('unlockFailed'), 'error');
                     }
-                } catch (error) { if (addToast) addToast('Unlock failed', 'error'); }
+                } catch (error) { if (addToast) addToast(t('unlockFailed'), 'error'); }
                 setUnlockLoading(false);
             };
 
@@ -1888,14 +1889,14 @@
                     {showUnlockConfirm && (
                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                             <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border p-5">
-                                <h3 className="text-[14px] font-semibold text-white mb-3">{t('unlockVm') || 'Unlock VM'}</h3>
-                                <p className="text-[13px] text-gray-400 mb-2">{t('unlockVmConfirm') || `Are you sure you want to unlock ${displayName}?`}</p>
+                                <h3 className="text-[14px] font-semibold text-white mb-3">{t('unlockVm')}</h3>
+                                <p className="text-[13px] text-gray-400 mb-2">{t('unlockVmConfirm')}</p>
                                 {lockInfo.lock_description && <p className="text-[12px] mb-2" style={{color: '#efc006'}}>{lockInfo.lock_description}</p>}
                                 {lockInfo.unlock_command && <code className="block text-[11px] text-gray-500 bg-proxmox-dark p-2 mb-3 font-mono">{lockInfo.unlock_command}</code>}
                                 <div className="flex justify-end gap-2">
                                     <button onClick={() => setShowUnlockConfirm(false)} className="px-3 py-1.5 text-[13px] text-gray-400 border border-proxmox-border hover:text-white">{t('cancel')}</button>
                                     <button onClick={handleUnlock} disabled={unlockLoading} className="px-3 py-1.5 text-[13px] text-white border disabled:opacity-50" style={{background: '#efc006', borderColor: '#d4a905'}}>
-                                        {unlockLoading ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : t('unlock') || 'Unlock'}
+                                        {unlockLoading ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : t('unlock')}
                                     </button>
                                 </div>
                             </div>
@@ -1939,8 +1940,8 @@
                                 </button>
                             )}
                             {isQemu && isRunning && onOpenSpice && (
-                                <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'}>
-                                    <Icons.ExternalLink className="w-3 h-3" /> {t('spiceConsole') || 'SPICE'}
+                                <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint')}>
+                                    <Icons.ExternalLink className="w-3 h-3" /> {t('spiceConsole')}
                                 </button>
                             )}
                             <button onClick={() => onOpenConfig(vm)}>
@@ -1971,7 +1972,7 @@
                                         </button>
                                         {isRunning && isQemu && (
                                             <button onClick={() => { handleAction('reset'); setShowActionsMenu(false); }} disabled={actionLoading?.[`${vm.vmid}-reset`]} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#efc006'}}>
-                                                <Icons.Zap className="w-3.5 h-3.5" /> {t('forceReset') || 'Force Reset'}
+                                                <Icons.Zap className="w-3.5 h-3.5" /> {t('forceReset')}
                                             </button>
                                         )}
                                         {isRunning && (
@@ -1984,12 +1985,12 @@
                                         <button onClick={() => { openVmWebUrl(); setShowActionsMenu(false); }}
                                             className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.ExternalLink className="w-3.5 h-3.5" />
-                                            {vmWebUrl ? (t('openVmWebUI') || 'Open Web UI') : (t('setVmWebLink') || 'Set Web URL…')}
+                                            {vmWebUrl ? (t('openVmWebUI')) : (t('setVmWebLink'))}
                                         </button>
                                         {vmWebUrl && (
                                             <button onClick={() => { promptForVmWebUrl(); setShowActionsMenu(false); }}
                                                 className="w-full text-left px-3 py-1.5 text-[11px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)', opacity: 0.7}}>
-                                                <span className="w-3.5 h-3.5" /> {t('editVmWebLink') || 'Edit Web URL…'}
+                                                <span className="w-3.5 h-3.5" /> {t('editVmWebLink')}
                                             </button>
                                         )}
                                         <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
@@ -2009,7 +2010,7 @@
                         </button>
                         <button className={activeDetailTab === 'snapshots' ? 'active' : ''}
                             onClick={() => { setActiveDetailTab('snapshots'); fetchSnapshots(); }}>
-                            <Icons.Clock className="w-3 h-3 inline mr-1" />{t('snapshotsTab') || 'Snapshots'}
+                            <Icons.Clock className="w-3 h-3 inline mr-1" />{t('snapshotsTab')}
                         </button>
                         <button onClick={() => onOpenConfig(vm)}>
                             <Icons.Settings className="w-3 h-3 inline mr-1" />{t('configure')}
@@ -2032,12 +2033,12 @@
                                     <div className="corp-console-tile relative flex items-center justify-center overflow-hidden" style={{height: '180px', background: consoleShot ? '#000' : 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
                                         {consoleShot ? (
                                             <React.Fragment>
-                                                <img src={consoleShot} alt={t('consolePreview') || 'Console preview'}
+                                                <img src={consoleShot} alt={t('consolePreview')}
                                                      onClick={() => onOpenConsole(vm)}
-                                                     title={t('launchWebConsole') || 'Launch Web Console'}
+                                                     title={t('launchWebConsole')}
                                                      style={{width: '100%', height: '100%', objectFit: 'contain', cursor: 'pointer'}} />
                                                 <button onClick={(e) => { e.stopPropagation(); setShotNonce(n => n + 1); }}
-                                                        title={t('refresh') || 'Refresh'} disabled={shotLoading}
+                                                        title={t('refresh')} disabled={shotLoading}
                                                         className="absolute top-1 right-1 p-1"
                                                         style={{background: 'rgba(0,0,0,0.5)', color: '#fff', borderRadius: '3px', lineHeight: 0}}>
                                                     <Icons.RefreshCw className={`w-3.5 h-3.5 ${shotLoading ? 'animate-spin' : ''}`} />
@@ -2050,9 +2051,9 @@
                                                     : <Icons.Box className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
                                                 }
                                                 <div className="text-[11px]" style={{color: '#728b9a'}}>
-                                                    {!isRunning ? (t('vmStopped') || 'VM is powered off')
-                                                        : (shotLoading && isQemu ? (t('loadingPreview') || 'Loading preview…')
-                                                                                 : (t('consoleAvailable') || 'Console available'))}
+                                                    {!isRunning ? (t('vmStopped'))
+                                                        : (shotLoading && isQemu ? (t('loadingPreview'))
+                                                                                 : (t('consoleAvailable')))}
                                                 </div>
                                             </div>
                                         )}
@@ -2060,13 +2061,13 @@
                                     {isRunning && (
                                         <button onClick={() => onOpenConsole(vm)} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-accent)'}}>
                                             <Icons.Terminal className="w-3.5 h-3.5" />
-                                            {t('launchWebConsole') || 'Launch Web Console'}
+                                            {t('launchWebConsole')}
                                         </button>
                                     )}
                                     {isRunning && isQemu && onOpenSpice && (
-                                        <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)'}}>
+                                        <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint')} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)'}}>
                                             <Icons.ExternalLink className="w-3.5 h-3.5" />
-                                            {t('spiceConsole') || 'SPICE'}
+                                            {t('spiceConsole')}
                                         </button>
                                     )}
                                 </div>
@@ -2075,12 +2076,12 @@
                                 <div className="flex-1 min-w-0">
                                     <table className="corp-property-grid">
                                         <tbody>
-                                            <tr><td>{t('guestOs') || 'Guest OS'}</td><td>{guestInfo?.os_pretty_name || vmHwInfo?.ostype || (isQemu ? 'QEMU Virtual Machine' : 'LXC Container')}</td></tr>
+                                            <tr><td>{t('guestOs')}</td><td>{guestInfo?.os_pretty_name || vmHwInfo?.ostype || (isQemu ? 'QEMU Virtual Machine' : 'LXC Container')}</td></tr>
                                             <tr><td>{t('type')}</td><td>{isQemu ? 'QEMU/KVM' : 'LXC'} - {vmHwInfo ? `${vmHwInfo.machine} / ${vmHwInfo.bios === 'ovmf' ? 'UEFI' : 'SeaBIOS'}` : vm.vmid}</td></tr>
-                                            <tr><td>{t('qemuAgent') || 'QEMU Agent'}</td><td className="flex items-center gap-1.5">{isQemu && isRunning ? (guestInfo ? <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#60b515'}}></span> {t('running')}</> : <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#f54f47'}}></span> {t('notInstalled') || 'Not installed'}</>) : <span style={{color: '#728b9a'}}>-</span>}</td></tr>
+                                            <tr><td>{t('qemuAgent')}</td><td className="flex items-center gap-1.5">{isQemu && isRunning ? (guestInfo ? <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#60b515'}}></span> {t('running')}</> : <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#f54f47'}}></span> {t('notInstalled')}</>) : <span style={{color: '#728b9a'}}>-</span>}</td></tr>
                                             <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{guestInfo?.ip_addresses?.join(', ') || '-'}</td></tr>
                                             {guestInfo?.hostname && <tr><td>{t('hostname')}</td><td>{guestInfo.hostname}</td></tr>}
-                                            {vm.tags && <tr><td>Tags</td><td><div className="flex flex-wrap gap-1">{(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
+                                            {vm.tags && <tr><td>{t('tags')}</td><td><div className="flex flex-wrap gap-1">{(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                                 <span key={tag} className="px-1.5 py-0.5 text-[11px]" style={{background: 'rgba(73, 175, 217, 0.12)', color: '#49afd9', border: '1px solid rgba(73, 175, 217, 0.25)'}}>{tag}</span>
                                             ))}</div></td></tr>}
                                         </tbody>
@@ -2123,10 +2124,10 @@
                                 <div className="flex items-center justify-between px-3 py-2" style={{background: 'rgba(239, 192, 6, 0.08)', borderLeft: '3px solid #efc006'}}>
                                     <div className="flex items-center gap-2">
                                         <Icons.Lock className="w-4 h-4" style={{color: '#efc006'}} />
-                                        <span className="text-[13px]" style={{color: '#efc006'}}>{t('vmLocked') || 'This virtual machine is locked'}: {lockInfo.lock_reason || 'unknown'}</span>
+                                        <span className="text-[13px]" style={{color: '#efc006'}}>{t('vmLocked')}: {lockInfo.lock_reason || 'unknown'}</span>
                                     </div>
                                     <button onClick={() => setShowUnlockConfirm(true)} className="px-2 py-1 text-[12px] font-medium" style={{color: '#49afd9'}}>
-                                        {t('unlock') || 'Unlock'}
+                                        {t('unlock')}
                                     </button>
                                 </div>
                             )}
@@ -2134,7 +2135,7 @@
                                 <div className="flex items-center gap-2 px-3 py-2" style={{background: 'rgba(239, 192, 6, 0.08)', borderLeft: '3px solid #efc006'}}>
                                     <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" style={{color: '#efc006'}} />
                                     <span className="text-[13px]" style={{color: '#efc006'}}>{t('guestAgentNotInstalled')}</span>
-                                    <a href="https://pve.proxmox.com/wiki/Qemu-guest-agent" target="_blank" rel="noopener noreferrer" className="text-[12px] ml-1" style={{color: '#49afd9'}}>{t('installGuestAgent') || 'Install QEMU Guest Agent...'}</a>
+                                    <a href="https://pve.proxmox.com/wiki/Qemu-guest-agent" target="_blank" rel="noopener noreferrer" className="text-[12px] ml-1" style={{color: '#49afd9'}}>{t('installGuestAgent')}</a>
                                 </div>
                             )}
 
@@ -2144,7 +2145,7 @@
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                     <div className="px-3 py-2 flex items-center gap-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                         <Icons.HardDrive className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
-                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('guestFilesystems') || 'Filesystem Usage'}</span>
+                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('guestFilesystems')}</span>
                                         <span className="text-[11px] ml-auto" style={{color: '#728b9a'}}>{fsInfo.filesystems.length} {fsInfo.filesystems.length === 1 ? 'mount' : 'mounts'}</span>
                                     </div>
                                     <div className="p-3 space-y-2">
@@ -2178,7 +2179,7 @@
                                 {/* Left: VM Hardware */}
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                     <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
-                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('vmHardware') || 'VM Hardware'}</span>
+                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('vmHardware')}</span>
                                     </div>
                                     <div className="p-3 space-y-2">
                                         {/* CPU */}
@@ -2198,7 +2199,7 @@
                                         {/* Memory */}
                                         <div className="flex items-center gap-2 text-[12px]">
                                             <Icons.MemoryStick className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#9b59b6'}} />
-                                            <span style={{color: '#adbbc4', width: '60px'}}>{t('memory') || 'Memory'}</span>
+                                            <span style={{color: '#adbbc4', width: '60px'}}>{t('memory')}</span>
                                             <div className="flex-1">
                                                 <div className="flex items-center gap-2">
                                                     <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
@@ -2237,7 +2238,7 @@
                                         {vmHwInfo?.net && (
                                             <div className="flex items-center gap-2 text-[12px]">
                                                 <Icons.Network className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#efc006'}} />
-                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('network') || 'Network'}</span>
+                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('network')}</span>
                                                 <span style={{color: '#e9ecef'}}>{vmHwInfo.net}</span>
                                             </div>
                                         )}
@@ -2245,7 +2246,7 @@
                                         {vmHwInfo && (
                                             <div className="flex items-center gap-2 text-[12px]">
                                                 <Icons.Settings className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#728b9a'}} />
-                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('biosType') || 'BIOS'}</span>
+                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('biosType')}</span>
                                                 <span style={{color: '#e9ecef'}}>{vmHwInfo.bios === 'ovmf' ? 'UEFI (OVMF)' : 'SeaBIOS'} • {vmHwInfo.machine} • {vmHwInfo.scsihw}</span>
                                             </div>
                                         )}
@@ -2257,7 +2258,7 @@
                                     {/* related objects */}
                                     <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                         <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
-                                            <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('relatedObjects') || 'Related Objects'}</span>
+                                            <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('relatedObjects')}</span>
                                         </div>
                                         <table className="corp-property-grid">
                                             <tbody>
@@ -2265,7 +2266,7 @@
                                                 <tr><td>{t('status')}</td><td className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{background: isRunning ? '#60b515' : '#728b9a'}}></span> {isRunning ? t('running') : t('stopped')}</td></tr>
                                                 <tr><td>VMID</td><td>{vm.vmid}</td></tr>
                                                 <tr><td>{t('uptime')}</td><td>{formatUptime(vm.uptime)}</td></tr>
-                                                {vmHwInfo?.net && <tr><td>{t('network') || 'Network'}</td><td>{vmHwInfo.net}</td></tr>}
+                                                {vmHwInfo?.net && <tr><td>{t('network')}</td><td>{vmHwInfo.net}</td></tr>}
                                             </tbody>
                                         </table>
                                     </div>
@@ -2295,12 +2296,12 @@
                                               guestInfo.guest_time_ns) && (
                                                 <details className="px-3 py-2" style={{borderTop: '1px solid var(--corp-border-medium)'}}>
                                                     <summary className="text-[12px] cursor-pointer" style={{color: '#728b9a'}}>
-                                                        {t('guestDetail') || 'Guest detail'} — {t('filesystems') || 'Filesystems'}, {t('interfaces') || 'Interfaces'}, {t('users') || 'Users'}
+                                                        {t('guestDetail')} — {t('filesystems')}, {t('interfaces')}, {t('users')}
                                                     </summary>
                                                     <div className="mt-2 space-y-2">
                                                         {guestInfo.filesystems && guestInfo.filesystems.length > 0 && (
                                                             <div>
-                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('filesystems') || 'Filesystems'}</div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('filesystems')}</div>
                                                                 <table className="corp-property-grid" style={{fontSize: '11px'}}>
                                                                     <tbody>
                                                                         {guestInfo.filesystems.map((fs, idx) => (
@@ -2325,7 +2326,7 @@
                                                         )}
                                                         {guestInfo.interfaces && guestInfo.interfaces.length > 0 && (
                                                             <div>
-                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('interfaces') || 'Interfaces'}</div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('interfaces')}</div>
                                                                 <table className="corp-property-grid" style={{fontSize: '11px'}}>
                                                                     <tbody>
                                                                         {guestInfo.interfaces.filter(n => n.name !== 'lo').map((nic, idx) => (
@@ -2347,7 +2348,7 @@
                                                         )}
                                                         {guestInfo.users && guestInfo.users.length > 0 && (
                                                             <div>
-                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('loggedInUsers') || 'Logged-in users'}</div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('loggedInUsers')}</div>
                                                                 <table className="corp-property-grid" style={{fontSize: '11px'}}>
                                                                     <tbody>
                                                                         {guestInfo.users.map((u, idx) => (
@@ -2367,7 +2368,7 @@
                                                                     const hostMs = Date.now();
                                                                     const skewS = (guestMs - hostMs) / 1000;
                                                                     const skewClr = Math.abs(skewS) > 60 ? '#f54f47' : Math.abs(skewS) > 5 ? '#efc006' : '#60b515';
-                                                                    return (<span>{t('clockSkew') || 'Clock skew'}: <span style={{color: skewClr, fontFamily: 'monospace'}}>{skewS >= 0 ? '+' : ''}{skewS.toFixed(1)}s</span></span>);
+                                                                    return (<span>{t('clockSkew')}: <span style={{color: skewClr, fontFamily: 'monospace'}}>{skewS >= 0 ? '+' : ''}{skewS.toFixed(1)}s</span></span>);
                                                                 })()}
                                                             </div>
                                                         )}
@@ -2380,7 +2381,7 @@
                                     {/* HA config */}
                                     <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                         <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
-                                            <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('proxmoxHa') || 'Proxmox HA'}</span>
+                                            <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('proxmoxHa')}</span>
                                             <button
                                                 onClick={toggleProxmoxHa}
                                                 disabled={haLoading}
@@ -2390,14 +2391,14 @@
                                                     : {color: '#60b515', border: '1px solid rgba(96, 181, 21, 0.3)'}
                                                 }
                                             >
-                                                {haLoading ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : haEnabled ? t('disable') : t('haActivate') || 'Enable'}
+                                                {haLoading ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : haEnabled ? t('disable') : t('haActivate')}
                                             </button>
                                         </div>
                                         <div className="px-3 py-2 flex items-center gap-2">
                                             <Icons.Shield className="w-4 h-4" style={{color: haEnabled ? '#60b515' : '#728b9a'}} />
                                             <div>
                                                 <div className="text-[12px]" style={{color: '#e9ecef'}}>{haEnabled ? t('active') : t('disabled')}</div>
-                                                {haEnabled && <div className="text-[11px]" style={{color: '#728b9a'}}>Max Restart: 3 | Max Relocate: 3</div>}
+                                                {haEnabled && <div className="text-[11px]" style={{color: '#728b9a'}}>{t('maxRestart')}: 3 | {t('maxRelocate')}: 3</div>}
                                             </div>
                                         </div>
                                     </div>
@@ -2409,7 +2410,7 @@
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                     <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                         <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>
-                                            {t('performanceMetrics') || 'Performance Metrics'}
+                                            {t('performanceMetrics')}
                                         </span>
                                         <div className="flex items-center gap-2">
                                             <select
@@ -2428,7 +2429,7 @@
                                                 onClick={() => setMetricsRefreshTick(t => t + 1)}
                                                 disabled={metricsLoading}
                                                 className="p-0.5 rounded hover:bg-white/10 transition-colors disabled:opacity-40"
-                                                title={t('refresh') || 'Refresh'}
+                                                title={t('refresh')}
                                             >
                                                 <Icons.RotateCw className={`w-3.5 h-3.5 ${metricsLoading ? 'animate-spin' : ''}`} style={{color: '#728b9a'}} />
                                             </button>
@@ -2445,25 +2446,25 @@
                                                     <LineChart data={metricsData.metrics.cpu} timestamps={metricsData.timestamps}
                                                         label="CPU" color="#49afd9" unit="%" />
                                                     <LineChart data={memDataGB} timestamps={metricsData.timestamps}
-                                                        label={t('memory') || 'Memory'} color="#9b59b6" unit=" GB" yMin={0} yMax={maxMemGB}
+                                                        label={t('memory')} color="#9b59b6" unit=" GB" yMin={0} yMax={maxMemGB}
                                                         formatValue={v => v.toFixed(2)} />
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <LineChart data={metricsData.metrics.disk_read} timestamps={metricsData.timestamps}
-                                                        label={t('diskRead') || 'Disk Read'} color="#efc006" unit="/s" formatValue={formatBytes} />
+                                                        label={t('diskRead')} color="#efc006" unit="/s" formatValue={formatBytes} />
                                                     <LineChart data={metricsData.metrics.disk_write} timestamps={metricsData.timestamps}
-                                                        label={t('diskWrite') || 'Disk Write'} color="#f97316" unit="/s" formatValue={formatBytes} />
+                                                        label={t('diskWrite')} color="#f97316" unit="/s" formatValue={formatBytes} />
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-3">
                                                     <LineChart data={metricsData.metrics.net_in} timestamps={metricsData.timestamps}
-                                                        label={t('networkIn') || 'Network In'} color="#49afd9" unit="/s" formatValue={formatBytes} />
+                                                        label={t('networkIn')} color="#49afd9" unit="/s" formatValue={formatBytes} />
                                                     <LineChart data={metricsData.metrics.net_out} timestamps={metricsData.timestamps}
-                                                        label={t('networkOut') || 'Network Out'} color="#8b5cf6" unit="/s" formatValue={formatBytes} />
+                                                        label={t('networkOut')} color="#8b5cf6" unit="/s" formatValue={formatBytes} />
                                                 </div>
                                             </div>
                                         ) : (
                                             <div className="text-center py-4 text-[12px]" style={{color: '#728b9a'}}>
-                                                {t('noDataAvailable') || 'No data available'}
+                                                {t('noDataAvailable')}
                                             </div>
                                         )}
                                     </div>
@@ -2477,7 +2478,7 @@
                         <div className="p-4 space-y-3">
                             <div className="flex items-center justify-between mb-2">
                                 <h3 className="text-[13px] font-medium flex items-center gap-1.5" style={{color: '#e9ecef'}}>
-                                    <Icons.Clock className="w-4 h-4" />{t('snapshotsTab') || 'Snapshots'}
+                                    <Icons.Clock className="w-4 h-4" />{t('snapshotsTab')}
                                     {snapshots.length + efficientSnapshots.length > 0 && (
                                         <span className="text-[11px] font-normal" style={{color:'var(--corp-text-muted, #728b9a)'}}>
                                             ({snapshots.filter(s => s.name !== 'current').length + efficientSnapshots.length})
@@ -2487,7 +2488,7 @@
                                 <button onClick={() => setShowCreateSnap(!showCreateSnap)}
                                     className="corp-vm-btn corp-vm-btn-primary flex items-center gap-1.5">
                                     <Icons.Plus className="w-3 h-3" />
-                                    {t('createSnapshot') || 'Take Snapshot'}
+                                    {t('createSnapshot')}
                                 </button>
                             </div>
 
@@ -2495,20 +2496,20 @@
                                 <div style={{background: 'var(--corp-surface-2, #1a2733)', border: '1px solid var(--corp-border-medium, #344955)', padding: '12px 14px'}}>
                                     <div className="space-y-2">
                                         <div>
-                                            <div className="corp-vm-section-title">{t('snapshotName') || 'Name'}</div>
+                                            <div className="corp-vm-section-title">{t('snapshotName')}</div>
                                             <input type="text" value={snapName} onChange={e => setSnapName(e.target.value)}
                                                 placeholder="snap_2026..." />
                                         </div>
                                         <div>
-                                            <div className="corp-vm-section-title">{t('description') || 'Description'} <span style={{color:'var(--corp-text-muted)', fontWeight:400}}>({t('optional')})</span></div>
+                                            <div className="corp-vm-section-title">{t('description')} <span style={{color:'var(--corp-text-muted)', fontWeight:400}}>({t('optional')})</span></div>
                                             <input type="text" value={snapDesc} onChange={e => setSnapDesc(e.target.value)}
-                                                placeholder={t('snapshotDescription') || 'Optional description'} />
+                                                placeholder={t('snapshotDescription')} />
                                         </div>
                                         <div className="flex items-center justify-between pt-1">
                                             {isQemu && isRunning ? (
                                                 <label className="flex items-center gap-2 text-[12px] cursor-pointer" style={{color:'var(--corp-text-secondary, #adbbc4)'}}>
                                                     <input type="checkbox" checked={snapRam} onChange={e => setSnapRam(e.target.checked)} />
-                                                    {t('includeRam') || 'Include RAM state'}
+                                                    {t('includeRam')}
                                                 </label>
                                             ) : <span></span>}
                                             <div className="flex gap-2 ml-auto">
@@ -2518,7 +2519,7 @@
                                                 </button>
                                                 <button onClick={handleCreateSnap}
                                                     className="corp-vm-btn corp-vm-btn-create">
-                                                    {t('create') || 'Create'}
+                                                    {t('create')}
                                                 </button>
                                             </div>
                                         </div>
@@ -2564,9 +2565,9 @@
                                             </div>
                                             <div className="flex gap-1 flex-shrink-0">
                                                 <button onClick={() => setCompareSnap({ a: 'current', b: node.name })}
-                                                    className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1" title={t('compareSnapshot') || 'Compare with current'}>
+                                                    className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1" title={t('compareSnapshot')}>
                                                     <Icons.ChevronRight className="w-3 h-3" style={{transform:'rotate(90deg)'}} />
-                                                    <span className="text-[11px]">{t('compare') || 'Compare'}</span>
+                                                    <span className="text-[11px]">{t('compare')}</span>
                                                 </button>
                                                 <button onClick={() => handleRollbackSnap(node.name)}
                                                     className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1" title={t('rollback')}>
@@ -2592,8 +2593,8 @@
                                     return (
                                         <div className="corp-empty-state">
                                             <Icons.Clock style={{color: 'var(--corp-border-medium)'}} />
-                                            <div className="corp-empty-title">{t('noSnapshots') || 'No snapshots'}</div>
-                                            <div className="corp-empty-text">{t('noSnapshotsHint') || 'Take a snapshot to capture the current state.'}</div>
+                                            <div className="corp-empty-title">{t('noSnapshots')}</div>
+                                            <div className="corp-empty-text">{t('noSnapshotsHint')}</div>
                                         </div>
                                     );
 
@@ -2602,7 +2603,7 @@
 
                                     {efficientSnapshots.length > 0 && (<>
                                         <div className="corp-vm-section-title mt-3" style={{color: 'var(--corp-accent, #49afd9)'}}>
-                                            Efficient Snapshots (LVM COW)
+                                            {t('spaceEfficientSnapshots')} (LVM COW)
                                         </div>
                                         {efficientSnapshots.map(snap => (
                                             <div key={snap.id} className="corp-snap-row flex items-center justify-between"
@@ -2611,7 +2612,7 @@
                                                     <div className="flex items-center gap-2">
                                                         <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{snap.name}</span>
                                                         <span className="corp-snap-pill" style={{background:'rgba(96,181,21,0.15)', color:'#60b515', borderColor:'rgba(96,181,21,0.30)'}}>COW</span>
-                                                        {snap.fs_frozen && <span className="corp-snap-pill" style={{background:'rgba(73,175,217,0.12)', color:'var(--corp-accent, #49afd9)', borderColor:'rgba(73,175,217,0.30)'}}>frozen</span>}
+                                                        {snap.fs_frozen && <span className="corp-snap-pill" style={{background:'rgba(73,175,217,0.12)', color:'var(--corp-accent, #49afd9)', borderColor:'rgba(73,175,217,0.30)'}}>{t('fsFrozen')}</span>}
                                                         {snap.total_snap_alloc_gb != null && (
                                                             <span className="text-[10.5px] px-1.5 py-0" style={{background:'rgba(255,255,255,0.04)', color:'var(--corp-text-muted, #728b9a)', border:'1px solid var(--corp-border-subtle)'}}>
                                                                 {snap.total_snap_alloc_gb.toFixed(1)} GB
@@ -2738,7 +2739,7 @@
                                                 {type === 'vm' ? 'VM' : 'CT'} {vmid}
                                             </span>
                                             <span className="text-xs text-gray-500">
-                                                Max Restart: {resource.max_restart || 3}
+                                                {t('maxRestart')}: {resource.max_restart || 3}
                                             </span>
                                         </div>
                                         <button
@@ -2939,9 +2940,9 @@
                                             <div className="flex items-start gap-2">
                                                 <span className="text-red-400 text-lg">💿</span>
                                                 <div className="flex-1">
-                                                    <p className="text-red-400 font-medium text-sm">{t('isoMounted') || 'ISO/CD-ROM Mounted'}</p>
+                                                    <p className="text-red-400 font-medium text-sm">{t('isoMounted')}</p>
                                                     <p className="text-red-300/70 text-xs mt-1">
-                                                        {t('isoMigrationWarning') || 'Migration may fail if the ISO is not available on the target node. Eject the CD/DVD or ensure the ISO exists on shared storage.'}
+                                                        {t('isoMigrationWarning')}
                                                     </p>
                                                     {detectedIsos && detectedIsos.length > 0 && (
                                                         <div className="mt-2 space-y-1">
@@ -2951,7 +2952,7 @@
                                                                     <code className="text-red-300 bg-red-500/10 px-1 rounded break-all">{iso.iso}</code>
                                                                     {iso.isLocal && (
                                                                         <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">
-                                                                            {t('localStorage') || 'Local'}
+                                                                            {t('localStorage')}
                                                                         </span>
                                                                     )}
                                                                 </div>
@@ -2966,9 +2967,9 @@
                                         <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg flex items-start gap-2">
                                             <span className="text-yellow-400 text-lg">⚠️</span>
                                             <div>
-                                                <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
+                                                <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue')}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning')}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>
@@ -3033,7 +3034,7 @@
                                 {hasLocalDisks && (
                                     <div className="p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
                                         <p className="text-xs text-yellow-400">
-                                            ⚠️ {t('localDisksDetected') || 'This VM has local disks. Migration requires copying disk data.'}
+                                            ⚠️ {t('localDisksDetected')}
                                         </p>
                                     </div>
                                 )}
@@ -3048,7 +3049,7 @@
                                     <div>
                                         <span>{t('withLocalDisks')}</span>
                                         <p className="text-xs text-gray-500">{t('withLocalDisksDesc')}</p>
-                                        {hasLocalDisks && <p className="text-xs text-yellow-400">{t('requiredForThisVm') || 'Required for this VM'}</p>}
+                                        {hasLocalDisks && <p className="text-xs text-yellow-400">{t('requiredForThisVm')}</p>}
                                     </div>
                                 </label>
                                 
@@ -3145,7 +3146,7 @@
                                 {t('liveMigration')}
                             </label>
                             <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-400">
-                                {t('bulkMigrationNote') || 'Migrations will be performed sequentially. This may take some time.'}
+                                {t('bulkMigrationNote')}
                             </div>
                         </div>
                         <div className="flex justify-end gap-3 mt-6">
@@ -3532,9 +3533,9 @@
                                             <div className="flex items-start gap-2">
                                                 <span className="text-red-400 text-lg">💿</span>
                                                 <div className="flex-1">
-                                                    <p className="text-red-400 font-medium text-sm">{t('isoMounted') || 'ISO/CD-ROM Mounted'}</p>
+                                                    <p className="text-red-400 font-medium text-sm">{t('isoMounted')}</p>
                                                     <p className="text-red-300/70 text-xs mt-1">
-                                                        {t('isoMigrationWarning') || 'Migration may fail if the ISO is not available on the target node. Eject the CD/DVD or ensure the ISO exists on shared storage.'}
+                                                        {t('isoMigrationWarning')}
                                                     </p>
                                                     {detectedIsos && detectedIsos.length > 0 && (
                                                         <div className="mt-2 space-y-1">
@@ -3544,7 +3545,7 @@
                                                                     <code className="text-red-300 bg-red-500/10 px-1 rounded break-all">{iso.iso}</code>
                                                                     {iso.isLocal && (
                                                                         <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">
-                                                                            {t('localStorage') || 'Local'}
+                                                                            {t('localStorage')}
                                                                         </span>
                                                                     )}
                                                                 </div>
@@ -3559,9 +3560,9 @@
                                         <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg flex items-start gap-2">
                                             <span className="text-yellow-400 text-lg">⚠️</span>
                                             <div>
-                                                <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
+                                                <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue')}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning')}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>
@@ -3572,9 +3573,9 @@
                                             <div className="flex items-start gap-2">
                                                 <span className="text-yellow-400 text-lg">📎</span>
                                                 <div className="flex-1">
-                                                    <p className="text-yellow-400 font-medium text-sm">{t('detachedDisksTitle') || 'Detached Disks/ISOs Still Referenced'}</p>
+                                                    <p className="text-yellow-400 font-medium text-sm">{t('detachedDisksTitle')}</p>
                                                     <p className="text-yellow-300/70 text-xs mt-1">
-                                                        {t('detachedDisksWarning') || "PVE keeps detached volumes as 'unused*' references on the VM. Cross-cluster migration tries to move them too — if any sit on local-only storage it will fail with a cryptic 'storage does not support vm images' error. Clean them up in VM → Configure → Hardware → Unused Disks before starting."}
+                                                        {t('detachedDisksWarning')}
                                                     </p>
                                                     <div className="mt-2 space-y-1">
                                                         {unusedEntries.map((u, idx) => (
@@ -3583,7 +3584,7 @@
                                                                 <code className="text-yellow-300 bg-yellow-500/10 px-1 rounded break-all">{u.value}</code>
                                                                 {u.isLocal && (
                                                                     <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">
-                                                                        {t('localStorage') || 'Local'}
+                                                                        {t('localStorage')}
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -3648,7 +3649,7 @@
                                                         <>
                                                             {/* Storage Mapping - per disk */}
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('storageMappings') || 'Storage Mapping'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('storageMappings')}</label>
                                                                 {sourceDisks.length > 0 ? (
                                                                     <div className="space-y-2">
                                                                         {/* group by unique source storage */}
@@ -3690,7 +3691,7 @@
 
                                                             {/* Network Mapping - per NIC */}
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('networkMappings') || 'Network Mapping'}</label>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('networkMappings')}</label>
                                                                 {sourceNics.length > 0 ? (
                                                                     <div className="space-y-2">
                                                                         {sourceNics.map(nic => (
@@ -3776,10 +3777,10 @@
                                                             {estimatedDiskGb > 100 && online && isQemu && (
                                                                 <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg space-y-2">
                                                                     <div className="text-sm text-yellow-400">
-                                                                        ⚠️ <strong>{t('largeDiskWarning') || 'Large Disk Detected'}</strong> ({estimatedDiskGb.toFixed(0)} GB)
+                                                                        ⚠️ <strong>{t('largeDiskWarning')}</strong> ({estimatedDiskGb.toFixed(0)} GB)
                                                                     </div>
                                                                     <div className="text-xs text-yellow-400/80">
-                                                                        {t('largeDiskExplanation') || 'Live migration for disks >100GB may fail with "401 Unauthorized" due to Proxmox WebSocket ticket timeout. The server will automatically use offline migration unless forced.'}
+                                                                        {t('largeDiskExplanation')}
                                                                     </div>
                                                                     <label className="flex items-center gap-3 text-sm text-yellow-300 mt-2">
                                                                         <input
@@ -3788,7 +3789,7 @@
                                                                             onChange={(e) => setForceOnline(e.target.checked)}
                                                                             className="w-4 h-4 rounded"
                                                                         />
-                                                                        {t('forceOnlineMigration') || 'Force online migration anyway (may fail)'}
+                                                                        {t('forceOnlineMigration')}
                                                                     </label>
                                                                 </div>
                                                             )}
@@ -3870,7 +3871,7 @@
                                         <span className="font-medium text-white">{log.vm}</span>
                                         {log.dry_run && (
                                             <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
-                                                Dry Run
+                                                {t('dryRunShort')}
                                             </span>
                                         )}
                                     </div>
@@ -3890,7 +3891,7 @@
                     {/* LW: Show count of hidden older migrations */}
                     {hiddenCount > 0 && (
                         <div className="text-center py-2 text-xs text-gray-500">
-                            + {hiddenCount} {t('olderMigrations') || 'older migrations'}
+                            + {hiddenCount} {t('olderMigrations')}
                         </div>
                     )}
                 </div>
@@ -3994,8 +3995,8 @@
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/validate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildBody()) });
                     const data = await r.json().catch(() => ({}));
                     if (r?.ok) setPlan(data);
-                    else addToast('Error', data.error || 'Validation failed', 'error');
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    else addToast(t('error'), data.error || t('mcevpnValidationFailed'), 'error');
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
@@ -4005,13 +4006,13 @@
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildBody()) });
                     const data = await r.json().catch(() => ({}));
                     if (r?.ok) {
-                        addToast(t('mcevpnCreated') || 'Cross-cluster EVPN vNet created', `${data.name} → ${data.status}`, 'success');
+                        addToast(t('mcevpnCreated'), `${data.name} → ${data.status}`, 'success');
                         setShowCreate(false); setForm(blankForm); setPlan(null); load();
                     } else {
                         const extra = data.conflicts ? ` (${data.conflicts.join('; ')})` : (data.status ? ` [${data.status}]` : '');
-                        addToast('Error', (data.error || 'Create failed') + extra, 'error');
+                        addToast(t('error'), (data.error || t('createFailed')) + extra, 'error');
                     }
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
@@ -4020,20 +4021,20 @@
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/apply`, { method: 'POST' });
                     const data = await r.json().catch(() => ({}));
-                    if (r?.ok) { addToast(t('mcevpnReapplied') || 'Re-applied', `${data.name} → ${data.status}`, 'success'); load(); }
-                    else addToast('Error', data.error || 'Re-apply failed', 'error');
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    if (r?.ok) { addToast(t('mcevpnReapplied'), `${data.name} → ${data.status}`, 'success'); load(); }
+                    else addToast(t('error'), data.error || t('mcevpnReapplyFailed'), 'error');
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
             const remove = async (vid, purge) => {
-                if (!window.confirm(purge ? (t('mcevpnPurgeConfirm') || 'Delete this vNet AND remove it from every member cluster?') : (t('mcevpnForgetConfirm') || 'Forget this record? (SDN objects stay on the clusters)'))) return;
+                if (!window.confirm(purge ? (t('mcevpnPurgeConfirm')) : (t('mcevpnForgetConfirm')))) return;
                 setBusy(true);
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}${purge ? '?purge=1' : ''}`, { method: 'DELETE' });
-                    if (r?.ok) { addToast(t('mcevpnDeleted') || 'Deleted', '', 'success'); load(); }
-                    else { const d = await r.json().catch(() => ({})); addToast('Error', d.error || 'Delete failed', 'error'); }
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    if (r?.ok) { addToast(t('mcevpnDeleted'), '', 'success'); load(); }
+                    else { const d = await r.json().catch(() => ({})); addToast(t('error'), d.error || t('deleteFailed'), 'error'); }
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
@@ -4043,22 +4044,22 @@
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/scan`, { method: 'POST' });
                     const data = await r.json().catch(() => ({}));
-                    if (r?.ok) { addToast(t('mcevpnScanned') || 'Drift scan done', `${data.name} → ${data.status}`, 'info'); load(); }
-                    else addToast('Error', data.error || 'Scan failed', 'error');
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    if (r?.ok) { addToast(t('mcevpnScanned'), `${data.name} → ${data.status}`, 'info'); load(); }
+                    else addToast(t('error'), data.error || t('driftScanFailed'), 'error');
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
             // #612 P2 — re-assert the desired definition on drifted/missing members
             const reconcile = async (vid) => {
-                if (!window.confirm(t('mcevpnReconcileConfirm') || 'Re-push the desired EVPN definition to every member (fixes drift, runs a cluster-wide SDN apply)?')) return;
+                if (!window.confirm(t('mcevpnReconcileConfirm'))) return;
                 setBusy(true);
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/reconcile`, { method: 'POST' });
                     const data = await r.json().catch(() => ({}));
-                    if (r?.ok) { addToast(t('mcevpnReconciled') || 'Reconciled', `${data.name} → ${data.status}`, 'success'); load(); }
-                    else addToast('Error', data.error || 'Reconcile failed', 'error');
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    if (r?.ok) { addToast(t('mcevpnReconciled'), `${data.name} → ${data.status}`, 'success'); load(); }
+                    else addToast(t('error'), data.error || t('mcevpnReconcileFailed'), 'error');
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
@@ -4069,14 +4070,14 @@
                 if ((editForm.alias || '') !== (showEdit.alias || '')) body.alias = editForm.alias.trim();
                 if (editForm.addSubnet.trim()) body.add_subnets = [{ cidr: editForm.addSubnet.trim() }];
                 if (editForm.delSubnet.trim()) body.del_subnets = [editForm.delSubnet.trim()];
-                if (!('alias' in body) && !body.add_subnets && !body.del_subnets) { addToast('Error', t('mcevpnNothingToChange') || 'Nothing to change', 'error'); return; }
+                if (!('alias' in body) && !body.add_subnets && !body.del_subnets) { addToast(t('error'), t('mcevpnNothingToChange'), 'error'); return; }
                 setBusy(true);
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/${showEdit.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                     const data = await r.json().catch(() => ({}));
-                    if (r?.ok) { addToast(t('mcevpnEdited') || 'vNet updated', `${data.name} → ${data.status}`, 'success'); setShowEdit(null); load(); }
-                    else addToast('Error', data.error || 'Edit failed', 'error');
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    if (r?.ok) { addToast(t('mcevpnEdited'), `${data.name} → ${data.status}`, 'success'); setShowEdit(null); load(); }
+                    else addToast(t('error'), data.error || t('mcevpnEditFailed'), 'error');
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
@@ -4085,8 +4086,8 @@
                 setAutoReconcile(val); // optimistic
                 try {
                     const r = await authFetch(`${API_URL}/settings/server`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ multi_sdn_drift_reconcile: val }) });
-                    if (!r?.ok) { setAutoReconcile(!val); addToast('Error', t('mcevpnSettingFailed') || 'Failed to save setting', 'error'); }
-                } catch (e) { setAutoReconcile(!val); addToast('Error', e.message, 'error'); }
+                    if (!r?.ok) { setAutoReconcile(!val); addToast(t('error'), t('mcevpnSettingFailed'), 'error'); }
+                } catch (e) { setAutoReconcile(!val); addToast(t('error'), e.message, 'error'); }
             };
 
             // #612 P3 — expand / shrink the span
@@ -4095,19 +4096,19 @@
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cluster_id: cid }) });
                     const data = await r.json().catch(() => ({}));
-                    if (r?.ok) { addToast(t('mcevpnMemberAdded') || 'Cluster added to the span', `${clusterName(cid)} → ${data.status}`, 'success'); load(); }
-                    else { const extra = data.conflicts ? ` (${data.conflicts.join('; ')})` : ''; addToast('Error', (data.error || 'Add failed') + extra, 'error'); }
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    if (r?.ok) { addToast(t('mcevpnMemberAdded'), `${clusterName(cid)} → ${data.status}`, 'success'); load(); }
+                    else { const extra = data.conflicts ? ` (${data.conflicts.join('; ')})` : ''; addToast(t('error'), (data.error || t('mcevpnAddFailed')) + extra, 'error'); }
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
             const removeMember = async (vid, cid, purge) => {
-                if (!window.confirm(purge ? (t('mcevpnRemovePurgeConfirm') || 'Remove this cluster from the span AND delete the vNet from it?') : (t('mcevpnRemoveConfirm') || 'Remove this cluster from the span? (the vNet stays on the cluster)'))) return;
+                if (!window.confirm(purge ? (t('mcevpnRemovePurgeConfirm')) : (t('mcevpnRemoveConfirm')))) return;
                 setBusy(true);
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/members/${cid}${purge ? '?purge=1' : ''}`, { method: 'DELETE' });
-                    if (r?.ok) { addToast(t('mcevpnMemberRemoved') || 'Cluster removed from the span', '', 'success'); load(); }
-                    else { const d = await r.json().catch(() => ({})); addToast('Error', d.error || 'Remove failed', 'error'); }
-                } catch (e) { addToast('Error', e.message, 'error'); }
+                    if (r?.ok) { addToast(t('mcevpnMemberRemoved'), '', 'success'); load(); }
+                    else { const d = await r.json().catch(() => ({})); addToast(t('error'), d.error || t('mcevpnRemoveFailed'), 'error'); }
+                } catch (e) { addToast(t('error'), e.message, 'error'); }
                 finally { setBusy(false); }
             };
 
@@ -4118,16 +4119,16 @@
                 <div className="space-y-4">
                     <div className="flex items-center justify-between">
                         <div>
-                            <h2 className="text-lg font-semibold text-white flex items-center gap-2"><Icons.Network className="w-5 h-5 text-cyan-400" />{t('mcevpnTitle') || 'Multi-Cluster EVPN'}</h2>
-                            <p className="text-xs text-gray-500 mt-0.5">{t('mcevpnSubtitle') || 'One logical EVPN vNet spanning several clusters that share a BGP ASN. The physical BGP-EVPN underlay must already peer.'}</p>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2"><Icons.Network className="w-5 h-5 text-cyan-400" />{t('mcevpnTitle')}</h2>
+                            <p className="text-xs text-gray-500 mt-0.5">{t('mcevpnSubtitle')}</p>
                         </div>
                         <div className="flex items-center gap-2">
                             {canAdminSettings && (
-                                <button onClick={() => saveAutoReconcile(!autoReconcile)} title={t('mcevpnAutoReconcileHint') || 'When on, the drift scanner re-pushes the desired config to drifted members automatically (cluster-wide SDN apply). Off = detect-only.'} className={`px-2.5 py-1.5 rounded-lg text-xs border flex items-center gap-1.5 ${autoReconcile ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-proxmox-dark text-gray-400 border-proxmox-border hover:text-white'}`}><Icons.RefreshCw className="w-3.5 h-3.5" />{t('mcevpnAutoReconcile') || 'Auto-reconcile'}: {autoReconcile ? (t('enabled') || 'on') : (t('disabled') || 'off')}</button>
+                                <button onClick={() => saveAutoReconcile(!autoReconcile)} title={t('mcevpnAutoReconcileHint')} className={`px-2.5 py-1.5 rounded-lg text-xs border flex items-center gap-1.5 ${autoReconcile ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-proxmox-dark text-gray-400 border-proxmox-border hover:text-white'}`}><Icons.RefreshCw className="w-3.5 h-3.5" />{t('mcevpnAutoReconcile')}: {autoReconcile ? (t('enabled')) : (t('disabled'))}</button>
                             )}
-                            <button onClick={load} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white flex items-center gap-1.5"><Icons.RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />{t('refresh') || 'Refresh'}</button>
+                            <button onClick={load} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white flex items-center gap-1.5"><Icons.RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />{t('refresh')}</button>
                             {canManage && (
-                                <button onClick={() => { setShowCreate(true); setPlan(null); }} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 flex items-center gap-1.5"><Icons.Plus className="w-3.5 h-3.5" />{t('mcevpnCreate') || 'Create EVPN vNet'}</button>
+                                <button onClick={() => { setShowCreate(true); setPlan(null); }} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 flex items-center gap-1.5"><Icons.Plus className="w-3.5 h-3.5" />{t('mcevpnCreate')}</button>
                             )}
                         </div>
                     </div>
@@ -4135,13 +4136,13 @@
                     {clusters.length < 2 && (
                         <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-xs text-yellow-300 flex items-start gap-2">
                             <Icons.AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                            <span>{t('mcevpnNeedTwo') || 'A cross-cluster EVPN vNet spans multiple clusters — add at least two connected clusters to make this useful. You can still define one, but it only makes sense across ≥2 members.'}</span>
+                            <span>{t('mcevpnNeedTwo')}</span>
                         </div>
                     )}
 
                     {vnets.length === 0 && !loading ? (
                         <div className="p-10 text-center text-gray-600 text-sm bg-proxmox-card border border-proxmox-border rounded-xl">
-                            {t('mcevpnEmpty') || 'No cross-cluster EVPN vNets yet. Create one to span an EVPN L2 domain across same-ASN clusters.'}
+                            {t('mcevpnEmpty')}
                         </div>
                     ) : (
                         <div className="space-y-2">
@@ -4152,7 +4153,7 @@
                                             <Icons.Network className="w-4 h-4 text-cyan-400 flex-shrink-0" />
                                             <div className="min-w-0">
                                                 <div className="text-sm font-medium text-white truncate">{v.name} {v.alias && <span className="text-gray-500 font-normal">— {v.alias}</span>}</div>
-                                                <div className="text-xs text-gray-500">zone {v.zone} · VNI {v.vni} · ASN {v.asn}{v.controller ? ` · ctl ${v.controller}` : ''}</div>
+                                                <div className="text-xs text-gray-500">{t('mcevpnZoneShort')} {v.zone} · VNI {v.vni} · ASN {v.asn}{v.controller ? ` · ctl ${v.controller}` : ''}</div>
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-2 flex-shrink-0">
@@ -4177,8 +4178,8 @@
                                                                 <span className={`px-2 py-0.5 rounded text-xs font-semibold ${statusChip(st.status || 'unknown')}`}>{st.status || 'unknown'}</span>
                                                                 {canManage && (v.member_clusters || []).length > 1 && (
                                                                     <>
-                                                                        <button disabled={busy} onClick={() => removeMember(v.id, cid, false)} title={t('mcevpnRemoveMember') || 'Remove from span (leave the vNet on the cluster)'} className="text-gray-500 hover:text-white px-1 text-sm leading-none disabled:opacity-50">−</button>
-                                                                        <button disabled={busy} onClick={() => removeMember(v.id, cid, true)} title={t('mcevpnRemovePurge') || 'Remove from span + delete the vNet from this cluster'} className="text-red-400/70 hover:text-red-300 disabled:opacity-50"><Icons.Trash2 className="w-3.5 h-3.5" /></button>
+                                                                        <button disabled={busy} onClick={() => removeMember(v.id, cid, false)} title={t('mcevpnRemoveMember')} className="text-gray-500 hover:text-white px-1 text-sm leading-none disabled:opacity-50">−</button>
+                                                                        <button disabled={busy} onClick={() => removeMember(v.id, cid, true)} title={t('mcevpnRemovePurge')} className="text-red-400/70 hover:text-red-300 disabled:opacity-50"><Icons.Trash2 className="w-3.5 h-3.5" /></button>
                                                                     </>
                                                                 )}
                                                             </div>
@@ -4190,9 +4191,9 @@
                                                 const nonMembers = clusters.filter(c => !(v.member_clusters || []).includes(c.id));
                                                 return nonMembers.length > 0 ? (
                                                     <div className="flex items-center gap-2">
-                                                        <span className="text-[11px] text-gray-500">{t('mcevpnAddMember') || 'Add cluster to span'}:</span>
+                                                        <span className="text-[11px] text-gray-500">{t('mcevpnAddMember')}:</span>
                                                         <select disabled={busy} value="" onChange={e => { if (e.target.value) addMember(v.id, e.target.value); }} className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs">
-                                                            <option value="">{t('mcevpnPickCluster') || '— pick a cluster —'}</option>
+                                                            <option value="">{t('mcevpnPickCluster')}</option>
                                                             {nonMembers.map(c => <option key={c.id} value={c.id}>{c.name || c.display_name || c.id}</option>)}
                                                         </select>
                                                     </div>
@@ -4200,15 +4201,15 @@
                                             })()}
                                             {canManage ? (
                                             <div className="flex items-center gap-2 flex-wrap">
-                                                <button disabled={busy} onClick={() => scan(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnScan') || 'Scan for drift'}</button>
-                                                <button disabled={busy} onClick={() => openEdit(v)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnEdit') || 'Edit'}</button>
-                                                <button disabled={busy} onClick={() => reapply(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 border border-cyan-500/30 disabled:opacity-50">{t('mcevpnReapply') || 'Re-apply / retry'}</button>
-                                                <button disabled={busy} onClick={() => reconcile(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 disabled:opacity-50">{t('mcevpnReconcile') || 'Reconcile drift'}</button>
-                                                <button disabled={busy} onClick={() => remove(v.id, false)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnForget') || 'Forget record'}</button>
-                                                <button disabled={busy} onClick={() => remove(v.id, true)} className="px-2.5 py-1.5 rounded-lg text-xs bg-red-500/10 text-red-300 hover:bg-red-500/20 border border-red-500/30 disabled:opacity-50">{t('mcevpnPurge') || 'Delete + purge from clusters'}</button>
+                                                <button disabled={busy} onClick={() => scan(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnScan')}</button>
+                                                <button disabled={busy} onClick={() => openEdit(v)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnEdit')}</button>
+                                                <button disabled={busy} onClick={() => reapply(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 border border-cyan-500/30 disabled:opacity-50">{t('mcevpnReapply')}</button>
+                                                <button disabled={busy} onClick={() => reconcile(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 disabled:opacity-50">{t('mcevpnReconcile')}</button>
+                                                <button disabled={busy} onClick={() => remove(v.id, false)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnForget')}</button>
+                                                <button disabled={busy} onClick={() => remove(v.id, true)} className="px-2.5 py-1.5 rounded-lg text-xs bg-red-500/10 text-red-300 hover:bg-red-500/20 border border-red-500/30 disabled:opacity-50">{t('mcevpnPurge')}</button>
                                             </div>
                                             ) : (
-                                                <div className="text-[11px] text-gray-600">{t('mcevpnReadOnly') || 'Read-only view — managing cross-cluster EVPN needs the SDN + settings permissions.'}</div>
+                                                <div className="text-[11px] text-gray-600">{t('mcevpnReadOnly')}</div>
                                             )}
                                         </div>
                                     )}
@@ -4221,33 +4222,33 @@
                         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowCreate(false)}>
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between sticky top-0 bg-proxmox-card">
-                                    <h3 className="font-semibold text-white flex items-center gap-2"><Icons.Network className="w-4 h-4 text-cyan-400" />{t('mcevpnCreate') || 'Create EVPN vNet'}</h3>
+                                    <h3 className="font-semibold text-white flex items-center gap-2"><Icons.Network className="w-4 h-4 text-cyan-400" />{t('mcevpnCreate')}</h3>
                                     <button onClick={() => setShowCreate(false)} className="text-gray-500 hover:text-white"><Icons.X className="w-5 h-5" /></button>
                                 </div>
                                 <div className="p-4 space-y-3">
                                     <div className="grid grid-cols-2 gap-3">
-                                        <label className="text-xs text-gray-400">{t('mcevpnVnetName') || 'vNet name'} <span className="text-gray-600">(≤8)</span>
+                                        <label className="text-xs text-gray-400">{t('mcevpnVnetName')} <span className="text-gray-600">(≤8)</span>
                                             <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="evpn1" /></label>
-                                        <label className="text-xs text-gray-400">{t('alias') || 'Alias'}
+                                        <label className="text-xs text-gray-400">{t('alias')}
                                             <input value={form.alias} onChange={e => setForm({ ...form, alias: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="prod-span" /></label>
-                                        <label className="text-xs text-gray-400">{t('mcevpnZone') || 'EVPN zone id'} <span className="text-gray-600">(≤8)</span>
+                                        <label className="text-xs text-gray-400">{t('mcevpnZone')} <span className="text-gray-600">(≤8)</span>
                                             <input value={form.zone} onChange={e => setForm({ ...form, zone: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="z1" /></label>
-                                        <label className="text-xs text-gray-400">{t('mcevpnController') || 'EVPN controller id'}
+                                        <label className="text-xs text-gray-400">{t('mcevpnController')}
                                             <input value={form.controller} onChange={e => setForm({ ...form, controller: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="evpnctl" /></label>
-                                        <label className="text-xs text-gray-400">{t('mcevpnVni') || 'VNI (vnet tag)'}
+                                        <label className="text-xs text-gray-400">{t('mcevpnVni')}
                                             <input type="number" value={form.vni} onChange={e => setForm({ ...form, vni: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10010" /></label>
-                                        <label className="text-xs text-gray-400">{t('mcevpnAsn') || 'BGP ASN (shared)'}
+                                        <label className="text-xs text-gray-400">{t('mcevpnAsn')}
                                             <input type="number" value={form.asn} onChange={e => setForm({ ...form, asn: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="65000" /></label>
-                                        <label className="text-xs text-gray-400">{t('mcevpnVrf') || 'VRF-VXLAN / L3 VNI'} <span className="text-gray-600">({t('optional') || 'optional'})</span>
-                                            <input type="number" value={form.vrf_vxlan} onChange={e => setForm({ ...form, vrf_vxlan: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder={t('mcevpnVrfDefault') || 'defaults to VNI'} /></label>
-                                        <label className="text-xs text-gray-400">{t('mcevpnSubnet') || 'Subnet CIDR'} <span className="text-gray-600">({t('optional') || 'optional'})</span>
+                                        <label className="text-xs text-gray-400">{t('mcevpnVrf')} <span className="text-gray-600">({t('optional')})</span>
+                                            <input type="number" value={form.vrf_vxlan} onChange={e => setForm({ ...form, vrf_vxlan: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder={t('mcevpnVrfDefault')} /></label>
+                                        <label className="text-xs text-gray-400">{t('mcevpnSubnet')} <span className="text-gray-600">({t('optional')})</span>
                                             <input value={form.subnet} onChange={e => setForm({ ...form, subnet: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.9.0.0/24" /></label>
                                     </div>
-                                    <label className="text-xs text-gray-400 block">{t('mcevpnPeers') || 'EVPN controller peers (IPs, comma-separated)'} <span className="text-gray-600">({t('optional') || 'optional'})</span>
+                                    <label className="text-xs text-gray-400 block">{t('mcevpnPeers')} <span className="text-gray-600">({t('optional')})</span>
                                         <input value={form.peers} onChange={e => setForm({ ...form, peers: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.0.0.1, 10.0.0.2" /></label>
 
                                     <div>
-                                        <div className="text-xs text-gray-400 mb-1.5">{t('mcevpnMembers') || 'Member clusters (same ASN fabric)'}</div>
+                                        <div className="text-xs text-gray-400 mb-1.5">{t('mcevpnMembers')}</div>
                                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-40 overflow-y-auto">
                                             {evpnClusters.map(c => (
                                                 <label key={c.id} className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-lg border cursor-pointer ${form.cluster_ids.includes(c.id) ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'bg-proxmox-dark border-proxmox-border text-gray-300'}`}>
@@ -4260,16 +4261,16 @@
 
                                     {plan && (
                                         <div className={`p-3 rounded-lg border text-xs ${plan.ok ? 'bg-green-500/10 border-green-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}>
-                                            <div className={`font-semibold mb-1.5 ${plan.ok ? 'text-green-400' : 'text-yellow-400'}`}>{plan.ok ? (t('mcevpnPreviewOk') || 'Pre-flight OK — every member is reachable and conflict-free.') : (t('mcevpnPreviewIssues') || 'Pre-flight found issues:')}</div>
+                                            <div className={`font-semibold mb-1.5 ${plan.ok ? 'text-green-400' : 'text-yellow-400'}`}>{plan.ok ? (t('mcevpnPreviewOk')) : (t('mcevpnPreviewIssues'))}</div>
                                             {Object.entries(plan.plan || {}).map(([cid, p]) => (
                                                 <div key={cid} className="flex items-start justify-between gap-2 py-0.5">
                                                     <span className="text-gray-300">{clusterName(cid)}</span>
                                                     <span className="text-right">
                                                         {!p.reachable ? <span className="text-red-400">{p.reason || 'unreachable'}</span>
-                                                            : p.sdn_installed === false ? <span className="text-red-400">SDN not installed</span>
+                                                            : p.sdn_installed === false ? <span className="text-red-400">{t('mcevpnSdnNotInstalled')}</span>
                                                             : p.error ? <span className="text-red-400 max-w-[220px] truncate inline-block align-bottom" title={p.error}>{p.error}</span>
                                                             : (p.conflicts && p.conflicts.length) ? <span className="text-yellow-400">{p.conflicts.join('; ')}</span>
-                                                            : <span className="text-green-400">ok</span>}
+                                                            : <span className="text-green-400">OK</span>}
                                                     </span>
                                                 </div>
                                             ))}
@@ -4277,10 +4278,10 @@
                                     )}
                                 </div>
                                 <div className="p-4 border-t border-proxmox-border flex items-center justify-between sticky bottom-0 bg-proxmox-card">
-                                    <button disabled={busy || !canCreate} onClick={validate} className="px-3 py-2 rounded-lg text-sm bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white disabled:opacity-50">{t('mcevpnPreview') || 'Validate / preview'}</button>
+                                    <button disabled={busy || !canCreate} onClick={validate} className="px-3 py-2 rounded-lg text-sm bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white disabled:opacity-50">{t('mcevpnPreview')}</button>
                                     <div className="flex items-center gap-2">
-                                        <button onClick={() => setShowCreate(false)} className="px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button>
-                                        <button disabled={busy || !canCreate} onClick={create} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 disabled:opacity-50">{busy ? '…' : (t('mcevpnCreate') || 'Create EVPN vNet')}</button>
+                                        <button onClick={() => setShowCreate(false)} className="px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-white">{t('cancel')}</button>
+                                        <button disabled={busy || !canCreate} onClick={create} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 disabled:opacity-50">{busy ? '…' : (t('mcevpnCreate'))}</button>
                                     </div>
                                 </div>
                             </div>
@@ -4291,24 +4292,24 @@
                         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowEdit(null)}>
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
-                                    <h3 className="font-semibold text-white flex items-center gap-2"><Icons.Network className="w-4 h-4 text-cyan-400" />{t('mcevpnEditTitle') || 'Edit EVPN vNet'} <span className="text-gray-500 font-normal">{showEdit.name}</span></h3>
+                                    <h3 className="font-semibold text-white flex items-center gap-2"><Icons.Network className="w-4 h-4 text-cyan-400" />{t('mcevpnEditTitle')} <span className="text-gray-500 font-normal">{showEdit.name}</span></h3>
                                     <button onClick={() => setShowEdit(null)} className="text-gray-500 hover:text-white"><Icons.X className="w-5 h-5" /></button>
                                 </div>
                                 <div className="p-4 space-y-3">
-                                    <div className="text-[11px] text-gray-500">{t('mcevpnEditNote') || 'Structural fields (name / zone / VNI / ASN / controller) are immutable — delete and recreate to change them. Changes fan out to every member cluster and run a cluster-wide SDN apply.'}</div>
-                                    <label className="text-xs text-gray-400 block">{t('alias') || 'Alias'}
+                                    <div className="text-[11px] text-gray-500">{t('mcevpnEditNote')}</div>
+                                    <label className="text-xs text-gray-400 block">{t('alias')}
                                         <input value={editForm.alias} onChange={e => setEditForm({ ...editForm, alias: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="prod-span" /></label>
-                                    <label className="text-xs text-gray-400 block">{t('mcevpnAddSubnet') || 'Add subnet (CIDR)'}
+                                    <label className="text-xs text-gray-400 block">{t('mcevpnAddSubnet')}
                                         <input value={editForm.addSubnet} onChange={e => setEditForm({ ...editForm, addSubnet: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.8.0.0/24" /></label>
-                                    <label className="text-xs text-gray-400 block">{t('mcevpnDelSubnet') || 'Remove subnet (CIDR)'}
+                                    <label className="text-xs text-gray-400 block">{t('mcevpnDelSubnet')}
                                         <input value={editForm.delSubnet} onChange={e => setEditForm({ ...editForm, delSubnet: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.9.0.0/24" /></label>
                                     {(showEdit.subnets && showEdit.subnets.length > 0) && (
-                                        <div className="text-[11px] text-gray-500">{t('mcevpnCurrentSubnets') || 'Current subnets'}: {showEdit.subnets.map(s => s.cidr).join(', ')}</div>
+                                        <div className="text-[11px] text-gray-500">{t('mcevpnCurrentSubnets')}: {showEdit.subnets.map(s => s.cidr).join(', ')}</div>
                                     )}
                                 </div>
                                 <div className="p-4 border-t border-proxmox-border flex items-center justify-end gap-2">
-                                    <button onClick={() => setShowEdit(null)} className="px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button>
-                                    <button disabled={busy} onClick={submitEdit} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 disabled:opacity-50">{busy ? '…' : (t('save') || 'Save')}</button>
+                                    <button onClick={() => setShowEdit(null)} className="px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-white">{t('cancel')}</button>
+                                    <button disabled={busy} onClick={submitEdit} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 disabled:opacity-50">{busy ? '…' : (t('save'))}</button>
                                 </div>
                             </div>
                         </div>
@@ -4508,9 +4509,9 @@
                 if (!date) return '-';
                 const now = new Date();
                 const diff = Math.floor((now - new Date(date)) / 1000);
-                if (diff < 10) return t('justNow') || 'just now';
-                if (diff < 60) return (t('timeAgoSec') || '{n}s ago').replace('{n}', diff);
-                if (diff < 3600) return (t('timeAgoMin') || '{n}m ago').replace('{n}', Math.floor(diff / 60));
+                if (diff < 10) return t('justNow');
+                if (diff < 60) return (t('timeAgoSec')).replace('{n}', diff);
+                if (diff < 3600) return (t('timeAgoMin')).replace('{n}', Math.floor(diff / 60));
                 return new Date(date).toLocaleTimeString();
             };
 
@@ -4596,7 +4597,7 @@
                                         <div className="flex justify-center">
                                             <CircularProgress value={cluster.avgStorage} size={44} strokeWidth={4} color={cluster.avgStorage > 80 ? '#ef4444' : cluster.avgStorage > 60 ? '#eab308' : '#8b5cf6'} />
                                         </div>
-                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('storage') || 'Disk'}</div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('storage')}</div>
                                     </div>
                                     <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
                                         <div className="text-xl font-bold">
@@ -4609,13 +4610,13 @@
                             ) : (
                                 <div className="flex items-center justify-center h-20 text-gray-500 text-sm">
                                     <Icons.AlertTriangle className="w-4 h-4 mr-2" />
-                                    {t('noDataAvailable') || 'No data available'}
+                                    {t('noDataAvailable')}
                                 </div>
                             )}
 
                             <div className="mt-4 pt-3 border-t border-proxmox-border/50 flex items-center justify-between">
                                 <span className="text-xs text-gray-500">
-                                    {t('updated') || 'Updated'}: {formatLastUpdate(cluster.lastUpdate)}
+                                    {t('updated')}: {formatLastUpdate(cluster.lastUpdate)}
                                 </span>
                                 <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
                             </div>
@@ -4654,9 +4655,9 @@
                         {lbEnabled && (
                             <div className="flex items-center gap-3 px-2 py-1.5 text-[12px]" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
                                 <Icons.Scale className="w-3.5 h-3.5" style={{color: 'var(--color-success)'}} />
-                                <span style={{color: 'var(--corp-text-secondary)'}}>{t('crossClusterLB') || 'Cross-Cluster LB'}: <span style={{color: 'var(--color-success)'}}>{t('enabled') || 'Enabled'}</span></span>
-                                {group.cross_cluster_dry_run && <span style={{color: 'var(--color-warning)'}}>({t('simulationMode') || 'Simulation'})</span>}
-                                <span style={{color: 'var(--corp-text-muted)'}}>Threshold: {group.cross_cluster_threshold || 30}%</span>
+                                <span style={{color: 'var(--corp-text-secondary)'}}>{t('crossClusterLB')}: <span style={{color: 'var(--color-success)'}}>{t('enabled')}</span></span>
+                                {group.cross_cluster_dry_run && <span style={{color: 'var(--color-warning)'}}>({t('simulationMode')})</span>}
+                                <span style={{color: 'var(--corp-text-muted)'}}>{t('alertThreshold')}: {group.cross_cluster_threshold || 30}%</span>
                             </div>
                         )}
 
@@ -4666,13 +4667,13 @@
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
-                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> / <b style={{color: 'var(--corp-text-muted)'}}>{totals.totalVms - totals.runningVms}</b></span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('vms')}: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> / <b style={{color: 'var(--corp-text-muted)'}}>{totals.totalVms - totals.runningVms}</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
-                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage')}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
                         </div>
 
                         {/* Cluster table */}
@@ -4680,14 +4681,14 @@
                             <thead>
                                 <tr>
                                     {[
-                                        { field: 'name', label: t('name') || 'Name' },
-                                        { field: null, label: t('status') || 'Status' },
-                                        { field: 'nodes', label: t('nodes') || 'Nodes' },
+                                        { field: 'name', label: t('name') },
+                                        { field: null, label: t('status') },
+                                        { field: 'nodes', label: t('nodes') },
                                         { field: 'vms', label: 'VMs' },
                                         { field: 'cpu', label: 'CPU' },
                                         { field: 'ram', label: 'RAM' },
-                                        { field: null, label: t('storage') || 'Storage' },
-                                        { field: 'health', label: t('health') || 'Health' },
+                                        { field: null, label: t('storage') },
+                                        { field: 'health', label: t('health') },
                                     ].map((col, i) => (
                                         <th key={i}
                                             className={col.field ? 'cursor-pointer hover:text-white' : ''}
@@ -4708,7 +4709,7 @@
                                             <td>
                                                 <span className="inline-flex items-center gap-1.5">
                                                     <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? '#60b515' : '#f54f47'}} />
-                                                    <span style={{color: cluster.connected ? '#60b515' : '#f54f47', fontSize: '12px'}}>{cluster.connected ? (t('online') || 'online') : (t('offline') || 'offline')}</span>
+                                                    <span style={{color: cluster.connected ? '#60b515' : '#f54f47', fontSize: '12px'}}>{cluster.connected ? (t('online')) : (t('offline'))}</span>
                                                 </span>
                                             </td>
                                             <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
@@ -4749,7 +4750,7 @@
                             <div>
                                 <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
                                     <Icons.Activity className="w-3.5 h-3.5" style={{color: '#49afd9'}} />
-                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources') || 'Top Resources'}</span>
+                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources')}</span>
                                 </div>
                                 <table className="corp-datagrid">
                                     <thead><tr>
@@ -4794,7 +4795,7 @@
                             <div>
                                 <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
                                     <Icons.Activity className="w-3.5 h-3.5" style={{color: '#a178d9'}} />
-                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('lbHistory') || 'LB History'}</span>
+                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('lbHistory')}</span>
                                 </div>
                                 <table className="corp-datagrid">
                                     <thead><tr><th>{t('time')}</th><th>{t('action')}</th><th>{t('details')}</th></tr></thead>
@@ -4813,7 +4814,7 @@
 
                         {groupClusters.length === 0 && (
                             <div className="py-8 text-center text-[13px]" style={{color: '#728b9a'}}>
-                                {t('noClustersInGroup') || 'No clusters in this group'}
+                                {t('noClustersInGroup')}
                             </div>
                         )}
                     </div>
@@ -4842,13 +4843,13 @@
                                 {totals.totalAlerts > 0 && (
                                     <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg">
                                         <Icons.AlertTriangle className="w-4 h-4 text-red-400" />
-                                        <span className="text-sm text-red-400 font-medium">{totals.totalAlerts} {t('alerts') || 'Alerts'}</span>
+                                        <span className="text-sm text-red-400 font-medium">{totals.totalAlerts} {t('alerts')}</span>
                                     </div>
                                 )}
                                 <button
                                     onClick={onOpenSettings}
                                     className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-proxmox-dark transition-colors"
-                                    title={t('settings') || 'Settings'}
+                                    title={t('settings')}
                                 >
                                     <Icons.Settings className="w-5 h-5" />
                                 </button>
@@ -4870,17 +4871,17 @@
                                     </div>
                                     <div>
                                         <h3 className="text-lg font-semibold flex items-center gap-2">
-                                            {t('crossClusterLB') || 'Cross-Cluster Load Balancing'}
-                                            <span className="bg-green-500/10 text-green-400 px-2 py-0.5 rounded-full text-xs">{t('enabled') || 'Enabled'}</span>
+                                            {t('crossClusterLB')}
+                                            <span className="bg-green-500/10 text-green-400 px-2 py-0.5 rounded-full text-xs">{t('enabled')}</span>
                                             {group.cross_cluster_dry_run && (
-                                                <span className="bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded-full text-xs">{t('simulationMode') || 'Simulation Mode'}</span>
+                                                <span className="bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded-full text-xs">{t('simulationMode')}</span>
                                             )}
                                         </h3>
                                         <div className="flex items-center gap-4 text-xs text-gray-500 mt-1">
-                                            <span>{t('threshold') || 'Threshold'}: {group.cross_cluster_threshold || 30}%</span>
-                                            <span>{t('interval') || 'Interval'}: {group.cross_cluster_interval || 600}s</span>
+                                            <span>{t('threshold')}: {group.cross_cluster_threshold || 30}%</span>
+                                            <span>{t('interval')}: {group.cross_cluster_interval || 600}s</span>
                                             {groupStatus?.cross_cluster_lb?.last_run && (
-                                                <span>{t('lastRun') || 'Last run'}: {formatLastUpdate(groupStatus.cross_cluster_lb.last_run)}</span>
+                                                <span>{t('lastRun')}: {formatLastUpdate(groupStatus.cross_cluster_lb.last_run)}</span>
                                             )}
                                         </div>
                                     </div>
@@ -4893,9 +4894,9 @@
                     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
                         {[
                             { icon: Icons.Server, value: `${totals.connectedClusters}/${totals.clusters}`, label: t('clusters'), color: 'proxmox-orange', hoverColor: 'proxmox-orange' },
-                            { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline') || 'Nodes', color: 'blue-400', hoverColor: 'blue-500' },
-                            { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning') || 'Running', color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
-                            { icon: Icons.Square, value: totals.totalVms - totals.runningVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
+                            { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline'), color: 'blue-400', hoverColor: 'blue-500' },
+                            { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning'), color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
+                            { icon: Icons.Square, value: totals.totalVms - totals.runningVms, label: t('vmsStopped'), color: 'gray-400', hoverColor: 'gray-500' },
                         ].map((stat, i) => (
                             <div key={i} className={`bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-${stat.hoverColor}/30 transition-all group`}>
                                 <div className="flex items-center gap-3">
@@ -4914,14 +4915,14 @@
                         {[
                             { value: totals.avgCpu, label: 'CPU', color: totals.avgCpu > 80 ? '#ef4444' : totals.avgCpu > 60 ? '#eab308' : '#22c55e' },
                             { value: totals.avgMem, label: 'RAM', color: totals.avgMem > 80 ? '#ef4444' : totals.avgMem > 60 ? '#eab308' : '#3b82f6' },
-                            { value: totals.avgStorage, label: t('storage') || 'Disk', color: totals.avgStorage > 80 ? '#ef4444' : totals.avgStorage > 60 ? '#eab308' : '#8b5cf6' },
+                            { value: totals.avgStorage, label: t('storage'), color: totals.avgStorage > 80 ? '#ef4444' : totals.avgStorage > 60 ? '#eab308' : '#8b5cf6' },
                         ].map((stat, i) => (
                             <div key={i} className="bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-proxmox-border transition-all">
                                 <div className="flex items-center gap-3">
                                     <CircularProgress value={stat.value || 0} size={44} strokeWidth={4} color={stat.color} />
                                     <div>
                                         <div className="text-sm font-bold text-white">{stat.label}</div>
-                                        <div className="text-xs text-gray-500">{t('average') || 'Avg'}</div>
+                                        <div className="text-xs text-gray-500">{t('average')}</div>
                                     </div>
                                 </div>
                             </div>
@@ -4931,10 +4932,10 @@
                     {/* Sort Controls */}
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-sm text-gray-500 mr-1">{t('sortBy') || 'Sort by'}:</span>
-                            <SortButton field="name" label={t('name') || 'Name'} />
-                            <SortButton field="health" label={t('health') || 'Health'} />
-                            <SortButton field="nodes" label={t('nodes') || 'Nodes'} />
+                            <span className="text-sm text-gray-500 mr-1">{t('sortBy')}:</span>
+                            <SortButton field="name" label={t('name')} />
+                            <SortButton field="health" label={t('health')} />
+                            <SortButton field="nodes" label={t('nodes')} />
                             <SortButton field="vms" label="VMs" />
                             <SortButton field="cpu" label="CPU" />
                             <SortButton field="ram" label="RAM" />
@@ -4959,11 +4960,11 @@
                                             <Icons.Activity className="w-5 h-5 text-cyan-400" />
                                         </div>
                                         <div>
-                                            <h3 className="font-semibold text-white">{t('topResources') || 'Top Resources'}</h3>
-                                            <p className="text-xs text-gray-500">{t('highestCpuUsage') || 'Highest CPU and RAM usage across all clusters'}</p>
+                                            <h3 className="font-semibold text-white">{t('topResources')}</h3>
+                                            <p className="text-xs text-gray-500">{t('highestCpuUsage')}</p>
                                         </div>
                                     </div>
-                                    <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">{t('top10') || 'Top 10'}</span>
+                                    <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">{t('top10')}</span>
                                 </div>
                                 <div className="overflow-x-auto">
                                     <table className="w-full">
@@ -4990,7 +4991,7 @@
                                                         key={`${guest.cluster_id}-${guest.vmid}`}
                                                         className="hover:bg-proxmox-hover/50 transition-colors cursor-pointer group"
                                                         onClick={() => { if (guestCluster && onSelectVm) onSelectVm(guestCluster, guest.vmid, guest.node, guest); }}
-                                                        title={t('clickToOpenVm') || 'Click to open VM'}
+                                                        title={t('clickToOpenVm')}
                                                     >
                                                         <td className="px-4 py-3">
                                                             <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isVM ? 'bg-blue-500/20' : 'bg-purple-500/20'}`}>
@@ -5046,8 +5047,8 @@
                                     <Icons.Activity className="w-5 h-5 text-purple-400" />
                                 </div>
                                 <div>
-                                    <h3 className="font-semibold text-white">{t('lbHistory') || 'Load Balancing History'}</h3>
-                                    <p className="text-xs text-gray-500">{t('recentLbActions') || 'Recent cross-cluster LB actions'}</p>
+                                    <h3 className="font-semibold text-white">{t('lbHistory')}</h3>
+                                    <p className="text-xs text-gray-500">{t('recentLbActions')}</p>
                                 </div>
                             </div>
                             {lbHistory.length > 0 ? (
@@ -5055,9 +5056,9 @@
                                     <table className="w-full">
                                         <thead className="bg-proxmox-dark/50">
                                             <tr className="text-left text-xs text-gray-400">
-                                                <th className="px-4 py-3 font-medium">{t('time') || 'Time'}</th>
-                                                <th className="px-4 py-3 font-medium">{t('action') || 'Action'}</th>
-                                                <th className="px-4 py-3 font-medium">{t('details') || 'Details'}</th>
+                                                <th className="px-4 py-3 font-medium">{t('time')}</th>
+                                                <th className="px-4 py-3 font-medium">{t('action')}</th>
+                                                <th className="px-4 py-3 font-medium">{t('details')}</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-proxmox-border/50">
@@ -5084,7 +5085,7 @@
                             ) : (
                                 <div className="p-8 text-center text-gray-500 text-sm">
                                     <Icons.Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                    {t('noLbEvents') || 'No cross-cluster LB events yet'}
+                                    {t('noLbEvents')}
                                 </div>
                             )}
                         </div>
@@ -5096,8 +5097,8 @@
                             <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-proxmox-orange/20 to-orange-600/20 flex items-center justify-center">
                                 <Icons.Server className="w-8 h-8 text-proxmox-orange" />
                             </div>
-                            <h3 className="text-lg font-semibold text-white mb-2">{t('noClustersInGroup') || 'No clusters in this group'}</h3>
-                            <p className="text-gray-500 text-sm">{t('addClustersToGroup') || 'Assign clusters to this group to see them here'}</p>
+                            <h3 className="text-lg font-semibold text-white mb-2">{t('noClustersInGroup')}</h3>
+                            <p className="text-gray-500 text-sm">{t('addClustersToGroup')}</p>
                         </div>
                     )}
                 </div>
@@ -5274,9 +5275,9 @@
                 if (!date) return '-';
                 const now = new Date();
                 const diff = Math.floor((now - new Date(date)) / 1000);
-                if (diff < 10) return t('justNow') || 'just now';
-                if (diff < 60) return (t('timeAgoSec') || '{n}s ago').replace('{n}', diff);
-                if (diff < 3600) return (t('timeAgoMin') || '{n}m ago').replace('{n}', Math.floor(diff / 60));
+                if (diff < 10) return t('justNow');
+                if (diff < 60) return (t('timeAgoSec')).replace('{n}', diff);
+                if (diff < 3600) return (t('timeAgoMin')).replace('{n}', Math.floor(diff / 60));
                 return new Date(date).toLocaleTimeString();
             };
             
@@ -5387,7 +5388,7 @@
                                         <div className="flex justify-center">
                                             <CircularProgress value={cluster.avgStorage} size={44} strokeWidth={4} color={cluster.avgStorage > 80 ? '#ef4444' : cluster.avgStorage > 60 ? '#eab308' : '#8b5cf6'} />
                                         </div>
-                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('storage') || 'Disk'}</div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('storage')}</div>
                                     </div>
                                     
                                     {/* VMs */}
@@ -5402,14 +5403,14 @@
                             ) : (
                                 <div className="flex items-center justify-center h-20 text-gray-500 text-sm">
                                     <Icons.AlertTriangle className="w-4 h-4 mr-2" />
-                                    {t('noDataAvailable') || 'No data available'}
+                                    {t('noDataAvailable')}
                                 </div>
                             )}
                             
                             {/* Footer */}
                             <div className="mt-4 pt-3 border-t border-proxmox-border/50 flex items-center justify-between">
                                 <span className="text-xs text-gray-500">
-                                    {t('updated') || 'Updated'}: {formatLastUpdate(cluster.lastUpdate)}
+                                    {t('updated')}: {formatLastUpdate(cluster.lastUpdate)}
                                 </span>
                                 <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
                             </div>
@@ -5430,12 +5431,12 @@
                                     ? <Icons.Network className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
                                     : <Icons.Grid className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
                                 }
-                                <span className="corp-header-title">{topologyOnly ? (t('topologyView') || 'Topology') : (t('inventoryOverview') || t('allClustersOverview') || 'Inventory Overview')}</span>
+                                <span className="corp-header-title">{topologyOnly ? (t('topologyView')) : (t('inventoryOverview') || t('allClustersOverview'))}</span>
                             </div>
                             <div className="flex items-center gap-3">
                                 {totals.totalAlerts > 0 && (
                                     <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-error)'}}>
-                                        <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts') || 'alerts'}
+                                        <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts')}
                                     </span>
                                 )}
                             </div>
@@ -5443,17 +5444,17 @@
 
                         {/* stats bar */}
                         {!topologyOnly && <div className="flex items-center gap-0 flex-wrap text-[13px] px-2 py-2" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
-                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('clusters')}: <b style={{color: 'var(--color-text)'}}>{totals.connectedClusters}/{totals.clusters}</b> online</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('clusters')}: <b style={{color: 'var(--color-text)'}}>{totals.connectedClusters}/{totals.clusters}</b> {t('online')}</span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             {(() => {
                                 const stoppedVms = totals.totalVms - totals.runningVms;
-                                const runningWord = (t('running') || 'running').toLowerCase();
-                                const stoppedWord = (t('stopped') || 'stopped').toLowerCase();
+                                const runningWord = (t('running')).toLowerCase();
+                                const stoppedWord = (t('stopped')).toLowerCase();
                                 const runningLabel = totals.runningVms === 1 ? runningWord : (runningWord === 'uruchomiona' ? 'uruchomione' : runningWord);
                                 const stoppedLabel = stoppedVms === 1 ? stoppedWord : (stoppedWord === 'zatrzymana' ? 'zatrzymane' : stoppedWord);
-                                return <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {runningLabel}, <b style={{color: 'var(--corp-text-muted)'}}>{stoppedVms}</b> {stoppedLabel}</span>;
+                                return <span style={{color: 'var(--corp-text-secondary)'}}>{t('vms')}: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {runningLabel}, <b style={{color: 'var(--corp-text-muted)'}}>{stoppedVms}</b> {stoppedLabel}</span>;
                             })()}
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
@@ -5466,7 +5467,7 @@
                                 <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgMem, 100)}%`, background: corpBarColor(totals.avgMem)}} />
                             </span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
-                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage')}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
                             <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
                                 <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgStorage, 100)}%`, background: corpBarColor(totals.avgStorage)}} />
                             </span>
@@ -5477,14 +5478,14 @@
                             <thead>
                                 <tr>
                                     {[
-                                        { field: 'name', label: t('name') || 'Name' },
-                                        { field: null, label: t('status') || 'Status' },
-                                        { field: 'nodes', label: t('nodes') || 'Nodes' },
+                                        { field: 'name', label: t('name') },
+                                        { field: null, label: t('status') },
+                                        { field: 'nodes', label: t('nodes') },
                                         { field: 'vms', label: 'VMs' },
                                         { field: 'cpu', label: 'CPU' },
                                         { field: 'ram', label: 'RAM' },
-                                        { field: null, label: t('storage') || 'Storage' },
-                                        { field: 'health', label: t('health') || 'Health' },
+                                        { field: null, label: t('storage') },
+                                        { field: 'health', label: t('health') },
                                     ].map((col, i) => (
                                         <th key={i}
                                             className={col.field ? 'cursor-pointer hover:text-white' : ''}
@@ -5505,7 +5506,7 @@
                                             <td>
                                                 <span className="inline-flex items-center gap-1.5">
                                                     <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? 'var(--color-success)' : 'var(--color-error)'}} />
-                                                    <span style={{color: cluster.connected ? 'var(--color-success)' : 'var(--color-error)', fontSize: '12px'}}>{cluster.connected ? (t('online') || 'online') : (t('offline') || 'offline')}</span>
+                                                    <span style={{color: cluster.connected ? 'var(--color-success)' : 'var(--color-error)', fontSize: '12px'}}>{cluster.connected ? (t('online')) : (t('offline'))}</span>
                                                 </span>
                                             </td>
                                             <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
@@ -5549,8 +5550,8 @@
                             <div>
                                 <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
                                     <Icons.Activity className="w-3.5 h-3.5" style={{color: '#49afd9'}} />
-                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources') || 'Top Resources'}</span>
-                                    <span className="text-[11px]" style={{color: '#728b9a'}}>{t('top10') || 'Top 10'}</span>
+                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources')}</span>
+                                    <span className="text-[11px]" style={{color: '#728b9a'}}>{t('top10')}</span>
                                 </div>
                                 <table className="corp-datagrid corp-datagrid-striped">
                                     <thead>
@@ -5636,7 +5637,7 @@
                             <div>
                                 <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-medium)'}}>
                                     <Icons.Network className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
-                                    <span className="text-[13px] font-semibold" style={{color: 'var(--corp-text-secondary)'}}>{t('topologyView') || 'Topology'}</span>
+                                    <span className="text-[13px] font-semibold" style={{color: 'var(--corp-text-secondary)'}}>{t('topologyView')}</span>
                                 </div>
                                 <div className="mt-3 flex flex-wrap gap-5">
                                     {clusters.filter(c => c.connected).map(cluster => {
@@ -5718,7 +5719,7 @@
                                                                     <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0${isOnline ? ' topo-status-glow' : ''}`} style={{background: isOnline ? '#60b515' : '#f54f47'}} />
                                                                     <Icons.Server className="w-3 h-3 flex-shrink-0" style={{color: isOnline ? 'var(--corp-text-secondary)' : '#f54f47'}} />
                                                                     <span className="text-[12px] font-medium" style={{color: isOnline ? 'var(--color-text)' : '#f54f47'}}>{nodeName}</span>
-                                                                    {!isOnline && <span className="text-[9px] font-bold px-1.5 py-0.5" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
+                                                                    {!isOnline && <span className="text-[9px] font-bold px-1.5 py-0.5" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>{t('offline').toUpperCase()}</span>}
                                                                     {isOnline && (
                                                                         <div className="flex items-center gap-3 ml-auto">
                                                                             <div className="flex items-center gap-1">
@@ -5770,7 +5771,7 @@
 
                                                     {nodeEntries.length === 0 && (
                                                         <div className="px-2 py-3 text-center text-[11px]" style={{color: 'var(--corp-text-muted)'}}>
-                                                            {t('loading') || 'Loading...'}
+                                                            {t('loading')}
                                                         </div>
                                                     )}
                                                 </div>
@@ -5803,7 +5804,7 @@
                         {clusters.length === 0 && (
                             <div className="py-8 text-center text-[13px]" style={{color: '#728b9a'}}>
                                 <Icons.Server className="w-6 h-6 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
-                                {t('noClustersConfigured') || 'No clusters configured'}
+                                {t('noClustersConfigured')}
                             </div>
                         )}
                     </div>
@@ -5822,8 +5823,8 @@
                                     <Icons.Grid className="w-7 h-7 text-white" />
                                 </div>
                                 <div>
-                                    <h1 className="text-2xl font-bold text-white">{t('allClustersOverview') || 'All Clusters Overview'}</h1>
-                                    <p className="text-gray-400 text-sm">{t('multiClusterSummary') || 'Summary of all managed clusters'}</p>
+                                    <h1 className="text-2xl font-bold text-white">{t('allClustersOverview')}</h1>
+                                    <p className="text-gray-400 text-sm">{t('multiClusterSummary')}</p>
                                 </div>
                             </div>
 
@@ -5832,7 +5833,7 @@
                                 {totals.totalAlerts > 0 && (
                                     <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg">
                                         <Icons.AlertTriangle className="w-4 h-4 text-red-400" />
-                                        <span className="text-sm text-red-400 font-medium">{totals.totalAlerts} {t('alerts') || 'Alerts'}</span>
+                                        <span className="text-sm text-red-400 font-medium">{totals.totalAlerts} {t('alerts')}</span>
                                     </div>
                                 )}
 
@@ -5849,9 +5850,9 @@
                     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
                         {[
                             { icon: Icons.Server, value: `${totals.connectedClusters}/${totals.clusters}`, label: t('clusters'), color: 'proxmox-orange', hoverColor: 'proxmox-orange' },
-                            { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline') || 'Nodes', color: 'blue-400', hoverColor: 'blue-500' },
-                            { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning') || 'Running', color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
-                            { icon: Icons.Square, value: totals.totalVms - totals.runningVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
+                            { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline'), color: 'blue-400', hoverColor: 'blue-500' },
+                            { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning'), color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
+                            { icon: Icons.Square, value: totals.totalVms - totals.runningVms, label: t('vmsStopped'), color: 'gray-400', hoverColor: 'gray-500' },
                         ].map((stat, i) => (
                             <div key={i} className={`bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-${stat.hoverColor}/30 transition-all group`}>
                                 <div className="flex items-center gap-3">
@@ -5870,14 +5871,14 @@
                         {[
                             { value: totals.avgCpu, label: 'CPU', color: totals.avgCpu > 80 ? '#ef4444' : totals.avgCpu > 60 ? '#eab308' : '#22c55e' },
                             { value: totals.avgMem, label: 'RAM', color: totals.avgMem > 80 ? '#ef4444' : totals.avgMem > 60 ? '#eab308' : '#3b82f6' },
-                            { value: totals.avgStorage, label: t('storage') || 'Disk', color: totals.avgStorage > 80 ? '#ef4444' : totals.avgStorage > 60 ? '#eab308' : '#8b5cf6' },
+                            { value: totals.avgStorage, label: t('storage'), color: totals.avgStorage > 80 ? '#ef4444' : totals.avgStorage > 60 ? '#eab308' : '#8b5cf6' },
                         ].map((stat, i) => (
                             <div key={i} className="bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-proxmox-border transition-all">
                                 <div className="flex items-center gap-3">
                                     <CircularProgress value={stat.value || 0} size={44} strokeWidth={4} color={stat.color} />
                                     <div>
                                         <div className="text-sm font-bold text-white">{stat.label}</div>
-                                        <div className="text-xs text-gray-500">{t('average') || 'Avg'}</div>
+                                        <div className="text-xs text-gray-500">{t('average')}</div>
                                     </div>
                                 </div>
                             </div>
@@ -5887,10 +5888,10 @@
                     {/* Sort Controls */}
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-sm text-gray-500 mr-1">{t('sortBy') || 'Sort by'}:</span>
-                            <SortButton field="name" label={t('name') || 'Name'} />
-                            <SortButton field="health" label={t('health') || 'Health'} />
-                            <SortButton field="nodes" label={t('nodes') || 'Nodes'} />
+                            <span className="text-sm text-gray-500 mr-1">{t('sortBy')}:</span>
+                            <SortButton field="name" label={t('name')} />
+                            <SortButton field="health" label={t('health')} />
+                            <SortButton field="nodes" label={t('nodes')} />
                             <SortButton field="vms" label="VMs" />
                             <SortButton field="cpu" label="CPU" />
                             <SortButton field="ram" label="RAM" />
@@ -5917,7 +5918,7 @@
                             {Object.keys(groupedClusters).length > 0 && (
                                 <div className="flex items-center gap-3 px-1">
                                     <Icons.Folder className="w-4 h-4 text-gray-500" />
-                                    <h3 className="text-base font-semibold text-white">{t('ungrouped') || 'Ungrouped'}</h3>
+                                    <h3 className="text-base font-semibold text-white">{t('ungrouped')}</h3>
                                     <span className="text-sm text-gray-500">({ungroupedClusters.length})</span>
                                 </div>
                             )}
@@ -5936,11 +5937,11 @@
                                         <Icons.Activity className="w-5 h-5 text-cyan-400" />
                                     </div>
                                     <div>
-                                        <h3 className="font-semibold text-white">{t('topResources') || 'Top Resources'}</h3>
-                                        <p className="text-xs text-gray-500">{t('highestCpuUsage') || 'Highest CPU and RAM usage across all clusters'}</p>
+                                        <h3 className="font-semibold text-white">{t('topResources')}</h3>
+                                        <p className="text-xs text-gray-500">{t('highestCpuUsage')}</p>
                                     </div>
                                 </div>
-                                <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">{t('top10') || 'Top 10'}</span>
+                                <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">{t('top10')}</span>
                             </div>
                             <div className="overflow-x-auto">
                                 <table className="w-full">
@@ -5972,7 +5973,7 @@
                                                             onSelectVm(guestCluster, guest.vmid, guest.node, guest);
                                                         }
                                                     }}
-                                                    title={t('clickToOpenVm') || 'Click to open VM'}
+                                                    title={t('clickToOpenVm')}
                                                 >
                                                     <td className="px-4 py-3">
                                                         <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isVM ? 'bg-blue-500/20' : 'bg-purple-500/20'}`}>
@@ -6043,8 +6044,8 @@
                             <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-proxmox-orange/20 to-orange-600/20 flex items-center justify-center">
                                 <Icons.Server className="w-8 h-8 text-proxmox-orange" />
                             </div>
-                            <h3 className="text-lg font-semibold text-white mb-2">{t('noClustersConfigured') || 'No clusters configured'}</h3>
-                            <p className="text-gray-500 text-sm">{t('addClusterToStart') || 'Add a cluster to get started'}</p>
+                            <h3 className="text-lg font-semibold text-white mb-2">{t('noClustersConfigured')}</h3>
+                            <p className="text-gray-500 text-sm">{t('addClusterToStart')}</p>
                         </div>
                     )}
                 </div>
@@ -6106,12 +6107,12 @@
                 setXclbRunning(true);
                 try {
                     const res = await authFetch(`${API_URL}/cluster-groups/${group.id}/balance-now`, { method: 'POST' });
-                    if (res && res.ok) addToast(t('balanceNowStarted') || 'Cross-cluster balance check started');
+                    if (res && res.ok) addToast(t('balanceNowStarted'));
                     else {
                         const data = res ? await res.json().catch(() => ({})) : {};
-                        addToast(data.error || 'Failed', 'error');
+                        addToast(data.error || t('xclbBalanceCheckFailed'), 'error');
                     }
-                } catch(e) { addToast('Balance check failed', 'error'); }
+                } catch(e) { addToast(t('xclbBalanceCheckFailed'), 'error'); }
                 finally { setTimeout(() => setXclbRunning(false), 3000); }
             };
 
@@ -6379,37 +6380,37 @@
                         })
                     });
                     if (res && res.ok) {
-                        if (addToast) addToast(t('xReplCreated') || 'Replication job created', 'success');
+                        if (addToast) addToast(t('xReplCreated'), 'success');
                         setShowCreateXRepl(false);
                         setXReplForm({ source_cluster: '', vmid: '', vm_type: 'qemu', target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
                         await fetchXReplJobs();
                     } else if (res) {
                         const err = await res.json();
-                        if (addToast) addToast(err.error || t('xReplCreateFailed') || 'Failed to create replication job', 'error');
+                        if (addToast) addToast(err.error || t('xReplCreateFailed'), 'error');
                     }
                 } catch (e) {
-                    if (addToast) addToast(t('connectionError') || 'Connection error', 'error');
+                    if (addToast) addToast(t('connectionError'), 'error');
                 }
             };
 
             const handleDeleteXRepl = async (jobId) => {
-                if (!confirm(t('confirmDeleteXRepl') || 'Delete this replication job?')) return;
+                if (!confirm(t('confirmDeleteXRepl'))) return;
                 // #552 - second prompt: also tear down the replica VM on the target?
-                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget'));
                 try {
                     // MK #564 — send the choice explicitly so "keep replica" can't be
                     // overridden by the job's stored delete_target flag (a failed teardown
                     // would otherwise wedge the job as undeletable).
                     const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}?delete_target=${alsoDeleteTarget ? '1' : '0'}`, { method: 'DELETE' });
                     if (res && res.ok) {
-                        if (addToast) addToast(t('xReplDeleted') || 'Replication job deleted', 'success');
+                        if (addToast) addToast(t('xReplDeleted'), 'success');
                         await fetchXReplJobs();
                     } else if (res) {
                         const err = await res.json();
-                        if (addToast) addToast(err.error || t('xReplDeleteFailed') || 'Failed to delete', 'error');
+                        if (addToast) addToast(err.error || t('xReplDeleteFailed'), 'error');
                     }
                 } catch (e) {
-                    if (addToast) addToast(t('connectionError') || 'Connection error', 'error');
+                    if (addToast) addToast(t('connectionError'), 'error');
                 }
             };
 
@@ -6417,13 +6418,13 @@
                 try {
                     const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}/run`, { method: 'POST' });
                     if (res && res.ok) {
-                        if (addToast) addToast(t('xReplStarted') || 'Replication started', 'success');
+                        if (addToast) addToast(t('xReplStarted'), 'success');
                     } else if (res) {
                         const err = await res.json();
-                        if (addToast) addToast(err.error || t('xReplStartFailed') || 'Failed to start', 'error');
+                        if (addToast) addToast(err.error || t('xReplStartFailed'), 'error');
                     }
                 } catch (e) {
-                    if (addToast) addToast(t('connectionError') || 'Connection error', 'error');
+                    if (addToast) addToast(t('connectionError'), 'error');
                 }
             };
 
@@ -6436,10 +6437,10 @@
 
             // MK: tab config
             const tabs = [
-                { id: 'general', label: t('general') || 'General', icon: Icons.Settings },
-                { id: 'lb', label: t('crossClusterLB') || 'Cross-Cluster LB', icon: Icons.Scale },
-                { id: 'replication', label: t('crossClusterReplication') || 'Replication', icon: Icons.Globe },
-                { id: 'info', label: t('info') || 'Info', icon: Icons.Info },
+                { id: 'general', label: t('general'), icon: Icons.Settings },
+                { id: 'lb', label: t('crossClusterLB'), icon: Icons.Scale },
+                { id: 'replication', label: t('crossClusterReplication'), icon: Icons.Globe },
+                { id: 'info', label: t('info'), icon: Icons.Info },
             ];
 
             return (
@@ -6452,7 +6453,7 @@
                                     <Icons.Folder className="w-5 h-5" style={{ color: form.color || '#E86F2D' }} />
                                 </div>
                                 <div>
-                                    <h2 className="text-lg font-semibold text-white">{t('groupSettings') || 'Group Settings'}</h2>
+                                    <h2 className="text-lg font-semibold text-white">{t('groupSettings')}</h2>
                                     <p className="text-xs text-gray-500">{group.name}</p>
                                 </div>
                             </div>
@@ -6484,26 +6485,26 @@
                             {activeTab === 'general' && (
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'} *</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('name')} *</label>
                                         <input
                                             value={form.name}
                                             onChange={e => setForm(p => ({...p, name: e.target.value}))}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
-                                            placeholder="Production Cluster Group"
+                                            placeholder={t('groupNamePlaceholder')}
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">{t('description') || 'Description'}</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('description')}</label>
                                         <textarea
                                             value={form.description}
                                             onChange={e => setForm(p => ({...p, description: e.target.value}))}
                                             rows={3}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange resize-none"
-                                            placeholder="Optional description for this group..."
+                                            placeholder={t('optionalDescription')}
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">{t('color') || 'Color'}</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('color')}</label>
                                         <div className="flex items-center gap-3">
                                             <input
                                                 type="color"
@@ -6539,8 +6540,8 @@
                                     {/* enable toggle */}
                                     <div className="flex items-center justify-between p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                         <div>
-                                            <h4 className="text-sm font-medium text-white">{t('enableCrossClusterLB') || 'Enable Cross-Cluster Load Balancing'}</h4>
-                                            <p className="text-xs text-gray-500 mt-0.5">{t('lbDescription') || 'Automatically migrate VMs between clusters when resource thresholds are exceeded'}</p>
+                                            <h4 className="text-sm font-medium text-white">{t('enableCrossClusterLB')}</h4>
+                                            <p className="text-xs text-gray-500 mt-0.5">{t('lbDescription')}</p>
                                         </div>
                                         <label className="relative inline-flex items-center cursor-pointer">
                                             <input
@@ -6566,7 +6567,7 @@
                                                         ? React.createElement('span', {className: 'w-3.5 h-3.5 border-2 border-proxmox-orange/40 border-t-proxmox-orange rounded-full animate-spin'})
                                                         : React.createElement(Icons.RefreshCw, {className: 'w-3.5 h-3.5'})
                                                     }
-                                                    {t('balanceNow') || 'Balance Now'}
+                                                    {t('balanceNow')}
                                                 </button>
                                             </div>
                                             {/* Dry run toggle */}
@@ -6574,8 +6575,8 @@
                                                 <div className="flex items-center gap-2">
                                                     <Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />
                                                     <div>
-                                                        <span className="text-sm text-yellow-300">{t('dryRunMode') || 'Dry Run / Simulation Mode'}</span>
-                                                        <p className="text-xs text-gray-500">{t('dryRunDesc') || 'Log what would happen without actually migrating'}</p>
+                                                        <span className="text-sm text-yellow-300">{t('dryRunMode')}</span>
+                                                        <p className="text-xs text-gray-500">{t('dryRunDesc')}</p>
                                                     </div>
                                                 </div>
                                                 <label className="relative inline-flex items-center cursor-pointer">
@@ -6590,8 +6591,8 @@
                                             </div>
 
                                             <Slider
-                                                label={t('cpuThreshold') || 'CPU Threshold (%)'}
-                                                description={t('crossClusterThresholdDesc') || 'CPU threshold for cluster imbalance (10-80%)'}
+                                                label={t('cpuThreshold')}
+                                                description={t('crossClusterThresholdDesc')}
                                                 value={form.cross_cluster_threshold}
                                                 onChange={v => setForm(p => ({...p, cross_cluster_threshold: v}))}
                                                 min={10}
@@ -6599,8 +6600,8 @@
                                             />
 
                                             <Slider
-                                                label={t('checkInterval') || 'Check Interval'}
-                                                description={t('crossClusterIntervalDesc') || 'Time between check cycles'}
+                                                label={t('checkInterval')}
+                                                description={t('crossClusterIntervalDesc')}
                                                 value={form.cross_cluster_interval}
                                                 onChange={v => setForm(p => ({...p, cross_cluster_interval: v}))}
                                                 min={300}
@@ -6611,11 +6612,11 @@
 
                                             <div className="grid grid-cols-2 gap-4">
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetStorage') || 'Target Storage'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetStorage')}</label>
                                                     {loadingResources ? (
                                                         <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                                             <Icons.RefreshCw className="w-4 h-4 animate-spin" />
-                                                            {t('loadingCrossClusterResources') || 'Loading...'}
+                                                            {t('loadingCrossClusterResources')}
                                                         </div>
                                                     ) : commonStorages.length > 0 ? (
                                                         <select
@@ -6623,7 +6624,7 @@
                                                             onChange={e => setForm(p => ({...p, cross_cluster_target_storage: e.target.value}))}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
                                                         >
-                                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                                            <option value="">{t('selectStorage')}</option>
                                                             {commonStorages.map(s => (
                                                                 <option key={s.storage} value={s.storage}>
                                                                     {s.storage} ({s.type})
@@ -6633,17 +6634,17 @@
                                                     ) : (
                                                         <div className="text-xs text-yellow-400 py-2">
                                                             <Icons.AlertTriangle className="w-3 h-3 inline mr-1" />
-                                                            {t('noCommonStorages') || 'No common storage found across all clusters'}
+                                                            {t('noCommonStorages')}
                                                         </div>
                                                     )}
-                                                    <p className="text-xs text-gray-600 mt-1">{t('commonStorageHint') || 'Only storages available on all clusters'}</p>
+                                                    <p className="text-xs text-gray-600 mt-1">{t('commonStorageHint')}</p>
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetBridge') || 'Target Bridge'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetBridge')}</label>
                                                     {loadingResources ? (
                                                         <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                                             <Icons.RefreshCw className="w-4 h-4 animate-spin" />
-                                                            {t('loadingCrossClusterResources') || 'Loading...'}
+                                                            {t('loadingCrossClusterResources')}
                                                         </div>
                                                     ) : commonBridges.length > 0 ? (
                                                         <select
@@ -6673,16 +6674,16 @@
                                                     ) : (
                                                         <div className="text-xs text-yellow-400 py-2">
                                                             <Icons.AlertTriangle className="w-3 h-3 inline mr-1" />
-                                                            {t('noCommonBridges') || 'No common bridge found across all clusters'}
+                                                            {t('noCommonBridges')}
                                                         </div>
                                                     )}
-                                                    <p className="text-xs text-gray-600 mt-1">{t('commonBridgeHint') || 'Only bridges available on all clusters'}</p>
+                                                    <p className="text-xs text-gray-600 mt-1">{t('commonBridgeHint')}</p>
                                                 </div>
                                             </div>
 
                                             <Slider
-                                                label={t('maxMigrations') || 'Max Migrations per Cycle'}
-                                                description={t('crossClusterMaxMigrationsDesc') || 'Max migrations per check cycle'}
+                                                label={t('maxMigrations')}
+                                                description={t('crossClusterMaxMigrationsDesc')}
                                                 value={form.cross_cluster_max_migrations}
                                                 onChange={v => setForm(p => ({...p, cross_cluster_max_migrations: v}))}
                                                 min={1}
@@ -6694,12 +6695,12 @@
                                             {/* Container Balancing Toggle */}
                                             <div className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                 <div>
-                                                    <span className="text-sm text-white">{t('includeContainers') || 'Include Containers'}</span>
-                                                    <p className="text-xs text-gray-500 mt-0.5">{t('includeContainersDesc') || 'Include containers (LXC) in cross-cluster balancing'}</p>
+                                                    <span className="text-sm text-white">{t('includeContainers')}</span>
+                                                    <p className="text-xs text-gray-500 mt-0.5">{t('includeContainersDesc')}</p>
                                                     {form.cross_cluster_include_containers && (
                                                         <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
                                                             <Icons.AlertTriangle className="w-3 h-3" />
-                                                            {t('containerMigrationWarning') || 'Containers are restarted during migration (downtime)'}
+                                                            {t('containerMigrationWarning')}
                                                         </p>
                                                     )}
                                                 </div>
@@ -6716,8 +6717,8 @@
 
                                             {/* Excluded VMs per Cluster */}
                                             <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
-                                                <h4 className="text-sm font-medium text-white mb-1">{t('excludedVMsCrossCluster') || 'Excluded VMs/Containers'}</h4>
-                                                <p className="text-xs text-gray-500 mb-3">{t('excludedVMsCrossClusterDesc') || 'VMs and containers excluded from automatic cross-cluster balancing'}</p>
+                                                <h4 className="text-sm font-medium text-white mb-1">{t('excludedVMsCrossCluster')}</h4>
+                                                <p className="text-xs text-gray-500 mb-3">{t('excludedVMsCrossClusterDesc')}</p>
 
                                                 {loadingExcludedVMs ? (
                                                     <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
@@ -6725,7 +6726,7 @@
                                                         {t('loading')}...
                                                     </div>
                                                 ) : groupClusters.filter(c => c.connected).length === 0 ? (
-                                                    <div className="text-xs text-gray-600 py-2">{t('noExcludedVMsInGroup') || 'No VMs excluded'}</div>
+                                                    <div className="text-xs text-gray-600 py-2">{t('noExcludedVMsInGroup')}</div>
                                                 ) : (
                                                     <div className="space-y-2">
                                                         {groupClusters.filter(c => c.connected).map(cluster => {
@@ -6766,13 +6767,13 @@
                                                                                                 onClick={() => includeVM(cluster.id, vm.vmid)}
                                                                                                 className="text-xs text-green-400 hover:text-green-300"
                                                                                             >
-                                                                                                {t('include') || 'Include'}
+                                                                                                {t('include')}
                                                                                             </button>
                                                                                         </div>
                                                                                     ))}
                                                                                 </div>
                                                                             ) : (
-                                                                                <div className="text-xs text-gray-600 p-2">{t('noExcludedVMsInGroup') || 'No VMs excluded'}</div>
+                                                                                <div className="text-xs text-gray-600 p-2">{t('noExcludedVMsInGroup')}</div>
                                                                             )}
 
                                                                             {available.length > 0 && (
@@ -6782,7 +6783,7 @@
                                                                                         className="flex-1 bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-sm"
                                                                                         defaultValue=""
                                                                                     >
-                                                                                        <option value="" disabled>{t('selectVMToExclude') || 'Select VM to exclude...'}</option>
+                                                                                        <option value="" disabled>{t('selectVMToExclude')}</option>
                                                                                         {available.map(vm => (
                                                                                             <option key={vm.vmid} value={vm.vmid}>
                                                                                                 {vm.name || `VM ${vm.vmid}`} ({vm.vmid}) - {vm.node}
@@ -6801,7 +6802,7 @@
                                                                                         className="px-2.5 py-1.5 bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 text-xs flex items-center gap-1"
                                                                                     >
                                                                                         <Icons.Ban className="w-3.5 h-3.5" />
-                                                                                        {t('exclude') || 'Exclude'}
+                                                                                        {t('exclude')}
                                                                                     </button>
                                                                                 </div>
                                                                             )}
@@ -6825,9 +6826,9 @@
                                         <div>
                                             <h4 className="text-sm font-medium text-white flex items-center gap-2">
                                                 <Icons.Globe className="w-4 h-4 text-proxmox-orange" />
-                                                {t('crossClusterReplication') || 'Cross-Cluster Replication'}
+                                                {t('crossClusterReplication')}
                                             </h4>
-                                            <p className="text-xs text-gray-500 mt-0.5">{t('crossClusterReplicationDesc') || 'Replicate VM snapshots to another cluster (DR)'}</p>
+                                            <p className="text-xs text-gray-500 mt-0.5">{t('crossClusterReplicationDesc')}</p>
                                         </div>
                                         {groupClusters.length >= 2 && (
                                             <button
@@ -6835,7 +6836,7 @@
                                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-proxmox-orange/10 text-proxmox-orange rounded-lg text-xs hover:bg-proxmox-orange/20 transition-colors"
                                             >
                                                 <Icons.Plus className="w-3.5 h-3.5" />
-                                                {t('addDrJob') || 'Add DR Job'}
+                                                {t('addDrJob')}
                                             </button>
                                         )}
                                     </div>
@@ -6843,7 +6844,7 @@
                                     {groupClusters.length < 2 ? (
                                         <div className="text-center py-8 text-gray-500 text-sm">
                                             <Icons.AlertTriangle className="w-8 h-8 mx-auto mb-2 text-gray-600" />
-                                            {t('needTwoClusters') || 'At least 2 clusters needed for cross-cluster replication'}
+                                            {t('needTwoClusters')}
                                         </div>
                                     ) : xReplLoading ? (
                                         <div className="flex items-center justify-center gap-2 py-8 text-gray-500 text-sm">
@@ -6852,7 +6853,7 @@
                                         </div>
                                     ) : xReplJobs.length === 0 && !showCreateXRepl ? (
                                         <div className="text-center py-8 text-gray-500 text-sm">
-                                            {t('noReplicationJobs') || 'No replication jobs configured'}
+                                            {t('noReplicationJobs')}
                                         </div>
                                     ) : (
                                         <div className="space-y-2">
@@ -6878,7 +6879,7 @@
                                                                 {job.last_run && (
                                                                     <>
                                                                         <span>&middot;</span>
-                                                                        <span>{t('lastRunPrefix') || 'Last'}: {new Date(job.last_run).toLocaleString()}</span>
+                                                                        <span>{t('lastRunPrefix')}: {new Date(job.last_run).toLocaleString()}</span>
                                                                     </>
                                                                 )}
                                                                 {job.last_status && (
@@ -6888,10 +6889,10 @@
                                                             </div>
                                                         </div>
                                                         <div className="flex gap-1 flex-shrink-0 ml-2">
-                                                            <button onClick={() => handleRunXReplNow(job.id)} className="p-1.5 rounded hover:bg-green-500/10 text-gray-400 hover:text-green-400" title={t('runNow') || 'Run now'}>
+                                                            <button onClick={() => handleRunXReplNow(job.id)} className="p-1.5 rounded hover:bg-green-500/10 text-gray-400 hover:text-green-400" title={t('runNow')}>
                                                                 <Icons.Play className="w-3.5 h-3.5" />
                                                             </button>
-                                                            <button onClick={() => handleDeleteXRepl(job.id)} className="p-1.5 rounded hover:bg-red-500/10 text-gray-400 hover:text-red-400" title={t('delete') || 'Delete'}>
+                                                            <button onClick={() => handleDeleteXRepl(job.id)} className="p-1.5 rounded hover:bg-red-500/10 text-gray-400 hover:text-red-400" title={t('delete')}>
                                                                 <Icons.Trash className="w-3.5 h-3.5" />
                                                             </button>
                                                         </div>
@@ -6904,17 +6905,17 @@
                                     {/* Inline create form */}
                                     {showCreateXRepl && groupClusters.length >= 2 && (
                                         <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4">
-                                            <h5 className="text-sm font-medium text-white mb-3">{t('newCrossClusterReplication') || 'New Cross-Cluster Replication'}</h5>
+                                            <h5 className="text-sm font-medium text-white mb-3">{t('newCrossClusterReplication')}</h5>
                                             <div className="grid grid-cols-2 gap-3">
                                                 {/* Source Cluster */}
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('sourceCluster') || 'Source Cluster'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('sourceCluster')}</label>
                                                     <select
                                                         value={xReplForm.source_cluster}
                                                         onChange={e => setXReplForm(f => ({ ...f, source_cluster: e.target.value, vmid: '', vm_type: 'qemu' }))}
                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                     >
-                                                        <option value="">{t('selectCluster') || 'Select cluster...'}</option>
+                                                        <option value="">{t('selectCluster')}</option>
                                                         {groupClusters.filter(c => c.connected).map(c => (
                                                             <option key={c.id} value={c.id}>{c.name}</option>
                                                         ))}
@@ -6939,7 +6940,7 @@
                                                             }}
                                                             className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                         >
-                                                            <option value="">{t('selectVM') || 'Select VM...'}</option>
+                                                            <option value="">{t('selectVM')}</option>
                                                             {xReplSourceVMs.map(vm => (
                                                                 <option key={vm.vmid} value={vm.vmid}>
                                                                     {vm.name || `VM ${vm.vmid}`} ({vm.vmid}) - {vm.type === 'lxc' ? 'CT' : 'VM'}
@@ -6947,19 +6948,19 @@
                                                             ))}
                                                         </select>
                                                     ) : (
-                                                        <div className="text-xs text-gray-500 py-2">{t('selectSourceClusterFirst') || 'Select a source cluster first'}</div>
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectSourceClusterFirst')}</div>
                                                     )}
                                                 </div>
 
                                                 {/* Target Cluster */}
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetCluster') || 'Target Cluster'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetCluster')}</label>
                                                     <select
                                                         value={xReplForm.target_cluster}
                                                         onChange={e => setXReplForm(f => ({ ...f, target_cluster: e.target.value, target_storage: '', target_bridge: 'vmbr0' }))}
                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                     >
-                                                        <option value="">{t('selectCluster') || 'Select cluster...'}</option>
+                                                        <option value="">{t('selectCluster')}</option>
                                                         {groupClusters.filter(c => c.connected && c.id !== xReplForm.source_cluster).map(c => (
                                                             <option key={c.id} value={c.id}>{c.name}</option>
                                                         ))}
@@ -6968,7 +6969,7 @@
 
                                                 {/* Target Storage */}
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetStorage') || 'Target Storage'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetStorage')}</label>
                                                     {xReplLoadingResources ? (
                                                         <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                                             <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -6980,19 +6981,19 @@
                                                             onChange={e => setXReplForm(f => ({ ...f, target_storage: e.target.value }))}
                                                             className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                         >
-                                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                                            <option value="">{t('selectStorage')}</option>
                                                             {xReplTargetStorages.map(s => (
                                                                 <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
                                                             ))}
                                                         </select>
                                                     ) : (
-                                                        <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst') || 'Select a target cluster first'}</div>
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst')}</div>
                                                     )}
                                                 </div>
 
                                                 {/* Target Bridge */}
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetBridge') || 'Target Bridge'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetBridge')}</label>
                                                     {xReplLoadingResources ? (
                                                         <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                                             <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -7020,26 +7021,26 @@
                                                             )}
                                                         </select>
                                                     ) : (
-                                                        <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst') || 'Select a target cluster first'}</div>
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectTargetClusterFirst')}</div>
                                                     )}
                                                 </div>
 
                                                 {/* Target VMID (optional) - #552 */}
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional')}</label>
                                                     <input
                                                         type="number"
                                                         min="100"
                                                         value={xReplForm.target_vmid || ''}
                                                         onChange={e => setXReplForm(f => ({ ...f, target_vmid: e.target.value }))}
-                                                        placeholder={t('autoNextId') || 'auto'}
+                                                        placeholder={t('autoNextId')}
                                                         className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                     />
                                                 </div>
 
                                                 {/* Schedule */}
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('scheduleCron') || 'Schedule (Cron)'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('scheduleCron')}</label>
                                                     <input
                                                         type="text"
                                                         value={xReplForm.schedule}
@@ -7051,7 +7052,7 @@
 
                                                 {/* Retention */}
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('replicationRetention') || 'Retention'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('replicationRetention')}</label>
                                                     <input
                                                         type="number"
                                                         min="1"
@@ -7068,13 +7069,13 @@
                                                     disabled={!xReplForm.source_cluster || !xReplForm.vmid || !xReplForm.target_cluster}
                                                     className="px-3 py-1.5 bg-proxmox-orange text-white rounded-lg text-sm hover:bg-proxmox-orange/90 transition-colors disabled:opacity-50"
                                                 >
-                                                    {t('create') || 'Create'}
+                                                    {t('create')}
                                                 </button>
                                                 <button
                                                     onClick={() => setShowCreateXRepl(false)}
                                                     className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border text-gray-300 rounded-lg text-sm hover:bg-proxmox-darker transition-colors"
                                                 >
-                                                    {t('cancel') || 'Cancel'}
+                                                    {t('cancel')}
                                                 </button>
                                             </div>
                                         </div>
@@ -7085,7 +7086,7 @@
                                         <div className="mt-6">
                                             <div className="flex items-center gap-2 mb-3">
                                                 <Icons.RefreshCw className="w-4 h-4 text-purple-400" />
-                                                <h4 className="text-sm font-medium text-white">{t('nativeProxmoxReplication') || 'Native Proxmox Replication (ZFS)'}</h4>
+                                                <h4 className="text-sm font-medium text-white">{t('nativeProxmoxReplication')}</h4>
                                             </div>
                                             <div className="space-y-3">
                                                 {Object.entries(nativeReplByCluster).map(([cid, jobs]) => {
@@ -7127,19 +7128,19 @@
                             {activeTab === 'info' && (
                                 <div className="space-y-4">
                                     <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
-                                        <h4 className="text-sm font-medium text-white mb-3">{t('groupInfo') || 'Group Information'}</h4>
+                                        <h4 className="text-sm font-medium text-white mb-3">{t('groupInfo')}</h4>
                                         <div className="space-y-2 text-sm">
                                             <div className="flex justify-between">
-                                                <span className="text-gray-400">{t('groupId') || 'Group ID'}</span>
+                                                <span className="text-gray-400">{t('groupId')}</span>
                                                 <span className="text-white font-mono text-xs">{group.id}</span>
                                             </div>
                                             <div className="flex justify-between">
-                                                <span className="text-gray-400">{t('created') || 'Created'}</span>
+                                                <span className="text-gray-400">{t('created')}</span>
                                                 <span className="text-white">{group.created ? new Date(group.created).toLocaleString() : '-'}</span>
                                             </div>
                                             {group.tenant_id && (
                                                 <div className="flex justify-between">
-                                                    <span className="text-gray-400">{t('tenant') || 'Tenant'}</span>
+                                                    <span className="text-gray-400">{t('tenant')}</span>
                                                     <span className="text-white">{group.tenant_id}</span>
                                                 </div>
                                             )}
@@ -7149,16 +7150,16 @@
                                     {/* LB info */}
                                     {group.cross_cluster_lb_enabled && (
                                         <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
-                                            <h4 className="text-sm font-medium text-white mb-3">{t('lbStatus') || 'Load Balancing Status'}</h4>
+                                            <h4 className="text-sm font-medium text-white mb-3">{t('lbStatus')}</h4>
                                             <div className="space-y-2 text-sm">
                                                 <div className="flex justify-between">
-                                                    <span className="text-gray-400">{t('lastRun') || 'Last LB Run'}</span>
-                                                    <span className="text-white">{group.last_lb_run ? new Date(group.last_lb_run).toLocaleString() : t('neverRun') || 'Never run'}</span>
+                                                    <span className="text-gray-400">{t('lastRun')}</span>
+                                                    <span className="text-white">{group.last_lb_run ? new Date(group.last_lb_run).toLocaleString() : t('neverRun')}</span>
                                                 </div>
                                                 <div className="flex justify-between">
-                                                    <span className="text-gray-400">{t('mode') || 'Mode'}</span>
+                                                    <span className="text-gray-400">{t('mode')}</span>
                                                     <span className={group.cross_cluster_dry_run ? 'text-yellow-400' : 'text-green-400'}>
-                                                        {group.cross_cluster_dry_run ? t('simulation') || 'Simulation' : t('active') || 'Active'}
+                                                        {group.cross_cluster_dry_run ? t('simulation') : t('active')}
                                                     </span>
                                                 </div>
                                             </div>
@@ -7169,8 +7170,8 @@
                                         <div className="flex items-start gap-3">
                                             <Icons.Info className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
                                             <div className="text-sm text-gray-400">
-                                                <p className="mb-2">{t('lbExplanation') || 'Cross-Cluster Load Balancing monitors CPU and RAM usage across all clusters in this group. When a cluster exceeds the configured threshold, VMs are automatically migrated to a less loaded cluster.'}</p>
-                                                <p>{t('lbDryRunExplanation') || 'Enable Dry Run mode first to review what actions would be taken before enabling live migrations.'}</p>
+                                                <p className="mb-2">{t('lbExplanation')}</p>
+                                                <p>{t('lbDryRunExplanation')}</p>
                                             </div>
                                         </div>
                                     </div>
@@ -7184,7 +7185,7 @@
                                 onClick={onClose}
                                 className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
                             >
-                                {t('cancel') || 'Cancel'}
+                                {t('cancel')}
                             </button>
                             <button
                                 onClick={handleSave}
@@ -7192,9 +7193,9 @@
                                 className="px-5 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded-lg text-sm font-medium text-white transition-colors flex items-center gap-2"
                             >
                                 {saving ? (
-                                    <><Icons.RefreshCw className="w-4 h-4 animate-spin" /> {t('saving') || 'Saving...'}</>
+                                    <><Icons.RefreshCw className="w-4 h-4 animate-spin" /> {t('saving')}</>
                                 ) : (
-                                    <><Icons.Save className="w-4 h-4" /> {t('save') || 'Save'}</>
+                                    <><Icons.Save className="w-4 h-4" /> {t('save')}</>
                                 )}
                             </button>
                         </div>
@@ -7297,7 +7298,7 @@
                         <div className="mt-4 pt-4 border-t border-proxmox-border">
                             <div className="flex items-center justify-center gap-2 text-yellow-400">
                                 <Icons.Wrench />
-                                <span className="text-sm font-medium">{maintenanceNodes} Node(s) {t('maintenance')}</span>
+                                <span className="text-sm font-medium">{t('nodes')} — {t('maintenance')}: {maintenanceNodes}</span>
                             </div>
                         </div>
                     )}
@@ -7320,11 +7321,11 @@
 
             const nameValidationError = !snapname ? '' : (
                 !/^[a-zA-Z]/.test(snapname)
-                    ? (t('snapshotNameLetterWarning') || 'Snapshot name must start with a letter.')
+                    ? (t('snapshotNameLetterWarning'))
                     : (!/^[a-zA-Z0-9_-]+$/.test(snapname)
-                        ? (t('snapshotNameCharsWarning') || 'Snapshot name can only contain alphanumeric characters, underscores, and hyphens (no spaces or special characters).')
+                        ? (t('snapshotNameCharsWarning'))
                         : (snapname.length > 80
-                            ? (t('snapshotNameLengthWarning') || 'Snapshot name cannot exceed 80 characters.')
+                            ? (t('snapshotNameLengthWarning'))
                             : ''))
             );
 
@@ -7351,7 +7352,7 @@
                                     </div>
                                 </div>
                                 <div className="corp-vm-modal-actions">
-                                    <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close') || 'Close'}>
+                                    <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close')}>
                                         <Icons.X />
                                     </button>
                                 </div>
@@ -7678,7 +7679,7 @@
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">{t('schedule') || 'Schedule'}</label>
+                                <label className="block text-sm text-gray-400 mb-1">{t('schedule')}</label>
                                 <select
                                     value={schedule}
                                     onChange={(e) => setSchedule(e.target.value)}

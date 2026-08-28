@@ -524,7 +524,7 @@
                         if (r.ok) {
                             setData(await r.json());
                         }else{
-                            setErr('Failed to load metrics');
+                            setErr(t('failedToLoadMetrics'));
                         }
                     } catch (e) {
                         setErr(e.message);
@@ -546,9 +546,9 @@
                         <div className="flex justify-between items-center p-4 border-b border-proxmox-border">
                             <div>
                                 <h2 className="text-lg font-semibold text-white">
-                                    {vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`} - {t('performanceMetrics') || 'Performance Metrics'}
+                                    {vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`} - {t('performanceMetrics')}
                                 </h2>
-                                <p className="text-sm text-gray-500">{t('node') || 'Node'}: {vm.node}</p>
+                                <p className="text-sm text-gray-500">{t('node')}: {vm.node}</p>
                             </div>
                             <div className="flex items-center gap-4">
                                 <select
@@ -556,11 +556,11 @@
                                     onChange={e => setTimeframe(e.target.value)}
                                     className="bg-proxmox-dark border border-proxmox-border rounded px-3 py-1.5 text-sm text-white"
                                 >
-                                    <option value="hour">1 {t('hour') || 'Hour'}</option>
-                                    <option value="day">1 {t('day') || 'Day'}</option>
-                                    <option value="week">1 {t('week') || 'Week'}</option>
-                                    <option value="month">1 {t('month') || 'Month'}</option>
-                                    <option value="year">1 {t('year') || 'Year'}</option>
+                                    <option value="hour">1 {t('hour')}</option>
+                                    <option value="day">1 {t('day')}</option>
+                                    <option value="week">1 {t('week')}</option>
+                                    <option value="month">1 {t('month')}</option>
+                                    <option value="year">1 {t('year')}</option>
                                 </select>
                                 <button onClick={onClose} className="p-1 hover:bg-proxmox-border rounded">
                                     <Icons.X />
@@ -572,7 +572,7 @@
                             {loading ? (
                                 <div className="flex items-center justify-center py-12">
                                     <Icons.RotateCw />
-                                    <span className="ml-2 text-gray-400">{t('loading') || 'Loading...'}</span>
+                                    <span className="ml-2 text-gray-400">{t('loading')}</span>
                                 </div>
                             ) : err ? (
                                 <div className="text-center py-12 text-red-400">{err}</div>
@@ -588,7 +588,7 @@
                                     <LineChart 
                                         data={memDataGB}
                                         timestamps={data.timestamps}
-                                        label={t('memory') || 'Memory'} 
+                                        label={t('memory')}
                                         color="#22c55e" 
                                         unit=" GB"
                                         yMin={0}
@@ -599,7 +599,7 @@
                                         <LineChart 
                                             data={data.metrics.disk_read}
                                             timestamps={data.timestamps}
-                                            label={t('diskRead') || 'Disk Read'} 
+                                            label={t('diskRead')}
                                             color="#eab308" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -607,7 +607,7 @@
                                         <LineChart 
                                             data={data.metrics.disk_write}
                                             timestamps={data.timestamps}
-                                            label={t('diskWrite') || 'Disk Write'} 
+                                            label={t('diskWrite')}
                                             color="#f97316" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -617,7 +617,7 @@
                                         <LineChart 
                                             data={data.metrics.net_in}
                                             timestamps={data.timestamps}
-                                            label={t('networkIn') || 'Network In'} 
+                                            label={t('networkIn')}
                                             color="#06b6d4" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -625,7 +625,7 @@
                                         <LineChart 
                                             data={data.metrics.net_out}
                                             timestamps={data.timestamps}
-                                            label={t('networkOut') || 'Network Out'} 
+                                            label={t('networkOut')}
                                             color="#8b5cf6" 
                                             unit="/s"
                                             formatValue={formatBytes}
@@ -635,11 +635,11 @@
                                     {data.metrics.pressurecpusome && (
                                         <LineChart
                                             datasets={[
-                                                { label: t('psiSome') || 'Some', data: data.metrics.pressurecpusome, color: '#3b82f6' },
-                                                { label: t('psiFull') || 'Full', data: data.metrics.pressurecpufull, color: '#ef4444' }
+                                                { label: t('psiSome'), data: data.metrics.pressurecpusome, color: '#3b82f6' },
+                                                { label: t('psiFull'), data: data.metrics.pressurecpufull, color: '#ef4444' }
                                             ]}
                                             timestamps={data.timestamps}
-                                            label={t('cpuPressureStall') || 'CPU Pressure Stall'}
+                                            label={t('cpuPressureStall')}
                                             unit="%"
                                             yMin={0}
                                             yMax={100}
@@ -648,11 +648,11 @@
                                     {data.metrics.pressurememorysome && (
                                         <LineChart
                                             datasets={[
-                                                { label: t('psiSome') || 'Some', data: data.metrics.pressurememorysome, color: '#22c55e' },
-                                                { label: t('psiFull') || 'Full', data: data.metrics.pressurememoryfull, color: '#ef4444' }
+                                                { label: t('psiSome'), data: data.metrics.pressurememorysome, color: '#22c55e' },
+                                                { label: t('psiFull'), data: data.metrics.pressurememoryfull, color: '#ef4444' }
                                             ]}
                                             timestamps={data.timestamps}
-                                            label={t('memoryPressureStall') || 'Memory Pressure Stall'}
+                                            label={t('memoryPressureStall')}
                                             unit="%"
                                             yMin={0}
                                             yMax={100}
@@ -661,11 +661,11 @@
                                     {data.metrics.pressureiosome && (
                                         <LineChart
                                             datasets={[
-                                                { label: t('psiSome') || 'Some', data: data.metrics.pressureiosome, color: '#eab308' },
-                                                { label: t('psiFull') || 'Full', data: data.metrics.pressureiofull, color: '#ef4444' }
+                                                { label: t('psiSome'), data: data.metrics.pressureiosome, color: '#eab308' },
+                                                { label: t('psiFull'), data: data.metrics.pressureiofull, color: '#ef4444' }
                                             ]}
                                             timestamps={data.timestamps}
-                                            label={t('ioPressureStall') || 'IO Pressure Stall'}
+                                            label={t('ioPressureStall')}
                                             unit="%"
                                             yMin={0}
                                             yMax={100}
@@ -679,7 +679,7 @@
                                     )}
                                 </div>
                             ) : (
-                                <div className="text-center py-12 text-gray-400">No data available</div>
+                                <div className="text-center py-12 text-gray-400">{t('noDataAvailable')}</div>
                             )}
                         </div>
                     </div>
@@ -809,7 +809,7 @@
                     <a
                         href="mailto:sponsor@pegaprox.com?subject=Sponsorship%20Inquiry"
                         className="group"
-                        title={t('becomeSponsor') || 'Become a sponsor'}
+                        title={t('becomeSponsor')}
                     >
                         <div className="w-12 h-12 rounded-lg bg-proxmox-card border border-dashed border-proxmox-border flex flex-col items-center justify-center hover:border-proxmox-orange/50 transition-all hover:scale-105">
                             <span className="text-sm">🎯</span>
@@ -888,7 +888,7 @@
                                     <Icons.AlertTriangle className="w-5 h-5" />
                                 </div>
                                 <div>
-                                    <span className="font-bold">{t('criticalAlert') || 'CRITICAL ALERT'}:</span>
+                                    <span className="font-bold">{t('criticalAlert')}:</span>
                                     <span className="ml-2">{alert.message}</span>
                                     <span className="ml-4 text-red-200 text-sm">
                                         {new Date(alert.timestamp).toLocaleTimeString()}
@@ -897,12 +897,12 @@
                             </div>
                             <div className="flex items-center gap-3">
                                 <span className="text-sm text-red-200">
-                                    {t('haRecoveryMayStart') || 'HA recovery may be in progress...'}
+                                    {t('haRecoveryMayStart')}
                                 </span>
                                 <button
                                     onClick={() => onDismiss && onDismiss(nodeName)}
                                     className="p-1 hover:bg-red-500 rounded"
-                                    title={t('dismiss') || 'Dismiss'}
+                                    title={t('dismiss')}
                                 >
                                     <Icons.X className="w-4 h-4" />
                                 </button>
@@ -951,8 +951,8 @@
                         setNodeInfo(data.info); 
                         if (data.info.already_in_cluster || data.info.has_old_config) setForceRejoin(true);
                         setStep(2); 
-                    } else { setError(data.error || 'Connection failed'); }
-                } catch (err) { setError('Network error: ' + err.message); }
+                    } else { setError(data.error || t('connectionFailed')); }
+                } catch (err) { setError(`${t('networkError')}: ${err.message}`); }
                 finally { setLoading(false); }
             };
             
@@ -966,8 +966,8 @@
                         body: JSON.stringify({ node_ip: nodeIp, username, password, ssh_port: sshPort, link0_address: link0Address || undefined, force: forceRejoin })
                     });
                     const data = await response.json();
-                    if (data.success) { setJoinResult(data); setStep(3); if (onSuccess) onSuccess(); } else { setError(data.error || 'Join failed'); }
-                } catch (err) { setError('Network error: ' + err.message); }
+                    if (data.success) { setJoinResult(data); setStep(3); if (onSuccess) onSuccess(); } else { setError(data.error || t('joinFailed')); }
+                } catch (err) { setError(`${t('networkError')}: ${err.message}`); }
                 finally { setLoading(false); }
             };
             
@@ -976,51 +976,51 @@
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg">
                         <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                            <h2 className="text-lg font-semibold flex items-center gap-2"><Icons.Server className="w-5 h-5 text-proxmox-orange" />Add Node to Cluster</h2>
+                            <h2 className="text-lg font-semibold flex items-center gap-2"><Icons.Server className="w-5 h-5 text-proxmox-orange" />{t('addNodeToCluster')}</h2>
                             <button onClick={handleClose} className="p-1 hover:bg-proxmox-dark rounded"><Icons.X className="w-5 h-5" /></button>
                         </div>
                         <div className="px-4 py-3 border-b border-proxmox-border">
                             <div className="flex items-center justify-between">
-                                {[1, 2, 3].map(s => (<div key={s} className="flex items-center"><div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${step >= s ? 'bg-proxmox-orange text-white' : 'bg-proxmox-dark text-gray-400'}`}>{step > s ? <Icons.Check className="w-4 h-4" /> : s}</div><span className={`ml-2 text-sm ${step >= s ? 'text-white' : 'text-gray-500'}`}>{s === 1 ? 'Connect' : s === 2 ? 'Verify' : 'Join'}</span>{s < 3 && <div className="w-12 h-0.5 bg-proxmox-border mx-2" />}</div>))}
+                                {[1, 2, 3].map(s => (<div key={s} className="flex items-center"><div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${step >= s ? 'bg-proxmox-orange text-white' : 'bg-proxmox-dark text-gray-400'}`}>{step > s ? <Icons.Check className="w-4 h-4" /> : s}</div><span className={`ml-2 text-sm ${step >= s ? 'text-white' : 'text-gray-500'}`}>{s === 1 ? t('joinStepConnect') : s === 2 ? t('joinStepVerify') : t('joinStepJoin')}</span>{s < 3 && <div className="w-12 h-0.5 bg-proxmox-border mx-2" />}</div>))}
                             </div>
                         </div>
                         <div className="p-4">
                             {error && <div className="mb-4 p-3 bg-red-500/20 border border-red-500 rounded-lg text-red-400 text-sm">{error}</div>}
                             {step === 1 && (<div className="space-y-4">
-                                <div><label className="block text-sm text-gray-400 mb-1">Node IP *</label><input type="text" value={nodeIp} onChange={e => setNodeIp(e.target.value)} placeholder="192.168.1.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div>
-                                <div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">SSH User</label><input type="text" value={username} onChange={e => setUsername(e.target.value)} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div><div><label className="block text-sm text-gray-400 mb-1">SSH Port</label><input type="number" value={sshPort} onChange={e => setSshPort(parseInt(e.target.value) || 22)} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div></div>
-                                <div><label className="block text-sm text-gray-400 mb-1">SSH Password *</label><input type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div>
-                                <div><label className="block text-sm text-gray-400 mb-1">Link0 Address (optional)</label><input type="text" value={link0Address} onChange={e => setLink0Address(e.target.value)} placeholder="10.0.0.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /><p className="text-xs text-gray-500 mt-1">Only for multi-network setups</p></div>
+                                <div><label className="block text-sm text-gray-400 mb-1">{t('nodeIp')} *</label><input type="text" value={nodeIp} onChange={e => setNodeIp(e.target.value)} placeholder="192.168.1.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div>
+                                <div className="grid grid-cols-2 gap-4"><div><label className="block text-sm text-gray-400 mb-1">{t('sshUser')}</label><input type="text" value={username} onChange={e => setUsername(e.target.value)} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div><div><label className="block text-sm text-gray-400 mb-1">{t('sshPort')}</label><input type="number" value={sshPort} onChange={e => setSshPort(parseInt(e.target.value) || 22)} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div></div>
+                                <div><label className="block text-sm text-gray-400 mb-1">{t('sshPassword')} *</label><input type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div>
+                                <div><label className="block text-sm text-gray-400 mb-1">{t('link0AddressOptional')}</label><input type="text" value={link0Address} onChange={e => setLink0Address(e.target.value)} placeholder="10.0.0.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /><p className="text-xs text-gray-500 mt-1">{t('multiNetworkOnly')}</p></div>
                             </div>)}
                             {step === 2 && nodeInfo && (<div className="space-y-4">
-                                <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg"><div className="flex items-center gap-2 text-green-400"><Icons.CheckCircle className="w-5 h-5" /><span className="font-medium">Connection OK</span></div></div>
+                                <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg"><div className="flex items-center gap-2 text-green-400"><Icons.CheckCircle className="w-5 h-5" /><span className="font-medium">{t('connectionOk')}</span></div></div>
                                 <div className="bg-proxmox-dark rounded-lg p-4 space-y-3">
-                                    <div className="flex justify-between"><span className="text-gray-400">Hostname:</span><span className="font-mono text-white">{nodeInfo.hostname}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">IP:</span><span className="font-mono text-white">{nodeInfo.ip}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Proxmox:</span><span className={nodeInfo.proxmox_installed ? 'text-green-400' : 'text-red-400'}>{nodeInfo.proxmox_installed ? nodeInfo.proxmox_version : 'Not Installed'}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Cluster:</span><span className={nodeInfo.already_in_cluster ? 'text-yellow-400' : 'text-green-400'}>{nodeInfo.already_in_cluster ? nodeInfo.current_cluster : 'Not in cluster'}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">{t('hostname')}:</span><span className="font-mono text-white">{nodeInfo.hostname}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">{t('ipAddress')}:</span><span className="font-mono text-white">{nodeInfo.ip}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">Proxmox:</span><span className={nodeInfo.proxmox_installed ? 'text-green-400' : 'text-red-400'}>{nodeInfo.proxmox_installed ? nodeInfo.proxmox_version : t('notInstalled')}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">{t('cluster')}:</span><span className={nodeInfo.already_in_cluster ? 'text-yellow-400' : 'text-green-400'}>{nodeInfo.already_in_cluster ? nodeInfo.current_cluster : t('notInCluster')}</span></div>
                                 </div>
-                                {!nodeInfo.proxmox_installed && <div className="p-3 bg-red-500/20 border border-red-500 rounded-lg text-red-400 text-sm">Proxmox VE not installed</div>}
+                                {!nodeInfo.proxmox_installed && <div className="p-3 bg-red-500/20 border border-red-500 rounded-lg text-red-400 text-sm">{t('proxmoxVeNotInstalled')}</div>}
                                 {(nodeInfo.already_in_cluster || nodeInfo.has_old_config) && (
                                     <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm flex items-start gap-2">
                                         <Icons.AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-                                        <span>{nodeInfo.already_in_cluster ? 'This node is already in a cluster.' : 'This node has leftover cluster config files.'}</span>
+                                        <span>{nodeInfo.already_in_cluster ? t('nodeAlreadyInCluster') : t('leftoverClusterConfig')}</span>
                                     </div>
                                 )}
                                 {nodeInfo.proxmox_installed && (
                                     <label className="flex items-center gap-2 cursor-pointer p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                         <input type="checkbox" checked={forceRejoin} onChange={e => setForceRejoin(e.target.checked)} className="w-4 h-4 rounded border-gray-500 accent-proxmox-orange" />
-                                        <span className="text-sm text-white font-medium">Force Join</span>
-                                        <span className="text-xs text-gray-500">- cleans old corosync/pve config before joining (use if node was previously in a cluster)</span>
+                                        <span className="text-sm text-white font-medium">{t('forceJoin')}</span>
+                                        <span className="text-xs text-gray-500">{t('forceJoinHint')}</span>
                                     </label>
                                 )}
                             </div>)}
-                            {step === 3 && joinResult && (<div className="text-center"><div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg"><Icons.CheckCircle className="w-12 h-12 text-green-400 mx-auto mb-2" /><h3 className="text-lg font-semibold text-green-400">Node Joined!</h3><p className="text-gray-400 mt-2">{joinResult.message}</p></div><p className="text-sm text-gray-500 mt-4">Refresh to see the new node.</p></div>)}
+                            {step === 3 && joinResult && (<div className="text-center"><div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg"><Icons.CheckCircle className="w-12 h-12 text-green-400 mx-auto mb-2" /><h3 className="text-lg font-semibold text-green-400">{t('nodeJoined')}</h3><p className="text-gray-400 mt-2">{joinResult.message}</p></div><p className="text-sm text-gray-500 mt-4">{t('refreshForNewNode')}</p></div>)}
                         </div>
                         <div className="p-4 border-t border-proxmox-border flex justify-between">
-                            {step === 1 && (<><button onClick={handleClose} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-white">Cancel</button><button onClick={testConnection} disabled={loading || !nodeIp || !password} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50 flex items-center gap-2 text-white">{loading && <Icons.Loader className="w-4 h-4 animate-spin" />}Test Connection</button></>)}
-                            {step === 2 && (<><button onClick={() => setStep(1)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-white">Back</button><button onClick={joinCluster} disabled={loading || !nodeInfo?.proxmox_installed || (nodeInfo?.already_in_cluster && !forceRejoin)} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50 flex items-center gap-2 text-white">{loading && <Icons.Loader className="w-4 h-4 animate-spin" />}{loading ? 'Joining...' : (forceRejoin ? 'Force Join Cluster' : 'Join Cluster')}</button></>)}
-                            {step === 3 && <button onClick={handleClose} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg ml-auto text-white">Done</button>}
+                            {step === 1 && (<><button onClick={handleClose} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-white">{t('cancel')}</button><button onClick={testConnection} disabled={loading || !nodeIp || !password} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50 flex items-center gap-2 text-white">{loading && <Icons.Loader className="w-4 h-4 animate-spin" />}{t('testConnection')}</button></>)}
+                            {step === 2 && (<><button onClick={() => setStep(1)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-white">{t('back')}</button><button onClick={joinCluster} disabled={loading || !nodeInfo?.proxmox_installed || (nodeInfo?.already_in_cluster && !forceRejoin)} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50 flex items-center gap-2 text-white">{loading && <Icons.Loader className="w-4 h-4 animate-spin" />}{loading ? t('joiningCluster') : (forceRejoin ? t('forceJoinCluster') : t('joinCluster'))}</button></>)}
+                            {step === 3 && <button onClick={handleClose} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg ml-auto text-white">{t('done')}</button>}
                         </div>
                     </div>
                 </div>
@@ -1030,6 +1030,7 @@
         // MK: Feb 2026 - Removal checklist with blockers (hard) vs warnings (soft)
         // LW: After pvecm delnode, automatically cleans up stale config on removed node via SSH
         function RemoveNodeConfirmModal({ isOpen, onClose, node, clusterId, onSuccess, addToast }) {
+            const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState(null);
@@ -1048,7 +1049,7 @@
                             return r.json();
                         })
                         .then(setCanRemove)
-                        .catch(e => setError('Could not check status: ' + e.message));
+                        .catch(e => setError(`${t('nodeStatusCheckFailed')}: ${e.message}`));
                 }
             }, [isOpen, node]);
             
@@ -1064,12 +1065,14 @@
                     if (data.success) { 
                         const cleanupOk = data.cleanup?.success;
                         const cleanupDetail = data.cleanup?.message || '';
-                        const cleanupMsg = cleanupOk ? ' ✓ Config cleaned' : ` ⚠ Cleanup: ${cleanupDetail}`;
-                        if (addToast) addToast(`Node removed.${cleanupMsg}`, cleanupOk ? 'success' : 'warning'); 
+                        const cleanupMsg = cleanupOk
+                            ? ` ✓ ${t('configCleaned')}`
+                            : ` ⚠ ${t('cleanupLabel')}: ${cleanupDetail}`;
+                        if (addToast) addToast(`${t('nodeRemoved')}${cleanupMsg}`, cleanupOk ? 'success' : 'warning');
                         if (onSuccess) onSuccess(); onClose(); 
                     }
-                    else { setError(data.error || 'Failed'); }
-                } catch (err) { setError('Network error'); }
+                    else { setError(data.error || t('failed')); }
+                } catch (err) { setError(t('networkError')); }
                 finally { setLoading(false); }
             };
             
@@ -1077,24 +1080,30 @@
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-md">
-                        <div className="p-4 border-b border-proxmox-border"><h2 className="text-lg font-semibold text-red-400 flex items-center gap-2"><Icons.AlertTriangle className="w-5 h-5" />Remove Node</h2></div>
+                        <div className="p-4 border-b border-proxmox-border"><h2 className="text-lg font-semibold text-red-400 flex items-center gap-2"><Icons.AlertTriangle className="w-5 h-5" />{t('removeNodeConfirm')}</h2></div>
                         <div className="p-4 space-y-4">
                             {error && <div className="p-3 bg-red-500/20 border border-red-500 rounded-lg text-red-400 text-sm">{error}</div>}
-                            <p className="text-gray-300">Remove <strong className="text-white">{node.name}</strong> from cluster?</p>
-                            <p className="text-xs text-gray-500">This runs <code className="bg-proxmox-dark px-1 rounded">pvecm delnode</code> on another cluster node.</p>
+                            <p className="text-gray-300">
+                                {(() => {
+                                    const message = t('removeNodeQuestion');
+                                    const [before, after] = message.split('{name}');
+                                    return <>{before}<strong className="text-white">{node.name}</strong>{after}</>;
+                                })()}
+                            </p>
+                            <p className="text-xs text-gray-500">{t('removeNodeCommandPrefix')} <code className="bg-proxmox-dark px-1 rounded">pvecm delnode</code> {t('removeNodeCommandSuffix')}</p>
                             {canRemove && (<div className="bg-proxmox-dark rounded-lg p-3 space-y-2">
-                                <div className="flex items-center gap-2">{canRemove.in_maintenance ? <Icons.CheckCircle className="w-4 h-4 text-green-400" /> : <Icons.XCircle className="w-4 h-4 text-red-400" />}<span className={canRemove.in_maintenance ? 'text-green-400' : 'text-red-400'}>Maintenance Mode</span></div>
-                                <div className="flex items-center gap-2">{canRemove.maintenance_complete ? <Icons.CheckCircle className="w-4 h-4 text-green-400" /> : <Icons.XCircle className="w-4 h-4 text-red-400" />}<span className={canRemove.maintenance_complete ? 'text-green-400' : 'text-red-400'}>Evacuation Done</span></div>
-                                <div className="flex items-center gap-2">{canRemove.is_offline ? <Icons.CheckCircle className="w-4 h-4 text-green-400" /> : <Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />}<span className={canRemove.is_offline ? 'text-green-400' : 'text-yellow-400'}>{canRemove.is_offline ? 'Node Offline' : 'Node Online (recommended: shutdown after removal)'}</span></div>
-                                {!canRemove.has_vms ? <div className="flex items-center gap-2"><Icons.CheckCircle className="w-4 h-4 text-green-400" /><span className="text-green-400">No VMs/CTs on node</span></div> : <div className="flex items-center gap-2"><Icons.XCircle className="w-4 h-4 text-red-400" /><span className="text-red-400">{canRemove.vm_count} VM(s)/CT(s) still on node</span></div>}
+                                <div className="flex items-center gap-2">{canRemove.in_maintenance ? <Icons.CheckCircle className="w-4 h-4 text-green-400" /> : <Icons.XCircle className="w-4 h-4 text-red-400" />}<span className={canRemove.in_maintenance ? 'text-green-400' : 'text-red-400'}>{t('maintenanceMode')}</span></div>
+                                <div className="flex items-center gap-2">{canRemove.maintenance_complete ? <Icons.CheckCircle className="w-4 h-4 text-green-400" /> : <Icons.XCircle className="w-4 h-4 text-red-400" />}<span className={canRemove.maintenance_complete ? 'text-green-400' : 'text-red-400'}>{t('evacuationDone')}</span></div>
+                                <div className="flex items-center gap-2">{canRemove.is_offline ? <Icons.CheckCircle className="w-4 h-4 text-green-400" /> : <Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />}<span className={canRemove.is_offline ? 'text-green-400' : 'text-yellow-400'}>{canRemove.is_offline ? t('nodeOffline') : t('nodeOnlineShutdownRecommended')}</span></div>
+                                {!canRemove.has_vms ? <div className="flex items-center gap-2"><Icons.CheckCircle className="w-4 h-4 text-green-400" /><span className="text-green-400">{t('noVmsCtsOnNode')}</span></div> : <div className="flex items-center gap-2"><Icons.XCircle className="w-4 h-4 text-red-400" /><span className="text-red-400">{(t('vmsCtsStillOnNode')).replace('{count}', canRemove.vm_count)}</span></div>}
                             </div>)}
-                            {canRemove && !canRemove.can_remove && canRemove.blockers?.length > 0 && (<div className="p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm"><strong>Blockers:</strong><ul className="mt-1 ml-4 list-disc">{canRemove.blockers.map((b, i) => <li key={i}>{b}</li>)}</ul></div>)}
+                            {canRemove && !canRemove.can_remove && canRemove.blockers?.length > 0 && (<div className="p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm"><strong>{t('blockers')}:</strong><ul className="mt-1 ml-4 list-disc">{canRemove.blockers.map((b, i) => <li key={i}>{b}</li>)}</ul></div>)}
                             {canRemove?.warnings?.length > 0 && (<div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm flex items-start gap-2"><Icons.AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /><span>{canRemove.warnings.join('. ')}</span></div>)}
-                            {canRemove?.can_remove && (<div><label className="block text-sm text-gray-400 mb-1">Type <strong className="text-white">{node.name}</strong> to confirm:</label><input type="text" value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder={node.name} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div>)}
+                            {canRemove?.can_remove && (<div><label className="block text-sm text-gray-400 mb-1">{t('removeNodeTypeName')}: <strong className="text-white">{node.name}</strong></label><input type="text" value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder={node.name} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" /></div>)}
                         </div>
                         <div className="p-4 border-t border-proxmox-border flex justify-end gap-3">
-                            <button onClick={onClose} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-white">Cancel</button>
-                            <button onClick={removeNode} disabled={loading || !canRemove?.can_remove || confirmText !== node.name} className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 flex items-center gap-2 text-white">{loading && <Icons.Loader className="w-4 h-4 animate-spin" />}Remove</button>
+                            <button onClick={onClose} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-white">{t('cancel')}</button>
+                            <button onClick={removeNode} disabled={loading || !canRemove?.can_remove || confirmText !== node.name} className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 flex items-center gap-2 text-white">{loading && <Icons.Loader className="w-4 h-4 animate-spin" />}{t('removeNodeConfirm')}</button>
                         </div>
                     </div>
                 </div>
@@ -1118,7 +1127,7 @@
             const startMove = async () => {
                 if (!targetCluster || !password) return;
                 setLoading(true); setError(null); setStep(3);
-                setProgress([{ text: 'Removing node from current cluster...', status: 'running' }]);
+                setProgress([{ text: t('moveNodeRemoving'), status: 'running' }]);
                 
                 try {
                     // Remove from current cluster
@@ -1131,8 +1140,8 @@
                     const removeData = await removeResp.json();
                     
                     if (!removeData.success) {
-                        setProgress(prev => [...prev.slice(0, -1), { text: 'Remove from cluster failed', status: 'error' }]);
-                        setError(removeData.error || 'Failed to remove node from current cluster');
+                        setProgress(prev => [...prev.slice(0, -1), { text: t('moveNodeRemoveFailed'), status: 'error' }]);
+                        setError(removeData.error || t('moveNodeRemoveFailedDetail'));
                         setLoading(false);
                         return;
                     }
@@ -1140,8 +1149,8 @@
                     const cleanupOk = removeData.cleanup?.success;
                     setProgress(prev => [
                         ...prev.slice(0, -1),
-                        { text: 'Removed from current cluster' + (cleanupOk ? ' (config cleaned)' : ''), status: 'done' },
-                        { text: `Getting join info from ${targetCluster.name}...`, status: 'running' }
+                        { text: t('moveNodeRemoved') + (cleanupOk ? ` (${t('moveNodeConfigCleaned')})` : ''), status: 'done' },
+                        { text: t('moveNodeGettingJoinInfo').replace('{cluster}', targetCluster.name), status: 'running' }
                     ]);
                     
                     // Get join info from target cluster
@@ -1149,16 +1158,16 @@
                         credentials: 'include', headers: getAuthHeaders()
                     });
                     if (!joinInfoResp || !joinInfoResp.ok) {
-                        setProgress(prev => [...prev.slice(0, -1), { text: 'Could not get join info', status: 'error' }]);
-                        setError('Failed to get join info from target cluster. You may need to join manually.');
+                        setProgress(prev => [...prev.slice(0, -1), { text: t('moveNodeJoinInfoFailed'), status: 'error' }]);
+                        setError(t('moveNodeJoinInfoFailedDetail'));
                         setLoading(false);
                         return;
                     }
                     
                     setProgress(prev => [
                         ...prev.slice(0, -1),
-                        { text: `Got join info from ${targetCluster.name}`, status: 'done' },
-                        { text: `Joining node to ${targetCluster.name}...`, status: 'running' }
+                        { text: t('moveNodeGotJoinInfo').replace('{cluster}', targetCluster.name), status: 'done' },
+                        { text: t('moveNodeJoining').replace('{cluster}', targetCluster.name), status: 'running' }
                     ]);
                     
                     // Resolve node IP from current cluster knowledge
@@ -1195,20 +1204,28 @@
                     if (joinData.success) {
                         setProgress(prev => [
                             ...prev.slice(0, -1),
-                            { text: `Successfully joined ${targetCluster.name}!`, status: 'done' }
+                            { text: t('moveNodeJoined').replace('{cluster}', targetCluster.name), status: 'done' }
                         ]);
-                        if (addToast) addToast(`Node ${nodeName} moved to ${targetCluster.name}`, 'success');
+                        if (addToast) addToast(
+                            t('moveNodeMovedToast')
+                                .replace('{node}', nodeName)
+                                .replace('{cluster}', targetCluster.name),
+                            'success'
+                        );
                         setTimeout(() => { if (onSuccess) onSuccess(); onClose(); }, 2000);
                     } else {
                         setProgress(prev => [
                             ...prev.slice(0, -1),
-                            { text: 'Join failed - node removed but not joined', status: 'error' }
+                            { text: t('moveNodeJoinFailed'), status: 'error' }
                         ]);
-                        setError(`Node was removed from cluster but could not join target: ${joinData.error}. Join manually with pvecm.`);
+                        setError(
+                            t('moveNodeJoinManualError')
+                                .replace('{error}', joinData.error)
+                        );
                     }
                 } catch (err) {
-                    setError('Network error: ' + err.message);
-                    setProgress(prev => [...prev.slice(0, -1), { text: 'Error', status: 'error' }]);
+                    setError(`${t('networkError')}: ${err.message}`);
+                    setProgress(prev => [...prev.slice(0, -1), { text: t('error'), status: 'error' }]);
                 } finally {
                     setLoading(false);
                 }
@@ -1221,7 +1238,7 @@
                         <div className="p-4 border-b border-proxmox-border">
                             <h2 className="text-lg font-semibold text-blue-400 flex items-center gap-2">
                                 <Icons.ArrowRight className="w-5 h-5" />
-                                {t('moveNodeToCluster') || 'Move Node to another Cluster'}
+                                {t('moveNodeToCluster')}
                             </h2>
                         </div>
                         <div className="p-4 space-y-4">
@@ -1229,20 +1246,19 @@
                             
                             {step === 1 && (<>
                                 <p className="text-gray-300 text-sm">
-                                    Move <strong className="text-white">{nodeName}</strong> to another cluster. 
-                                    This will remove it from the current cluster and join it to the target.
+                                    {t('moveNodeIntro').replace('{node}', nodeName)}
                                 </p>
                                 
                                 <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-yellow-400 text-sm flex items-start gap-2">
                                     <Icons.AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-                                    <span>All VMs must be migrated off this node first. The node must be in maintenance mode.</span>
+                                    <span>{t('moveNodeMaintenanceWarning')}</span>
                                 </div>
                                 
                                 {otherClusters.length === 0 ? (
-                                    <p className="text-gray-500 text-sm italic">No other clusters available.</p>
+                                    <p className="text-gray-500 text-sm italic">{t('noOtherClustersAvailable')}</p>
                                 ) : (
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-2">{t('targetCluster') || 'Target Cluster'}</label>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('targetCluster')}</label>
                                         <div className="space-y-2">
                                             {otherClusters.map(c => (
                                                 <button
@@ -1267,15 +1283,15 @@
                                 
                                 {targetCluster && (
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Root password of {nodeName}</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('rootPasswordOfNode').replace('{node}', nodeName)}</label>
                                         <input 
                                             type="password" 
                                             value={password} 
                                             onChange={e => setPassword(e.target.value)} 
-                                            placeholder="Node root password for SSH" 
+                                            placeholder={t('nodeRootPasswordSsh')}
                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" 
                                         />
-                                        <p className="text-xs text-gray-500 mt-1">Needed to SSH into the node and run pvecm join</p>
+                                        <p className="text-xs text-gray-500 mt-1">{t('moveNodeSshHint')}</p>
                                     </div>
                                 )}
                             </>)}
@@ -1295,7 +1311,7 @@
                         </div>
                         <div className="p-4 border-t border-proxmox-border flex justify-end gap-3">
                             <button onClick={onClose} disabled={loading} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-white disabled:opacity-50">
-                                {step === 3 && !loading ? 'Close' : 'Cancel'}
+                                {step === 3 && !loading ? t('close') : t('cancel')}
                             </button>
                             {step === 1 && (
                                 <button 
@@ -1304,7 +1320,7 @@
                                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 flex items-center gap-2 text-white"
                                 >
                                     {loading && <Icons.Loader className="w-4 h-4 animate-spin" />}
-                                    Move Node
+                                    {t('moveNode')}
                                 </button>
                             )}
                         </div>
@@ -1484,24 +1500,26 @@
         // MK May 2026 — keyboard shortcuts overlay. Toggled with `?`.
         // Centralised list lives here so we don't grow stale documentation.
         const KEYBOARD_SHORTCUTS = [
-            { keys: ['Ctrl', 'K'], altKeys: ['⌘', 'K'], desc: 'Quick search / command palette' },
-            { keys: ['?'],                              desc: 'Toggle this help' },
-            { keys: ['Esc'],                            desc: 'Close modal / dropdown' },
-            { keys: ['/'],                              desc: 'Focus search input on current view' },
-            { keys: ['g', 'd'],                         desc: 'Go to Overview' },
-            { keys: ['g', 'r'],                         desc: 'Go to Resources' },
-            { keys: ['g', 's'],                         desc: 'Go to Datacenter' },
-            { keys: ['g', 'a'],                         desc: 'Go to Automation' },
-            { keys: ['g', 'p'],                         desc: 'Go to Reports' },
-            { keys: ['g', ','],                         desc: 'Open Settings' },
-            { keys: ['n'],                              desc: 'New VM (current cluster)' },
-            { keys: ['Shift', 'N'],                     desc: 'New container (current cluster)' },
-            { keys: ['r'],                              desc: 'Refresh active cluster' },
-            { keys: ['t'],                              desc: 'Toggle theme (light/dark)' },
-            { keys: ['Shift', '?'],                     desc: 'Show keyboard shortcuts' },
+            { keys: ['Ctrl', 'K'], altKeys: ['⌘', 'K'], desc: 'shortcutQuickSearchCommandPalette' },
+            { keys: ['?'],                              desc: 'shortcutToggleHelp' },
+            { keys: ['Esc'],                            desc: 'shortcutCloseModalDropdown' },
+            { keys: ['/'],                              desc: 'shortcutFocusSearch' },
+            { keys: ['g', 'd'],                         desc: 'shortcutGoOverview' },
+            { keys: ['g', 'r'],                         desc: 'shortcutGoResources' },
+            { keys: ['g', 's'],                         desc: 'shortcutGoDatacenter' },
+            { keys: ['g', 'a'],                         desc: 'shortcutGoAutomation' },
+            { keys: ['g', 'p'],                         desc: 'shortcutGoReports' },
+            { keys: ['g', ','],                         desc: 'shortcutOpenSettings' },
+            { keys: ['n'],                              desc: 'shortcutNewVmCurrentCluster' },
+            { keys: ['Shift', 'N'],                     desc: 'shortcutNewContainerCurrentCluster' },
+            { keys: ['r'],                              desc: 'shortcutRefreshActiveCluster' },
+            { keys: ['t'],                              desc: 'shortcutToggleTheme' },
+            { keys: ['Shift', '?'],                     desc: 'shortcutShowKeyboardShortcuts' },
         ];
 
         function KeyboardShortcutsModal({ open, onClose }) {
+            const { t } = useTranslation();
+
             React.useEffect(() => {
                 if (!open) return;
                 const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); onClose(); } };
@@ -1520,16 +1538,16 @@
                         <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
                             <div className="flex items-center gap-2">
                                 <Icons.Keyboard className="w-5 h-5" style={{ color: 'var(--corp-accent, #0078a8)' }} />
-                                <h3 className="text-base font-semibold">Keyboard Shortcuts</h3>
+                                <h3 className="text-base font-semibold">{t('keyboardShortcuts')}</h3>
                             </div>
-                            <button onClick={onClose} className="opacity-60 hover:opacity-100 text-lg leading-none" aria-label="close">×</button>
+                            <button onClick={onClose} className="opacity-60 hover:opacity-100 text-lg leading-none" aria-label={t('close')}>×</button>
                         </div>
                         <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-sm">
                             {KEYBOARD_SHORTCUTS.map((sc, i) => {
                                 const keys = isMac && sc.altKeys ? sc.altKeys : sc.keys;
                                 return (
                                     <div key={i} className="flex items-center justify-between gap-3 py-1.5">
-                                        <span className="opacity-85">{sc.desc}</span>
+                                        <span className="opacity-85">{t(sc.desc)}</span>
                                         <span className="flex items-center gap-1 flex-shrink-0">
                                             {keys.map((k, idx) => (
                                                 <React.Fragment key={idx}>
@@ -1543,7 +1561,7 @@
                                                             textAlign: 'center',
                                                         }}
                                                     >{k}</kbd>
-                                                    {idx < keys.length - 1 && <span className="opacity-50 text-xs">then</span>}
+                                                    {idx < keys.length - 1 && <span className="opacity-50 text-xs">{t('shortcutThen')}</span>}
                                                 </React.Fragment>
                                             ))}
                                         </span>
@@ -1552,7 +1570,7 @@
                             })}
                         </div>
                         <div className="px-5 py-3 text-xs opacity-60" style={{ borderTop: '1px solid var(--corp-border, #29414e)' }}>
-                            Press <kbd className="px-1 rounded" style={{ background: 'var(--corp-surface-2, #29414e)', border: '1px solid var(--corp-border, #485764)' }}>Esc</kbd> to close
+                            {t('shortcutPress')} <kbd className="px-1 rounded" style={{ background: 'var(--corp-surface-2, #29414e)', border: '1px solid var(--corp-border, #485764)' }}>Esc</kbd> {t('shortcutToClose')}
                         </div>
                     </div>
                 </div>
@@ -1562,6 +1580,7 @@
         // NS — sticky banner at top while WS is dropped. Auto-shows after 4s of disconnect
         // so a quick reconnect-blip doesn't flash a scary banner. Passive: gets state via prop.
         function ConnectionLostBanner({ connected, reconnectingMs }) {
+            const { t } = useTranslation();
             const [visible, setVisible] = React.useState(false);
             React.useEffect(() => {
                 let tid;
@@ -1584,8 +1603,8 @@
                     }}
                 >
                     <span className="inline-flex w-2 h-2 rounded-full" style={{ background: '#fde68a', boxShadow: '0 0 6px #fde68a', animation: 'pulse 1.4s infinite' }} />
-                    <span className="font-medium">Live updates disconnected</span>
-                    <span className="opacity-80">Trying to reconnect{reconnectingMs ? ` (${Math.round(reconnectingMs/1000)}s)` : '…'}</span>
+                    <span className="font-medium">{t('liveUpdatesDisconnected')}</span>
+                    <span className="opacity-80">{t('tryingReconnect')}{reconnectingMs ? ` (${Math.round(reconnectingMs/1000)}s)` : '…'}</span>
                 </div>
             );
         }
@@ -1650,6 +1669,7 @@
         // MK — quick filter chip row. Drop above any list. Fully controlled.
         // chips: [{ id, label, count }, ...]; selected: array of chip ids; onChange(newSelection)
         function FilterChips({ chips, selected, onChange, multiSelect = true, className = '' }) {
+            const { t } = useTranslation();
             const sel = new Set(selected || []);
             const toggle = (id) => {
                 let next;
@@ -1692,7 +1712,7 @@
                             onClick={() => onChange([])}
                             className="text-xs opacity-60 hover:opacity-100 ml-1"
                             style={{ background: 'transparent', color: 'var(--corp-text, #e9ecef)' }}
-                        >Clear</button>
+                        >{t('clear')}</button>
                     )}
                 </div>
             );
@@ -1741,11 +1761,18 @@
                     if (res && res.ok) {
                         setData(await res.json());
                     } else if (res && res.status === 503) {
-                        setData({ score: 0, band: 'critical', factors: [], issues: ['Offline'] });
+                        setData({
+                            score: 0,
+                            band: 'critical',
+                            factors: [],
+                            issues: [
+                                (typeof t === 'function' && t('offline')) || 'Offline'
+                            ]
+                        });
                     }
                 } catch (_) { /* keep last */ }
                 finally { setLoading(false); }
-            }, [clusterId, authFetch, apiUrl]);
+            }, [clusterId, authFetch, apiUrl, t]);
 
             React.useEffect(() => {
                 fetchHealth();
@@ -1755,7 +1782,7 @@
 
             if (!clusterId) return null;
             if (!data && loading) {
-                return <span className="corp-badge" style={{ background: 'rgba(150,150,150,0.15)', color: '#999', border: '1px solid rgba(150,150,150,0.3)' }}>… score</span>;
+                return <span className="corp-badge" style={{ background: 'rgba(150,150,150,0.15)', color: '#999', border: '1px solid rgba(150,150,150,0.3)' }}>{(typeof t === 'function' && t('healthScoreLoading')) || '… score'}</span>;
             }
             if (!data) return null;
 
@@ -1780,7 +1807,7 @@
                         onClick={() => setShowDetails(true)}
                         onMouseEnter={() => setHovering(true)}
                         onMouseLeave={() => setHovering(false)}
-                        title="Cluster health — click for breakdown"
+                        title={(typeof t === 'function' && t('clusterHealthBreakdown')) || 'Cluster health — click for breakdown'}
                     >
                         <span style={{ fontWeight: 700, letterSpacing: '0.02em' }}>{data.score}</span>
                         <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>{(typeof t === 'function' && t('health')) || 'health'}</span>
@@ -1815,6 +1842,8 @@
         }
 
         function ClusterHealthModal({ data, onClose }) {
+            const { t } = useTranslation();
+
             React.useEffect(() => {
                 const onKey = (e) => { if (e.key === 'Escape') onClose(); };
                 window.addEventListener('keydown', onKey);
@@ -1825,6 +1854,14 @@
                 degraded: '#ee8e26', critical: '#f54f47',
             };
             const fg = colors[data.band] || '#999';
+            const normalizedBand = String(data.band || '').toLowerCase();
+            const bandKey = ['excellent', 'good', 'warning', 'degraded', 'critical'].includes(normalizedBand)
+                ? normalizedBand
+                : null;
+            const bandLabel = bandKey
+                ? t(bandKey)
+                : (data.band || '');
+
             return (
                 <div className="fixed inset-0 z-[10010] flex items-center justify-center p-4" style={{ background: 'rgba(8,14,24,0.72)' }} onClick={onClose}>
                     <div
@@ -1836,14 +1873,14 @@
                             <div className="flex items-center gap-3">
                                 <div style={{ fontSize: '1.6rem', fontWeight: 700, color: fg, letterSpacing: '0.02em' }}>{data.score}</div>
                                 <div>
-                                    <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>Cluster health</div>
-                                    <div className="text-xs opacity-60" style={{ textTransform: 'capitalize' }}>{data.band}</div>
+                                    <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{t('clusterHealth')}</div>
+                                    <div className="text-xs opacity-60">{bandLabel}</div>
                                 </div>
                             </div>
-                            <button onClick={onClose} className="opacity-60 hover:opacity-100 text-lg leading-none" aria-label="close">×</button>
+                            <button onClick={onClose} className="opacity-60 hover:opacity-100 text-lg leading-none" aria-label={t('close')}>×</button>
                         </div>
                         <div className="p-5 space-y-3">
-                            <div className="text-xs uppercase tracking-wide opacity-60">Factors</div>
+                            <div className="text-xs uppercase tracking-wide opacity-60">{t('healthFactors')}</div>
                             <div className="space-y-1">
                                 {(data.factors || []).map((f, i) => (
                                     <div key={i} className="flex items-center justify-between py-1.5" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
@@ -1861,7 +1898,7 @@
                             </div>
                             {Array.isArray(data.issues) && data.issues.length > 0 && (
                                 <>
-                                    <div className="text-xs uppercase tracking-wide opacity-60 mt-4">Issues</div>
+                                    <div className="text-xs uppercase tracking-wide opacity-60 mt-4">{t('healthIssues')}</div>
                                     <ul className="text-sm space-y-1">
                                         {data.issues.map((iss, i) => (
                                             <li key={i} className="flex items-start gap-2">
@@ -1872,7 +1909,7 @@
                                 </>
                             )}
                             {data.computed_at && (
-                                <div className="text-xs opacity-50 mt-3">Computed: {new Date(data.computed_at).toLocaleString()}</div>
+                                <div className="text-xs opacity-50 mt-3">{t('healthComputed')}: {new Date(data.computed_at).toLocaleString()}</div>
                             )}
                         </div>
                     </div>
@@ -1925,7 +1962,7 @@
             if (!data) {
                 return (
                     <div className="rounded-lg p-6" style={{ background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)' }}>
-                        <div className="opacity-70 text-sm">{loading ? (t('loading') || 'Loading…') : t('apiNoDataYet')}</div>
+                        <div className="opacity-70 text-sm">{loading ? (t('loading')) : t('apiNoDataYet')}</div>
                     </div>
                 );
             }
@@ -2000,7 +2037,7 @@
                                     </tr>
                                 ))}
                                 {(!data.by_endpoint || data.by_endpoint.length === 0) && (
-                                    <tr><td colSpan="5" className="px-4 py-3 opacity-60 text-center">No samples yet</td></tr>
+                                    <tr><td colSpan="5" className="px-4 py-3 opacity-60 text-center">{t('noSamplesYet')}</td></tr>
                                 )}
                             </tbody>
                         </table>
@@ -2013,14 +2050,16 @@
         // LW May 2026 — VM snapshot comparison modal. Opens with one snap pre-selected,
         // user picks the other via dropdown; backend returns the diff.
         function SnapshotCompareModal({ vm, clusterId, snapshots, initialA, initialB, onClose, authFetch, apiUrl }) {
+            const { t } = useTranslation();
+
             // Build options list — include 'current' as a synthetic entry
             const opts = React.useMemo(() => {
                 const names = (snapshots || [])
                     .map(s => s.name)
                     .filter(n => n && n !== 'current');
-                return [{ value: 'current', label: 'current (live config)' },
+                return [{ value: 'current', label: t('snapshotCurrentLiveConfig') },
                         ...names.map(n => ({ value: n, label: n }))];
-            }, [snapshots]);
+            }, [snapshots, t]);
 
             const [a, setA] = React.useState(initialA || 'current');
             const [b, setB] = React.useState(initialB || (opts[1]?.value || 'current'));
@@ -2030,14 +2069,14 @@
             const [showSame, setShowSame] = React.useState(false);
 
             React.useEffect(() => {
-                if (!a || !b || a === b) { setDiff(null); setError(a === b ? 'Pick two different snapshots' : null); return; }
+                if (!a || !b || a === b) { setDiff(null); setError(a === b ? t('snapshotPickTwoDifferent') : null); return; }
                 setLoading(true); setError(null);
                 (async () => {
                     try {
                         const url = `${apiUrl}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`;
                         const r = await authFetch(url);
                         if (!r || !r.ok) {
-                            const msg = r ? (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` : 'Network error';
+                            const msg = r ? (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` : t('networkError');
                             setError(msg); setDiff(null);
                         } else {
                             setDiff(await r.json());
@@ -2046,7 +2085,7 @@
                         setError(e.message || String(e));
                     } finally { setLoading(false); }
                 })();
-            }, [a, b, vm.node, vm.type, vm.vmid, clusterId, apiUrl, authFetch]);
+            }, [a, b, vm.node, vm.type, vm.vmid, clusterId, apiUrl, authFetch, t]);
 
             React.useEffect(() => {
                 const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -2080,18 +2119,18 @@
                             <div>
                                 <div className="text-base font-semibold flex items-center gap-2">
                                     <Icons.Camera className="w-4 h-4" style={{ color: 'var(--corp-accent, #49afd9)' }} />
-                                    Snapshot Compare — {vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}
+                                    {t('snapshotCompareTitle')} — {vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}
                                 </div>
                                 {diff?.summary && (
                                     <div className="text-xs opacity-70 mt-0.5">
                                         <span style={{ color: '#60b515' }}>+{diff.summary.added}</span>{' '}
                                         <span style={{ color: '#f54f47' }}>−{diff.summary.removed}</span>{' '}
                                         <span style={{ color: '#f7b428' }}>~{diff.summary.changed}</span>{' '}
-                                        <span className="opacity-60">·  {diff.summary.same} unchanged</span>
+                                        <span className="opacity-60">·  {diff.summary.same} {t('snapshotUnchanged')}</span>
                                     </div>
                                 )}
                             </div>
-                            <button onClick={onClose} className="opacity-60 hover:opacity-100 text-lg leading-none" aria-label="close">×</button>
+                            <button onClick={onClose} className="opacity-60 hover:opacity-100 text-lg leading-none" aria-label={t('close')}>×</button>
                         </div>
 
                         <div className="px-5 py-3 flex flex-wrap items-center gap-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
@@ -2110,7 +2149,7 @@
                                 onClick={() => { const tmp = a; setA(b); setB(tmp); }}
                                 className="px-2 py-1 text-xs rounded"
                                 style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}
-                                title="Swap A and B"
+                                title={t('snapshotSwapAB')}
                             >⇆</button>
                             <label className="flex items-center gap-2 text-sm">
                                 <span className="opacity-70">B:</span>
@@ -2126,19 +2165,19 @@
                             <div className="flex-grow" />
                             <label className="flex items-center gap-2 text-xs opacity-80 cursor-pointer">
                                 <input type="checkbox" checked={showSame} onChange={(e) => setShowSame(e.target.checked)} />
-                                Show unchanged
+                                {t('showUnchanged')}
                             </label>
                         </div>
 
                         <div className="flex-1 overflow-auto" style={{ minHeight: 200 }}>
-                            {loading && <div className="p-6 text-center opacity-70">Loading diff…</div>}
+                            {loading && <div className="p-6 text-center opacity-70">{t('snapshotLoadingDiff')}</div>}
                             {error && <div className="p-6 text-center" style={{ color: '#f54f47' }}>{error}</div>}
                             {!loading && !error && diff && (
                                 <table className="w-full text-sm" style={{ tableLayout: 'fixed', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
                                     <thead style={{ position: 'sticky', top: 0, background: 'var(--corp-surface-2, #29414e)' }}>
                                         <tr>
                                             <th className="px-3 py-2 text-left" style={{ width: '24px' }}></th>
-                                            <th className="px-3 py-2 text-left" style={{ width: '20%' }}>Key</th>
+                                            <th className="px-3 py-2 text-left" style={{ width: '20%' }}>{t('snapshotDiffKey')}</th>
                                             <th className="px-3 py-2 text-left">{a}</th>
                                             <th className="px-3 py-2 text-left">{b}</th>
                                         </tr>
@@ -2161,7 +2200,10 @@
                                             </tr>
                                         ))}
                                         {filteredDiffs.length === 0 && (
-                                            <tr><td colSpan="4" className="px-3 py-6 text-center opacity-60">{showSame ? 'No keys' : 'No differences (toggle "Show unchanged" to see all)'}</td></tr>
+                                            <tr><td colSpan="4" className="px-3 py-6 text-center opacity-60">{showSame
+                                                    ? t('snapshotNoKeys')
+                                                    : (t('snapshotNoDifferencesHint'))
+                                                        .replace('{showUnchanged}', t('showUnchanged'))}</td></tr>
                                         )}
                                     </tbody>
                                 </table>
@@ -2212,7 +2254,7 @@
                         onClick={() => setShowDetails(true)}
                         onMouseEnter={() => setHovering(true)}
                         onMouseLeave={() => setHovering(false)}
-                        title="PBS health — click for breakdown"
+                        title={(typeof t === 'function' && t('pbsHealthBreakdown')) || 'PBS health'}
                     >
                         <span style={{ fontWeight: 700 }}>{data.score}</span>
                         <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>{(typeof t === 'function' && t('health')) || 'health'}</span>
@@ -2227,7 +2269,7 @@
                                 {data.factors.map((f, i) => (
                                     <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '2px 0' }}>
                                         <span style={{ opacity: 0.8 }}>{f.label}</span>
-                                        <span style={{ color: f.delta < 0 ? '#f54f47' : '#60b515' }}>{f.delta < 0 ? f.delta : 'ok'}</span>
+                                        <span style={{ color: f.delta < 0 ? '#f54f47' : '#60b515' }}>{f.delta < 0 ? f.delta : ((typeof t === 'function' && t('ok')) || 'OK')}</span>
                                     </div>
                                 ))}
                             </div>
@@ -2241,20 +2283,26 @@
 
         // Backup Status Pill for VM list rows
         function BackupStatusPill({ status, lastAgeHours, encrypted, verifyAgeHours, count30d }) {
+            const { t } = useTranslation();
+
             const map = {
-                ok:    { bg: 'rgba(96,181,21,0.15)',  fg: '#60b515', label: 'fresh',  icon: '✓' },
+                ok:    { bg: 'rgba(96,181,21,0.15)',  fg: '#60b515', label: t('backupStatusFresh'), icon: '✓' },
                 warn:  { bg: 'rgba(247,180,40,0.15)', fg: '#f7b428', label: '7d',     icon: '⚠' },
-                stale: { bg: 'rgba(245,79,71,0.15)',  fg: '#f54f47', label: 'stale',  icon: '✗' },
-                none:  { bg: 'rgba(150,150,150,0.15)',fg: '#999',    label: 'none',   icon: '—' },
+                stale: { bg: 'rgba(245,79,71,0.15)',  fg: '#f54f47', label: t('backupStatusStale'), icon: '✗' },
+                none:  { bg: 'rgba(150,150,150,0.15)',fg: '#999',    label: t('backupStatusNone'), icon: '—' },
             };
             const c = map[status] || map.none;
             const tip = (lastAgeHours == null
-                ? 'No backups found'
+                ? t('noBackups')
                 : lastAgeHours < 48
-                    ? `Last backup ${lastAgeHours.toFixed(1)}h ago`
-                    : `Last backup ${(lastAgeHours/24).toFixed(1)}d ago`)
-                + (count30d ? ` · ${count30d} in last 30d` : '')
-                + (verifyAgeHours != null ? ` · verified ${(verifyAgeHours/24).toFixed(1)}d ago` : ' · not verified');
+                    ? t('backupLastHoursAgo').replace('{hours}', lastAgeHours.toFixed(1))
+                    : t('backupLastDaysAgo').replace('{days}', (lastAgeHours / 24).toFixed(1)))
+                + (count30d
+                    ? ` · ${t('backupCountLast30Days').replace('{count}', count30d)}`
+                    : '')
+                + (verifyAgeHours != null
+                    ? ` · ${t('backupVerifiedDaysAgo').replace('{days}', (verifyAgeHours / 24).toFixed(1))}`
+                    : ` · ${t('backupNotVerified')}`);
             return (
                 <span title={tip}
                     style={{
@@ -2275,6 +2323,7 @@
 
         // Live Backup Progress Pane — tails a UPID's task log
         function BackupProgressPane({ clusterId, upid, node, authFetch, apiUrl, onClose }) {
+            const { t } = useTranslation();
             const [lines, setLines] = React.useState([]);
             const [done, setDone] = React.useState(false);
             const [exitstatus, setExitstatus] = React.useState(null);
@@ -2324,6 +2373,12 @@
 
             const peakMbps = throughput.length ? Math.max(...throughput.map(t => t.mbps)) : 0;
 
+            const statusLabel = done
+                ? (exitstatus === 'OK'
+                    ? t('backupTaskCompleted')
+                    : t('backupTaskFailed').replace('{status}', exitstatus))
+                : t('backupTaskInProgress');
+
             return (
                 <div className="fixed bottom-0 right-4 z-[150]"
                     style={{ width: 'min(720px, 95vw)', maxHeight: '60vh',
@@ -2337,14 +2392,14 @@
                                   padding: '8px 12px', borderBottom: '1px solid var(--corp-border)' }}>
                         <div className="flex items-center gap-2">
                             <Icons.Clock className="w-4 h-4" style={{ color: done ? (exitstatus === 'OK' ? '#60b515' : '#f54f47') : '#f7b428' }} />
-                            <span className="font-medium text-sm">Backup {done ? (exitstatus === 'OK' ? 'completed' : `failed (${exitstatus})`) : 'in progress…'}</span>
+                            <span className="font-medium text-sm">{statusLabel}</span>
                             {throughput.length > 0 && (
                                 <span className="text-xs opacity-70" style={{ fontVariantNumeric: 'tabular-nums' }}>
-                                    {throughput[throughput.length - 1].mbps.toFixed(1)} MiB/s · peak {peakMbps.toFixed(1)}
+                                    {throughput[throughput.length - 1].mbps.toFixed(1)} MiB/s · {t('backupPeak')} {peakMbps.toFixed(1)}
                                 </span>
                             )}
                         </div>
-                        <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}}>×</button>
+                        <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}} aria-label={t('close')}>×</button>
                     </div>
                     {throughput.length > 1 && (
                         <div style={{ padding: '4px 12px' }}>
@@ -2357,7 +2412,7 @@
                     <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px',
                                   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                                   fontSize: '11.5px', whiteSpace: 'pre-wrap', lineHeight: '1.4' }}>
-                        {lines.length === 0 ? <span className="opacity-50">Waiting for output…</span>
+                        {lines.length === 0 ? <span className="opacity-50">{t('backupWaitingForOutput')}</span>
                             : lines.map((l, i) => (
                                 <div key={i} style={{
                                     color: /ERROR|FAIL/i.test(l) ? '#f54f47'
@@ -2374,6 +2429,8 @@
 
         // PBS Capacity Forecast Tile
         function PbsCapacityForecast({ pbsId, authFetch, apiUrl, t }) {
+            const { t: contextT } = useTranslation();
+            const tr = typeof t === 'function' ? t : contextT;
             const [data, setData] = React.useState(null);
             React.useEffect(() => {
                 if (!pbsId) return;
@@ -2389,7 +2446,7 @@
             if (!data || data.length === 0) return null;
             return (
                 <div className="rounded-md p-3" style={{ background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)' }}>
-                    <div className="text-xs uppercase tracking-wide opacity-70 mb-2">{t ? (t('capacityForecast') || 'Capacity forecast') : 'Capacity forecast'}</div>
+                    <div className="text-xs uppercase tracking-wide opacity-70 mb-2">{tr('capacityForecast')}</div>
                     <div className="space-y-2">
                         {data.map(d => {
                             const days = d.eta_days_to_full;
@@ -2401,12 +2458,12 @@
                                         <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.8 }}>{d.used_pct}%</span>
                                         {days != null ? (
                                             <span style={{ color, fontVariantNumeric: 'tabular-nums' }}
-                                                title={`${t ? (t('slope') || 'Slope') : 'Slope'}: ${d.slope_pct_per_day}% / ${t ? (t('day') || 'day') : 'day'}, ${d.samples} ${t ? (t('samples') || 'samples') : 'samples'}`}>
+                                                title={`${tr('slope')}: ${d.slope_pct_per_day}% / ${tr('day')}, ${d.samples} ${tr('samples')}`}>
                                                 {days < 1
-                                                    ? `<1 ${t ? (t('dayShort') || 'd') : 'd'}`
+                                                    ? `<1 ${tr('dayShort')}`
                                                     : days < 365
-                                                        ? `${days.toFixed(0)} ${t ? (t('dayShort') || 'd') : 'd'}`
-                                                        : `>1 ${t ? (t('yearShort') || 'y') : 'y'}`}
+                                                        ? `${days.toFixed(0)} ${tr('dayShort')}`
+                                                        : `>1 ${tr('yearShort')}`}
                                             </span>
                                         ) : (
                                             <span style={{ opacity: 0.5 }}>—</span>
@@ -2423,6 +2480,7 @@
 
         // Storage-Add Pre-flight Indicator
         function StoragePreflightCheck({ clusterId, config, authFetch, apiUrl, onResult }) {
+            const { t } = useTranslation();
             const [state, setState] = React.useState({ status: 'idle', issues: [], info: {} });
             const run = async () => {
                 if (config.type !== 'pbs') return;
@@ -2448,15 +2506,15 @@
             return (
                 <div style={{ background: 'var(--corp-surface-2, #29414e)', padding: '8px 10px', borderRadius: '4px', fontSize: '12px' }}>
                     <div className="flex items-center justify-between">
-                        <span className="opacity-80">Pre-flight check (PBS)</span>
+                        <span className="opacity-80">{t('preflightCheck')}</span>
                         <button onClick={run} disabled={state.status === 'checking'}
                             style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', padding: '2px 8px',
                                      borderRadius: '3px', border: 'none', cursor: 'pointer',
                                      opacity: state.status === 'checking' ? 0.5 : 1 }}>
-                            {state.status === 'checking' ? 'Checking…' : 'Run check'}
+                            {state.status === 'checking' ? t('checking') : t('runCheck')}
                         </button>
                     </div>
-                    {state.status === 'ok' && <div style={{ color: '#60b515', marginTop: '4px' }}>✓ All checks passed. Live fingerprint matches; auth ok; datastore exists.</div>}
+                    {state.status === 'ok' && <div style={{ color: '#60b515', marginTop: '4px' }}>✓ {t('preflightOk')}. {t('preflightSuccessDetails')}</div>}
                     {state.status === 'fail' && (
                         <ul style={{ marginTop: '4px', paddingLeft: '18px' }}>
                             {state.issues.map((iss, i) => <li key={i} style={{ color: '#f54f47' }}>{iss}</li>)}
@@ -2464,7 +2522,7 @@
                     )}
                     {state.info.live_fingerprint && state.status !== 'ok' && (
                         <div style={{ marginTop: '4px', opacity: 0.7, fontFamily: 'ui-monospace, monospace', fontSize: '11px', wordBreak: 'break-all' }}>
-                            Live fingerprint: {state.info.live_fingerprint}
+                            {t('liveFingerprint')}: {state.info.live_fingerprint}
                         </div>
                     )}
                 </div>
@@ -2474,10 +2532,11 @@
 
         // Auto-Fingerprint button — fetches the cert fingerprint via probe endpoint
         function FingerprintFetcher({ host, port, authFetch, apiUrl, onFetched }) {
+            const { t } = useTranslation();
             const [busy, setBusy] = React.useState(false);
             const [error, setError] = React.useState(null);
             const fetchIt = async () => {
-                if (!host) { setError('host required'); return; }
+                if (!host) { setError(t('hostRequired')); return; }
                 setBusy(true); setError(null);
                 try {
                     const r = await authFetch(`${apiUrl}/pbs/probe-fingerprint`, {
@@ -2500,8 +2559,8 @@
                         style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', padding: '4px 10px',
                                  borderRadius: '3px', border: 'none', cursor: 'pointer', fontSize: '12px',
                                  opacity: (busy || !host) ? 0.5 : 1 }}
-                        title="Connect to host and capture the TLS fingerprint">
-                        {busy ? '…' : 'Auto-fetch'}
+                        title={t('fingerprintFetchTitle')}>
+                        {busy ? '…' : t('fingerprintAutoFetch')}
                     </button>
                     {error && <span style={{ color: '#f54f47', fontSize: '11px' }}>{error}</span>}
                 </span>
@@ -2511,6 +2570,8 @@
 
         // Backup Restore Wizard — three-mode (new/overwrite/test)
         function BackupRestoreWizard({ clusterId, snapshot, datastoreName, nodes, storages, authFetch, apiUrl, onClose, onStarted }) {
+            const { t } = useTranslation();
+
             // snapshot: {volid, vmid, type, backup_time}
             const [mode, setMode] = React.useState('new');
             const [targetNode, setTargetNode] = React.useState(nodes?.[0] || '');
@@ -2559,10 +2620,16 @@
                 finally { setRunning(false); }
             };
 
+            const modeLabels = {
+                new: t('restoreModeNew'),
+                overwrite: t('restoreModeOverwrite'),
+                test: t('restoreModeTest'),
+            };
+
             const modeDescs = {
-                new: 'Restore as a new VM with the chosen VMID. Original VM stays untouched.',
-                overwrite: 'Overwrite an existing VM with the same VMID. Existing config + disks will be lost.',
-                test: 'Test-restore — restore + boot, then keep the test VM (no auto-cleanup). Useful for DR drills.',
+                new: t('restoreModeNewDesc'),
+                overwrite: t('restoreModeOverwriteDesc'),
+                test: t('restoreModeTestDesc'),
             };
 
             return (
@@ -2573,14 +2640,14 @@
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
-                            <div className="text-base font-semibold">Restore backup</div>
-                            <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}}>×</button>
+                            <div className="text-base font-semibold">{t('restoreBackup')}</div>
+                            <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}} aria-label={t('close')}>×</button>
                         </div>
                         <div className="p-5 space-y-3">
-                            <div className="text-xs opacity-70">Source: {snapshot?.volid || '(unknown)'}</div>
+                            <div className="text-xs opacity-70">{t('restoreSource')}: {snapshot?.volid || `(${t('unknown')})`}</div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Mode</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('restoreMode')}</div>
                                 <div className="grid grid-cols-3 gap-2">
                                     {['new', 'overwrite', 'test'].map(m => (
                                         <button key={m} type="button" onClick={() => setMode(m)}
@@ -2591,7 +2658,7 @@
                                                 borderRadius: '3px',
                                                 fontWeight: mode === m ? 600 : 400,
                                             }}>
-                                            {m}
+                                            {modeLabels[m] || m}
                                         </button>
                                     ))}
                                 </div>
@@ -2599,7 +2666,7 @@
                             </div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Target node</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('targetNode')}</div>
                                 <select value={targetNode} onChange={e => setTargetNode(e.target.value)}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
@@ -2608,18 +2675,18 @@
                             </div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Target VMID</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('targetVmid')}</div>
                                 <input type="number" value={targetVmid} onChange={e => setTargetVmid(e.target.value)}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }} />
                             </div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Target storage (optional)</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('targetStorage')} ({t('optional')})</div>
                                 <select value={targetStorage} onChange={e => setTargetStorage(e.target.value)}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
-                                    <option value="">— use default from backup —</option>
+                                    <option value="">— {t('restoreUseBackupDefault')} —</option>
                                     {(storages || []).map(s => <option key={s} value={s}>{s}</option>)}
                                 </select>
                             </div>
@@ -2630,14 +2697,16 @@
                                 <button type="button" onClick={onClose}
                                     className="px-3 py-1.5 text-sm"
                                     style={{ background: 'transparent', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                    Cancel
+                                    {t('cancel')}
                                 </button>
                                 <button type="button" onClick={submit} disabled={running || !targetNode || !targetVmid}
                                     className="px-3 py-1.5 text-sm font-medium"
                                     style={{ background: mode === 'overwrite' ? '#b94a3a' : 'var(--corp-accent, #0078a8)',
                                              color: '#fff', border: 'none', borderRadius: '3px',
                                              opacity: (running || !targetNode || !targetVmid) ? 0.5 : 1 }}>
-                                    {running ? 'Starting…' : `Start restore (${mode})`}
+                                    {running
+                                        ? t('starting')
+                                        : t('restoreStartMode').replace('{mode}', modeLabels[mode] || mode)}
                                 </button>
                             </div>
                         </div>
@@ -2650,6 +2719,7 @@
         // LW May 2026 — Encryption key generator. Generates server-side, shows
         // once, lets the user download the JSON envelope + a printable sheet.
         function EncryptionKeyModal({ authFetch, apiUrl, onClose }) {
+            const { t } = useTranslation();
             const [data, setData] = React.useState(null);
             const [busy, setBusy] = React.useState(false);
             const [err, setErr] = React.useState(null);
@@ -2678,15 +2748,15 @@
                 const w = window.open('', 'pbs-key', 'width=720,height=900');
                 if (!w) return;
                 const safe = (s) => String(s).replace(/[<&>]/g, c => ({'<':'&lt;','&':'&amp;','>':'&gt;'})[c]);
-                w.document.write(`<!DOCTYPE html><html><head><title>PBS Encryption Key Recovery Sheet</title>
+                w.document.write(`<!DOCTYPE html><html><head><title>${safe(t('encryptionRecoveryPrintTitle'))}</title>
 <style>body{font-family:ui-monospace,monospace;font-size:11pt;padding:24px;color:#000}
 h1{font-size:14pt;margin-bottom:6px}.warn{color:#a00;font-weight:bold}
 pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px;background:#f7f7f7}
 @media print{body{padding:0}}</style></head><body>
-<h1>PBS Encryption Key — Recovery Sheet</h1>
-<p class="warn">⚠ Without this key, all backups encrypted with it are UNRECOVERABLE. Store offline.</p>
+<h1>${safe(t('encryptionRecoveryPrintHeading'))}</h1>
+<p class="warn">${safe(t('encryptionRecoveryPrintWarning'))}</p>
 <pre>${safe(data?.recovery_sheet || '')}</pre>
-<p>JSON envelope (paste into /etc/pve/priv/storage/&lt;id&gt;.enc):</p>
+<p>${safe(t('encryptionRecoveryJsonEnvelope'))}</p>
 <pre>${safe(JSON.stringify(data?.key_json, null, 2))}</pre>
 </body></html>`);
                 w.document.close();
@@ -2703,20 +2773,19 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                         <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
                             <div className="text-base font-semibold flex items-center gap-2">
                                 <Icons.Lock className="w-4 h-4" />
-                                PBS Encryption Key
+                                {t('pbsEncryptionKey')}
                             </div>
-                            <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}}>×</button>
+                            <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}} aria-label={t('close')}>×</button>
                         </div>
                         <div className="p-5 space-y-3">
                             {!data && (
                                 <>
                                     <div className="text-sm opacity-80">
-                                        Generates a fresh AES-256 encryption key in PBS format. Without this key,
-                                        encrypted backups are unrecoverable — store offline.
+                                        {t('encryptionKeyIntro')}
                                     </div>
                                     <div style={{ background: 'rgba(245,79,71,0.08)', border: '1px solid rgba(245,79,71,0.4)',
                                                   borderRadius: '4px', padding: '8px 10px', fontSize: '12px', color: '#f54f47' }}>
-                                        ⚠ The key is shown <strong>once</strong>. PegaProx does not retain a copy.
+                                        ⚠ {t('encryptionKeyShown')} <strong>{t('encryptionKeyOnce')}</strong>. {t('encryptionKeyNoCopy')}
                                     </div>
                                     {err && <div style={{ color: '#f54f47', fontSize: '12px' }}>{err}</div>}
                                     <div className="flex justify-end">
@@ -2724,18 +2793,18 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                             className="px-4 py-2 text-sm font-medium"
                                             style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', border: 'none', borderRadius: '3px',
                                                      opacity: busy ? 0.5 : 1 }}>
-                                            {busy ? 'Generating…' : 'Generate key'}
+                                            {busy ? t('generatingKey') : t('generateKey')}
                                         </button>
                                     </div>
                                 </>
                             )}
                             {data && (
                                 <>
-                                    <div className="text-xs uppercase tracking-wide opacity-70">Fingerprint</div>
+                                    <div className="text-xs uppercase tracking-wide opacity-70">{t('fingerprint')}</div>
                                     <div className="font-mono text-xs" style={{ wordBreak: 'break-all', padding: '6px 8px', background: 'var(--corp-surface-2, #29414e)', borderRadius: '3px' }}>
                                         {data.fingerprint}
                                     </div>
-                                    <div className="text-xs uppercase tracking-wide opacity-70 mt-3">Recovery sheet (printable)</div>
+                                    <div className="text-xs uppercase tracking-wide opacity-70 mt-3">{t('recoverySheetPrintable')}</div>
                                     <pre style={{ fontSize: '10.5px', maxHeight: '260px', overflowY: 'auto',
                                                   padding: '10px 12px', background: 'var(--corp-surface-2, #29414e)',
                                                   borderRadius: '3px', whiteSpace: 'pre-wrap' }}>{data.recovery_sheet}</pre>
@@ -2743,17 +2812,17 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                         <button onClick={() => download(`pbs-key-${data.fingerprint.slice(0,8)}.json`, JSON.stringify(data.key_json, null, 2), 'application/json')}
                                             className="px-3 py-1.5 text-sm"
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                            Download JSON
+                                            {t('downloadJson')}
                                         </button>
                                         <button onClick={() => download(`pbs-key-recovery-${data.fingerprint.slice(0,8)}.txt`, data.recovery_sheet)}
                                             className="px-3 py-1.5 text-sm"
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                            Download .txt
+                                            {t('downloadTxt')}
                                         </button>
                                         <button onClick={printSheet}
                                             className="px-3 py-1.5 text-sm font-medium"
                                             style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', border: 'none', borderRadius: '3px' }}>
-                                            Print recovery sheet
+                                            {t('printRecoverySheet')}
                                         </button>
                                     </div>
                                 </>
@@ -2768,6 +2837,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
         // NS May 2026 — settings panel for the auto-verify schedule.
         // Backend at /api/pbs/verify-schedule (GET/PUT). Single dialog toggle.
         function VerifyScheduleModal({ authFetch, apiUrl, onClose }) {
+            const { t } = useTranslation();
             const [cfg, setCfg] = React.useState(null);
             const [busy, setBusy] = React.useState(false);
             const [err, setErr] = React.useState(null);
@@ -2809,33 +2879,43 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                         <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
                             <div className="text-base font-semibold flex items-center gap-2">
                                 <Icons.Clock className="w-4 h-4" />
-                                Auto Backup Verification
+                                {t('autoBackupVerification')}
                             </div>
-                            <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}}>×</button>
+                            <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}} aria-label={t('close')}>×</button>
                         </div>
                         {!cfg ? (
-                            <div className="p-6 text-center opacity-70">{err || 'Loading…'}</div>
+                            <div className="p-6 text-center opacity-70">{err || t('loading')}</div>
                         ) : (
                             <div className="p-5 space-y-3">
                                 <p className="text-xs opacity-70">
-                                    Schedules a weekly backup-verification: a small set of recent snapshots is restored to scratch, booted, then cleaned up. Catches silent backup corruption.
+                                    {t('autoBackupVerificationDesc')}
                                 </p>
                                 <label className="flex items-center gap-3">
                                     <input type="checkbox" checked={!!cfg.enabled} onChange={(e) => update('enabled', e.target.checked)} />
-                                    <span>Enable scheduled auto-verification</span>
+                                    <span>{t('enableAutoBackupVerification')}</span>
                                 </label>
                                 <div style={{ opacity: cfg.enabled ? 1 : 0.5 }}>
                                     <div className="grid grid-cols-2 gap-3">
                                         <label className="text-sm">
-                                            <div className="opacity-70 mb-1">Day</div>
+                                            <div className="opacity-70 mb-1">{t('day')}</div>
                                             <select value={cfg.day || 'sun'} onChange={(e) => update('day', e.target.value)}
                                                 className="w-full px-2 py-1.5 text-sm" disabled={!cfg.enabled}
                                                 style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
-                                                {['mon','tue','wed','thu','fri','sat','sun'].map(d => <option key={d} value={d}>{d.toUpperCase()}</option>)}
+                                                {[
+                                                    ['mon', 'monday'],
+                                                    ['tue', 'tuesday'],
+                                                    ['wed', 'wednesday'],
+                                                    ['thu', 'thursday'],
+                                                    ['fri', 'friday'],
+                                                    ['sat', 'saturday'],
+                                                    ['sun', 'sunday'],
+                                                ].map(([value, labelKey]) => (
+                                                    <option key={value} value={value}>{t(labelKey)}</option>
+                                                ))}
                                             </select>
                                         </label>
                                         <label className="text-sm">
-                                            <div className="opacity-70 mb-1">Hour (0-23)</div>
+                                            <div className="opacity-70 mb-1">{t('verifyHourRange')}</div>
                                             <input type="number" min="0" max="23" value={cfg.hour ?? 4}
                                                 onChange={(e) => update('hour', Math.max(0, Math.min(23, parseInt(e.target.value) || 0)))}
                                                 disabled={!cfg.enabled}
@@ -2844,7 +2924,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                         </label>
                                     </div>
                                     <label className="text-sm block mt-3">
-                                        <div className="opacity-70 mb-1">Snapshots per run (1-50)</div>
+                                        <div className="opacity-70 mb-1">{t('verifySnapshotsPerRun')}</div>
                                         <input type="number" min="1" max="50" value={cfg.weekly_count ?? 5}
                                             onChange={(e) => update('weekly_count', Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
                                             disabled={!cfg.enabled}
@@ -2852,13 +2932,13 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }} />
                                     </label>
                                     <label className="text-sm block mt-3">
-                                        <div className="opacity-70 mb-1">Scope</div>
+                                        <div className="opacity-70 mb-1">{t('verifyScope')}</div>
                                         <select value={cfg.scope || 'latest_per_vm'} onChange={(e) => update('scope', e.target.value)}
                                             disabled={!cfg.enabled}
                                             className="w-full px-2 py-1.5 text-sm"
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
-                                            <option value="latest_per_vm">Latest snapshot per VM</option>
-                                            <option value="all">All snapshots in pool</option>
+                                            <option value="latest_per_vm">{t('verifyScopeLatestPerVm')}</option>
+                                            <option value="all">{t('verifyScopeAll')}</option>
                                         </select>
                                     </label>
                                 </div>
@@ -2867,13 +2947,13 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                     <button onClick={onClose}
                                         className="px-3 py-1.5 text-sm"
                                         style={{ background: 'transparent', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                        Cancel
+                                        {t('cancel')}
                                     </button>
                                     <button onClick={save} disabled={busy}
                                         className="px-3 py-1.5 text-sm font-medium"
                                         style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', border: 'none', borderRadius: '3px',
                                                  opacity: busy ? 0.5 : 1 }}>
-                                        {busy ? 'Saving…' : 'Save'}
+                                        {busy ? t('savingLocation') : t('save')}
                                     </button>
                                 </div>
                             </div>

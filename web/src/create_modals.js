@@ -277,7 +277,7 @@
 
             // LW: XCP-ng VMs skip the advanced step (no BIOS/Machine/SCSI/EFI/TPM)
             const steps = isXcpng && isQemu
-                ? [t('general'), t('installMethod') || 'Install', t('hardware'), t('disk'), t('network'), t('options') || 'Options']
+                ? [t('general'), t('installMethod'), t('hardware'), t('disk'), t('network'), t('options')]
                 : isQemu
                     ? [t('general'), t('os'), t('hardware'), t('disk'), t('network'), t('advanced')]
                     : [t('general'), t('template'), t('resources'), t('disk'), t('network'), t('options')];
@@ -374,10 +374,10 @@
             const validateStep = (step) => {
                 const errs = {};
                 if (step === 0) {
-                    if (!config.name || !config.name.trim()) errs.name = t('required') || 'Required';
+                    if (!config.name || !config.name.trim()) errs.name = t('required');
                 }
                 if (step === 3 && isQemu && !isXcpng) {
-                    if (!config.storage) errs.storage = t('required') || 'Required';
+                    if (!config.storage) errs.storage = t('required');
                 }
                 setStepErrors(errs);
                 return Object.keys(errs).length === 0;
@@ -426,9 +426,9 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">VM ID</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('vmid')}</label>
                                             <input type="number" value={config.vmid} onChange={e => setConfig({...config, vmid: e.target.value})}
-                                                placeholder={nextVmid ? `${t('next')}: ${nextVmid}` : ''}
+                                                placeholder={nextVmid ? `${t('nextId')}: ${nextVmid}` : ''}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                     </div>
@@ -441,7 +441,7 @@
                                     </div>
                                     {isQemu && (
                                         <div className="pt-3 border-t border-proxmox-border">
-                                            <label className="block text-xs text-gray-500 mb-2">{t('quickTemplate') || 'Quick Template'}</label>
+                                            <label className="block text-xs text-gray-500 mb-2">{t('quickTemplate')}</label>
                                             <div className="grid grid-cols-2 gap-2">
                                                 {VM_PRESETS.map(p => (
                                                     <button key={p.label} type="button"
@@ -462,7 +462,7 @@
                                 return (
                                     <div className="space-y-4">
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('installMethod') || 'Install Method'}</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('installMethod')}</label>
                                             <div className="flex gap-3">
                                                 {['template', 'iso', 'pxe'].map(m => (
                                                     <label key={m} className={`flex-1 flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-colors ${config.install_method === m ? 'border-orange-500 bg-orange-500/10 text-white' : 'border-proxmox-border bg-proxmox-dark text-gray-400 hover:border-gray-500'}`}>
@@ -470,8 +470,8 @@
                                                             onChange={e => setConfig({...config, install_method: e.target.value})}
                                                             className="hidden" />
                                                         <span className="text-sm font-medium">
-                                                            {m === 'template' ? (t('fromTemplate') || 'From Template') :
-                                                             m === 'iso' ? (t('fromIso') || 'From ISO') :
+                                                            {m === 'template' ? (t('fromTemplate')) :
+                                                             m === 'iso' ? (t('fromIso')) :
                                                              'PXE Boot'}
                                                         </span>
                                                     </label>
@@ -484,7 +484,7 @@
                                                 <label className="block text-sm text-gray-400 mb-1">{t('template')}</label>
                                                 <select value={config.template} onChange={e => setConfig({...config, template: e.target.value})}
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
-                                                    <option value="">{t('selectTemplate') || 'Select template...'}</option>
+                                                    <option value="">{t('selectTemplate')}</option>
                                                     {templateList.map(tpl => <option key={tpl.uuid} value={tpl.uuid}>{tpl.name}</option>)}
                                                 </select>
                                             </div>
@@ -492,19 +492,19 @@
 
                                         {(config.install_method === 'iso' || config.install_method === 'pxe') && (
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">{t('osType') || 'OS Type'}</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('osType')}</label>
                                                 <select value={config.os_type} onChange={e => setConfig({...config, os_type: e.target.value})}
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
                                                     {xcpOsTypes.map(os => <option key={os.key} value={os.key}>{os.label}</option>)}
                                                     {xcpOsTypes.length === 0 && (
                                                         <>
-                                                            <option value="linux">Linux (Generic)</option>
+                                                            <option value="linux">{t('linuxGeneric')}</option>
                                                             <option value="windows">Windows</option>
-                                                            <option value="other">Other</option>
+                                                            <option value="other">{t('other')}</option>
                                                         </>
                                                     )}
                                                 </select>
-                                                <p className="text-xs text-gray-500 mt-1">{t('osTypeHint') || 'Selects the correct built-in template for platform flags'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('osTypeHint')}</p>
                                             </div>
                                         )}
 
@@ -513,7 +513,7 @@
                                                 <label className="block text-sm text-gray-400 mb-1">{t('isoImage')}</label>
                                                 <select value={config.iso_uuid} onChange={e => setConfig({...config, iso_uuid: e.target.value})}
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
-                                                    <option value="">{t('selectIso') || 'Select ISO...'}</option>
+                                                    <option value="">{t('selectIso')}</option>
                                                     {isoList.map(iso => <option key={iso.uuid || iso.volid} value={iso.uuid || iso.volid}>{iso.name || iso.volid}</option>)}
                                                 </select>
                                             </div>
@@ -521,7 +521,7 @@
 
                                         {config.install_method === 'pxe' && (
                                             <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-                                                <p className="text-sm text-blue-400">{t('pxeHint') || 'VM will boot from network (PXE). Make sure a PXE/DHCP server is available on the selected network.'}</p>
+                                                <p className="text-sm text-blue-400">{t('pxeHint')}</p>
                                             </div>
                                         )}
                                     </div>
@@ -547,7 +547,7 @@
                                                     type="text"
                                                     value={config._isoFilter || ''}
                                                     onChange={e => setConfig({...config, _isoFilter: e.target.value})}
-                                                    placeholder={t('filterIso') || 'Filter ISOs…'}
+                                                    placeholder={t('filterIso')}
                                                     className="w-full pl-7 pr-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs focus:outline-none focus:border-proxmox-orange"
                                                 />
                                             </div>
@@ -570,7 +570,7 @@
                                                     {filtered.map(iso => (
                                                         <option key={iso.volid} value={iso.volid}>{iso.volid.split('/').pop()}</option>
                                                     ))}
-                                                    {q && filtered.length === 0 && <option disabled>{t('noResults') || 'No results'}</option>}
+                                                    {q && filtered.length === 0 && <option disabled>{t('noResults')}</option>}
                                                 </select>
                                             );
                                         })()}
@@ -637,20 +637,20 @@
                                     {/* MK: Advanced CPU Section */}
                                     <details className="group">
                                         <summary className="flex items-center justify-between cursor-pointer p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg hover:bg-blue-500/20">
-                                            <span className="text-sm font-medium text-blue-400">{t('advancedCpu') || 'Advanced CPU'}</span>
+                                            <span className="text-sm font-medium text-blue-400">{t('advancedCpu')}</span>
                                             <Icons.ChevronDown className="w-4 h-4 text-blue-400 group-open:rotate-180 transition-transform" />
                                         </summary>
                                         <div className="mt-3 space-y-3 p-3 bg-proxmox-dark/50 rounded-lg">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">{t('cpuAffinity') || 'CPU Affinity'}</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('cpuAffinity')}</label>
                                                 <input type="text" value={config.cpu_affinity} onChange={e => setConfig({...config, cpu_affinity: e.target.value})}
                                                     placeholder="e.g. 0-3 or 0,2,4,6"
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
-                                                <p className="text-xs text-gray-500 mt-1">{t('cpuAffinityHint') || 'Pin vCPUs to specific host CPUs'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('cpuAffinityHint')}</p>
                                             </div>
                                             <label className="flex items-center gap-2 text-sm text-gray-300">
                                                 <input type="checkbox" checked={config.numa} onChange={e => setConfig({...config, numa: e.target.checked})} className="rounded" />
-                                                {t('enableNuma') || 'Enable NUMA'}
+                                                {t('enableNuma')}
                                             </label>
                                         </div>
                                     </details>
@@ -658,12 +658,12 @@
                                     {/* MK: Advanced Memory Section */}
                                     <details className="group">
                                         <summary className="flex items-center justify-between cursor-pointer p-3 bg-purple-500/10 border border-purple-500/30 rounded-lg hover:bg-purple-500/20">
-                                            <span className="text-sm font-medium text-purple-400">{t('advancedMemory') || 'Advanced Memory'}</span>
+                                            <span className="text-sm font-medium text-purple-400">{t('advancedMemory')}</span>
                                             <Icons.ChevronDown className="w-4 h-4 text-purple-400 group-open:rotate-180 transition-transform" />
                                         </summary>
                                         <div className="mt-3 space-y-3 p-3 bg-proxmox-dark/50 rounded-lg">
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">{t('minimumMemory') || 'Minimum Memory'}</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('minimumMemory')}</label>
                                                 <div className="flex gap-2">
                                                     <input type="number" min="0" 
                                                         value={config.min_memoryUnit === 'GB' ? (config.min_memory ? config.min_memory / 1024 : '') : (config.min_memory || '')}
@@ -675,7 +675,7 @@
                                                                 setConfig({...config, min_memory: config.min_memoryUnit === 'GB' ? Math.round(val * 1024) : val});
                                                             }
                                                         }}
-                                                        placeholder={t('sameAsMemory') || 'Same as Memory'}
+                                                        placeholder={t('sameAsMemory')}
                                                         className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                                     <select value={config.min_memoryUnit || 'MB'} onChange={e => setConfig({...config, min_memoryUnit: e.target.value})}
                                                         className="w-20 px-2 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
@@ -683,19 +683,19 @@
                                                         <option value="GB">GB</option>
                                                     </select>
                                                 </div>
-                                                <p className="text-xs text-gray-500 mt-1">{t('minimumMemoryHint') || 'Lower limit for memory ballooning'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('minimumMemoryHint')}</p>
                                             </div>
                                             <div className="grid grid-cols-2 gap-4">
                                                 <label className="flex items-center gap-2 text-sm text-gray-300">
                                                     <input type="checkbox" checked={config.ballooning} onChange={e => setConfig({...config, ballooning: e.target.checked})} className="rounded" />
-                                                    {t('ballooningDevice') || 'Ballooning Device'}
+                                                    {t('ballooningDevice')}
                                                 </label>
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">{t('memoryShares') || 'Memory Shares'}</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('memoryShares')}</label>
                                                 <input type="number" min="0" max="50000" value={config.shares} onChange={e => setConfig({...config, shares: parseInt(e.target.value) || 0})}
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
-                                                <p className="text-xs text-gray-500 mt-1">{t('memorySharesHint') || 'Weight for memory auto-ballooning (0-50000, default: 1000)'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('memorySharesHint')}</p>
                                             </div>
                                         </div>
                                     </details>
@@ -729,12 +729,12 @@
                                 <div className="space-y-4">
                                     {/* MK: Primary Disk with ALL options */}
                                     <div className="p-4 bg-proxmox-dark/50 rounded-lg border border-proxmox-border">
-                                        <h4 className="text-sm font-medium text-white mb-3">{isXcpng ? (t('virtualDisk') || 'Virtual Disk') : `${t('primaryDisk') || 'Disk'} 0 (${config.disk_type}0)`}</h4>
+                                        <h4 className="text-sm font-medium text-white mb-3">{isXcpng ? (t('virtualDisk')) : `${t('primaryDisk')} 0 (${config.disk_type}0)`}</h4>
                                         {isXcpng ? (
                                             /* XCP-ng: simplified disk config - just SR + size */
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('storageRepository') || 'Storage Repository'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('storageRepository')}</label>
                                                     <select value={config.storage} onChange={e => setConfig({...config, storage: e.target.value})}
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
                                                         {diskStorages.map(s => (
@@ -790,7 +790,7 @@
                                                 <select value={fmts.length === 1 ? '' : config.disk_format} onChange={e => setConfig({...config, disk_format: e.target.value})}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm"
                                                     disabled={fmts.length === 1}>
-                                                    <option value="">{fmts.length === 1 ? fmts[0].toUpperCase() : (t('storageDefault') || 'Default')}</option>
+                                                    <option value="">{fmts.length === 1 ? fmts[0].toUpperCase() : (t('storageDefault'))}</option>
                                                     {fmts.length > 1 && fmts.map(f => <option key={f} value={f}>{f === 'raw' ? 'Raw' : f === 'qcow2' ? 'QCOW2' : 'VMDK'}</option>)}
                                                 </select>); })()}
                                             </div>
@@ -798,11 +798,11 @@
                                                 <label className="block text-xs text-gray-400 mb-1">{t('cache')}</label>
                                                 <select value={config.disk_cache} onChange={e => setConfig({...config, disk_cache: e.target.value})}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
-                                                    <option value="">{t('default') || 'Default'}</option>
+                                                    <option value="">{t('default')}</option>
                                                     <option value="directsync">Direct Sync</option>
                                                     <option value="writethrough">Write Through</option>
                                                     <option value="writeback">Write Back</option>
-                                                    <option value="none">{t('none') || 'None'}</option>
+                                                    <option value="none">{t('none')}</option>
                                                 </select>
                                             </div>
                                             {config.disk_type === 'scsi' && (
@@ -839,7 +839,7 @@
                                     {config.additional_disks.map((disk, idx) => (
                                         <div key={idx} className="p-4 bg-proxmox-dark/50 rounded-lg border border-proxmox-border">
                                             <div className="flex items-center justify-between mb-3">
-                                                <h4 className="text-sm font-medium text-white">{t('disk') || 'Disk'} {idx + 1} ({disk.type}{idx + 1})</h4>
+                                                <h4 className="text-sm font-medium text-white">{t('disk')} {idx + 1} ({disk.type}{idx + 1})</h4>
                                                 <button onClick={() => setConfig({...config, additional_disks: config.additional_disks.filter((_, i) => i !== idx)})}
                                                     className="p-1 text-red-400 hover:bg-red-500/20 rounded">
                                                     <Icons.Trash2 className="w-4 h-4" />
@@ -892,7 +892,7 @@
                                                     }}
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm"
                                                         disabled={fmts.length === 1}>
-                                                        <option value="">{fmts.length === 1 ? fmts[0].toUpperCase() : (t('storageDefault') || 'Default')}</option>
+                                                        <option value="">{fmts.length === 1 ? fmts[0].toUpperCase() : (t('storageDefault'))}</option>
                                                         {fmts.length > 1 && fmts.map(f => <option key={f} value={f}>{f === 'raw' ? 'Raw' : f === 'qcow2' ? 'QCOW2' : 'VMDK'}</option>)}
                                                     </select>); })()}
                                                 </div>
@@ -904,11 +904,11 @@
                                                         setConfig({...config, additional_disks: newDisks});
                                                     }}
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
-                                                        <option value="">{t('default') || 'Default'}</option>
+                                                        <option value="">{t('default')}</option>
                                                         <option value="directsync">Direct Sync</option>
                                                         <option value="writethrough">Write Through</option>
                                                         <option value="writeback">Write Back</option>
-                                                        <option value="none">{t('none') || 'None'}</option>
+                                                        <option value="none">{t('none')}</option>
                                                     </select>
                                                 </div>
                                                 {disk.type === 'scsi' && (
@@ -962,7 +962,7 @@
                                     {/* MK: Add Disk Button */}
                                     <button onClick={() => setConfig({...config, additional_disks: [...config.additional_disks, {type: 'scsi', storage: config.storage, size: '32', format: '', cache: '', discard: true, iothread: true, ssd: false}]})}
                                         className="w-full px-4 py-2 border-2 border-dashed border-proxmox-border rounded-lg text-gray-400 hover:text-white hover:border-proxmox-orange transition-colors">
-                                        + {t('addDisk') || 'Add Disk'}
+                                        + {t('addDisk')}
                                     </button>
                                 </div>
                             );
@@ -1012,9 +1012,9 @@
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('macAddress')}</label>
                                             <input type="text" value={config.net_macaddr} onChange={e => setConfig({...config, net_macaddr: e.target.value})}
-                                                placeholder={t('autoGenerate') || 'Auto-generate (leave empty)'}
+                                                placeholder={t('autoGenerate')}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                     </div>
@@ -1022,7 +1022,7 @@
                                     {/* MK: Advanced Network Options */}
                                     <details className="group">
                                         <summary className="flex items-center justify-between cursor-pointer p-3 bg-green-500/10 border border-green-500/30 rounded-lg hover:bg-green-500/20">
-                                            <span className="text-sm font-medium text-green-400">{t('advancedNetwork') || 'Advanced Network'}</span>
+                                            <span className="text-sm font-medium text-green-400">{t('advancedNetwork')}</span>
                                             <Icons.ChevronDown className="w-4 h-4 text-green-400 group-open:rotate-180 transition-transform" />
                                         </summary>
                                         <div className="mt-3 space-y-3 p-3 bg-proxmox-dark/50 rounded-lg">
@@ -1030,19 +1030,19 @@
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">MTU</label>
                                                     <input type="number" min="1" max="65520" value={config.net_mtu} onChange={e => setConfig({...config, net_mtu: e.target.value})}
-                                                        placeholder={t('inheritBridge') || 'Inherit from bridge'}
+                                                        placeholder={t('inheritBridge')}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('rateLimit') || 'Rate Limit'} (MB/s)</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('rateLimit')} (MB/s)</label>
                                                     <input type="number" min="0" step="0.1" value={config.net_rate} onChange={e => setConfig({...config, net_rate: e.target.value})}
-                                                        placeholder={t('unlimited') || 'Unlimited'}
+                                                        placeholder={t('unlimited')}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                                 </div>
                                             </div>
                                             <label className="flex items-center gap-2 text-sm text-gray-300">
                                                 <input type="checkbox" checked={config.net_disconnect} onChange={e => setConfig({...config, net_disconnect: e.target.checked})} className="rounded" />
-                                                {t('disconnected') || 'Disconnected'} ({t('noLinkOnStart') || 'No network link on start'})
+                                                {t('disconnected')} ({t('noLinkOnStart')})
                                             </label>
                                         </div>
                                     </details>
@@ -1069,9 +1069,9 @@
                                             </label>
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('description') || 'Description'}</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('description')}</label>
                                             <textarea value={config.description || ''} onChange={e => setConfig({...config, description: e.target.value})}
-                                                rows="3" placeholder={t('optionalDescription') || 'Optional description...'}
+                                                rows="3" placeholder={t('optionalDescription')}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white resize-none" />
                                         </div>
                                     </div>
@@ -1119,10 +1119,10 @@
                                                 </div>
                                                 <div>
                                                     {/* #678 — EFI disk format (raw/qcow2), like Proxmox; '' keeps the storage default */}
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('format') || 'Format'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('format')}</label>
                                                     <select value={config.efi_format || ''} onChange={e => setConfig({...config, efi_format: e.target.value})}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
-                                                        <option value="">{t('storageDefault') || 'Storage default'}</option>
+                                                        <option value="">{t('storageDefault')}</option>
                                                         {getAllowedFormats(config.efi_storage || config.storage).map(f => <option key={f} value={f}>{f}</option>)}
                                                     </select>
                                                 </div>
@@ -1162,10 +1162,10 @@
                                                 </div>
                                                 <div>
                                                     {/* #678 — TPM state format, same optional format= as the EFI disk */}
-                                                    <label className="block text-sm text-gray-400 mb-1">{t('format') || 'Format'}</label>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('format')}</label>
                                                     <select value={config.tpm_format || ''} onChange={e => setConfig({...config, tpm_format: e.target.value})}
                                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
-                                                        <option value="">{t('storageDefault') || 'Storage default'}</option>
+                                                        <option value="">{t('storageDefault')}</option>
                                                         {getAllowedFormats(config.tpm_storage).map(f => <option key={f} value={f}>{f}</option>)}
                                                     </select>
                                                 </div>
@@ -1203,17 +1203,17 @@
                                     {/* MK: High Availability Section */}
                                     <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg space-y-3">
                                         <div className="flex items-center justify-between">
-                                            <h4 className="text-sm font-medium text-red-400">{t('highAvailability') || 'High Availability'}</h4>
+                                            <h4 className="text-sm font-medium text-red-400">{t('highAvailability')}</h4>
                                             <label className="flex items-center gap-2 text-sm text-gray-300">
                                                 <input type="checkbox" checked={config.ha_enabled} onChange={e => setConfig({...config, ha_enabled: e.target.checked})} className="rounded" />
-                                                {t('enableHa') || 'Add to Proxmox Native HA'}
+                                                {t('enableHa')}
                                             </label>
                                         </div>
                                         {config.ha_enabled && (
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">{t('haGroup') || 'HA Group'}</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('haGroup')}</label>
                                                 <input type="text" value={config.ha_group} onChange={e => setConfig({...config, ha_group: e.target.value})}
-                                                    placeholder={t('defaultGroup') || 'Default group (leave empty)'}
+                                                    placeholder={t('defaultGroup')}
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                             </div>
                                         )}
@@ -1244,21 +1244,21 @@
                                 <div className="space-y-4">
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('node') || 'Node'}</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('node')}</label>
                                             <select value={config.node} onChange={e => setConfig({...config, node: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
                                                 {nodes.map(n => <option key={n} value={n}>{n}</option>)}
                                             </select>
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">CT ID</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('ctId')}</label>
                                             <input type="number" value={config.vmid} onChange={e => setConfig({...config, vmid: e.target.value})}
-                                                placeholder={nextVmid ? `Nächste: ${nextVmid}` : ''}
+                                                placeholder={nextVmid ? `${t('nextId')}: ${nextVmid}` : ''}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">{t('hostname') || 'Hostname'}</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('hostname')}</label>
                                         <input type="text" value={config.name} onChange={e => setConfig({...config, name: e.target.value})}
                                             placeholder="my-container"
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
@@ -1269,7 +1269,7 @@
                             return (
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Template</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('template')}</label>
                                         <select value={config.template} onChange={e => setConfig({...config, template: e.target.value})}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
                                             <option value="">{t('selectTemplate')}</option>
@@ -1310,7 +1310,7 @@
                                                         e.target.value = '';
                                                     }}
                                                 />
-                                                📂 {t('loadSshKeyFile') || 'Load SSH Key File'}
+                                                📂 {t('loadSshKeyFile')}
                                             </label>
                                         </div>
                                         <textarea
@@ -1320,7 +1320,7 @@
                                             rows={3}
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono resize-none"
                                         />
-                                        <p className="text-xs text-gray-500 mt-1">{t('sshKeyHintMultiple') || 'One key per line. Paste or load from file.'}</p>
+                                        <p className="text-xs text-gray-500 mt-1">{t('sshKeyHintMultiple')}</p>
                                     </div>
                                 </div>
                             );
@@ -1400,10 +1400,10 @@
                                 <div className="space-y-4">
                                     {/* MK: Root Filesystem */}
                                     <div className="p-4 bg-proxmox-dark/50 rounded-lg border border-proxmox-border">
-                                        <h4 className="text-sm font-medium text-white mb-3">{t('rootFilesystem') || 'Root Filesystem'} (rootfs)</h4>
+                                        <h4 className="text-sm font-medium text-white mb-3">{t('rootFilesystem')} (rootfs)</h4>
                                         <div className="grid grid-cols-3 gap-4">
                                             <div className="col-span-2">
-                                                <label className="block text-xs text-gray-400 mb-1">Storage</label>
+                                                <label className="block text-xs text-gray-400 mb-1">{t('storage')}</label>
                                                 <select value={config.storage} onChange={e => setConfig({...config, storage: e.target.value})}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
                                                     {storageList.map(s => (
@@ -1426,7 +1426,7 @@
                                     {config.additional_disks.map((mp, idx) => (
                                         <div key={idx} className="p-4 bg-proxmox-dark/50 rounded-lg border border-proxmox-border">
                                             <div className="flex items-center justify-between mb-3">
-                                                <h4 className="text-sm font-medium text-white">{t('mountPoint') || 'Mount Point'} {idx} (mp{idx})</h4>
+                                                <h4 className="text-sm font-medium text-white">{t('mountPoint')} {idx} (mp{idx})</h4>
                                                 <button onClick={() => setConfig({...config, additional_disks: config.additional_disks.filter((_, i) => i !== idx)})}
                                                     className="p-1 text-red-400 hover:bg-red-500/20 rounded">
                                                     <Icons.Trash2 className="w-4 h-4" />
@@ -1434,7 +1434,7 @@
                                             </div>
                                             <div className="grid grid-cols-4 gap-3">
                                                 <div className="col-span-2">
-                                                    <label className="block text-xs text-gray-400 mb-1">Storage</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('storage')}</label>
                                                     <select value={mp.storage} onChange={e => {
                                                         const newMps = [...config.additional_disks];
                                                         newMps[idx] = {...mp, storage: e.target.value};
@@ -1455,7 +1455,7 @@
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('path') || 'Path'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('path')}</label>
                                                     <input type="text" value={mp.path || ''} onChange={e => {
                                                         const newMps = [...config.additional_disks];
                                                         newMps[idx] = {...mp, path: e.target.value};
@@ -1495,7 +1495,7 @@
                                                                 setConfig({...config, additional_disks: newMps});
                                                             }}
                                                             className="rounded border-proxmox-border bg-proxmox-darker" />
-                                                        <span className="text-xs text-gray-300">preserve xattrs / suid on snapshot &amp; backup</span>
+                                                        <span className="text-xs text-gray-300">{t('preserveXattrsSuidBackup')}</span>
                                                     </label>
                                                 </div>
                                             </div>
@@ -1505,7 +1505,7 @@
                                     {/* MK: Add Mount Point Button */}
                                     <button onClick={() => setConfig({...config, additional_disks: [...config.additional_disks, {storage: config.storage, size: '8', path: '/mnt/data' + config.additional_disks.length}]})}
                                         className="w-full px-4 py-2 border-2 border-dashed border-proxmox-border rounded-lg text-gray-400 hover:text-white hover:border-proxmox-orange transition-colors">
-                                        + {t('addMountPoint') || 'Add Mount Point'}
+                                        + {t('addMountPoint')}
                                     </button>
                                 </div>
                             );
@@ -1515,7 +1515,7 @@
                                     {/* Bridge Selection */}
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Bridge / VNet</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('bridgeVnet')}</label>
                                             <select value={config.net_bridge} onChange={e => setConfig({...config, net_bridge: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
                                                 {/* Local bridges */}
@@ -1538,9 +1538,9 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">VLAN Tag</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('vlanTagLabel')}</label>
                                             <input type="text" value={config.net_tag} onChange={e => setConfig({...config, net_tag: e.target.value})}
-                                                placeholder={t('optional') || 'optional'}
+                                                placeholder={t('optional')}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                     </div>
@@ -1548,21 +1548,21 @@
                                     {/* MK: Advanced Network for LXC */}
                                     <div className="grid grid-cols-3 gap-4">
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('macAddress')}</label>
                                             <input type="text" value={config.net_macaddr} onChange={e => setConfig({...config, net_macaddr: e.target.value})}
-                                                placeholder={t('autoGenerate') || 'Auto-generate'}
+                                                placeholder={t('autoGenerate')}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">MTU</label>
                                             <input type="number" min="1" max="65520" value={config.net_mtu} onChange={e => setConfig({...config, net_mtu: e.target.value})}
-                                                placeholder={t('inheritBridge') || 'Inherit'}
+                                                placeholder={t('inheritBridge')}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('rateLimit') || 'Rate Limit'} (MB/s)</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('rateLimit')} (MB/s)</label>
                                             <input type="number" min="0" step="0.1" value={config.net_rate} onChange={e => setConfig({...config, net_rate: e.target.value})}
-                                                placeholder={t('unlimited') || 'Unlimited'}
+                                                placeholder={t('unlimited')}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                     </div>
@@ -1577,20 +1577,20 @@
                                                 className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm"
                                             >
                                                 <option value="dhcp">DHCP</option>
-                                                <option value="static">Static</option>
-                                                <option value="manual">{t('manual') || 'Manual'}</option>
+                                                <option value="static">{t('staticMode')}</option>
+                                                <option value="manual">{t('manual')}</option>
                                             </select>
                                         </div>
                                         {config.net_ip_type === 'static' && (
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('ipAddress') || 'IP Address'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('ipAddress')}</label>
                                                     <input type="text" value={config.net_ip} onChange={e => setConfig({...config, net_ip: e.target.value})}
                                                         placeholder="192.168.1.100/24"
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('gateway')}</label>
                                                     <input type="text" value={config.net_gw} onChange={e => setConfig({...config, net_gw: e.target.value})}
                                                         placeholder="192.168.1.1"
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
@@ -1610,20 +1610,20 @@
                                             >
                                                 <option value="dhcp">DHCP</option>
                                                 <option value="slaac">SLAAC</option>
-                                                <option value="static">Static</option>
-                                                <option value="manual">{t('manual') || 'Manual'}</option>
+                                                <option value="static">{t('staticMode')}</option>
+                                                <option value="manual">{t('manual')}</option>
                                             </select>
                                         </div>
                                         {config.net_ip6_type === 'static' && (
                                             <div className="grid grid-cols-2 gap-3">
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">{t('ipAddress') || 'IP Address'}</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('ipAddress')}</label>
                                                     <input type="text" value={config.net_ip6} onChange={e => setConfig({...config, net_ip6: e.target.value})}
                                                         placeholder="2001:db8::100/64"
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('gateway')}</label>
                                                     <input type="text" value={config.net_gw6} onChange={e => setConfig({...config, net_gw6: e.target.value})}
                                                         placeholder="2001:db8::1"
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
@@ -1640,7 +1640,7 @@
                                         </label>
                                         <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
                                             <input type="checkbox" checked={config.net_disconnected} onChange={e => setConfig({...config, net_disconnected: e.target.checked})} className="rounded" />
-                                            {t('disconnected') || 'Disconnected'}
+                                            {t('disconnected')}
                                         </label>
                                     </div>
                                 </div>
@@ -1651,17 +1651,17 @@
                                     {/* MK: High Availability Section for LXC */}
                                     <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg space-y-3">
                                         <div className="flex items-center justify-between">
-                                            <h4 className="text-sm font-medium text-red-400">{t('highAvailability') || 'High Availability'}</h4>
+                                            <h4 className="text-sm font-medium text-red-400">{t('highAvailability')}</h4>
                                             <label className="flex items-center gap-2 text-sm text-gray-300">
                                                 <input type="checkbox" checked={config.ha_enabled} onChange={e => setConfig({...config, ha_enabled: e.target.checked})} className="rounded" />
-                                                {t('enableHa') || 'Add to Proxmox Native HA'}
+                                                {t('enableHa')}
                                             </label>
                                         </div>
                                         {config.ha_enabled && (
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">{t('haGroup') || 'HA Group'}</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('haGroup')}</label>
                                                 <input type="text" value={config.ha_group} onChange={e => setConfig({...config, ha_group: e.target.value})}
-                                                    placeholder={t('defaultGroup') || 'Default group (leave empty)'}
+                                                    placeholder={t('defaultGroup')}
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                             </div>
                                         )}
@@ -1671,19 +1671,19 @@
                                     <div className="space-y-2">
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.unprivileged} onChange={e => setConfig({...config, unprivileged: e.target.checked})} className="rounded" />
-                                            Unprivileged Container ({t('recommendedInline') || 'recommended'})
+                                            {t('unprivilegedContainer')} ({t('recommendedInline')})
                                         </label>
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.nesting} onChange={e => setConfig({...config, nesting: e.target.checked})} className="rounded" />
-                                            Nesting ({t('dockerSupport') || 'Docker support'})
+                                            {t('nesting')} ({t('dockerSupport')})
                                         </label>
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.keyctl} onChange={e => setConfig({...config, keyctl: e.target.checked})} className="rounded" />
-                                            keyctl ({t('keyctlDesc') || 'required for Docker in unprivileged LXC'})
+                                            keyctl ({t('keyctlDesc')})
                                         </label>
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.fuse} onChange={e => setConfig({...config, fuse: e.target.checked})} className="rounded" />
-                                            FUSE ({t('fuseDesc') || 'allow FUSE mounts inside container'})
+                                            FUSE ({t('fuseDesc')})
                                         </label>
                                         <label className="flex items-center gap-2 text-sm text-gray-300">
                                             <input type="checkbox" checked={config.onboot} onChange={e => setConfig({...config, onboot: e.target.checked})} className="rounded" />
@@ -1700,17 +1700,17 @@
                                         <h4 className="text-sm font-medium text-white mb-3">DNS</h4>
                                         <div className="space-y-3">
                                             <div>
-                                                <label className="block text-xs text-gray-400 mb-1">{t('dnsDomain') || 'DNS Domain'}</label>
+                                                <label className="block text-xs text-gray-400 mb-1">{t('dnsDomain')}</label>
                                                 <input type="text" value={config.dns_domain} onChange={e => setConfig({...config, dns_domain: e.target.value})}
-                                                    placeholder={t('useHostSettings') || 'Use host settings'}
+                                                    placeholder={t('useHostSettings')}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-gray-400 mb-1">{t('dnsServers') || 'DNS Servers'}</label>
+                                                <label className="block text-xs text-gray-400 mb-1">{t('dnsServers')}</label>
                                                 <input type="text" value={config.dns_servers} onChange={e => setConfig({...config, dns_servers: e.target.value})}
-                                                    placeholder={t('useHostSettings') || 'Use host settings (e.g. 8.8.8.8 1.1.1.1)'}
+                                                    placeholder={t('useHostSettings')}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
-                                                <p className="text-xs text-gray-500 mt-1">{t('dnsServersHint') || 'Space-separated list of DNS servers'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('dnsServersHint')}</p>
                                             </div>
                                         </div>
                                     </div>
@@ -1734,16 +1734,16 @@
                                     <span className={`corp-vm-type-pill ${isQemu ? '' : 'lxc'}`}>{isQemu ? 'VM' : 'CT'}</span>
                                     <div className="corp-vm-modal-title-block">
                                         <h2 className="corp-vm-modal-title">
-                                            {isQemu ? (t('createVm') || 'Create VM') : (t('createContainer') || 'Create Container')}
+                                            {isQemu ? (t('createVm')) : (t('createContainer'))}
                                         </h2>
                                         <div className="corp-vm-modal-meta">
                                             <span>{isQemu ? 'QEMU/KVM' : 'LXC'}</span>
                                             <span className="corp-meta-sep">·</span>
-                                            <span>{t('step') || 'Step'} {activeStep + 1} / {steps.length}</span>
+                                            <span>{t('step')} {activeStep + 1} / {steps.length}</span>
                                             {nextVmid && (
                                                 <>
                                                     <span className="corp-meta-sep">·</span>
-                                                    <span>{t('vmid') || 'VMID'} {nextVmid}</span>
+                                                    <span>{t('vmid')} {nextVmid}</span>
                                                 </>
                                             )}
                                         </div>
@@ -1751,7 +1751,7 @@
                                 </div>
                                 <div className="corp-vm-modal-actions">
                                     <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost">
-                                        {t('close') || 'Close'}
+                                        {t('close')}
                                     </button>
                                 </div>
                             </div>
@@ -1759,7 +1759,7 @@
                             {nodes.length === 0 && (
                                 <div className="corp-vm-modal-warning">
                                     <Icons.AlertTriangle className="w-3.5 h-3.5" />
-                                    <span>{t('noNodesAvailable') || 'No nodes available. Please wait for cluster data to load.'}</span>
+                                    <span>{t('noNodesAvailable')}</span>
                                 </div>
                             )}
 
@@ -1785,7 +1785,7 @@
                             <div className="corp-vm-modal-body" style={{ minHeight: '320px' }}>
                                 {storageList.length === 0 && config.node && (
                                     <p style={{ fontSize: '11.5px', color: 'var(--corp-text-muted)', margin: '0 0 12px' }}>
-                                        {t('loadingStorage') || 'Loading storage list...'} ({t('node') || 'Node'}: {config.node})
+                                        {t('loadingStorage')} ({t('node')}: {config.node})
                                     </p>
                                 )}
                                 {renderStepContent()}
@@ -1795,7 +1795,7 @@
                                 Was Cancel directly next to Next which is a misclick footgun. */}
                             <div className="corp-vm-modal-footer">
                                 <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost">
-                                    {t('cancel') || 'Cancel'}
+                                    {t('cancel')}
                                 </button>
                                 <div style={{ display: 'flex', gap: '8px' }}>
                                     <button
@@ -1803,14 +1803,14 @@
                                         disabled={activeStep === 0}
                                         className="corp-vm-btn corp-vm-btn-ghost"
                                     >
-                                        {t('back') || 'Back'}
+                                        {t('back')}
                                     </button>
                                     {activeStep < steps.length - 1 ? (
                                         <button
                                             onClick={() => { if (validateStep(activeStep)) setActiveStep(activeStep + 1); }}
                                             className="corp-vm-btn corp-vm-btn-primary"
                                         >
-                                            {t('next') || 'Next'}
+                                            {t('next')}
                                         </button>
                                     ) : (
                                         <button
@@ -1819,7 +1819,7 @@
                                             className="corp-vm-btn corp-vm-btn-create"
                                         >
                                             {loading && <Icons.RotateCw className="w-3.5 h-3.5" />}
-                                            {isQemu ? (t('createVm') || 'Create VM') : (t('createContainer') || 'Create Container')}
+                                            {isQemu ? (t('createVm')) : (t('createContainer'))}
                                         </button>
                                     )}
                                 </div>
@@ -1851,7 +1851,7 @@
                         {nodes.length === 0 && (
                             <div className="p-4 bg-yellow-500/10 border-b border-yellow-500/30">
                                 <p className="text-yellow-400 text-sm">
-                                    ⚠️ {t('noNodesAvailable') || 'No nodes available. Please wait for cluster data to load.'}
+                                    ⚠️ {t('noNodesAvailable')}
                                 </p>
                             </div>
                         )}
@@ -1860,7 +1860,7 @@
                         {storageList.length === 0 && config.node && (
                             <div className="px-6 pt-2">
                                 <p className="text-xs text-gray-500">
-                                    {t('loadingStorage') || 'Lade Storage-Liste...'} (Node: {config.node})
+                                    {t('loadingStorage')} ({t('node')}: {config.node})
                                 </p>
                             </div>
                         )}
@@ -1999,7 +1999,7 @@
                         onClick={e => e.stopPropagation()}
                     >
                         <div className="p-6 border-b border-proxmox-border">
-                            <h2 className="text-xl font-bold text-white">{reconfigureConfig ? (t('reconfigureCluster') || 'Re-configure Cluster') : t('addCluster')}</h2>
+                            <h2 className="text-xl font-bold text-white">{reconfigureConfig ? (t('reconfigureCluster')) : t('addCluster')}</h2>
                             <div className="flex gap-2 mt-3">
                                 {[
                                     { id: 'proxmox', label: 'Proxmox VE', icon: Icons.Server, active: 'bg-orange-500/20 text-orange-400 border-orange-500/40', inactive: 'bg-proxmox-dark text-gray-500 border-transparent hover:text-gray-300 hover:border-proxmox-border' },
@@ -2035,7 +2035,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('clusterName')}</label>
                                     <input type="text" value={config.name} onChange={e => setConfig({...config, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
-                                        placeholder={t('clusterNamePlaceholder') || 'Production Cluster'} />
+                                        placeholder={t('clusterNamePlaceholder')} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2048,13 +2048,13 @@
                                 We never go through a reverse proxy — direct TLS to PVE, no MitM-able middlebox. */}
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('apiPort') || 'Proxmox API Port'}</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('apiPort')}</label>
                                     <input type="number" value={config.api_port}
                                         onChange={e => setConfig({...config, api_port: parseInt(e.target.value) || 8006})}
                                         min="1" max="65535"
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
                                         placeholder="8006" />
-                                    <p className="mt-1 text-xs text-gray-500">{t('apiPortHint') || 'Default 8006. Override only if PVE listens on a non-standard port. Direct TLS only — no reverse-proxy support.'}</p>
+                                    <p className="mt-1 text-xs text-gray-500">{t('apiPortHint')}</p>
                                 </div>
                             </div>
                             <div className="grid grid-cols-2 gap-4">
@@ -2063,13 +2063,13 @@
                                     <input type="text" value={config.user} onChange={e => setConfig({...config, user: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
                                         placeholder="root@pam or user@pam!tokenid" />
-                                    <p className="mt-1 text-xs text-gray-500">{t('apiTokenHint') || 'For API tokens use: user@realm!tokenid'}</p>
+                                    <p className="mt-1 text-xs text-gray-500">{t('apiTokenHint')}</p>
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('passwordOrToken') || t('password')}</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('passwordOrToken')}</label>
                                     <input type="password" value={config.pass} onChange={e => setConfig({...config, pass: e.target.value})}
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors"
-                                        placeholder={config.user.includes('!') ? (t('tokenSecret') || 'Token Secret') : (t('password') || 'Password')} />
+                                        placeholder={config.user.includes('!') ? (t('tokenSecret')) : (t('password'))} />
                                 </div>
                             </div>
                             
@@ -2078,7 +2078,7 @@
                                     <div className="flex items-start gap-3">
                                         <Icons.AlertTriangle className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
                                         <div>
-                                            <p className="font-medium text-yellow-200">{t('apiTokenWarningTitle') || 'API Token Authentication'}</p>
+                                            <p className="font-medium text-yellow-200">{t('apiTokenWarningTitle')}</p>
                                             <p className="text-sm text-yellow-300/80 mt-1">{t('apiTokenWarningDesc')}</p>
                                         </div>
                                     </div>
@@ -2089,11 +2089,11 @@
                                 <button type="button" onClick={() => setShowSshSettings(!showSshSettings)}
                                     className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors">
                                     <Icons.ChevronRight className={`w-3 h-3 transform transition-transform ${showSshSettings ? 'rotate-90' : ''}`} />
-                                    {t('sshKeyOptional') || 'SSH Key (Optional)'}
+                                    {t('sshKeyOptional')}
                                 </button>
                                 {showSshSettings && (
                                     <div className="mt-4 space-y-4 p-4 bg-proxmox-dark/50 rounded-lg">
-                                        <p className="text-xs text-gray-400">{t('sshKeyExplanation') || 'SSH features use your login credentials automatically. Only add a key here if password authentication is disabled on your nodes.'}</p>
+                                        <p className="text-xs text-gray-400">{t('sshKeyExplanation')}</p>
                                         <textarea value={config.ssh_key} onChange={e => setConfig({...config, ssh_key: e.target.value})}
                                             className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors font-mono text-xs"
                                             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows={4} />
@@ -2132,7 +2132,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('clusterName')}</label>
                                     <input type="text" value={xcpConfig.name} onChange={e => setXcpConfig({...xcpConfig, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder={t('xcpngNamePlaceholder') || 'XCP-ng Pool 1'} />
+                                        placeholder={t('xcpngNamePlaceholder')} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2152,15 +2152,15 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
                                     <input type="password" value={xcpConfig.pass} onChange={e => setXcpConfig({...xcpConfig, pass: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition-colors"
-                                        placeholder={t('password') || 'Password'} />
+                                        placeholder={t('password')} />
                                 </div>
                             </div>
 
                             <div className="p-3 bg-cyan-500/10 border border-cyan-500/20 rounded-lg">
                                 <p className="text-xs text-cyan-300/70">
-                                    {t('xcpngConnectHint') || 'Connect to the pool master host. XAPI port 443 is used by default.'}
+                                    {t('xcpngConnectHint')}
                                 </p>
-                                <p className="text-xs text-amber-400/80 mt-1.5 font-medium">{t('techPreview') || 'Tech Preview'} - {t('xcpngTechPreviewNote') || 'Some features may be limited or subject to change.'}</p>
+                                <p className="text-xs text-amber-400/80 mt-1.5 font-medium">{t('techPreview')} - {t('xcpngTechPreviewNote')}</p>
                             </div>
 
                             <div className="space-y-4 pt-4 border-t border-proxmox-border">
@@ -2184,7 +2184,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('name')}</label>
                                     <input type="text" value={pbsConfig.name} onChange={e => setPbsConfig({...pbsConfig, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400 transition-colors"
-                                        placeholder={t('pbsNamePlaceholder') || 'Backup Server 1'} />
+                                        placeholder={t('pbsNamePlaceholder')} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2204,25 +2204,25 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
                                     <input type="password" value={pbsConfig.password} onChange={e => setPbsConfig({...pbsConfig, password: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400 transition-colors"
-                                        placeholder={t('password') || 'Password'} />
+                                        placeholder={t('password')} />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('port') || 'Port'}</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('port')}</label>
                                     <input type="number" value={pbsConfig.port} onChange={e => setPbsConfig({...pbsConfig, port: parseInt(e.target.value) || 8007})}
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:outline-none focus:border-blue-400 transition-colors" />
                                 </div>
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-300 mb-2">Fingerprint ({t('optional') || 'Optional'})</label>
+                                <label className="block text-sm font-medium text-gray-300 mb-2">{t('fingerprint')} ({t('optional')})</label>
                                 <input type="text" value={pbsConfig.fingerprint} onChange={e => setPbsConfig({...pbsConfig, fingerprint: e.target.value})}
                                     className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400 transition-colors font-mono text-xs"
                                     placeholder="XX:XX:XX:..." />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-300 mb-2">{t('notes') || 'Notes'} ({t('optional') || 'Optional'})</label>
+                                <label className="block text-sm font-medium text-gray-300 mb-2">{t('notes')} ({t('optional')})</label>
                                 <input type="text" value={pbsConfig.notes} onChange={e => setPbsConfig({...pbsConfig, notes: e.target.value})}
                                     className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-400 transition-colors"
-                                    placeholder={t('pbsNotesPlaceholder') || 'Backup for production cluster'} />
+                                    placeholder={t('pbsNotesPlaceholder')} />
                             </div>
 
                             {/* NS Apr 2026: SSH settings — needed for running apt upgrade on the PBS host */}
@@ -2230,28 +2230,28 @@
                                 <button type="button" onClick={() => setShowPbsSshSettings(!showPbsSshSettings)}
                                     className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors">
                                     <Icons.ChevronRight className={`w-3 h-3 transform transition-transform ${showPbsSshSettings ? 'rotate-90' : ''}`} />
-                                    {t('sshKeyOptional') || 'SSH (Optional — needed for remote update)'}
+                                    {t('sshKeyOptional')}
                                 </button>
                                 {showPbsSshSettings && (
                                     <div className="mt-4 space-y-3 p-4 bg-proxmox-dark/50 rounded-lg">
                                         <p className="text-xs text-gray-400">
-                                            {t('pbsSshHint') || 'SSH is only used for the Update Manager (apt dist-upgrade). If left blank, PegaProx falls back to the PBS web password. Use a dedicated key if your PBS has password-login disabled.'}
+                                            {t('pbsSshHint')}
                                         </p>
                                         <div className="grid grid-cols-2 gap-3">
                                             <div>
-                                                <label className="block text-xs text-gray-400 mb-1">{t('sshUser') || 'SSH User'}</label>
+                                                <label className="block text-xs text-gray-400 mb-1">{t('sshUser')}</label>
                                                 <input type="text" value={pbsConfig.ssh_user} onChange={e => setPbsConfig({...pbsConfig, ssh_user: e.target.value})}
                                                     placeholder="root"
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-gray-400 mb-1">{t('sshPort') || 'SSH Port'}</label>
+                                                <label className="block text-xs text-gray-400 mb-1">{t('sshPort')}</label>
                                                 <input type="number" value={pbsConfig.ssh_port} onChange={e => setPbsConfig({...pbsConfig, ssh_port: parseInt(e.target.value) || 22})}
                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                             </div>
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">{t('sshPrivateKey') || 'SSH Private Key'}</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('sshPrivateKey')}</label>
                                             <textarea value={pbsConfig.ssh_key} onChange={e => setPbsConfig({...pbsConfig, ssh_key: e.target.value})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 font-mono text-xs"
                                                 placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows={4} />
@@ -2268,7 +2268,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('name')}</label>
                                     <input type="text" value={vmwConfig.name} onChange={e => setVmwConfig({...vmwConfig, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                        placeholder={t('esxiNamePlaceholder') || 'ESXi Host 1'} />
+                                        placeholder={t('esxiNamePlaceholder')} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2288,10 +2288,10 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
                                     <input type="password" value={vmwConfig.password} onChange={e => setVmwConfig({...vmwConfig, password: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                        placeholder={t('password') || 'Password'} />
+                                        placeholder={t('password')} />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('port') || 'Port'}</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('port')}</label>
                                     <input type="number" value={vmwConfig.port} onChange={e => setVmwConfig({...vmwConfig, port: parseInt(e.target.value) || 443})}
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:outline-none focus:border-emerald-400 transition-colors" />
                                 </div>
@@ -2300,10 +2300,10 @@
                                 <Toggle checked={vmwConfig.ssl_verify} onChange={v => setVmwConfig({...vmwConfig, ssl_verify: v})} label={t('sslVerification')} />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-300 mb-2">{t('notes') || 'Notes'} ({t('optional') || 'Optional'})</label>
+                                <label className="block text-sm font-medium text-gray-300 mb-2">{t('notes')} ({t('optional')})</label>
                                 <input type="text" value={vmwConfig.notes} onChange={e => setVmwConfig({...vmwConfig, notes: e.target.value})}
                                     className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                    placeholder={t('esxiNotesPlaceholder') || 'Production ESXi host'} />
+                                    placeholder={t('esxiNotesPlaceholder')} />
                             </div>
                             </>)}
 
@@ -2319,10 +2319,10 @@
                                         : connectionType === 'xcpng' ? 'bg-cyan-500 hover:bg-cyan-600'
                                         : 'bg-proxmox-orange hover:bg-orange-600'
                                     }`}>
-                                    {loading ? t('connecting') : reconfigureConfig ? (t('reconfigure') || 'Re-configure')
-                                        : connectionType === 'pbs' ? (t('addPbsServer') || 'Add Backup Server')
-                                        : connectionType === 'vmware' ? (t('addVmwareServer') || 'Add VMware')
-                                        : connectionType === 'xcpng' ? (t('addXcpngPool') || 'Add XCP-ng Pool')
+                                    {loading ? t('connecting') : reconfigureConfig ? (t('reconfigure'))
+                                        : connectionType === 'pbs' ? (t('addPbsServer'))
+                                        : connectionType === 'vmware' ? (t('addVmwareServer'))
+                                        : connectionType === 'xcpng' ? (t('addXcpngPool'))
                                         : t('addCluster')}
                                 </button>
                             </div>
@@ -2385,11 +2385,11 @@
             // Generate password policy hint text
             const getPasswordPolicyHint = () => {
                 const hints = [];
-                hints.push(`${t('minChars') || 'Min.'} ${passwordPolicy.min_length} ${t('characters') || 'characters'}`);
-                if (passwordPolicy.require_uppercase) hints.push(t('uppercase') || 'uppercase');
-                if (passwordPolicy.require_lowercase) hints.push(t('lowercase') || 'lowercase');
-                if (passwordPolicy.require_numbers) hints.push(t('numbers') || 'number');
-                if (passwordPolicy.require_special) hints.push(t('specialChar') || 'special char');
+                hints.push(`${t('minChars')} ${passwordPolicy.min_length} ${t('characters')}`);
+                if (passwordPolicy.require_uppercase) hints.push(t('uppercase'));
+                if (passwordPolicy.require_lowercase) hints.push(t('lowercase'));
+                if (passwordPolicy.require_numbers) hints.push(t('numbers'));
+                if (passwordPolicy.require_special) hints.push(t('specialChar'));
                 return hints.join(', ');
             };
             
@@ -2419,13 +2419,13 @@
                 if (!file) return;
 
                 if (!file.type || !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) {
-                    addToast('Please choose a PNG, JPEG, GIF, or WebP image', 'error');
+                    addToast(t('avatarImageTypeInvalid'), 'error');
                     e.target.value = '';
                     return;
                 }
 
                 if (file.size > 512 * 1024) {
-                    addToast('Avatar image must be 512 KB or smaller', 'error');
+                    addToast(t('avatarImageTooLarge'), 'error');
                     e.target.value = '';
                     return;
                 }
@@ -2452,12 +2452,12 @@
                     const data = await response.json().catch(() => ({}));
                     if (response.ok) {
                         updateCurrentUser({ avatar_url: data.avatar_url || '' });
-                        addToast('Avatar updated', 'success');
+                        addToast(t('avatarUpdated'), 'success');
                     } else {
-                        addToast(data.error || 'Failed to update avatar', 'error');
+                        addToast(data.error || t('avatarUpdateFailed'), 'error');
                     }
                 } catch (err) {
-                    addToast(err.message || 'Failed to update avatar', 'error');
+                    addToast(err.message || t('avatarUpdateFailed'), 'error');
                 }
                 setAvatarUploading(false);
                 e.target.value = '';
@@ -2474,12 +2474,12 @@
                     const data = await response.json().catch(() => ({}));
                     if (response.ok) {
                         updateCurrentUser({ avatar_url: '' });
-                        addToast('Avatar removed', 'success');
+                        addToast(t('avatarRemoved'), 'success');
                     } else {
-                        addToast(data.error || 'Failed to remove avatar', 'error');
+                        addToast(data.error || t('avatarRemoveFailed'), 'error');
                     }
                 } catch (err) {
-                    addToast(err.message || 'Failed to remove avatar', 'error');
+                    addToast(err.message || t('avatarRemoveFailed'), 'error');
                 }
                 setAvatarUploading(false);
             };
@@ -2519,11 +2519,11 @@
                         setCreatedToken(data.token);
                         setNewTokenName(''); setNewTokenRole(''); setNewTokenExpiry('');
                         fetchTokens();
-                        if (addToast) addToast('Token created - copy it now, it won\'t be shown again!', 'warning');
+                        if (addToast) addToast(t('apiTokenCreatedCopyNow'), 'warning');
                     } else {
-                        if (addToast) addToast(data.error || 'Failed to create token', 'error');
+                        if (addToast) addToast(data.error || t('apiTokenCreateFailed'), 'error');
                     }
-                } catch (e) { if (addToast) addToast('Network error', 'error'); }
+                } catch (e) { if (addToast) addToast(t('networkError'), 'error'); }
                 finally { setLoading(false); }
             };
             
@@ -2536,9 +2536,9 @@
                     });
                     if (response.ok) {
                         fetchTokens();
-                        if (addToast) addToast('Token revoked', 'success');
+                        if (addToast) addToast(t('apiTokenRevoked'), 'success');
                     }
-                } catch (e) { if (addToast) addToast('Failed to revoke token', 'error'); }
+                } catch (e) { if (addToast) addToast(t('apiTokenRevokeFailed'), 'error'); }
             };
             
             const copyToken = (token) => {
@@ -2595,7 +2595,7 @@
                         // change (incl. the current one). Force a hard redirect to login so the
                         // user can't keep clicking in a dead UI.
                         if (data.relogin_required) {
-                            addToast(t('passwordChangedReloginRequired') || 'Password changed — please sign in again.', 'success');
+                            addToast(t('passwordChangedReloginRequired'), 'success');
                             // give the toast a breath, then hard-reload to wash out in-memory state
                             setTimeout(() => { window.location.href = '/'; }, 1200);
                         } else {
@@ -2603,7 +2603,7 @@
                         }
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error', 'error');
+                        addToast(data.error || t('error'), 'error');
                     }
                 } catch (err) {
                     addToast(t('connectionError'), 'error');
@@ -2624,7 +2624,7 @@
                         setSetupData(await response.json());
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error', 'error');
+                        addToast(data.error || t('error'), 'error');
                     }
                 } catch (err) {
                     addToast(t('connectionError'), 'error');
@@ -2664,7 +2664,7 @@
             
             const handleDisable2FA = async () => {
                 if (!disablePassword) {
-                    addToast(t('currentPassword') + ' required', 'error');
+                    addToast(t('currentPasswordRequired'), 'error');
                     return;
                 }
                 
@@ -2686,7 +2686,7 @@
                         fetch2FAStatus();
                     } else {
                         const data = await response.json();
-                        addToast(data.error || 'Error', 'error');
+                        addToast(data.error || t('error'), 'error');
                     }
                 } catch (err) {
                     addToast(t('connectionError'), 'error');
@@ -2726,7 +2726,7 @@
                                     </div>
                                 </div>
                                 <div className="corp-vm-modal-actions">
-                                    <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close') || 'Close'}>
+                                    <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close')}>
                                         <Icons.X />
                                     </button>
                                 </div>
@@ -2753,7 +2753,7 @@
                                 className={tabCls(activeTab === 'appearance')}
                             >
                                 <Icons.Palette />
-                                {t('appearance') || 'Appearance'}
+                                {t('appearance')}
                             </button>
                             <button
                                 onClick={() => setActiveTab('security')}
@@ -2767,14 +2767,14 @@
                                 className={tabCls(activeTab === 'tokens')}
                             >
                                 <Icons.Key />
-                                API Tokens
+                                {t('apiTokens')}
                             </button>
                             <button
                                 onClick={() => setActiveTab('sessions')}
                                 className={tabCls(activeTab === 'sessions')}
                             >
                                 <Icons.Monitor />
-                                {t('activeSessions') || 'Sessions'}
+                                {t('activeSessions')}
                             </button>
                         </div>
                         
@@ -2787,11 +2787,11 @@
                                         <div className="flex items-center gap-4">
                                             <UserAvatar user={user} sizeClass="w-16 h-16" textClass="text-xl" />
                                             <div className="flex-1 min-w-0">
-                                                <h3 className="text-white font-medium">{t('profilePicture') || 'Profile Picture'}</h3>
+                                                <h3 className="text-white font-medium">{t('profilePicture')}</h3>
                                                 <p className="text-sm text-gray-400">
-                                                    {t('profilePictureDesc') || 'Upload a personal avatar for the dashboard and user management overview.'}
+                                                    {t('profilePictureDesc')}
                                                 </p>
-                                                <p className="text-xs text-gray-500 mt-1">PNG, JPEG, GIF, or WebP up to 512 KB.</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('avatarImageRequirements')}</p>
                                             </div>
                                         </div>
                                         <div className="flex flex-wrap gap-2 mt-4">
@@ -2808,7 +2808,7 @@
                                                 className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium disabled:opacity-50 flex items-center gap-2"
                                             >
                                                 {avatarUploading ? <Icons.Loader className="w-4 h-4 animate-spin" /> : <Icons.Upload className="w-4 h-4" />}
-                                                {user?.avatar_url ? (t('changeAvatar') || 'Change Avatar') : (t('uploadAvatar') || 'Upload Avatar')}
+                                                {user?.avatar_url ? (t('changeAvatar')) : (t('uploadAvatar'))}
                                             </button>
                                             {user?.avatar_url && (
                                                 <button
@@ -2816,7 +2816,7 @@
                                                     disabled={avatarUploading}
                                                     className="px-4 py-2 bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 rounded-lg text-sm font-medium disabled:opacity-50"
                                                 >
-                                                    {t('removeAvatar') || 'Remove Avatar'}
+                                                    {t('removeAvatar')}
                                                 </button>
                                             )}
                                         </div>
@@ -2825,10 +2825,10 @@
                                     <div>
                                         <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
                                             <Icons.Palette />
-                                            {t('chooseTheme') || 'Choose Your Theme'}
+                                            {t('chooseTheme')}
                                         </h3>
                                         <p className="text-sm text-gray-400 mb-4">
-                                            {t('themePersonal') || 'Select a theme that suits your style. This setting is personal and only affects your account.'}
+                                            {t('themePersonal')}
                                         </p>
                                     </div>
                                     
@@ -2842,9 +2842,9 @@
                                                         setSelectedTheme(key);
                                                         const result = await updatePreferences({ theme: key });
                                                         if (result.success) {
-                                                            addToast(`${t('themeChanged') || 'Theme changed to'} ${theme.name}`, 'success');
+                                                            addToast(`${t('themeChanged')} ${theme.name}`, 'success');
                                                         } else {
-                                                            addToast(t('themeChangeFailed') || 'Failed to save theme', 'error');
+                                                            addToast(t('themeChangeFailed'), 'error');
                                                         }
                                                     }}
                                                     className={`p-3 rounded-xl border-2 transition-all hover:scale-105 ${
@@ -2893,17 +2893,17 @@
                                     <div className="pt-4 border-t border-proxmox-border">
                                         <h3 className="text-sm font-semibold text-white mb-1 flex items-center gap-2">
                                             <Icons.Grid className="w-4 h-4" />
-                                            {t('layoutStyle') || 'Layout Style'}
+                                            {t('layoutStyle')}
                                         </h3>
                                         <p className="text-xs text-gray-400 mb-3">
-                                            {t('layoutStyleDesc') || 'Choose between modern dashboard or corporate enterprise style.'}
+                                            {t('layoutStyleDesc')}
                                         </p>
                                         <div className="grid grid-cols-3 gap-3">
                                             {/* Modern layout card */}
                                             <button
                                                 onClick={async () => {
                                                     const result = await updatePreferences({ ui_layout: 'modern', theme: 'proxmoxDark' });
-                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutModern') || 'Modern'}`, 'success');
+                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutModern')}`, 'success');
                                                 }}
                                                 className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
                                                     (user?.ui_layout || 'modern') === 'modern'
@@ -2929,8 +2929,8 @@
                                                     )}
                                                 </div>
                                                 <div className="text-center">
-                                                    <span className="text-xs font-medium">{t('layoutModern') || 'Modern'}</span>
-                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutModernDesc') || 'Cards, animations, gradients'}</p>
+                                                    <span className="text-xs font-medium">{t('layoutModern')}</span>
+                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutModernDesc')}</p>
                                                 </div>
                                             </button>
                                             {/* Corporate layout card */}
@@ -2938,7 +2938,7 @@
                                                 onClick={async () => {
                                                     const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
                                                     const result = await updatePreferences({ ui_layout: 'corporate', theme: corpTheme });
-                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporate') || 'Corporate'}`, 'success');
+                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporate')}`, 'success');
                                                 }}
                                                 className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
                                                     user?.ui_layout === 'corporate'
@@ -2968,8 +2968,8 @@
                                                     )}
                                                 </div>
                                                 <div className="text-center">
-                                                    <span className="text-xs font-medium">{t('layoutCorporate') || 'Corporate'}</span>
-                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                                    <span className="text-xs font-medium">{t('layoutCorporate')}</span>
+                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc')}</p>
                                                 </div>
                                             </button>
                                             {/* Cloud layout card (Preview) — NS 2026-06-05 */}
@@ -3001,8 +3001,8 @@
                                                     )}
                                                 </div>
                                                 <div className="text-center">
-                                                    <span className="text-xs font-medium inline-flex items-center justify-center gap-1">☁️ Cloud <span className="text-[8px] px-1 rounded" style={{ background: 'rgba(34,211,238,0.15)', color: '#22d3ee' }}>PREVIEW</span></span>
-                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCloudDesc') || 'Airy card grid, teal'}</p>
+                                                    <span className="text-xs font-medium inline-flex items-center justify-center gap-1">☁️ Cloud <span className="text-[8px] px-1 rounded" style={{ background: 'rgba(34,211,238,0.15)', color: '#22d3ee' }}>{t('preview').toUpperCase()}</span></span>
+                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCloudDesc')}</p>
                                                 </div>
                                             </button>
                                         </div>
@@ -3016,8 +3016,8 @@
                                                     <Icons.Layers className="w-5 h-5 text-blue-400" />
                                                 </div>
                                                 <div>
-                                                    <p className="text-sm font-medium text-white">{t('taskbarAutoExpand') || 'TaskBar Auto-Expand'}</p>
-                                                    <p className="text-xs text-gray-400">{t('taskbarAutoExpandDesc') || 'Automatically expand TaskBar when new tasks start'}</p>
+                                                    <p className="text-sm font-medium text-white">{t('taskbarAutoExpand')}</p>
+                                                    <p className="text-xs text-gray-400">{t('taskbarAutoExpandDesc')}</p>
                                                 </div>
                                             </div>
                                             <button
@@ -3028,7 +3028,7 @@
                                                     console.log('TaskBar auto-expand toggle:', currentValue, '->', newValue);
                                                     const result = await updatePreferences({ taskbar_auto_expand: newValue });
                                                     if (result.success) {
-                                                        addToast(newValue ? (t('taskbarAutoExpandEnabled') || 'TaskBar auto-expand enabled') : (t('taskbarAutoExpandDisabled') || 'TaskBar auto-expand disabled'), 'success');
+                                                        addToast(newValue ? (t('taskbarAutoExpandEnabled')) : (t('taskbarAutoExpandDisabled')), 'success');
                                                     }
                                                 }}
                                                 className={`relative w-12 h-6 rounded-full transition-colors ${
@@ -3051,15 +3051,15 @@
                                                     <Icons.Tag className="w-5 h-5 text-blue-400" />
                                                 </div>
                                                 <div>
-                                                    <p className="text-sm font-medium text-white">{t('showVmidSidebar') || 'Show VM IDs in sidebar'}</p>
-                                                    <p className="text-xs text-gray-400">{t('showVmidSidebarDesc') || 'Show the VMID next to each guest name in the sidebar tree'}</p>
+                                                    <p className="text-sm font-medium text-white">{t('showVmidSidebar')}</p>
+                                                    <p className="text-xs text-gray-400">{t('showVmidSidebarDesc')}</p>
                                                 </div>
                                             </div>
                                             <button
                                                 onClick={async () => {
                                                     const newValue = !(user?.sidebar_show_vmid === true);
                                                     const result = await updatePreferences({ sidebar_show_vmid: newValue });
-                                                    if (result.success) addToast(newValue ? (t('showVmidSidebarOn') || 'VM IDs shown in sidebar') : (t('showVmidSidebarOff') || 'VM IDs hidden'), 'success');
+                                                    if (result.success) addToast(newValue ? (t('showVmidSidebarOn')) : (t('showVmidSidebarOff')), 'success');
                                                 }}
                                                 className={`relative w-12 h-6 rounded-full transition-colors ${user?.sidebar_show_vmid === true ? 'bg-proxmox-orange' : 'bg-gray-600'}`}
                                             >
@@ -3076,8 +3076,8 @@
                                                 <div className="flex items-center gap-3">
                                                     <Icons.Globe className="w-5 h-5 text-gray-400" />
                                                     <div>
-                                                        <p className="text-sm font-medium text-white">{t('languagePreference') || 'Language'}</p>
-                                                        <p className="text-xs text-gray-500">{t('languagePreferenceDesc') || 'Interface language for your account'}</p>
+                                                        <p className="text-sm font-medium text-white">{t('languagePreference')}</p>
+                                                        <p className="text-xs text-gray-500">{t('languagePreferenceDesc')}</p>
                                                     </div>
                                                 </div>
                                                 <LanguageSwitcher />
@@ -3091,13 +3091,13 @@
                                             <div className="flex items-center gap-3">
                                                 <Icons.Clock className="w-5 h-5 text-gray-400" />
                                                 <div>
-                                                    <p className="text-sm font-medium text-white">{t('timeFormat') || 'Time Format'}</p>
-                                                    <p className="text-xs text-gray-500">{t('timeFormatDesc') || '24-hour or 12-hour clock'}</p>
+                                                    <p className="text-sm font-medium text-white">{t('timeFormat')}</p>
+                                                    <p className="text-xs text-gray-500">{t('timeFormatDesc')}</p>
                                                 </div>
                                             </div>
                                             <select
                                                 value={localStorage.getItem('pegaprox-time-format') || '24h'}
-                                                onChange={e => { localStorage.setItem('pegaprox-time-format', e.target.value); addToast(t('timeFormatChanged') || 'Time format updated', 'success'); }}
+                                                onChange={e => { localStorage.setItem('pegaprox-time-format', e.target.value); addToast(t('timeFormatChanged'), 'success'); }}
                                                 className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
                                             >
                                                 <option value="24h">24h (14:30)</option>
@@ -3112,8 +3112,8 @@
                                             <div className="flex items-center gap-3">
                                                 <Icons.Eye className="w-5 h-5 text-gray-400" />
                                                 <div>
-                                                    <p className="text-sm font-medium text-white">{t('disableNoiseOverlay') || 'Disable noise overlay'}</p>
-                                                    <p className="text-xs text-gray-500">{t('disableNoiseOverlayDesc') || 'Removes the subtle dithering texture on the modern layout'}</p>
+                                                    <p className="text-sm font-medium text-white">{t('disableNoiseOverlay')}</p>
+                                                    <p className="text-xs text-gray-500">{t('disableNoiseOverlayDesc')}</p>
                                                 </div>
                                             </div>
                                             <button
@@ -3122,7 +3122,7 @@
                                                     localStorage.setItem('pegaprox-noise', off ? 'off' : 'on');
                                                     if (off) document.body.setAttribute('data-noise', 'off');
                                                     else document.body.removeAttribute('data-noise');
-                                                    addToast(t('settingsSaved') || 'Saved', 'success');
+                                                    addToast(t('settingsSaved'), 'success');
                                                 }}
                                                 className={`relative w-12 h-6 rounded-full transition-colors ${
                                                     localStorage.getItem('pegaprox-noise') === 'off' ? 'bg-emerald-500' : 'bg-proxmox-dark border border-proxmox-border'
@@ -3144,8 +3144,8 @@
                                             <div className="flex items-center gap-3">
                                                 <Icons.Lock className="w-5 h-5 text-gray-400" />
                                                 <div>
-                                                    <p className="text-sm font-medium text-white">{t('stableVncMode') || 'Stable VNC Mode'}</p>
-                                                    <p className="text-xs text-gray-500">{t('stableVncModeDesc') || 'Wraps VNC frames in AES-256-GCM. Use if your network has HTTPS inspection (CrowdStrike, Palo Alto, Zscaler, …) interfering with the VNC console.'}</p>
+                                                    <p className="text-sm font-medium text-white">{t('stableVncMode')}</p>
+                                                    <p className="text-xs text-gray-500">{t('stableVncModeDesc')}</p>
                                                 </div>
                                             </div>
                                             <button
@@ -3153,7 +3153,7 @@
                                                     const next = !stableVncOn;
                                                     setStableVncOn(next);
                                                     localStorage.setItem('pegaprox-vnc-stable-mode', next ? '1' : '0');
-                                                    addToast((t('settingsSaved') || 'Saved') + (next ? ' — ' + (t('stableVncModeNote') || 'next VNC connect uses encrypted tunnel') : ''), 'success');
+                                                    addToast((t('settingsSaved')) + (next ? ' — ' + (t('stableVncModeNote')) : ''), 'success');
                                                 }}
                                                 // MK Apr 2026 — flex-shrink-0 + ml-4: long description text was
                                                 // squeezing the toggle; the knob looked off-position because the
@@ -3175,8 +3175,8 @@
                                             <div className="flex items-center gap-3">
                                                 <Icons.Server className="w-5 h-5 text-gray-400" />
                                                 <div>
-                                                    <p className="text-sm font-medium text-white">{t('collapseNodesDefault') || 'Collapse nodes by default'}</p>
-                                                    <p className="text-xs text-gray-500">{t('collapseNodesDefaultDesc') || 'Cluster overview starts with every node minimized'}</p>
+                                                    <p className="text-sm font-medium text-white">{t('collapseNodesDefault')}</p>
+                                                    <p className="text-xs text-gray-500">{t('collapseNodesDefaultDesc')}</p>
                                                 </div>
                                             </div>
                                             <button
@@ -3188,7 +3188,7 @@
                                                     localStorage.removeItem('pegaprox-collapsed-nodes');
                                                     // poke the dashboard to re-sync state without requiring a refresh
                                                     try { window.dispatchEvent(new CustomEvent('pegaprox-node-collapse-pref', { detail: next })); } catch(_) {}
-                                                    addToast(next ? (t('collapseNodesOn') || 'Nodes will start collapsed') : (t('collapseNodesOff') || 'Nodes will start expanded'), 'success');
+                                                    addToast(next ? (t('collapseNodesOn')) : (t('collapseNodesOff')), 'success');
                                                 }}
                                                 className={`relative w-12 h-6 rounded-full transition-colors ${localStorage.getItem('pegaprox-nodes-default-collapsed') === '1' ? 'bg-proxmox-orange' : 'bg-proxmox-border'}`}
                                             >
@@ -3200,7 +3200,7 @@
                                     </div>
 
                                     <p className="text-xs text-gray-500 text-center">
-                                        {t('themeNote') || 'Theme changes are applied immediately and saved to your account.'}
+                                        {t('themeNote')}
                                     </p>
                                 </div>
                             )}
@@ -3217,8 +3217,8 @@
                                         </h3>
                                         {user?.auth_source && user.auth_source !== 'local' ? (
                                             <div className="text-sm text-gray-400 py-2">
-                                                <p>{t('passwordManagedExternally') || `Your password is managed by ${user.auth_source === 'ldap' ? 'LDAP / Active Directory' : user.auth_source === 'entra' ? 'Microsoft Entra ID' : 'your identity provider'}.`}</p>
-                                                <p className="text-xs text-gray-500 mt-1">{t('passwordManagedExternallyHint') || 'Please change your password directly in your directory service.'}</p>
+                                                <p>{t('passwordManagedExternally')}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('passwordManagedExternallyHint')}</p>
                                             </div>
                                         ) : (
                                         <form onSubmit={handleChangePassword} className="space-y-3">
@@ -3267,7 +3267,7 @@
                                         
                                         {!twoFAStatus.available ? (
                                             <p className="text-gray-400 text-sm">
-                                                2FA nicht verfügbar. Server benötigt: pip install pyotp qrcode[pil]
+                                                {t('twoFAUnavailableServerRequires')} pip install pyotp qrcode[pil]
                                             </p>
                                         ) : twoFAStatus.enabled ? (
                                             <div className="space-y-3">
@@ -3296,7 +3296,7 @@
                                             <div className="space-y-4">
                                                 <p className="text-gray-400 text-sm">{t('scan2FACode')}</p>
                                                 <div className="flex justify-center">
-                                                    <img src={setupData.qr_code} alt="QR Code" className="rounded-lg" />
+                                                    <img src={setupData.qr_code} alt={t('dashboardQrCode')} className="rounded-lg" />
                                                 </div>
                                                 <div className="text-center">
                                                     <p className="text-xs text-gray-500 mb-1">{t('secretKey')}:</p>
@@ -3353,7 +3353,7 @@
                                         <div className="p-4 bg-yellow-500/10 border border-yellow-500/40 rounded-xl">
                                             <div className="flex items-start gap-2 mb-2">
                                                 <Icons.AlertTriangle className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
-                                                <p className="text-yellow-400 font-medium text-sm">{t('copyTokenNow') || 'Copy your token now - it won\'t be shown again!'}</p>
+                                                <p className="text-yellow-400 font-medium text-sm">{t('copyTokenNow')}</p>
                                             </div>
                                             <div className="flex items-center gap-2 mt-2">
                                                 <code className="flex-1 bg-proxmox-dark px-3 py-2 rounded text-sm text-green-400 font-mono break-all select-all border border-proxmox-border">{createdToken}</code>
@@ -3551,10 +3551,10 @@
 
             const register = async () => {
                 if (!('credentials' in navigator) || !navigator.credentials.create) {
-                    addToast?.(t('browserNoWebauthn') || 'Browser does not support WebAuthn', 'error');
+                    addToast?.(t('browserNoWebauthn'), 'error');
                     return;
                 }
-                const name = (window.prompt(t('hardwareKeyNamePrompt') || 'Name this key (e.g. "YubiKey 5C Nano, office")', 'Security Key') || '').trim();
+                const name = (window.prompt(t('hardwareKeyNamePrompt'), 'Security Key') || '').trim();
                 if (!name) return;
                 setRegistering(true);
                 try {
@@ -3597,31 +3597,31 @@
                     });
                     const d = await finishRes.json().catch(() => ({}));
                     if (!finishRes.ok) throw new Error(d.error || `finish failed (${finishRes.status})`);
-                    addToast?.(t('hardwareKeyAdded') || `Security key "${name}" added`, 'success');
+                    addToast?.(t('hardwareKeyAdded'), 'success');
                     load();
                 } catch (e) {
                     console.error('webauthn register:', e);
-                    addToast?.((e && e.message) || 'Registration failed', 'error');
+                    addToast?.((e && e.message) || t('hardwareKeyRegistrationFailed'), 'error');
                 }
                 setRegistering(false);
             };
 
             const del = async (c) => {
-                if (!window.confirm(t('confirmRemoveKey') || `Remove "${c.name}"?`)) return;
+                if (!window.confirm(t('confirmRemoveKey'))) return;
                 const r = await fetch(`${API_URL}/webauthn/credentials/${c.id}`, {
                     method: 'DELETE', credentials: 'include', headers: getAuthHeaders()
                 });
-                if (r.ok) { addToast?.(t('hardwareKeyRemoved') || 'Key removed', 'success'); load(); }
-                else addToast?.('Delete failed', 'error');
+                if (r.ok) { addToast?.(t('hardwareKeyRemoved'), 'success'); load(); }
+                else addToast?.(t('deleteFailed'), 'error');
             };
 
             if (!available) {
                 return (
                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4">
                         <h3 className="text-white font-medium mb-2 flex items-center gap-2">
-                            <Icons.Key /> {t('hardwareKeys') || 'Hardware Keys'}
+                            <Icons.Key /> {t('hardwareKeys')}
                         </h3>
-                        <p className="text-sm text-gray-400">{t('webauthnUnavailable') || 'WebAuthn is not available on this server (fido2 library not installed).'}</p>
+                        <p className="text-sm text-gray-400">{t('webauthnUnavailable')}</p>
                     </div>
                 );
             }
@@ -3630,33 +3630,33 @@
                 <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4">
                     <div className="flex items-center justify-between mb-3">
                         <h3 className="text-white font-medium flex items-center gap-2">
-                            <Icons.Key /> {t('hardwareKeys') || 'Hardware Keys'}
+                            <Icons.Key /> {t('hardwareKeys')}
                             <span className="text-xs text-gray-500 ml-1">({creds.length})</span>
                         </h3>
                         <button onClick={register} disabled={registering || !hostUsable}
                             className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium disabled:opacity-50 flex items-center gap-2">
                             {registering ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Plus className="w-3.5 h-3.5" />}
-                            {t('addHardwareKey') || 'Add Security Key'}
+                            {t('addHardwareKey')}
                         </button>
                     </div>
                     {!hostUsable && hostReason === 'ip_literal' && (
                         <div className="mb-3 p-3 rounded-lg flex items-start gap-2" style={{background: 'rgba(239, 192, 6, 0.08)', borderLeft: '3px solid #efc006'}}>
                             <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" style={{color: '#efc006'}} />
                             <div className="text-xs text-yellow-300">
-                                <div className="font-medium">{t('webauthnIpHostTitle') || 'WebAuthn cannot be used with IP addresses'}</div>
+                                <div className="font-medium">{t('webauthnIpHostTitle')}</div>
                                 <div className="text-gray-400 mt-0.5">
-                                    {t('webauthnIpHostDesc') || 'Open PegaProx via its hostname (e.g. https://localhost:5000 or https://your-server.local:5000) to register a security key. IP addresses like 127.0.0.1 are not allowed by the WebAuthn spec.'}
+                                    {t('webauthnIpHostDesc')}
                                 </div>
                             </div>
                         </div>
                     )}
                     <p className="text-xs text-gray-500 mb-3">
-                        {t('hardwareKeysDesc') || 'YubiKey, Nitrokey, Touch ID, Windows Hello. Use as second factor during login. Register multiple keys so you have a backup.'}
+                        {t('hardwareKeysDesc')}
                     </p>
                     {loading && creds.length === 0 ? (
                         <div className="text-center py-4"><Icons.RotateCw className="w-4 h-4 animate-spin text-gray-400 mx-auto" /></div>
                     ) : creds.length === 0 ? (
-                        <p className="text-gray-500 text-sm text-center py-4">{t('noHardwareKeys') || 'No hardware keys registered yet.'}</p>
+                        <p className="text-gray-500 text-sm text-center py-4">{t('noHardwareKeys')}</p>
                     ) : (
                         <div className="space-y-2">
                             {creds.map(c => (
@@ -3667,14 +3667,14 @@
                                     <div className="flex-1 min-w-0">
                                         <div className="text-sm text-white font-medium truncate">{c.name}</div>
                                         <div className="text-xs text-gray-500 flex flex-wrap gap-3">
-                                            <span>{t('added') || 'Added'}: {fmtTs(c.created_at)}</span>
-                                            <span>{t('lastUsed') || 'Last used'}: {c.last_used_at ? fmtTs(c.last_used_at) : (t('never') || 'Never')}</span>
+                                            <span>{t('added')}: {fmtTs(c.created_at)}</span>
+                                            <span>{t('lastUsed')}: {c.last_used_at ? fmtTs(c.last_used_at) : (t('never'))}</span>
                                             {c.transports?.length > 0 && <span className="text-gray-400">{c.transports.join(', ')}</span>}
                                         </div>
                                     </div>
                                     <button onClick={() => del(c)}
                                         className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded text-xs flex items-center gap-1">
-                                        <Icons.Trash /> {t('remove') || 'Remove'}
+                                        <Icons.Trash /> {t('remove')}
                                     </button>
                                 </div>
                             ))}
@@ -3702,17 +3702,17 @@
             useEffect(() => { load(); }, []);
 
             const revoke = async (s) => {
-                if (s.is_current && !window.confirm(t('confirmRevokeCurrent') || 'Revoking this session will log you out. Continue?')) return;
+                if (s.is_current && !window.confirm(t('confirmRevokeCurrent'))) return;
                 const r = await fetch(`${API_URL}/user/sessions/${encodeURIComponent(s.revoke_token)}`, {
                     method: 'DELETE', credentials: 'include', headers: getAuthHeaders()
                 });
                 const d = await r.json().catch(() => ({}));
                 if (r.ok) {
-                    addToast?.(t('sessionRevoked') || 'Session revoked', 'success');
+                    addToast?.(t('sessionRevoked'), 'success');
                     if (d.self_logout) { window.location.href = '/'; return; }
                     load();
                 } else {
-                    addToast?.(d.error || 'Revoke failed', 'error');
+                    addToast?.(d.error || t('sessionRevokeFailed'), 'error');
                 }
             };
 
@@ -3727,12 +3727,12 @@
                 <div className="space-y-4">
                     <div className="flex items-center justify-between">
                         <div>
-                            <h3 className="text-lg font-semibold text-white">{t('activeSessions') || 'Active Sessions'}</h3>
-                            <p className="text-sm text-gray-400 mt-1">{t('activeSessionsDesc') || 'Where you are currently signed in. Revoke any session you no longer recognize.'}</p>
+                            <h3 className="text-lg font-semibold text-white">{t('activeSessions')}</h3>
+                            <p className="text-sm text-gray-400 mt-1">{t('activeSessionsDesc')}</p>
                         </div>
                         <button onClick={load} className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg text-sm flex items-center gap-2">
                             <Icons.RefreshCw className={loading ? 'animate-spin' : ''} />
-                            {t('refresh') || 'Refresh'}
+                            {t('refresh')}
                         </button>
                     </div>
                     {loading && sessions.length === 0 ? (
@@ -3740,7 +3740,7 @@
                             <Icons.RotateCw className="w-5 h-5 animate-spin" />
                         </div>
                     ) : sessions.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">{t('noSessions') || 'No active sessions.'}</div>
+                        <div className="text-center text-gray-500 py-8">{t('noSessions')}</div>
                     ) : (
                         <div className="space-y-2">
                             {sessions.map(s => (
@@ -3751,19 +3751,19 @@
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2">
                                             <span className="font-mono text-sm text-white">{s.ip || '—'}</span>
-                                            {s.is_current && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{t('currentSession') || 'this browser'}</span>}
-                                            {s.remember && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">{t('rememberMe') || 'remember me'}</span>}
+                                            {s.is_current && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{t('currentSession')}</span>}
+                                            {s.remember && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">{t('rememberMe')}</span>}
                                         </div>
                                         <div className="text-xs text-gray-400 truncate" title={s.user_agent}>{fmtAgent(s.user_agent)}</div>
                                         <div className="text-xs text-gray-500">
-                                            {t('lastActive') || 'Last active'}: {s.last_activity ? new Date(s.last_activity * 1000).toLocaleString() : '—'}
+                                            {t('lastActive')}: {s.last_activity ? new Date(s.last_activity * 1000).toLocaleString() : '—'}
                                         </div>
                                     </div>
                                     <button onClick={() => revoke(s)}
                                         className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm flex items-center gap-1.5"
-                                        title={t('revokeSession') || 'Revoke this session'}>
+                                        title={t('revokeSession')}>
                                         <Icons.Trash />
-                                        {t('revoke') || 'Revoke'}
+                                        {t('revoke')}
                                     </button>
                                 </div>
                             ))}
