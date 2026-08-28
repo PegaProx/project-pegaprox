@@ -237,6 +237,48 @@ def invalidate_user_ws_tokens(username: str) -> int:
     return len(gone)
 
 
+_SSE_FILTER_MISSING = object()
+
+
+def _serialize_sse_message(update_type, data, cluster_id, timestamp):
+    """One consistent SSE frame — used for the shared broadcast and per-user filtered frames."""
+    return json.dumps({
+        'type': update_type, 'data': data,
+        'cluster_id': cluster_id, 'timestamp': timestamp,
+    }, default=str)
+
+
+def _filtered_resources_frame(resources, cluster_id, username, timestamp):
+    """A per-VM-authorized 'resources' frame for a NON-admin client. Returns the serialized JSON,
+    or None to send nothing (unknown user -> fail closed).
+
+    #736 SSE-ACL rebuild — the 'resources' frame carries the whole cluster VM list, so a client
+    with cluster access but pool-/VM-scoped rights must not receive VMs it can't see (REST already
+    filters per-VM; the SSE stream previously did not). Scale: the caller filters ONLY scoped
+    clients and caches this per DISTINCT username within one broadcast, so it's
+    O(distinct-scoped-users), not O(clients); we fetch a SINGLE user (get_db().get_user), never
+    load_users() — that call is the documented hot-path landmine. user_can_access_vm admin-fast-
+    returns and reads the cached ACL map, so the per-VM pass is a dict lookup per VM.
+    """
+    if not isinstance(resources, list) or not username:
+        return None
+    from pegaprox.core.db import get_db
+    from pegaprox.utils.rbac import user_can_access_vm
+    try:
+        stored = get_db().get_user(username)
+    except Exception:
+        stored = None
+    if not stored:
+        return None
+    user = dict(stored)
+    user['username'] = username
+    allowed = [
+        r for r in resources
+        if user_can_access_vm(user, cluster_id, r.get('vmid'), 'vm.view', r.get('type'))
+    ]
+    return _serialize_sse_message('resources', allowed, cluster_id, timestamp)
+
+
 def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_clusters=None):
     """Broadcast update to SSE clients
 
@@ -257,13 +299,9 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         # broadcast. Caller's intent was "best-effort dispatch", not "verify
         # data shape" — that's a stability/observability win for broadcasts
         # like #413 layer 1 where a wrong arg shape killed the publisher.
+        timestamp = datetime.now().isoformat()
         try:
-            message = json.dumps({
-                'type': update_type,
-                'data': data,
-                'cluster_id': cluster_id,
-                'timestamp': datetime.now().isoformat()
-            }, default=str)
+            message = _serialize_sse_message(update_type, data, cluster_id, timestamp)
         except (TypeError, ValueError) as _ser_err:
             # If even default=str can't coerce, log enough context to find
             # the bad caller, then drop. Don't take the broadcaster down.
@@ -273,8 +311,10 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
             )
             return
 
-        # Limit message size
-        if len(message) > _MAX_BROADCAST_BYTES:
+        # Limit message size. For 'resources' the shared frame (all VMs) can be large, but scoped
+        # clients get a smaller per-user frame, so don't drop the whole broadcast on the shared
+        # size here — each outgoing frame is size-checked in the send loop instead (#736).
+        if update_type != 'resources' and len(message) > _MAX_BROADCAST_BYTES:
             logging.warning(f"SSE message too large ({len(message)} bytes), skipping")
             return
 
@@ -285,6 +325,9 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                                    'ha_event', 'alert', 'ha_status']
         is_cluster_specific = update_type in cluster_specific_events or cluster_id is not None
 
+        # #736 — cache each scoped user's filtered 'resources' frame within this broadcast, so we
+        # filter O(distinct-scoped-users) times rather than once per client.
+        _res_frame_cache = {}
         with sse_clients_lock:
             for client_id, client_info in list(sse_clients.items()):
                 try:
@@ -313,8 +356,24 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                         should_send = True
 
                     if q and should_send:
+                        client_message = message
+                        # #736 — a scoped (non-admin) client must not receive VMs it can't view over
+                        # the 'resources' stream. subscribed is None == admin/all-access (send the
+                        # shared frame); a subscription LIST means a possibly pool-/VM-scoped user,
+                        # so hand them a per-VM-authorized frame (cached per distinct user above).
+                        if update_type == 'resources' and cluster_id is not None and subscribed is not None:
+                            uname = client_info.get('user')
+                            client_message = _res_frame_cache.get(uname, _SSE_FILTER_MISSING)
+                            if client_message is _SSE_FILTER_MISSING:
+                                client_message = _filtered_resources_frame(data, cluster_id, uname, timestamp)
+                                _res_frame_cache[uname] = client_message
+                        if client_message is None:
+                            continue  # unknown user -> fail closed, send nothing
+                        if len(client_message) > _MAX_BROADCAST_BYTES:
+                            logging.warning(f"SSE message too large ({len(client_message)} bytes), skipping")
+                            continue
                         try:
-                            q.put_nowait(message)
+                            q.put_nowait(client_message)
                         except Exception:
                             # R3 (regression scan): a slow client's queue is full, so
                             # this frame is dropped — make it OBSERVABLE instead of
