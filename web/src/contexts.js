@@ -421,9 +421,14 @@
                             return updated;
                         });
                         
-                        // Apply theme immediately AND save to localStorage
+                        // Apply theme immediately AND save to localStorage.
+                        // Corporate renders only corporate-flagged themes — normalize
+                        // exactly like checkSession/useLayout do, so picking a Modern
+                        // theme while in Corporate keeps the saved choice but paints
+                        // the fallback instead of bleeding Modern variables in.
                         if (data.theme && PEGAPROX_THEMES[data.theme]) {
-                            applyTheme(data.theme);
+                            const layoutNow = data.ui_layout || document.body?.dataset?.layout;
+                            applyTheme(layoutNow === 'corporate' ? corporateThemeFor(data.theme) : data.theme);
                         }
                         return { success: true, data };
                     }

@@ -8398,11 +8398,20 @@
             // once) never toggles against a stale closure. The theme lives on the
             // server, so a failed save means no toggle — say so instead of doing
             // nothing silently (the old localStorage toggle always reacted visibly).
+            const corpToggleBusyRef = React.useRef(false);
             const toggleCorpTheme = async () => {
-                const light = document.body?.dataset?.corpTheme === 'light';
-                const result = await updatePreferences({ theme: light ? 'corporateDark' : 'corporateLight' });
-                if (!result?.success) {
-                    addToast(t('themeChangeFailed') || 'Failed to save theme', 'error');
+                // One save at a time: a second activation during the round-trip would
+                // read the not-yet-updated body attribute and submit the same theme.
+                if (corpToggleBusyRef.current) return;
+                corpToggleBusyRef.current = true;
+                try {
+                    const light = document.body?.dataset?.corpTheme === 'light';
+                    const result = await updatePreferences({ theme: light ? 'corporateDark' : 'corporateLight' });
+                    if (!result?.success) {
+                        addToast(t('themeChangeFailed') || 'Failed to save theme', 'error');
+                    }
+                } finally {
+                    corpToggleBusyRef.current = false;
                 }
             };
             const [globalSearchResults, setGlobalSearchResults] = useState(null);
@@ -9428,6 +9437,13 @@
                         return;
                     }
                     if (e.key === 't') {
+                        // Corporate-only, like the header button it mirrors — in the
+                        // other layouts this would overwrite the saved theme. Read the
+                        // DOM instead of isCorporate: this effect only re-registers on
+                        // [selectedCluster], so the closure could be stale. Ignoring
+                        // key repeat keeps a held key from queueing a burst of saves.
+                        if (document.body?.dataset?.layout !== 'corporate') return;
+                        if (e.repeat) return;
                         e.preventDefault();
                         toggleCorpTheme();
                         return;

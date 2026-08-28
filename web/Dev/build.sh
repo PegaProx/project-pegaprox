@@ -91,8 +91,14 @@ echo -e "${GREEN}✓ HTML shell with JSX insert marker${NC}"
 
 # Export the theme registry for the backend (pegaprox/theme_registry.py).
 # PEGAPROX_THEMES in index.html.original is the single source of truth; the
-# backend whitelists import the generated module. Runs in both build modes.
-node "$SCRIPT_DIR/export-themes.js" || exit 1
+# backend whitelists import the generated module. Runs in both build modes,
+# but --restore (in-browser Babel) never required Node — keep it that way and
+# only warn there; the production path errors with install hints further down.
+if command -v node &> /dev/null; then
+    node "$SCRIPT_DIR/export-themes.js" || exit 1
+elif [ "$1" == "--restore" ]; then
+    echo "⚠  node not found — skipping theme-registry export (pegaprox/theme_registry.py may be stale)"
+fi
 
 # --restore flag: dev mode with in-browser Babel compilation
 if [ "$1" == "--restore" ]; then
