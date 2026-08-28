@@ -13,8 +13,28 @@
         // so it must not pop the TaskBar open. Compared against the browser clock.
         const TASKBAR_RECENT_START_S = 120;
 
+        // Normalize a task's start time to Unix seconds. Proxmox sends a Unix
+        // timestamp; XCP-ng (xcpng.py get_tasks) sends datetime.isoformat(), a
+        // naive local-time string — Date.parse reads that as browser-local time,
+        // which matches when server and browser share a timezone. Returns null
+        // when the field is missing or unparseable.
+        function taskStartS(task) {
+            const st = task.starttime;
+            if (typeof st === 'number' && Number.isFinite(st)) return st;
+            if (typeof st === 'string' && st) {
+                const n = Number(st);
+                if (Number.isFinite(n)) return n;
+                const ms = Date.parse(st);
+                if (Number.isFinite(ms)) return ms / 1000;
+            }
+            return null;
+        }
+
         // Returns true if `tasks` contains a running task whose UPID has not been
         // seen before and which started recently. Records every UPID in `seenUpids`.
+        // The window is symmetric: a moderately skewed clock in either direction
+        // still counts a just-started task as recent, while a start time far in
+        // the future (broken clock) doesn't pop the bar.
         function hasNewlyStartedTask(tasks, seenUpids, nowS) {
             let found = false;
             for (const task of tasks) {
@@ -22,8 +42,9 @@
                 const unseen = !seenUpids.has(task.upid);
                 seenUpids.add(task.upid);
                 if (!unseen || task.status !== 'running') continue;
-                const age = task.starttime ? nowS - task.starttime : 0;
-                if (age < TASKBAR_RECENT_START_S) found = true;
+                const startS = taskStartS(task);
+                const age = startS === null ? 0 : nowS - startS;
+                if (Math.abs(age) < TASKBAR_RECENT_START_S) found = true;
             }
             return found;
         }
@@ -38,6 +59,8 @@
             const [filter, setFilter] = useState('all'); // all, running, error, today
             const { getAuthHeaders } = useAuth();
             const seenTaskUpids = React.useRef(new Set());
+            // First populated snapshot per cluster only seeds the seen-set; see effect.
+            const taskSeedRef = React.useRef({ clusterId: undefined, seeded: false });
             
             // LW: Resizable height - Feb 2026
             const [height, setHeight] = useState(() => {
@@ -57,14 +80,39 @@
             // jumps 0→N on mount, on every cluster switch (the parent wipes and
             // refetches `tasks`) and when a running task falls out of the 50-item
             // slice and re-enters — none of which is a task the user just started.
-            // The seen-set is never reset, so a UPID can pop the bar at most once.
+            // The first populated snapshot after mount or a cluster change only
+            // seeds the seen-set (a recent task someone else started must not pop
+            // the bar the moment the page starts observing); expansion decisions
+            // begin with the second snapshot. Within a cluster a UPID can pop the
+            // bar at most once; the set is rebuilt from the current snapshot when
+            // it grows past the cap, so week-long sessions don't accumulate UPIDs.
             React.useEffect(() => {
+                const seed = taskSeedRef.current;
+                if (seed.clusterId !== clusterId) {
+                    seed.clusterId = clusterId;
+                    seed.seeded = false;
+                    seenTaskUpids.current = new Set();
+                }
+                // The parent wipes `tasks` to [] mid-switch; an empty snapshot
+                // carries no information, so it neither seeds nor expands.
+                if (safeTasks.length === 0) return;
                 const nowS = Date.now() / 1000;
                 const started = hasNewlyStartedTask(safeTasks, seenTaskUpids.current, nowS);
-                if (autoExpandEnabled && started) {
-                    setExpanded(true);
+                if (seed.seeded) {
+                    if (autoExpandEnabled && started) {
+                        setExpanded(true);
+                    }
+                } else {
+                    seed.seeded = true;
                 }
-            }, [tasks, autoExpandEnabled]);
+                if (seenTaskUpids.current.size > 2000) {
+                    const current = new Set();
+                    for (const task of safeTasks) {
+                        if (task && task.upid) current.add(task.upid);
+                    }
+                    seenTaskUpids.current = current;
+                }
+            }, [tasks, clusterId, autoExpandEnabled]);
             
             // NS: Handle resize drag
             React.useEffect(() => {
