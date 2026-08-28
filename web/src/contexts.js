@@ -11,13 +11,13 @@
         // backend allowlist in pegaprox/api/users.py and the LanguageSwitcher list.
         const SUPPORTED_LANGS = ['de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh'];
 
-        // Corporate layout only renders its own two themes; anything else saved on
-        // the user (a Modern theme, an empty value) falls back to dark. The saved
+        // Corporate layout only renders themes whose registry entry is flagged
+        // corporate: true (see PEGAPROX_THEMES); anything else saved on the user
+        // (a Modern theme, an empty value) falls back to dark. The saved
         // user.theme is the single source of truth for light vs dark in Corporate —
         // the header toggle, the shortcut and the settings picker all write it.
-        const CORPORATE_THEMES = ['corporateDark', 'corporateLight'];
         function corporateThemeFor(theme) {
-            return CORPORATE_THEMES.includes(theme) ? theme : 'corporateDark';
+            return (PEGAPROX_THEMES[theme] && PEGAPROX_THEMES[theme].corporate) ? theme : 'corporateDark';
         }
 
         // map navigator.language ("en-US", "de-AT", ...) onto a supported code, or null

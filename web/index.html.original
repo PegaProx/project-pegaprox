@@ -633,6 +633,7 @@
                 name: 'Corporate Dark',
                 icon: '🖥️',
                 description: 'Modern corporate dark theme',
+                corporate: true,
                 colors: {
                     primary: '#49afd9',       // Clarity Skyline blue
                     primaryHover: '#3d9bc2',
@@ -650,6 +651,8 @@
                 name: 'Corporate Light',
                 icon: '💻',
                 description: 'Modern corporate light theme',
+                corporate: true,
+                light: true,
                 colors: {
                     primary: '#0079b8',
                     primaryHover: '#005e91',
@@ -666,6 +669,7 @@
             enterpriseBlue: {
                 name: 'Enterprise Blue',
                 icon: '🔷',
+                corporate: true,
                 description: 'Classic enterprise blue theme',
                 colors: {
                     primary: '#005EB8',       // Classic enterprise blue
@@ -717,8 +721,7 @@
             
             // Special handling for light theme - only if body exists
             if (document.body) {
-                const lightThemes = ['corporateLight'];
-                if (lightThemes.includes(themeName)) {
+                if (theme.light === true) {
                     document.body.classList.add('light-theme');
                     document.body.classList.remove('dark-theme');
                 } else {
@@ -731,7 +734,7 @@
                 // state — previously only the toggle set it, so a theme saved on the
                 // server rendered dark on the next load. Modern/Cloud never carry it.
                 if (document.body.dataset.layout === 'corporate') {
-                    document.body.dataset.corpTheme = themeName === 'corporateLight' ? 'light' : '';
+                    document.body.dataset.corpTheme = (theme.corporate && theme.light) ? 'light' : '';
                 }
             }
             

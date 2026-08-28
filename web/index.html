@@ -626,6 +626,7 @@
                 name: 'Corporate Dark',
                 icon: '🖥️',
                 description: 'Modern corporate dark theme',
+                corporate: true,
                 colors: {
                     primary: '#49afd9',       // Clarity Skyline blue
                     primaryHover: '#3d9bc2',
@@ -643,6 +644,8 @@
                 name: 'Corporate Light',
                 icon: '💻',
                 description: 'Modern corporate light theme',
+                corporate: true,
+                light: true,
                 colors: {
                     primary: '#0079b8',
                     primaryHover: '#005e91',
@@ -659,6 +662,7 @@
             enterpriseBlue: {
                 name: 'Enterprise Blue',
                 icon: '🔷',
+                corporate: true,
                 description: 'Classic enterprise blue theme',
                 colors: {
                     primary: '#005EB8',       // Classic enterprise blue
@@ -710,8 +714,7 @@
             
             // Special handling for light theme - only if body exists
             if (document.body) {
-                const lightThemes = ['corporateLight'];
-                if (lightThemes.includes(themeName)) {
+                if (theme.light === true) {
                     document.body.classList.add('light-theme');
                     document.body.classList.remove('dark-theme');
                 } else {
@@ -724,7 +727,7 @@
                 // state — previously only the toggle set it, so a theme saved on the
                 // server rendered dark on the next load. Modern/Cloud never carry it.
                 if (document.body.dataset.layout === 'corporate') {
-                    document.body.dataset.corpTheme = themeName === 'corporateLight' ? 'light' : '';
+                    document.body.dataset.corpTheme = (theme.corporate && theme.light) ? 'light' : '';
                 }
             }
             
@@ -4353,11 +4356,12 @@ acmeChallengeDns:'DNS-01',acmeChallengeHttp:'HTTP-01',acmeChallengeType:'Tipo di
 const LanguageContext=createContext();// NS May 2026 (#389): supported language allowlist — reused for input validation
 // both at init (localStorage) and at switch time. Keep in sync with the
 // backend allowlist in pegaprox/api/users.py and the LanguageSwitcher list.
-const SUPPORTED_LANGS=['de','en','it','fr','es','pt','ko','zh'];// Corporate layout only renders its own two themes; anything else saved on
-// the user (a Modern theme, an empty value) falls back to dark. The saved
+const SUPPORTED_LANGS=['de','en','it','fr','es','pt','ko','zh'];// Corporate layout only renders themes whose registry entry is flagged
+// corporate: true (see PEGAPROX_THEMES); anything else saved on the user
+// (a Modern theme, an empty value) falls back to dark. The saved
 // user.theme is the single source of truth for light vs dark in Corporate —
 // the header toggle, the shortcut and the settings picker all write it.
-const CORPORATE_THEMES=['corporateDark','corporateLight'];function corporateThemeFor(theme){return CORPORATE_THEMES.includes(theme)?theme:'corporateDark';}// map navigator.language ("en-US", "de-AT", ...) onto a supported code, or null
+function corporateThemeFor(theme){return PEGAPROX_THEMES[theme]&&PEGAPROX_THEMES[theme].corporate?theme:'corporateDark';}// map navigator.language ("en-US", "de-AT", ...) onto a supported code, or null
 function _detectBrowserLang(){try{const langs=[];if(navigator.languages&&navigator.languages.length)langs.push(...navigator.languages);if(navigator.language)langs.push(navigator.language);for(const raw of langs){if(typeof raw!=='string'||!raw)continue;const parts=raw.toLowerCase().split(/[-_]/);const base=parts[0];// This project currently ships Simplified Chinese only. Skip
 // explicitly Traditional Chinese preferences so zh-TW/zh-Hant
 // can fall through to the user's next preferred language.

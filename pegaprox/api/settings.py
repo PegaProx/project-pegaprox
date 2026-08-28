@@ -1573,12 +1573,8 @@ def update_server_settings():
 
             # NS: Default theme for new users - Jan 2026
             if 'default_theme' in data:
-                allowed_themes = [
-                    'proxmoxDark', 'proxmoxLight', 'midnight', 'forest', 'rose', 'ocean',
-                    'highContrast', 'dracula', 'nord', 'monokai', 'matrix', 'sunset',
-                    'cyberpunk', 'github', 'solarizedDark', 'gruvbox',
-                    'corporateDark', 'corporateLight', 'enterpriseBlue'  # NS: Corporate themes
-                ]
+                # Generated from PEGAPROX_THEMES (web/index.html.original) by build.sh
+                from pegaprox.theme_registry import ALLOWED_THEMES as allowed_themes
                 if data['default_theme'] in allowed_themes:
                     settings['default_theme'] = data['default_theme']
             
@@ -1786,12 +1782,8 @@ def update_server_settings():
             load_trusted_proxies(trusted_proxies)
             
             # NS: Default theme for new users - Jan 2026
-            allowed_themes = [
-                'proxmoxDark', 'proxmoxLight', 'midnight', 'forest', 'rose', 'ocean',
-                'highContrast', 'dracula', 'nord', 'monokai', 'matrix', 'sunset',
-                'cyberpunk', 'github', 'solarizedDark', 'gruvbox',
-                'corporateDark', 'corporateLight', 'enterpriseBlue'  # NS: Corporate themes
-            ]
+            # Generated from PEGAPROX_THEMES (web/index.html.original) by build.sh
+            from pegaprox.theme_registry import ALLOWED_THEMES as allowed_themes
             if default_theme in allowed_themes:
                 settings['default_theme'] = default_theme
             

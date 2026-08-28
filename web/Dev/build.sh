@@ -89,6 +89,11 @@ if ! grep -q "PEGAPROX_JSX_INSERT" web/index.html.original; then
 fi
 echo -e "${GREEN}✓ HTML shell with JSX insert marker${NC}"
 
+# Export the theme registry for the backend (pegaprox/theme_registry.py).
+# PEGAPROX_THEMES in index.html.original is the single source of truth; the
+# backend whitelists import the generated module. Runs in both build modes.
+node "$SCRIPT_DIR/export-themes.js" || exit 1
+
 # --restore flag: dev mode with in-browser Babel compilation
 if [ "$1" == "--restore" ]; then
     echo ""

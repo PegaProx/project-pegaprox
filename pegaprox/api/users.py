@@ -241,13 +241,9 @@ def update_user_preferences():
     logging.info(f"update_user_preferences: user before update: ui_layout={user.get('ui_layout')}")
     
     # Only allow specific fields to be updated
-    allowed_themes = [
-        'proxmoxDark', 'proxmoxLight', 'midnight', 'forest', 'rose', 'ocean',
-        'highContrast', 'dracula', 'nord', 'monokai', 'matrix', 'sunset',
-        'cyberpunk', 'github', 'solarizedDark', 'gruvbox',
-        'corporateDark', 'corporateLight', 'enterpriseBlue',  # NS: Corporate themes
-        'cloud'  # NS 2026-06-05: Cloud skin (Preview)
-    ]
+    # Generated from PEGAPROX_THEMES in web/index.html.original by
+    # web/Dev/build.sh — the frontend registry is the single source of truth.
+    from pegaprox.theme_registry import ALLOWED_THEMES as allowed_themes
     
     if 'theme' in data:
         theme = data['theme']
