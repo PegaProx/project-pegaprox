@@ -433,10 +433,11 @@ def get_cluster_group_status(group_id):
             try:
                 vms = mgr.get_vm_resources()
                 for vm in vms:
-                    if vm.get('status') == 'running':
+                    status = vm.get('status')
+                    if status == 'running':
                         total_vms_running += 1
                         c_info['vms_running'] += 1
-                    else:
+                    elif status == 'stopped':
                         total_vms_stopped += 1
                         c_info['vms_stopped'] += 1
             except Exception:
@@ -609,4 +610,3 @@ def refresh_node_apt_api(cluster_id, node):
 
 
 # ==================== NODE DISK MANAGEMENT ====================
-

@@ -4416,7 +4416,7 @@
                     ...cluster,
                     nodeCount, onlineNodes, offlineNodes,
                     avgCpu, avgMem, avgStorage,
-                    totalVms, runningVms: vmsRunning,
+                    totalVms, runningVms: vmsRunning, stoppedVms: vmsStopped,
                     healthScore: Math.round(healthScore),
                     hasMetrics: nodeCount > 0 || cluster.connected,
                     lastUpdate,
@@ -4450,6 +4450,7 @@
                 onlineNodes: clusterStats.reduce((acc, c) => acc + c.onlineNodes, 0),
                 totalVms: clusterStats.reduce((acc, c) => acc + c.totalVms, 0),
                 runningVms: clusterStats.reduce((acc, c) => acc + c.runningVms, 0),
+                stoppedVms: clusterStats.reduce((acc, c) => acc + (c.stoppedVms || 0), 0),
                 avgCpu: withMetrics.length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgCpu, 0) / withMetrics.length : 0,
                 avgMem: withMetrics.length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgMem, 0) / withMetrics.length : 0,
                 avgStorage: withMetrics.length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgStorage, 0) / withMetrics.length : 0,
@@ -4660,7 +4661,7 @@
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
-                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> / <b style={{color: 'var(--corp-text-muted)'}}>{totals.totalVms - totals.runningVms}</b></span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> / <b style={{color: 'var(--corp-text-muted)'}}>{totals.stoppedVms}</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
@@ -4706,7 +4707,7 @@
                                                 </span>
                                             </td>
                                             <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
-                                            <td><span style={{color: '#60b515'}}>{cluster.runningVms}</span> / <span style={{color: '#728b9a'}}>{cluster.totalVms - cluster.runningVms}</span></td>
+                                            <td><span style={{color: '#60b515'}}>{cluster.runningVms}</span> / <span style={{color: '#728b9a'}}>{cluster.stoppedVms}</span></td>
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
@@ -4889,7 +4890,7 @@
                             { icon: Icons.Server, value: `${totals.connectedClusters}/${totals.clusters}`, label: t('clusters'), color: 'proxmox-orange', hoverColor: 'proxmox-orange' },
                             { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline') || 'Nodes', color: 'blue-400', hoverColor: 'blue-500' },
                             { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning') || 'Running', color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
-                            { icon: Icons.Square, value: totals.totalVms - totals.runningVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
+                            { icon: Icons.Square, value: totals.stoppedVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
                         ].map((stat, i) => (
                             <div key={i} className={`bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-${stat.hoverColor}/30 transition-all group`}>
                                 <div className="flex items-center gap-3">
@@ -5172,7 +5173,7 @@
                     ...cluster,
                     nodeCount, onlineNodes, offlineNodes,
                     avgCpu, avgMem, avgStorage,
-                    totalVms, runningVms: vmsRunning,
+                    totalVms, runningVms: vmsRunning, stoppedVms: vmsStopped,
                     healthScore: Math.round(healthScore),
                     hasMetrics: nodeCount > 0 || cluster.connected,
                     lastUpdate,
@@ -5218,6 +5219,7 @@
                 onlineNodes: clusterStats.reduce((acc, c) => acc + c.onlineNodes, 0),
                 totalVms: clusterStats.reduce((acc, c) => acc + c.totalVms, 0),
                 runningVms: clusterStats.reduce((acc, c) => acc + c.runningVms, 0),
+                stoppedVms: clusterStats.reduce((acc, c) => acc + (c.stoppedVms || 0), 0),
                 avgCpu: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgCpu, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
                 avgMem: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgMem, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
                 avgStorage: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgStorage, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
@@ -5441,7 +5443,7 @@
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
-                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {t('running')?.toLowerCase()}, <b style={{color: 'var(--corp-text-muted)'}}>{totals.totalVms - totals.runningVms}</b> {t('stopped')?.toLowerCase()}</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {t('running')?.toLowerCase()}, <b style={{color: 'var(--corp-text-muted)'}}>{totals.stoppedVms}</b> {t('stopped')?.toLowerCase()}</span>
                             <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
                             <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
                             <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
@@ -5498,7 +5500,7 @@
                                             <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
                                             <td>
                                                 <span style={{color: 'var(--color-success)'}}>{cluster.runningVms}</span>
-                                                <span style={{color: 'var(--corp-text-muted)'}}> / {cluster.totalVms - cluster.runningVms}</span>
+                                                <span style={{color: 'var(--corp-text-muted)'}}> / {cluster.stoppedVms}</span>
                                             </td>
                                             <td>
                                                 <div className="flex items-center gap-1.5">
@@ -5838,7 +5840,7 @@
                             { icon: Icons.Server, value: `${totals.connectedClusters}/${totals.clusters}`, label: t('clusters'), color: 'proxmox-orange', hoverColor: 'proxmox-orange' },
                             { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline') || 'Nodes', color: 'blue-400', hoverColor: 'blue-500' },
                             { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning') || 'Running', color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
-                            { icon: Icons.Square, value: totals.totalVms - totals.runningVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
+                            { icon: Icons.Square, value: totals.stoppedVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
                         ].map((stat, i) => (
                             <div key={i} className={`bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-${stat.hoverColor}/30 transition-all group`}>
                                 <div className="flex items-center gap-3">
