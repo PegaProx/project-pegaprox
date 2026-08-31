@@ -17,8 +17,11 @@ if [ "$1" = "configure" ]; then
 
     chown pegaprox:pegaprox /var/lib/pegaprox
     chmod 750 /var/lib/pegaprox
-    chown pegaprox:pegaprox /usr/lib/pegaprox/pegaprox/api/.ssh_ws_server.py
-    chmod +x /usr/lib/pegaprox/pegaprox/api/.ssh_ws_server.py
+    # NB: .ssh_ws_server.py is NOT shipped in the package and is NOT written here —
+    # it's generated at runtime into a writable dir (the package's api/ is root-owned
+    # read-only for the service user, so vms.py falls back to a temp dir). The old
+    # chown/chmod on it was a leftover from when it was tracked (54dbca4) and made the
+    # postinst — and thus the whole appliance build — fail with "cannot access".
 
     systemctl enable pegaprox.service
     systemctl restart pegaprox.service || true

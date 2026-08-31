@@ -52,7 +52,6 @@
     "misc/grafana/pegaprox_grafana_dashboard_v1.1.json",
     "misc/proxmox-lxc-appliance-creator.sh",
     "pegaprox/__init__.py",
-    "pegaprox/api/.ssh_ws_server.py",
     "pegaprox/api/__init__.py",
     "pegaprox/api/alerts.py",
     "pegaprox/api/audit_search.py",
