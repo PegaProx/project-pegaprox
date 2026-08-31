@@ -4839,7 +4839,7 @@
                                                             });
                                                             
                                                             // Parse Proxmox boot order: [[legacy=]<[acdn]{1,4}>] [,order=<dev[;dev...]>]
-                                                            // legacy chars: a=any disk, c=bootdisk, d=cdrom, n=net
+                                                            // legacy chars: a=floppy, c=hard disk (bootdisk), d=cdrom, n=network
                                                             const bootDevices = [];
                                                             if (currentBoot) {
                                                                 const parts = currentBoot.split(',');
@@ -4872,18 +4872,8 @@
                                                                         allBootableDevices.forEach(d => {
                                                                             if (d.match(/^net\d+$/) && !bootDevices.includes(d)) bootDevices.push(d);
                                                                         });
-                                                                    } else if (ch >= 'a' && ch <= 'z') {
-                                                                        // a-m = additional disks beyond bootdisk (scsi1+)
-                                                                        const idx = ch.charCodeAt(0) - 97;
-                                                                        const diskNum = idx + 1;
-                                                                        for (const prefix of ['scsi', 'virtio', 'sata']) {
-                                                                            const devId = `${prefix}${diskNum}`;
-                                                                            if (allBootableDevices.includes(devId) && !bootDevices.includes(devId)) {
-                                                                                bootDevices.push(devId);
-                                                                                break;
-                                                                            }
-                                                                        }
                                                                     }
+                                                                    // 'a' = floppy — rarely configured, skip if no floppy device exists
                                                                 });
                                                                 
                                                                 // Append order= devices (explicit, take precedence)
