@@ -29,6 +29,7 @@ from collections import deque
 from typing import Optional
 
 import gevent
+import websocket   # #713 — WebSocketTimeoutException for the bounded pve_ws read slice
 
 # defaults
 SESSION_IDLE_TTL = 90.0          # seconds without activity → reaper closes
@@ -62,6 +63,8 @@ class VncPollSession:
         self._buf = deque()
         self._buf_lock = threading.Lock()
         self._buf_cond = threading.Condition(self._buf_lock)
+        # #713 — serialise SSL_read (the pump) and SSL_write (send) on the one pve_ws
+        self._pve_io_lock = threading.Lock()
         self._pump = gevent.spawn(self._pump_loop)
 
     # ─────────────────────────────────────────────────────────────────
@@ -75,15 +78,22 @@ class VncPollSession:
     # ─────────────────────────────────────────────────────────────────
     def _pump_loop(self):
         """Copy bytes from PVE into buffer until the connection drops."""
-        # Blocking recv. websocket-client is gevent-friendly thanks to monkey
-        # patching, so this yields the greenlet during socket waits.
+        # #713 — bounded read slice (was settimeout(None), a blocking recv): pve_ws is
+        # one SSL object and send() does an SSL_write on it; a concurrent SSL_read +
+        # SSL_write splices a TLS record and pveproxy tears the session with a tlsv1
+        # decode error. Funnel both through _pve_io_lock and release it between reads.
+        # websocket-client's frame_buffer is resumable across a timed-out recv → no drop.
         try:
-            self.pve_ws.settimeout(None)
+            self.pve_ws.settimeout(0.05)
         except Exception:
             pass
         while not self._closed:
             try:
-                data = self.pve_ws.recv()
+                with self._pve_io_lock:
+                    data = self.pve_ws.recv()
+            except websocket.WebSocketTimeoutException:
+                gevent.sleep(0)   # empty slice — yield so a pending send() takes the lock
+                continue
             except Exception as e:
                 logging.debug(f"[VncPoll {self.poll_id[:8]}] pve recv ended: {e}")
                 break
@@ -118,8 +128,10 @@ class VncPollSession:
         if self.crypto_session is not None:
             raw = self.crypto_session.decrypt(raw)
         self.bytes_sent += len(raw)
-        # send_binary on websocket-client = ws frame opcode 0x2
-        self.pve_ws.send_binary(raw)
+        # send_binary on websocket-client = ws frame opcode 0x2. #713 — under the
+        # shared lock so it never overlaps the pump's SSL_read on the same pve_ws.
+        with self._pve_io_lock:
+            self.pve_ws.send_binary(raw)
         return len(raw)
 
     def recv(self, max_wait: float = RECV_LONG_POLL_DEFAULT) -> list:

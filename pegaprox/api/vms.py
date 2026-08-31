@@ -7978,18 +7978,27 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         _apply_vnc_socket_options(pve_ws.sock)
 
         print(f"✓ Connected to Proxmox!")
-        pve_ws.settimeout(0.1)
-        
+        # #713 — pve_ws is a single SSL object; a concurrent SSL_read (the reader
+        # greenlet below) and SSL_write (this main loop / a keepalive) splice a TLS
+        # record and pveproxy tears the session with a tlsv1 decode-error. The
+        # standalone vnc_handler leg already funnels its pve_ws ops through one lock;
+        # the reverse-proxy / geventwebsocket console lands HERE on the main port and
+        # needed the same. Bounded 50ms read slice so the writer isn't starved on an
+        # empty recv.
+        pve_ws.settimeout(0.05)
+        _pve_io_lock = threading.Lock()
+
         bytes_sent = 0
         bytes_received = 0
-        
+
         # Greenlet to read from Proxmox and send to client
         def proxmox_to_client():
             nonlocal bytes_received, running
             try:
                 while running:
                     try:
-                        data = pve_ws.recv()
+                        with _pve_io_lock:
+                            data = pve_ws.recv()
                         if data:
                             bytes_received += len(data)
                             ws.send(data)
@@ -8023,7 +8032,8 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
                     break
                 if data:
                     bytes_sent += len(data)
-                    pve_ws.send(data)
+                    with _pve_io_lock:
+                        pve_ws.send(data)
             except Exception as e:
                 if running:
                     err_str = str(e)
@@ -8967,18 +8977,27 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         _apply_vnc_socket_options(pve_ws.sock)
 
         print(f"✓ Connected!")
-        pve_ws.settimeout(0.1)
-        
+        # #713 — pve_ws is a single SSL object; a concurrent SSL_read (the reader
+        # greenlet below) and SSL_write (this main loop / a keepalive) splice a TLS
+        # record and pveproxy tears the session with a tlsv1 decode-error. The
+        # standalone vnc_handler leg already funnels its pve_ws ops through one lock;
+        # the reverse-proxy / geventwebsocket console lands HERE on the main port and
+        # needed the same. Bounded 50ms read slice so the writer isn't starved on an
+        # empty recv.
+        pve_ws.settimeout(0.05)
+        _pve_io_lock = threading.Lock()
+
         bytes_sent = 0
         bytes_received = 0
-        
+
         # Greenlet to read from Proxmox and send to client
         def proxmox_to_client():
             nonlocal bytes_received, running
             try:
                 while running:
                     try:
-                        data = pve_ws.recv()
+                        with _pve_io_lock:
+                            data = pve_ws.recv()
                         if data:
                             bytes_received += len(data)
                             ws.send(data)
@@ -9012,7 +9031,8 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
                     break
                 if data:
                     bytes_sent += len(data)
-                    pve_ws.send(data)
+                    with _pve_io_lock:
+                        pve_ws.send(data)
             except TimeoutError:
                 gsleep(0.01)
             except Exception as e:
