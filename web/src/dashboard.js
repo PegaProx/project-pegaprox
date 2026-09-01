@@ -18781,7 +18781,7 @@
                                                             <>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>CPU</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('cpu') || 'CPU'}</span>
                                                                         <span className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{cpuPct}%</span>
                                                                     </div>
                                                                     <div className={`w-full ${barH} ${isCorporate ? '' : 'bg-proxmox-dark'} ${barRound} overflow-hidden`} style={barBg ? {background: barBg, borderRadius: barRadius} : {}}>
@@ -19342,7 +19342,7 @@
                                                                             {sorted.length > 50 && <div className="text-center py-2 text-xs text-gray-500">Showing 50 of {sorted.length} snapshots</div>}
                                                                         </div>
                                                                     ) : (
-                                                                        <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">No snapshots found</div>
+                                                                        <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">{t('noSnapshots') || 'No snapshots found'}</div>
                                                                     );
                                                                 })()}
                                                             </div>
@@ -22514,19 +22514,19 @@
                                                     </p>
                                                     <div className="grid grid-cols-2 gap-2">
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">SSH User</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('sshUser') || 'SSH User'}</label>
                                                             <input type="text" value={pbsForm.ssh_user || ''} onChange={e => setPbsForm(p => ({...p, ssh_user: e.target.value}))}
                                                                 placeholder="root"
                                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">SSH Port</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('sshPort') || 'SSH Port'}</label>
                                                             <input type="number" value={pbsForm.ssh_port || 22} onChange={e => setPbsForm(p => ({...p, ssh_port: parseInt(e.target.value) || 22}))}
                                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                         </div>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-xs text-gray-400 mb-1">SSH Private Key</label>
+                                                        <label className="block text-xs text-gray-400 mb-1">{t('sshPrivateKey') || 'SSH Private Key'}</label>
                                                         <textarea value={pbsForm.ssh_key || ''} onChange={e => setPbsForm(p => ({...p, ssh_key: e.target.value}))}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 font-mono text-xs"
                                                             placeholder={editingPBS ? "Leave blank to keep existing key" : "-----BEGIN OPENSSH PRIVATE KEY-----"} rows={4} />
