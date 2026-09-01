@@ -18688,10 +18688,10 @@
                                                 {isAdmin && (
                                                     <>
                                                         <button onClick={() => { setEditingPBS(selectedPBS); setPbsForm({ name: selectedPBS.name, host: selectedPBS.host, port: selectedPBS.port, user: selectedPBS.user, password: '********', api_token_id: selectedPBS.api_token_id || '', api_token_secret: selectedPBS.using_api_token ? '********' : '', fingerprint: selectedPBS.fingerprint || '', ssl_verify: selectedPBS.ssl_verify || false, linked_clusters: selectedPBS.linked_clusters || [], notes: selectedPBS.notes || '', ssh_user: selectedPBS.ssh_user || '', ssh_port: selectedPBS.ssh_port || 22, ssh_key: selectedPBS.has_ssh_key ? '********' : '', _showSsh: !!selectedPBS.ssh_user }); setShowAddPBS(true); }} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white hover:border-blue-500/30 transition-all text-sm flex items-center gap-2'}>
-                                                            <Icons.Edit className="w-4 h-4" /> Edit
+                                                            <Icons.Edit className="w-4 h-4" /> {t('edit') || 'Edit'}
                                                         </button>
                                                         <button onClick={() => handleDeletePBS(selectedPBS.id)} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-red-400 hover:border-red-500/30 transition-all text-sm flex items-center gap-2'}>
-                                                            <Icons.Trash className="w-4 h-4" /> Delete
+                                                            <Icons.Trash className="w-4 h-4" /> {t('delete') || 'Delete'}
                                                         </button>
                                                     </>
                                                 )}
@@ -18712,7 +18712,7 @@
                                                     </button>
                                                 )}
                                                 <button onClick={() => { fetchPBSStatus(selectedPBS.id); fetchPBSDatastores(selectedPBS.id); fetchPBSTasks(selectedPBS.id); fetchPBSJobs(selectedPBS.id); }} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white hover:border-proxmox-orange/30 transition-all text-sm flex items-center gap-2'}>
-                                                    <Icons.RefreshCw className={`w-4 h-4 ${pbsLoading ? 'animate-spin' : ''}`} /> Refresh
+                                                    <Icons.RefreshCw className={`w-4 h-4 ${pbsLoading ? 'animate-spin' : ''}`} /> {t('refresh') || 'Refresh'}
                                                 </button>
                                             </div>
                                         </div>
@@ -18724,8 +18724,8 @@
                                         }>
                                             {[
                                                 { id: 'dashboard', label: 'Dashboard', icon: Icons.Activity },
-                                                { id: 'datastores', label: 'Datastores', icon: Icons.Database },
-                                                { id: 'tasks', label: 'Tasks', icon: Icons.ClipboardList },
+                                                { id: 'datastores', label: t('datastores') || 'Datastores', icon: Icons.Database },
+                                                { id: 'tasks', label: t('tasks') || 'Tasks', icon: Icons.ClipboardList },
                                                 { id: 'jobs', label: 'Jobs', icon: Icons.Clock },
                                                 { id: 'reports', label: t('reports') || 'Reports', icon: Icons.FileText },  // MK Apr 2026: #273
                                             ].map(tab => (
@@ -18781,7 +18781,7 @@
                                                             <>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>CPU</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('cpu') || 'CPU'}</span>
                                                                         <span className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{cpuPct}%</span>
                                                                     </div>
                                                                     <div className={`w-full ${barH} ${isCorporate ? '' : 'bg-proxmox-dark'} ${barRound} overflow-hidden`} style={barBg ? {background: barBg, borderRadius: barRadius} : {}}>
@@ -18791,7 +18791,7 @@
                                                                 </div>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>Memory</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('memory') || 'Memory'}</span>
                                                                         <span className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{memPct}%</span>
                                                                     </div>
                                                                     <div className={`w-full ${barH} bg-proxmox-dark ${barRound} overflow-hidden`} style={barBg ? {background: barBg, borderRadius: barRadius} : {}}>
@@ -18811,7 +18811,7 @@
                                                                 </div>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>Uptime</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('uptime') || 'Uptime'}</span>
                                                                         <Icons.Clock className="w-4 h-4" style={{color: 'var(--corp-text-muted)'}} />
                                                                     </div>
                                                                     <div className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{days}d {hours}h {mins}m</div>
@@ -18824,7 +18824,7 @@
 
                                                 {/* LW: Feb 2026 - datastore cards */}
                                                 <div>
-                                                    <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Datastores ({pbsDatastores.length})</h2>
+                                                    <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('datastores') || 'Datastores'} ({pbsDatastores.length})</h2>
                                                     <div className={isCorporate ? 'space-y-0' : 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4'}>
                                                         {pbsDatastores.map(ds => {
                                                             const used = ds.used || 0;
@@ -18865,8 +18865,8 @@
                                                                                 <div className={`h-full rounded-full ${parseFloat(pct) > 85 ? 'bg-red-500' : parseFloat(pct) > 60 ? 'bg-yellow-500' : 'bg-blue-500'}`} style={{width: `${pct}%`}}></div>
                                                                             </div>
                                                                             <div className="grid grid-cols-2 gap-2 text-xs">
-                                                                                <div><span className="text-gray-500">Used:</span> <span className="text-gray-300">{formatBytes(used)}</span></div>
-                                                                                <div><span className="text-gray-500">Total:</span> <span className="text-gray-300">{formatBytes(total)}</span></div>
+                                                                                <div><span className="text-gray-500">{t('used') || 'Used'}:</span> <span className="text-gray-300">{formatBytes(used)}</span></div>
+                                                                                <div><span className="text-gray-500">{t('total') || 'Total'}:</span> <span className="text-gray-300">{formatBytes(total)}</span></div>
                                                                                 {gcStatus.index && (
                                                                                     <>
                                                                                         <div><span className="text-gray-500">Dedup:</span> <span className="text-cyan-400">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span></div>
@@ -18874,13 +18874,13 @@
                                                                                     </>
                                                                                 )}
                                                                                 {detail['total-snapshots'] !== undefined && (
-                                                                                    <div className="col-span-2"><span className="text-gray-500">Snapshots:</span> <span className="text-gray-300">{detail['total-snapshots']}</span></div>
+                                                                                    <div className="col-span-2"><span className="text-gray-500">{t('snapshots') || 'Snapshots'}:</span> <span className="text-gray-300">{detail['total-snapshots']}</span></div>
                                                                                 )}
                                                                             </div>
                                                                             {isAdmin && (
                                                                                 <div className="flex gap-2 mt-3 pt-3 border-t border-proxmox-border/50">
                                                                                     <button onClick={e => { e.stopPropagation(); setPbsActionLoading(p => ({...p, [`gc-${ds.name||ds.store}`]: true})); pbsAction('gc', ds.name || ds.store).finally(() => setPbsActionLoading(p => ({...p, [`gc-${ds.name||ds.store}`]: false}))); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-blue-500/20 transition-all" disabled={pbsActionLoading[`gc-${ds.name||ds.store}`]}>
-                                                                                        {pbsActionLoading[`gc-${ds.name||ds.store}`] ? 'Starting...' : 'GC'}
+                                                                                        {pbsActionLoading[`gc-${ds.name||ds.store}`] ? (t('starting') || 'Starting...') : 'GC'}
                                                                                     </button>
                                                                                     <button onClick={e => { e.stopPropagation(); pbsAction('verify', ds.name || ds.store); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-green-500/20 transition-all">Verify</button>
                                                                                 </div>
@@ -18896,11 +18896,11 @@
                                                 {/* LW: disk info */}
                                                 {pbsDisks.length > 0 && (
                                                     <div>
-                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Disks ({pbsDisks.length})</h2>
+                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('disks') || 'Disks'} ({pbsDisks.length})</h2>
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>Device</th><th className={isCorporate ? '' : 'text-left p-3'}>Type</th><th className={isCorporate ? '' : 'text-left p-3'}>Size</th><th className={isCorporate ? '' : 'text-left p-3'}>Model</th><th className={isCorporate ? '' : 'text-left p-3'}>Status</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('device') || 'Device'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('type') || 'Type'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('size') || 'Size'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('model') || 'Model'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('status') || 'Status'}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsDisks.map((disk, i) => (
@@ -18938,11 +18938,11 @@
                                                 {/* recent tasks */}
                                                 {pbsTasks.length > 0 && (
                                                     <div>
-                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Recent Tasks</h2>
+                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('recentTasks') || 'Recent Tasks'}</h2>
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>Type</th><th className={isCorporate ? '' : 'text-left p-3'}>Status</th><th className={isCorporate ? '' : 'text-left p-3'}>Started</th><th className={isCorporate ? '' : 'text-left p-3'}>Duration</th><th className={isCorporate ? '' : 'text-left p-3'}>Worker</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('type') || 'Type'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('status') || 'Status'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('started') || 'Started'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('duration') || 'Duration'}</th><th className={isCorporate ? '' : 'text-left p-3'}>Worker</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsTasks.slice(0, 10).map((task, i) => (
@@ -18993,7 +18993,7 @@
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>Name</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate In</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate Out</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst In</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst Out</th><th className={isCorporate ? '' : 'text-left p-3'}>Network</th><th className={isCorporate ? '' : 'text-left p-3'}>Timeframe</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('name') || 'Name'}</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate In</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate Out</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst In</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst Out</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('network') || 'Network'}</th><th className={isCorporate ? '' : 'text-left p-3'}>Timeframe</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsTrafficControl.map((tc, i) => (
@@ -19016,7 +19016,7 @@
                                                 {/* Notification Targets */}
                                                 {pbsNotifications && (pbsNotifications.targets?.length > 0 || pbsNotifications.matchers?.length > 0) && (
                                                     <div>
-                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Notifications</h2>
+                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('notifications') || 'Notifications'}</h2>
                                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                                             {pbsNotifications.targets?.length > 0 && (
                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
@@ -19024,19 +19024,19 @@
                                                                         <Icons.Bell className="w-4 h-4 text-blue-400" />Targets ({pbsNotifications.targets.length})
                                                                     </h3>
                                                                     <div className="space-y-2">
-                                                                        {pbsNotifications.targets.map((t, i) => (
+                                                                        {pbsNotifications.targets.map((target, i) => (
                                                                             <div key={i} className="flex items-center justify-between p-2 rounded bg-proxmox-dark/50">
                                                                                 <div className="flex items-center gap-2">
                                                                                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                                                                        t.type === 'sendmail' ? 'bg-green-500/20 text-green-400' :
-                                                                                        t.type === 'smtp' ? 'bg-blue-500/20 text-blue-400' :
-                                                                                        t.type === 'gotify' ? 'bg-purple-500/20 text-purple-400' :
-                                                                                        t.type === 'webhook' ? 'bg-orange-500/20 text-orange-400' :
+                                                                                        target.type === 'sendmail' ? 'bg-green-500/20 text-green-400' :
+                                                                                        target.type === 'smtp' ? 'bg-blue-500/20 text-blue-400' :
+                                                                                        target.type === 'gotify' ? 'bg-purple-500/20 text-purple-400' :
+                                                                                        target.type === 'webhook' ? 'bg-orange-500/20 text-orange-400' :
                                                                                         'bg-gray-500/20 text-gray-400'
-                                                                                    }`}>{t.type || 'unknown'}</span>
-                                                                                    <span className="text-white text-sm">{t.name || t.endpoint || '-'}</span>
+                                                                                    }`}>{target.type || 'unknown'}</span>
+                                                                                    <span className="text-white text-sm">{target.name || target.endpoint || '-'}</span>
                                                                                 </div>
-                                                                                {t.disable && <span className="text-xs text-red-400">disabled</span>}
+                                                                                {target.disable && <span className="text-xs text-red-400">{t('disabled') || 'disabled'}</span>}
                                                                             </div>
                                                                         ))}
                                                                     </div>
@@ -19054,7 +19054,7 @@
                                                                                     <span className="text-white text-sm">{m.name || '-'}</span>
                                                                                     {m.target && <span className="text-xs text-gray-500 ml-2">to: {Array.isArray(m.target) ? m.target.join(', ') : m.target}</span>}
                                                                                 </div>
-                                                                                {m.disable && <span className="text-xs text-red-400">disabled</span>}
+                                                                                {m.disable && <span className="text-xs text-red-400">{t('disabled') || 'disabled'}</span>}
                                                                             </div>
                                                                         ))}
                                                                     </div>
@@ -19067,7 +19067,7 @@
                                                 {/* Syslog (latest entries) */}
                                                 <div>
                                                     <div className="flex items-center justify-between mb-4">
-                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">System Log</h2>
+                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('syslog') || 'Syslog'}</h2>
                                                         <button onClick={() => fetchPBSSyslog(selectedPBS.id, 200)} className="text-xs text-gray-500 hover:text-white transition-colors flex items-center gap-1">
                                                             <Icons.RefreshCw className="w-3 h-3" />Load More
                                                         </button>
@@ -19097,7 +19097,7 @@
                                             <div className="flex gap-6">
                                                 {/* Datastore List */}
                                                 <div className="w-64 shrink-0 space-y-2">
-                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">Datastores</h3>
+                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">{t('datastores') || 'Datastores'}</h3>
                                                     {/* NS May 2026 — Capacity forecast tile */}
                                                     <PbsCapacityForecast pbsId={selectedPBS.id} authFetch={authFetch} apiUrl={API_URL} />
                                                     {pbsDatastores.map(ds => {
@@ -19149,7 +19149,7 @@
                                                                     <div className="flex flex-wrap gap-4 items-start">
                                                                         {pbsNamespaces.length > 0 && (
                                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-3 flex items-center gap-2">
-                                                                                <span className="text-xs text-gray-500">Namespace:</span>
+                                                                                <span className="text-xs text-gray-500">{t('namespace') || 'Namespace'}:</span>
                                                                                 <select className="bg-proxmox-dark border border-proxmox-border rounded px-2 py-1 text-sm text-white"
                                                                                     value={pbsSelectedNs}
                                                                                     onChange={e => {
@@ -19170,12 +19170,12 @@
                                                                                 <span className="text-xs text-gray-500 block mb-1.5">Garbage Collection</span>
                                                                                 <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                                                                                     <span className="text-gray-500">Last GC:</span><span className="text-gray-300">{fmtDate(gcStatus['last-run-endtime'] * 1000)}</span>
-                                                                                    <span className="text-gray-500">Duration:</span><span className="text-gray-300">{gcStatus['last-run-duration'] ? `${Math.floor(gcStatus['last-run-duration'] / 60)}m ${gcStatus['last-run-duration'] % 60}s` : '-'}</span>
+                                                                                    <span className="text-gray-500">{t('duration') || 'Duration'}:</span><span className="text-gray-300">{gcStatus['last-run-duration'] ? `${Math.floor(gcStatus['last-run-duration'] / 60)}m ${gcStatus['last-run-duration'] % 60}s` : '-'}</span>
                                                                                     <span className="text-gray-500">Dedup Factor:</span><span className="text-cyan-400 font-medium">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span>
                                                                                     <span className="text-gray-500">Disk Chunks:</span><span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span>
                                                                                     <span className="text-gray-500">Disk Bytes:</span><span className="text-gray-300">{formatBytes(gcStatus['disk-bytes'] || 0)}</span>
                                                                                     {gcStatus['pending-chunks'] > 0 && (
-                                                                                        <><span className="text-gray-500">Pending:</span><span className="text-yellow-400">{gcStatus['pending-chunks']} chunks ({formatBytes(gcStatus['pending-bytes'] || 0)})</span></>
+                                                                                        <><span className="text-gray-500">{t('pending') || 'Pending'}:</span><span className="text-yellow-400">{gcStatus['pending-chunks']} chunks ({formatBytes(gcStatus['pending-bytes'] || 0)})</span></>
                                                                                     )}
                                                                                     {gcStatus['removed-chunks'] > 0 && (
                                                                                         <><span className="text-gray-500">Removed:</span><span className="text-green-400">{gcStatus['removed-chunks']} chunks ({formatBytes(gcStatus['removed-bytes'] || 0)})</span></>
@@ -19342,7 +19342,7 @@
                                                                             {sorted.length > 50 && <div className="text-center py-2 text-xs text-gray-500">Showing 50 of {sorted.length} snapshots</div>}
                                                                         </div>
                                                                     ) : (
-                                                                        <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">No snapshots found</div>
+                                                                        <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">{t('noSnapshots') || 'No snapshots found'}</div>
                                                                     );
                                                                 })()}
                                                             </div>
@@ -19361,15 +19361,15 @@
                                         {pbsActiveTab === 'tasks' && (
                                             <div className="space-y-4">
                                                 <div className="flex items-center justify-between">
-                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Tasks ({pbsTasks.length})</h3>
+                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('tasks') || 'Tasks'} ({pbsTasks.length})</h3>
                                                     <button onClick={() => fetchPBSTasks(selectedPBS.id)} className="text-xs text-gray-500 hover:text-white transition-colors flex items-center gap-1">
-                                                        <Icons.RefreshCw className="w-3 h-3" /> Refresh
+                                                        <Icons.RefreshCw className="w-3 h-3" /> {t('refresh') || 'Refresh'}
                                                     </button>
                                                 </div>
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                     <table className="w-full text-sm">
                                                         <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                            <th className="text-left p-3">Type</th><th className="text-left p-3">Worker ID</th><th className="text-left p-3">Status</th><th className="text-left p-3">Started</th><th className="text-left p-3">Duration</th><th className="text-left p-3">User</th>
+                                                            <th className="text-left p-3">{t('type') || 'Type'}</th><th className="text-left p-3">Worker ID</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('started') || 'Started'}</th><th className="text-left p-3">{t('duration') || 'Duration'}</th><th className="text-left p-3">{t('user') || 'User'}</th>
                                                         </tr></thead>
                                                         <tbody>
                                                             {pbsTasks.map((task, i) => (
@@ -19426,8 +19426,8 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">ID</th><th className="text-left p-3">Store</th><th className="text-left p-3">Remote</th><th className="text-left p-3">Schedule</th><th className="text-left p-3">Last Run</th>
-                                                                    {isAdmin && <th className="text-right p-3">Actions</th>}
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">Store</th><th className="text-left p-3">Remote</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
+                                                                    {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {(pbsJobs.sync || []).map((job, i) => (
@@ -19435,7 +19435,7 @@
                                                                             <td className="p-3 text-white font-medium">{job.id}</td>
                                                                             <td className="p-3 text-gray-300">{job.store}</td>
                                                                             <td className="p-3 text-gray-400">{job.remote || '-'} / {job['remote-store'] || '-'}</td>
-                                                                            <td className="p-3 text-gray-400">{job.schedule || 'manual'}</td>
+                                                                            <td className="p-3 text-gray-400">{job.schedule || (t('manual') || 'manual')}</td>
                                                                             <td className="p-3 text-gray-500">{job['last-run-endtime'] ? fmtDate(job['last-run-endtime'] * 1000) : '-'}</td>
                                                                             {isAdmin && (
                                                                                 <td className="p-3 text-right">
@@ -19459,16 +19459,16 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">ID</th><th className="text-left p-3">Store</th><th className="text-left p-3">Schedule</th><th className="text-left p-3">Ignore Verified</th><th className="text-left p-3">Last Run</th>
-                                                                    {isAdmin && <th className="text-right p-3">Actions</th>}
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">Store</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">Ignore Verified</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
+                                                                    {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {(pbsJobs.verify || []).map((job, i) => (
                                                                         <tr key={i} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/30">
                                                                             <td className="p-3 text-white font-medium">{job.id}</td>
                                                                             <td className="p-3 text-gray-300">{job.store}</td>
-                                                                            <td className="p-3 text-gray-400">{job.schedule || 'manual'}</td>
-                                                                            <td className="p-3 text-gray-400">{job['ignore-verified'] ? 'Yes' : 'No'}</td>
+                                                                            <td className="p-3 text-gray-400">{job.schedule || (t('manual') || 'manual')}</td>
+                                                                            <td className="p-3 text-gray-400">{job['ignore-verified'] ? (t('yes') || 'Yes') : (t('no') || 'No')}</td>
                                                                             <td className="p-3 text-gray-500">{job['last-run-endtime'] ? fmtDate(job['last-run-endtime'] * 1000) : '-'}</td>
                                                                             {isAdmin && (
                                                                                 <td className="p-3 text-right">
@@ -19492,15 +19492,15 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">ID</th><th className="text-left p-3">Store</th><th className="text-left p-3">Schedule</th><th className="text-left p-3">Retention</th><th className="text-left p-3">Last Run</th>
-                                                                    {isAdmin && <th className="text-right p-3">Actions</th>}
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">Store</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('retention') || 'Retention'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
+                                                                    {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {(pbsJobs.prune || []).map((job, i) => (
                                                                         <tr key={i} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/30">
                                                                             <td className="p-3 text-white font-medium">{job.id}</td>
                                                                             <td className="p-3 text-gray-300">{job.store}</td>
-                                                                            <td className="p-3 text-gray-400">{job.schedule || 'manual'}</td>
+                                                                            <td className="p-3 text-gray-400">{job.schedule || (t('manual') || 'manual')}</td>
                                                                             <td className="p-3 text-gray-400 text-xs">
                                                                                 {[job['keep-last'] && `L:${job['keep-last']}`, job['keep-daily'] && `D:${job['keep-daily']}`, job['keep-weekly'] && `W:${job['keep-weekly']}`, job['keep-monthly'] && `M:${job['keep-monthly']}`, job['keep-yearly'] && `Y:${job['keep-yearly']}`].filter(Boolean).join(' ') || '-'}
                                                                             </td>
@@ -19527,7 +19527,7 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">Name</th><th className="text-left p-3">Host</th><th className="text-left p-3">Auth ID</th><th className="text-left p-3">Fingerprint</th>
+                                                                    <th className="text-left p-3">{t('name') || 'Name'}</th><th className="text-left p-3">{t('host') || 'Host'}</th><th className="text-left p-3">Auth ID</th><th className="text-left p-3">Fingerprint</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsRemotes.map((remote, i) => (
@@ -19573,7 +19573,7 @@
                                                             )}
                                                         </div>
                                                         <div className="flex justify-end gap-2 mt-6">
-                                                            <button onClick={() => setShowPbsPrune(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">Cancel</button>
+                                                            <button onClick={() => setShowPbsPrune(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">{t('cancel') || 'Cancel'}</button>
                                                             <button onClick={() => { pbsAction('prune', showPbsPrune, pbsPruneForm); setShowPbsPrune(null); }} className={`px-4 py-2 rounded-lg text-white text-sm font-medium ${pbsPruneForm.dry_run ? 'bg-blue-500 hover:bg-blue-600' : 'bg-red-500 hover:bg-red-600'}`}>
                                                                 {pbsPruneForm.dry_run ? 'Preview Prune' : 'Execute Prune'}
                                                             </button>
@@ -22431,39 +22431,39 @@
                         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl w-full max-w-lg animate-scale-in max-h-[90vh] overflow-y-auto">
                                 <div className="p-6">
-                                    <h2 className="text-xl font-bold text-white mb-4">{editingPBS ? 'Edit PBS Server' : 'Add Proxmox Backup Server'}</h2>
+                                    <h2 className="text-xl font-bold text-white mb-4">{editingPBS ? (t('editPbsServer') || 'Edit PBS Server') : (t('addPbsServer') || 'Add Backup Server')}</h2>
                                     <div className="space-y-4">
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Name *</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'} *</label>
                                             <input value={pbsForm.name} onChange={e => setPbsForm(p => ({...p, name: e.target.value}))} placeholder="My PBS Server" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                         </div>
                                         <div className="grid grid-cols-3 gap-3">
                                             <div className="col-span-2">
-                                                <label className="block text-sm text-gray-400 mb-1">Host *</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('host') || 'Host'} *</label>
                                                 <input value={pbsForm.host} onChange={e => setPbsForm(p => ({...p, host: e.target.value}))} placeholder="pbs.example.com" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Port</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('port') || 'Port'}</label>
                                                 <input type="number" value={pbsForm.port} onChange={e => setPbsForm(p => ({...p, port: parseInt(e.target.value) || 8007}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                         </div>
 
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <p className="text-xs text-gray-500 mb-3">Provide either Username + Password OR API Token (recommended)</p>
+                                            <p className="text-xs text-gray-500 mb-3">{t('pbsAuthMethodHint') || 'Provide either Username + Password OR API Token (recommended)'}</p>
                                             <div>
-                                                <label className="block text-sm text-gray-400 mb-1">Username</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('username') || 'Username'}</label>
                                                 <input value={pbsForm.user} onChange={e => setPbsForm(p => ({...p, user: e.target.value}))} placeholder="root@pam" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                             <div className="mt-3">
-                                                <label className="block text-sm text-gray-400 mb-1">Password</label>
-                                                <input type="password" value={pbsForm.password} onChange={e => setPbsForm(p => ({...p, password: e.target.value}))} placeholder="Password" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
+                                                <label className="block text-sm text-gray-400 mb-1">{t('password') || 'Password'}</label>
+                                                <input type="password" value={pbsForm.password} onChange={e => setPbsForm(p => ({...p, password: e.target.value}))} placeholder={t('password') || 'Password'} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                             <div className="mt-3">
-                                                <label className="block text-sm text-gray-400 mb-1">API Token ID</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('apiTokenId') || 'API Token ID'}</label>
                                                 <input value={pbsForm.api_token_id} onChange={e => setPbsForm(p => ({...p, api_token_id: e.target.value}))} placeholder="user@pam!tokenname" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                             <div className="mt-3">
-                                                <label className="block text-sm text-gray-400 mb-1">API Token Secret</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('apiTokenSecret') || 'API Token Secret'}</label>
                                                 <input type="password" value={pbsForm.api_token_secret} onChange={e => setPbsForm(p => ({...p, api_token_secret: e.target.value}))} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                         </div>
@@ -22471,7 +22471,7 @@
                                         <div className="border-t border-proxmox-border pt-4">
                                             <div>
                                                 <label className="block text-sm text-gray-400 mb-1 flex items-center justify-between">
-                                                    <span>Fingerprint (optional)</span>
+                                                    <span>{t('fingerprintOptional') || 'Fingerprint (optional)'}</span>
                                                     {/* NS May 2026 — auto-fetch via /api/pbs/probe-fingerprint */}
                                                     <FingerprintFetcher
                                                         host={pbsForm.host}
@@ -22487,14 +22487,14 @@
                                                 <button onClick={() => setPbsForm(p => ({...p, ssl_verify: !p.ssl_verify}))} className={`w-10 h-5 rounded-full transition-all ${pbsForm.ssl_verify ? 'bg-green-500' : 'bg-gray-600'}`}>
                                                     <div className={`w-4 h-4 bg-white rounded-full transition-transform ${pbsForm.ssl_verify ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
                                                 </button>
-                                                <span className="text-sm text-gray-300">Verify SSL Certificate</span>
+                                                <span className="text-sm text-gray-300">{t('sslVerification') || 'SSL Verification'}</span>
                                             </div>
                                         </div>
 
                                         {/* Link to PVE Clusters */}
                                         {clusters.length > 0 && (
                                             <div className="border-t border-proxmox-border pt-4">
-                                                <label className="block text-sm text-gray-400 mb-2">Link to PVE Clusters</label>
+                                                <label className="block text-sm text-gray-400 mb-2">{t('linkToPveClusters') || 'Link to PVE Clusters'}</label>
                                                 <div className="space-y-1.5">
                                                     {clusters.map(cl => (
                                                         <label key={cl.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-proxmox-dark hover:bg-proxmox-hover cursor-pointer transition-colors">
@@ -22511,8 +22511,8 @@
                                         )}
 
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Notes</label>
-                                            <textarea value={pbsForm.notes} onChange={e => setPbsForm(p => ({...p, notes: e.target.value}))} rows={2} placeholder="Optional notes..." className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white resize-none" />
+                                            <label className="block text-sm text-gray-400 mb-1">{t('notes') || 'Notes'}</label>
+                                            <textarea value={pbsForm.notes} onChange={e => setPbsForm(p => ({...p, notes: e.target.value}))} rows={2} placeholder={t('optionalNotesPlaceholder') || 'Optional notes...'} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white resize-none" />
                                         </div>
 
                                         {/* NS Apr 2026: SSH settings for running apt-upgrade on PBS host */}
@@ -22520,31 +22520,31 @@
                                             <button type="button" onClick={() => setPbsForm(p => ({...p, _showSsh: !p._showSsh}))}
                                                 className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors">
                                                 <Icons.ChevronRight className={`w-3 h-3 transform transition-transform ${pbsForm._showSsh ? 'rotate-90' : ''}`} />
-                                                SSH (Optional — needed for Update Manager)
+                                                {t('pbsSshOptionalTitle') || 'SSH (Optional — needed for Update Manager)'}
                                             </button>
                                             {pbsForm._showSsh && (
                                                 <div className="mt-3 space-y-3 p-3 bg-proxmox-dark/50 rounded-lg">
                                                     <p className="text-xs text-gray-400">
-                                                        SSH is only used for apt dist-upgrade. If blank, PegaProx falls back to the PBS web password. Use a key if password login is disabled.
+                                                        {t('pbsSshHint') || 'SSH is only used for the Update Manager (apt dist-upgrade). If left blank, PegaProx falls back to the PBS web password. Use a dedicated key if your PBS has password-login disabled.'}
                                                     </p>
                                                     <div className="grid grid-cols-2 gap-2">
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">SSH User</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('sshUser') || 'SSH User'}</label>
                                                             <input type="text" value={pbsForm.ssh_user || ''} onChange={e => setPbsForm(p => ({...p, ssh_user: e.target.value}))}
                                                                 placeholder="root"
                                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                         </div>
                                                         <div>
-                                                            <label className="block text-xs text-gray-400 mb-1">SSH Port</label>
+                                                            <label className="block text-xs text-gray-400 mb-1">{t('sshPort') || 'SSH Port'}</label>
                                                             <input type="number" value={pbsForm.ssh_port || 22} onChange={e => setPbsForm(p => ({...p, ssh_port: parseInt(e.target.value) || 22}))}
                                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                                         </div>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-xs text-gray-400 mb-1">SSH Private Key</label>
+                                                        <label className="block text-xs text-gray-400 mb-1">{t('sshPrivateKey') || 'SSH Private Key'}</label>
                                                         <textarea value={pbsForm.ssh_key || ''} onChange={e => setPbsForm(p => ({...p, ssh_key: e.target.value}))}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 font-mono text-xs"
-                                                            placeholder={editingPBS ? "Leave blank to keep existing key" : "-----BEGIN OPENSSH PRIVATE KEY-----"} rows={4} />
+                                                            placeholder={editingPBS ? (t('keepExistingSshKeyPlaceholder') || 'Leave blank to keep existing key') : "-----BEGIN OPENSSH PRIVATE KEY-----"} rows={4} />
                                                     </div>
                                                 </div>
                                             )}
@@ -22554,9 +22554,9 @@
                                         {pbsTestResult && (
                                             <div className={`p-3 rounded-lg text-sm ${pbsTestResult.success ? 'bg-green-500/10 border border-green-500/30 text-green-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'}`}>
                                                 {pbsTestResult.success ? (
-                                                    <span>Connection successful! PBS v{pbsTestResult.version?.version} - {pbsTestResult.datastores} datastore(s)</span>
+                                                    <span>{(t('pbsConnectionSuccessful') || 'Connection successful! PBS v{version} - {datastores} datastore(s)').replace('{version}', pbsTestResult.version?.version ?? '').replace('{datastores}', pbsTestResult.datastores ?? '')}</span>
                                                 ) : (
-                                                    <span>Connection failed: {pbsTestResult.error}</span>
+                                                    <span>{t('connectionFailed') || 'Connection failed'}: {pbsTestResult.error}</span>
                                                 )}
                                             </div>
                                         )}
@@ -22570,13 +22570,13 @@
                                             setPbsTestLoading(false);
                                         }} disabled={pbsTestLoading || !pbsForm.host} className="px-4 py-2 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white text-sm flex items-center gap-2 disabled:opacity-50">
                                             {pbsTestLoading ? <Icons.Loader className="w-4 h-4 animate-spin" /> : <Icons.Zap className="w-4 h-4" />}
-                                            Test Connection
+                                            {t('testConnection') || 'Test Connection'}
                                         </button>
                                         <div className="flex gap-2">
-                                            <button onClick={() => { setShowAddPBS(false); setEditingPBS(null); setPbsTestResult(null); setPbsForm({ name: '', host: '', port: 8007, user: 'root@pam', password: '', api_token_id: '', api_token_secret: '', fingerprint: '', ssl_verify: false, linked_clusters: [], notes: '', ssh_user: '', ssh_port: 22, ssh_key: '', _showSsh: false }); }} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">Cancel</button>
+                                            <button onClick={() => { setShowAddPBS(false); setEditingPBS(null); setPbsTestResult(null); setPbsForm({ name: '', host: '', port: 8007, user: 'root@pam', password: '', api_token_id: '', api_token_secret: '', fingerprint: '', ssl_verify: false, linked_clusters: [], notes: '', ssh_user: '', ssh_port: 22, ssh_key: '', _showSsh: false }); }} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">{t('cancel') || 'Cancel'}</button>
                                             <button onClick={async () => {
                                                 if (!pbsForm.name || !pbsForm.host) { addToast('Name and host are required', 'error'); return; }
-                                                if (!pbsForm.api_token_id && !pbsForm.password) { addToast('Provide password or API token', 'error'); return; }
+                                                if (!pbsForm.api_token_id && !pbsForm.password) { addToast(t('pbsPasswordOrTokenRequired') || 'Provide password or API token', 'error'); return; }
                                                 let result;
                                                 if (editingPBS) {
                                                     result = await handleUpdatePBS(editingPBS.id, pbsForm);
@@ -22590,7 +22590,7 @@
                                                     addToast(result.error, 'error');
                                                 }
                                             }} disabled={!pbsForm.name || !pbsForm.host} className="px-4 py-2 rounded-lg bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium disabled:opacity-50">
-                                                {editingPBS ? 'Save Changes' : 'Add Server'}
+                                                {editingPBS ? (t('save') || 'Save') : (t('addPbsServer') || 'Add Backup Server')}
                                             </button>
                                         </div>
                                     </div>
