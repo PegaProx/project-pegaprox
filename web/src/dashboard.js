@@ -22416,7 +22416,7 @@
                         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl w-full max-w-lg animate-scale-in max-h-[90vh] overflow-y-auto">
                                 <div className="p-6">
-                                    <h2 className="text-xl font-bold text-white mb-4">{editingPBS ? 'Edit PBS Server' : (t('addPbsServer') || 'Add Backup Server')}</h2>
+                                    <h2 className="text-xl font-bold text-white mb-4">{editingPBS ? (t('editPbsServer') || 'Edit PBS Server') : (t('addPbsServer') || 'Add Backup Server')}</h2>
                                     <div className="space-y-4">
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'} *</label>
@@ -22434,7 +22434,7 @@
                                         </div>
 
                                         <div className="border-t border-proxmox-border pt-4">
-                                            <p className="text-xs text-gray-500 mb-3">Provide either Username + Password OR API Token (recommended)</p>
+                                            <p className="text-xs text-gray-500 mb-3">{t('pbsAuthMethodHint') || 'Provide either Username + Password OR API Token (recommended)'}</p>
                                             <div>
                                                 <label className="block text-sm text-gray-400 mb-1">{t('username') || 'Username'}</label>
                                                 <input value={pbsForm.user} onChange={e => setPbsForm(p => ({...p, user: e.target.value}))} placeholder="root@pam" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
@@ -22444,11 +22444,11 @@
                                                 <input type="password" value={pbsForm.password} onChange={e => setPbsForm(p => ({...p, password: e.target.value}))} placeholder={t('password') || 'Password'} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                             <div className="mt-3">
-                                                <label className="block text-sm text-gray-400 mb-1">API Token ID</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('apiTokenId') || 'API Token ID'}</label>
                                                 <input value={pbsForm.api_token_id} onChange={e => setPbsForm(p => ({...p, api_token_id: e.target.value}))} placeholder="user@pam!tokenname" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                             <div className="mt-3">
-                                                <label className="block text-sm text-gray-400 mb-1">API Token Secret</label>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('apiTokenSecret') || 'API Token Secret'}</label>
                                                 <input type="password" value={pbsForm.api_token_secret} onChange={e => setPbsForm(p => ({...p, api_token_secret: e.target.value}))} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white" />
                                             </div>
                                         </div>
@@ -22456,7 +22456,7 @@
                                         <div className="border-t border-proxmox-border pt-4">
                                             <div>
                                                 <label className="block text-sm text-gray-400 mb-1 flex items-center justify-between">
-                                                    <span>Fingerprint (optional)</span>
+                                                    <span>{t('fingerprintOptional') || 'Fingerprint (optional)'}</span>
                                                     {/* NS May 2026 — auto-fetch via /api/pbs/probe-fingerprint */}
                                                     <FingerprintFetcher
                                                         host={pbsForm.host}
@@ -22479,7 +22479,7 @@
                                         {/* Link to PVE Clusters */}
                                         {clusters.length > 0 && (
                                             <div className="border-t border-proxmox-border pt-4">
-                                                <label className="block text-sm text-gray-400 mb-2">Link to PVE Clusters</label>
+                                                <label className="block text-sm text-gray-400 mb-2">{t('linkToPveClusters') || 'Link to PVE Clusters'}</label>
                                                 <div className="space-y-1.5">
                                                     {clusters.map(cl => (
                                                         <label key={cl.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-proxmox-dark hover:bg-proxmox-hover cursor-pointer transition-colors">
@@ -22497,7 +22497,7 @@
 
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('notes') || 'Notes'}</label>
-                                            <textarea value={pbsForm.notes} onChange={e => setPbsForm(p => ({...p, notes: e.target.value}))} rows={2} placeholder="Optional notes..." className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white resize-none" />
+                                            <textarea value={pbsForm.notes} onChange={e => setPbsForm(p => ({...p, notes: e.target.value}))} rows={2} placeholder={t('optionalNotesPlaceholder') || 'Optional notes...'} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2.5 text-sm text-white resize-none" />
                                         </div>
 
                                         {/* NS Apr 2026: SSH settings for running apt-upgrade on PBS host */}
@@ -22505,12 +22505,12 @@
                                             <button type="button" onClick={() => setPbsForm(p => ({...p, _showSsh: !p._showSsh}))}
                                                 className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors">
                                                 <Icons.ChevronRight className={`w-3 h-3 transform transition-transform ${pbsForm._showSsh ? 'rotate-90' : ''}`} />
-                                                SSH (Optional — needed for Update Manager)
+                                                {t('pbsSshOptionalTitle') || 'SSH (Optional — needed for Update Manager)'}
                                             </button>
                                             {pbsForm._showSsh && (
                                                 <div className="mt-3 space-y-3 p-3 bg-proxmox-dark/50 rounded-lg">
                                                     <p className="text-xs text-gray-400">
-                                                        SSH is only used for apt dist-upgrade. If blank, PegaProx falls back to the PBS web password. Use a key if password login is disabled.
+                                                        {t('pbsSshHint') || 'SSH is only used for the Update Manager (apt dist-upgrade). If left blank, PegaProx falls back to the PBS web password. Use a dedicated key if your PBS has password-login disabled.'}
                                                     </p>
                                                     <div className="grid grid-cols-2 gap-2">
                                                         <div>
@@ -22529,7 +22529,7 @@
                                                         <label className="block text-xs text-gray-400 mb-1">{t('sshPrivateKey') || 'SSH Private Key'}</label>
                                                         <textarea value={pbsForm.ssh_key || ''} onChange={e => setPbsForm(p => ({...p, ssh_key: e.target.value}))}
                                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 font-mono text-xs"
-                                                            placeholder={editingPBS ? "Leave blank to keep existing key" : "-----BEGIN OPENSSH PRIVATE KEY-----"} rows={4} />
+                                                            placeholder={editingPBS ? (t('keepExistingSshKeyPlaceholder') || 'Leave blank to keep existing key') : "-----BEGIN OPENSSH PRIVATE KEY-----"} rows={4} />
                                                     </div>
                                                 </div>
                                             )}
@@ -22539,9 +22539,9 @@
                                         {pbsTestResult && (
                                             <div className={`p-3 rounded-lg text-sm ${pbsTestResult.success ? 'bg-green-500/10 border border-green-500/30 text-green-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'}`}>
                                                 {pbsTestResult.success ? (
-                                                    <span>Connection successful! PBS v{pbsTestResult.version?.version} - {pbsTestResult.datastores} datastore(s)</span>
+                                                    <span>{(t('pbsConnectionSuccessful') || 'Connection successful! PBS v{version} - {datastores} datastore(s)').replace('{version}', pbsTestResult.version?.version ?? '').replace('{datastores}', pbsTestResult.datastores ?? '')}</span>
                                                 ) : (
-                                                    <span>Connection failed: {pbsTestResult.error}</span>
+                                                    <span>{t('connectionFailed') || 'Connection failed'}: {pbsTestResult.error}</span>
                                                 )}
                                             </div>
                                         )}
@@ -22561,7 +22561,7 @@
                                             <button onClick={() => { setShowAddPBS(false); setEditingPBS(null); setPbsTestResult(null); setPbsForm({ name: '', host: '', port: 8007, user: 'root@pam', password: '', api_token_id: '', api_token_secret: '', fingerprint: '', ssl_verify: false, linked_clusters: [], notes: '', ssh_user: '', ssh_port: 22, ssh_key: '', _showSsh: false }); }} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">{t('cancel') || 'Cancel'}</button>
                                             <button onClick={async () => {
                                                 if (!pbsForm.name || !pbsForm.host) { addToast('Name and host are required', 'error'); return; }
-                                                if (!pbsForm.api_token_id && !pbsForm.password) { addToast('Provide password or API token', 'error'); return; }
+                                                if (!pbsForm.api_token_id && !pbsForm.password) { addToast(t('pbsPasswordOrTokenRequired') || 'Provide password or API token', 'error'); return; }
                                                 let result;
                                                 if (editingPBS) {
                                                     result = await handleUpdatePBS(editingPBS.id, pbsForm);
