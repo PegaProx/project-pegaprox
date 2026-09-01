@@ -1,0 +1,89 @@
+# PROTOTYPE — self-hosted signed APT repository on GitHub Pages.
+#
+# Builds the pegaprox .deb from THIS repo's debian/ packaging (so it always carries our
+# latest fixes — e.g. the .ssh_ws_server.py postinst fix that the third-party build lagged
+# on), signs a proper apt repo, and publishes it to Pages so users can `apt install pegaprox`
+# from us. It does NOT replace gyptazy's repo for the non-Debian Python deps (flask-sock,
+# xenapi, simple-websocket, …) — see packaging/apt/README.md.
+#
+# Setup needed before this can run (one-time, see README):
+#   * repo Settings → Pages → Source = "GitHub Actions"
+#   * repo secret APT_GPG_PRIVATE_KEY = an ASCII-armored private signing key
+#   * (recommended) pin the 3rd-party actions below to a commit SHA like the other workflows.
+name: apt repo (prototype)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - debian/**
+      - packaging/apt/**
+      - version.json
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version aus version.json in die changelog schreiben
+        run: |
+          set -euo pipefail
+          VER=$(python3 -c "import json;print(json.load(open('version.json'))['version'])")
+          echo "PKG_VERSION=$VER" >> "$GITHUB_ENV"
+          # native 3.0 package → version is the whole string (no -N revision).
+          sed -i "1s/^pegaprox (.*)\( .*\)/pegaprox ($VER)\1/" debian/changelog
+          head -1 debian/changelog
+
+      - name: Build-Tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev debhelper apt-utils gnupg
+
+      - name: .deb bauen (aus unserem debian/)
+        run: |
+          set -euo pipefail
+          dpkg-buildpackage -b -us -uc
+          mkdir -p dist-debs
+          cp ../pegaprox_*_all.deb dist-debs/
+          ls -lh dist-debs/
+
+      - name: Signing-Key importieren
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$APT_GPG_PRIVATE_KEY" ] || { echo "secret APT_GPG_PRIVATE_KEY not set"; exit 1; }
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          KEY=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          echo "APT_SIGN_KEY=$KEY" >> "$GITHUB_ENV"
+
+      - name: Repo bauen + signieren
+        run: |
+          bash packaging/apt/build-apt-repo.sh dist-debs public "$APT_SIGN_KEY" stable main
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
