@@ -10596,13 +10596,22 @@ def cross_cluster_migrate_api():
             f"fingerprint={fp_result['fingerprint']}"
         )
         
-        logging.info(f"Starting remote migration of {vm_type}/{vmid} from {source_cluster_id} to {target_cluster_id}...")
         # MK Aug 2026 (#733) — log the host + fingerprint we hand to PVE. remote_migrate on a
         # target added without SSL trust rejects with a bare {"data":null}/500 and swallows the
         # real reason, so this is often the only way to tell whether the fp we computed matches
         # the one the source node actually sees. The fingerprint is public cert data — the token
         # secret is NOT logged (the full target-endpoint stays redacted in remote_migrate_vm).
-        logging.info(f"Target host: {fp_result['host']}, fingerprint: {fp_result['fingerprint']}, Token user: {target_token['token_id'].split('!')[0]}, Online: {online}")
+        #
+        # (#733 follow-up) Both lines go to the SOURCE cluster logger, not the root logger.
+        # As root-logger INFO they reached nobody on a stock container: app.py's basicConfig()
+        # leaves root at WARNING unless --debug or PEGAPROX_LOG_LEVEL is set (the Dockerfile
+        # ENTRYPOINT passes no args), and it attaches no FileHandler, so even at INFO they would
+        # only hit stderr — never logs/<cluster>.log, whose per-cluster loggers set
+        # propagate=False. The reporter tailing logs/ correctly saw nothing. The cluster logger
+        # writes the file handler (DEBUG by default) right next to the "Remote migrating" /
+        # "Migration data" lines people actually paste into issues.
+        source_manager.logger.info(f"Starting remote migration of {vm_type}/{vmid} from {source_cluster_id} to {target_cluster_id}...")
+        source_manager.logger.info(f"Target host: {fp_result['host']}, fingerprint: {fp_result['fingerprint']}, Token user: {target_token['token_id'].split('!')[0]}, Online: {online}")
         
         # Step 4: Perform the migration
         result = source_manager.remote_migrate_vm(

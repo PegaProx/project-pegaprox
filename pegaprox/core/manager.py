@@ -9551,8 +9551,18 @@ echo "AGENT_INSTALLED_OK"
                 with context.wrap_socket(sock, server_hostname=self.config.host) as ssock:
                     cert_der = ssock.getpeercert(binary_form=True)
                     fingerprint = hashlib.sha256(cert_der).hexdigest()
-                    # Format as colon-separated
-                    fingerprint_formatted = ':'.join(fingerprint[i:i+2] for i in range(0, len(fingerprint), 2))
+                    # Format as colon-separated UPPERCASE hex.
+                    #
+                    # (#733) This is not cosmetic. PVE looks the fingerprint we hand it up as a
+                    # raw hash key with no case normalisation — PVE::APIClient::LWP does
+                    # `$fingerprint->{cache}->{$fp}`, and the $fp it compares against comes from
+                    # Net::SSLeay::X509_get_fingerprint, which formats with "%02X:" (uppercase).
+                    # A lowercase fingerprint parses fine (the pve-fingerprint-sha256 format
+                    # accepts [A-Fa-f0-9]) but never matches, so remote_migrate aborts on the
+                    # cert check and PVE returns a bare {"data":null}/500 with the real reason
+                    # swallowed. Every other fingerprint path here already uppercases —
+                    # api/vms.py:421, :470, :2748 — this one was the outlier.
+                    fingerprint_formatted = ':'.join(fingerprint[i:i+2].upper() for i in range(0, len(fingerprint), 2))
             
             return {
                 'success': True, 
