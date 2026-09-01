@@ -7409,7 +7409,7 @@
                                         <h2 className="text-3xl font-bold text-white">PegaProx</h2>
                                         <p className="text-xl text-proxmox-orange mt-1">{PEGAPROX_VERSION}</p>
                                         <p className="text-sm text-gray-400 mt-2">Multi-Cluster Proxmox Management</p>
-                                        <p className="text-xs text-gray-500 mt-1">Build 2026.02 • © 2025-2026 PegaProx Team</p>
+                                        <p className="text-xs text-gray-500 mt-1">© 2025-2026 PegaProx Team</p>
                                     </div>
                                     
                                     {/* Team */}
