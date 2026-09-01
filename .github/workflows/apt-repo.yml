@@ -37,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # this job never git-pushes (Pages via artifact) — don't leave the token in .git/config
 
       - name: Version aus version.json in die changelog schreiben
         run: |
