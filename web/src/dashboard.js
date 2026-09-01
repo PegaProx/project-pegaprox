@@ -20082,12 +20082,12 @@
                                             : 'flex items-center gap-1 p-1 bg-proxmox-card border border-proxmox-border rounded-xl w-fit'
                                         }>
                                             {[
-                                                { id: 'vms', label: 'Virtual Machines', icon: Icons.Monitor },
-                                                { id: 'hosts', label: 'Hosts', icon: Icons.Server },
-                                                { id: 'datastores', label: 'Datastores', icon: Icons.Database },
-                                                { id: 'networks', label: 'Networks', icon: Icons.Globe },
-                                                { id: 'clusters', label: 'Clusters', icon: Icons.Layers },
-                                                { id: 'tasks', label: 'Tasks & Events', icon: Icons.ClipboardList },
+                                                { id: 'vms', label: t('virtualMachines'), icon: Icons.Monitor },
+                                                { id: 'hosts', label: t('esxiHostsTab'), icon: Icons.Server },
+                                                { id: 'datastores', label: t('datastores'), icon: Icons.Database },
+                                                { id: 'networks', label: t('esxiNetworksTab'), icon: Icons.Globe },
+                                                { id: 'clusters', label: t('esxiClustersTab'), icon: Icons.Layers },
+                                                { id: 'tasks', label: t('esxiTasksEventsTab'), icon: Icons.ClipboardList },
                                             ].map(tab => (
                                                 <button
                                                     key={tab.id}
@@ -20113,12 +20113,12 @@
                                             <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 flex items-center gap-3">
                                                 <Icons.AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0" />
                                                 <div className="flex-1">
-                                                    <span className="text-yellow-300 text-sm font-medium">Connection lost</span>
-                                                    <span className="text-yellow-400/70 text-sm ml-2">Session expired - data may be stale</span>
+                                                    <span className="text-yellow-300 text-sm font-medium">{t('esxiConnectionLost')}</span>
+                                                    <span className="text-yellow-400/70 text-sm ml-2">{t('esxiSessionExpiredDataStale')}</span>
                                                 </div>
                                                 <button onClick={() => { fetchVMwareVms(selectedVMware.id); fetchVMwareHosts(selectedVMware.id); fetchVMwareDatastores(selectedVMware.id); }} 
                                                     className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 rounded-lg text-xs font-medium">
-                                                    Reconnect
+                                                    {t('esxiReconnect')}
                                                 </button>
                                             </div>
                                         )}
@@ -20132,7 +20132,7 @@
                                                         <input
                                                             value={vmwareSearch}
                                                             onChange={e => setVmwareSearch(e.target.value)}
-                                                            placeholder="Search VMs..."
+                                                            placeholder={t('esxiSearchVms')}
                                                             className={isCorporate ? 'w-full pr-4 py-2 text-[13px] text-white placeholder-gray-500 focus:outline-none' : 'w-full pl-10 pr-4 py-2.5 bg-proxmox-card border border-proxmox-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500/50 text-sm'}
                                                             style={isCorporate ? {paddingLeft: '32px', background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)', borderRadius: '2px'} : {}}
                                                         />
@@ -20146,7 +20146,7 @@
                                                                 }
                                                                 style={isCorporate ? {color: vmwareFilter === f ? '#e9ecef' : '#728b9a', background: vmwareFilter === f ? '#324f61' : 'transparent', borderRight: '1px solid #485764'} : {}}
                                                             >
-                                                                {f === 'all' ? `All (${vmwareVms.length})` : f === 'running' ? `Running (${vmwareVms.filter(v => v.power_state === 'POWERED_ON').length})` : `Stopped (${vmwareVms.filter(v => v.power_state !== 'POWERED_ON').length})`}
+                                                                {f === 'all' ? `${t('all')} (${vmwareVms.length})` : f === 'running' ? `${t('running')} (${vmwareVms.filter(v => v.power_state === 'POWERED_ON').length})` : `${t('filterStopped')} (${vmwareVms.filter(v => v.power_state !== 'POWERED_ON').length})`}
                                                             </button>
                                                         ))}
                                                     </div>
@@ -20154,20 +20154,20 @@
                                                 
                                                 {/* VM Table */}
                                                 {vmwareLoading && vmwareVms.length === 0 ? (
-                                                    <div className="text-center py-12 text-gray-500">Loading VMs...</div>
+                                                    <div className="text-center py-12 text-gray-500">{t('esxiLoadingVms')}</div>
                                                 ) : (
                                                     <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                         <table className={isCorporate ? 'corp-datagrid' : 'w-full'}>
                                                             <thead>
                                                                 <tr className={isCorporate ? '' : 'border-b border-proxmox-border'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>Status</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>Name</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>Guest OS</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>CPUs</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>Memory</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>IP Address</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>Host</th>
-                                                                    <th className={isCorporate ? 'text-right' : 'text-right p-3 text-xs font-semibold text-gray-500 uppercase'}>Actions</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('status')}</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('name')}</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiGuestOs')}</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiCpus')}</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiMemory')}</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('ipAddress')}</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('host')}</th>
+                                                                    <th className={isCorporate ? 'text-right' : 'text-right p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('actions')}</th>
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
@@ -20205,18 +20205,18 @@
                                                                                 <td className="p-3 text-right" onClick={e => e.stopPropagation()}>
                                                                                     <div className="flex items-center justify-end gap-1">
                                                                                         {!isOn ? (
-                                                                                            <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'start')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-green-400 hover:bg-green-500/10 disabled:opacity-50" title="Start">
+                                                                                            <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'start')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-green-400 hover:bg-green-500/10 disabled:opacity-50" title={t('start')}>
                                                                                                 {actionLoading === 'start' ? <Icons.RefreshCw className="w-4 h-4 animate-spin" /> : <Icons.Play className="w-4 h-4" />}
                                                                                             </button>
                                                                                         ) : (
                                                                                             <>
-                                                                                                <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'stop')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 disabled:opacity-50" title="Shutdown">
+                                                                                                <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'stop')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 disabled:opacity-50" title={t('shutdown')}>
                                                                                                     {actionLoading === 'stop' ? <Icons.RefreshCw className="w-4 h-4 animate-spin" /> : <Icons.Square className="w-4 h-4" />}
                                                                                                 </button>
-                                                                                                <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'reset')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-yellow-400 hover:bg-yellow-500/10 disabled:opacity-50" title="Reset">
+                                                                                                <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'reset')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-yellow-400 hover:bg-yellow-500/10 disabled:opacity-50" title={t('resetVm')}>
                                                                                                     <Icons.RotateCw className="w-4 h-4" />
                                                                                                 </button>
-                                                                                                <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'suspend')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10 disabled:opacity-50" title="Suspend">
+                                                                                                <button onClick={() => vmwarePowerAction(vm.vm || vm.vm_id || vm.id, 'suspend')} disabled={!!actionLoading} className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10 disabled:opacity-50" title={t('suspend')}>
                                                                                                     <Icons.Pause className="w-4 h-4" />
                                                                                                 </button>
                                                                                             </>
@@ -20229,7 +20229,7 @@
                                                             </tbody>
                                                         </table>
                                                         {vmwareVms.length === 0 && !vmwareLoading && (
-                                                            <div className="text-center py-12 text-gray-500">No virtual machines found</div>
+                                                            <div className="text-center py-12 text-gray-500">{t('esxiNoVmsFound')}</div>
                                                         )}
                                                     </div>
                                                 )}
@@ -20240,7 +20240,7 @@
                                         {vmwareActiveTab === 'vms' && vmwareSelectedVm && (
                                             <div className="space-y-4">
                                                 <button onClick={() => { setVmwareSelectedVm(null); setVmwareVmTab('overview'); }} className="flex items-center gap-2 text-gray-400 hover:text-white text-sm">
-                                                    <span style={{display:"inline-block",transform:"rotate(180deg)"}}><Icons.ChevronRight className="w-4 h-4" /></span> Back to VM List
+                                                    <span style={{display:"inline-block",transform:"rotate(180deg)"}}><Icons.ChevronRight className="w-4 h-4" /></span> {t('backToVmList')}
                                                 </button>
                                                 
                                                 {vmwareVmDetail ? (() => {
@@ -20252,6 +20252,21 @@
                                                     const cpuCount = vm.cpu?.count || vm.cpu_count || vm.num_cpu || 0;
                                                     const guestOS = vm.guest_OS || vm.guest_os || '-';
                                                     const toolsStatus = vm.guest_info?.tools_status || vm.vmware_tools_status || '';
+                                                    const toolsStatusLabels = {
+                                                        toolsNotInstalled: t('vmwareToolsNotInstalled'),
+                                                        toolsNotRunning: t('vmwareToolsNotRunning'),
+                                                        toolsOk: t('vmwareToolsCurrent'),
+                                                        toolsOld: t('vmwareToolsOutdated'),
+                                                    };
+                                                    const toolsStatusLabel = toolsStatus
+                                                        ? (toolsStatusLabels[toolsStatus] || toolsStatus)
+                                                        : t('vmwareToolsNotInstalled');
+                                                    const powerStateLabels = {
+                                                        POWERED_ON: t('vmwarePowerOn'),
+                                                        POWERED_OFF: t('vmwarePowerOff'),
+                                                        SUSPENDED: t('vmwarePowerSuspended'),
+                                                    };
+                                                    const powerStateLabel = powerStateLabels[vm.power_state] || vm.power_state || '-';
                                                     const ipAddr = vm.guest_info?.ip_address || vm.ip_address || vm.guest_ip || '';
                                                     const hostName = vm.guest_info?.host_name || vm.hostname || '';
                                                     const hwVersion = vm.hardware?.version || '';
@@ -20273,7 +20288,7 @@
                                                                             <div className="flex items-center gap-3">
                                                                                 <h2 className="text-xl font-bold text-white">{vm.name}</h2>
                                                                                 <span className={`px-2 py-0.5 rounded text-xs font-semibold ${isOn ? 'bg-green-500/20 text-green-400' : isSuspended ? 'bg-yellow-500/20 text-yellow-400' : 'bg-gray-500/20 text-gray-400'}`}>
-                                                                                    {isOn ? 'ON' : isSuspended ? 'SUSPENDED' : 'OFF'}
+                                                                                    {isOn ? t('vmwarePowerOn') : isSuspended ? t('vmwarePowerSuspended') : t('vmwarePowerOff')}
                                                                                 </span>
                                                                                 {hwVersion && <span className="text-xs text-gray-600">{hwVersion}</span>}
                                                                             </div>
@@ -20282,7 +20297,7 @@
                                                                                 {cpuCount > 0 && <span>{cpuCount} vCPU</span>}
                                                                                 {memGB !== '-' && <span>{memGB} GB RAM</span>}
                                                                                 {totalDiskGB > 0 && <span>{totalDiskGB.toFixed(0)} GB Disk</span>}
-                                                                                {toolsStatus && <span className={toolsStatus.includes('Not') ? 'text-yellow-500' : 'text-gray-500'}>Tools: {toolsStatus.replace('toolsStatus','').replace('tools','')}</span>}
+                                                                                {toolsStatus && <span className={toolsStatus.includes('Not') ? 'text-yellow-500' : 'text-gray-500'}>{t('vmwareToolsShort')}: {toolsStatusLabel}</span>}
                                                                             </div>
                                                                         </div>
                                                                     </div>
@@ -20290,17 +20305,17 @@
                                                                         {/* Power Actions */}
                                                                         {!isOn ? (
                                                                             <button onClick={() => vmwarePowerAction(vmwareSelectedVm, 'start')} className="px-4 py-2 rounded-lg bg-green-500/20 text-green-400 hover:bg-green-500/30 text-sm font-medium flex items-center gap-1.5">
-                                                                                <Icons.Play className="w-4 h-4" /> Start
+                                                                                <Icons.Play className="w-4 h-4" /> {t('start')}
                                                                             </button>
                                                                         ) : (
                                                                             <>
                                                                                 <button onClick={() => vmwarePowerAction(vmwareSelectedVm, 'stop')} className="px-3 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 text-sm font-medium flex items-center gap-1.5">
-                                                                                    <Icons.Square className="w-3.5 h-3.5" /> Stop
+                                                                                    <Icons.Square className="w-3.5 h-3.5" /> {t('stop')}
                                                                                 </button>
-                                                                                <button onClick={() => vmwarePowerAction(vmwareSelectedVm, 'reset')} className="p-2 rounded-lg bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20" title="Reset">
+                                                                                <button onClick={() => vmwarePowerAction(vmwareSelectedVm, 'reset')} className="p-2 rounded-lg bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20" title={t('resetVm')}>
                                                                                     <Icons.RotateCw className="w-4 h-4" />
                                                                                 </button>
-                                                                                <button onClick={() => vmwarePowerAction(vmwareSelectedVm, 'suspend')} className="p-2 rounded-lg bg-blue-500/10 text-blue-400 hover:bg-blue-500/20" title="Suspend">
+                                                                                <button onClick={() => vmwarePowerAction(vmwareSelectedVm, 'suspend')} className="p-2 rounded-lg bg-blue-500/10 text-blue-400 hover:bg-blue-500/20" title={t('suspend')}>
                                                                                     <Icons.Pause className="w-4 h-4" />
                                                                                 </button>
                                                                             </>
@@ -20308,7 +20323,7 @@
                                                                         <div className="w-px h-8 bg-proxmox-border mx-1" />
                                                                         {/* Console */}
                                                                         {isOn && (
-                                                                            <button onClick={() => openVmwareConsole(vmwareSelectedVm)} className="p-2 rounded-lg bg-purple-500/10 text-purple-400 hover:bg-purple-500/20" title="Console (VMRC)">
+                                                                            <button onClick={() => openVmwareConsole(vmwareSelectedVm)} className="p-2 rounded-lg bg-purple-500/10 text-purple-400 hover:bg-purple-500/20" title={t('vmwareConsoleVmrc')}>
                                                                                 <Icons.Terminal className="w-4 h-4" />
                                                                             </button>
                                                                         )}
@@ -20320,17 +20335,17 @@
                                                                             <div className="absolute right-0 top-full mt-1 w-48 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 hidden group-hover:block">
                                                                                 <div className="py-1">
                                                                                     <button onClick={() => { setVmwareRenameName(vm.name || ''); setShowVmwareRename(true); }} className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-proxmox-hover flex items-center gap-2">
-                                                                                        <Icons.Edit className="w-3.5 h-3.5" /> Rename
+                                                                                        <Icons.Edit className="w-3.5 h-3.5" /> {t('rename')}
                                                                                     </button>
                                                                                     <button onClick={() => { setVmwareCloneName(`${vm.name}-clone`); setShowVmwareClone(true); }} className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-proxmox-hover flex items-center gap-2">
-                                                                                        <Icons.Copy className="w-3.5 h-3.5" /> Clone
+                                                                                        <Icons.Copy className="w-3.5 h-3.5" /> {t('clone')}
                                                                                     </button>
                                                                                     <button onClick={() => { fetchMigrationPlan(vmwareSelectedVm); }} className="w-full text-left px-4 py-2 text-sm text-emerald-400 hover:bg-proxmox-hover flex items-center gap-2">
-                                                                                        <Icons.FolderInput className="w-3.5 h-3.5" /> Migrate to Proxmox
+                                                                                        <Icons.FolderInput className="w-3.5 h-3.5" /> {t('migrateToProxmox')}
                                                                                     </button>
                                                                                     <div className="border-t border-proxmox-border my-1" />
                                                                                     <button onClick={() => setShowVmwareDelete(true)} disabled={isOn} className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-proxmox-hover flex items-center gap-2 disabled:opacity-30 disabled:cursor-not-allowed">
-                                                                                        <Icons.Trash className="w-3.5 h-3.5" /> Delete VM {isOn ? '(stop first)' : ''}
+                                                                                        <Icons.Trash className="w-3.5 h-3.5" /> {t('deleteVm')} {isOn ? `(${t('stopFirst')})` : ''}
                                                                                     </button>
                                                                                 </div>
                                                                             </div>
@@ -20342,11 +20357,11 @@
                                                             {/* VM Detail Tabs */}
                                                             <div className="flex items-center gap-1 border-b border-proxmox-border">
                                                                 {[
-                                                                    { id: 'overview', label: 'Overview' },
-                                                                    { id: 'settings', label: 'Settings' },
-                                                                    { id: 'config', label: 'Hardware' },
-                                                                    { id: 'snapshots', label: `Snapshots (${snapsList.length})` },
-                                                                    { id: 'migrate', label: 'Migration' },
+                                                                    { id: 'overview', label: t('overview') },
+                                                                    { id: 'settings', label: t('settings') },
+                                                                    { id: 'config', label: t('hardware') },
+                                                                    { id: 'snapshots', label: `${t('snapshotsTab')} (${snapsList.length})` },
+                                                                    { id: 'migrate', label: t('vmwareMigrationTab') },
                                                                 ].map(tab => (
                                                                     <button key={tab.id} onClick={() => setVmwareVmTab(tab.id)}
                                                                         className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${
@@ -20365,15 +20380,15 @@
                                                                     <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                             <div className="flex items-center justify-between mb-2">
-                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">CPU</span>
+                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">{t('cpu')}</span>
                                                                                 <Icons.Cpu className="w-4 h-4 text-blue-400" />
                                                                             </div>
                                                                             <div className="text-2xl font-bold text-white">{cpuCount}</div>
-                                                                            <div className="text-xs text-gray-500">vCPUs</div>
+                                                                            <div className="text-xs text-gray-500">{t('vcpus')}</div>
                                                                         </div>
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                             <div className="flex items-center justify-between mb-2">
-                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">Memory</span>
+                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">{t('esxiMemory')}</span>
                                                                                 <Icons.Memory className="w-4 h-4 text-purple-400" />
                                                                             </div>
                                                                             <div className="text-2xl font-bold text-white">{memGB}</div>
@@ -20381,7 +20396,7 @@
                                                                         </div>
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                             <div className="flex items-center justify-between mb-2">
-                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">Storage</span>
+                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">{t('storage')}</span>
                                                                                 <Icons.HardDrive className="w-4 h-4 text-emerald-400" />
                                                                             </div>
                                                                             <div className="text-2xl font-bold text-white">{totalDiskGB > 0 ? totalDiskGB.toFixed(0) : '-'}</div>
@@ -20389,7 +20404,7 @@
                                                                         </div>
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                             <div className="flex items-center justify-between mb-2">
-                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">Network</span>
+                                                                                <span className="text-xs text-gray-500 uppercase font-semibold">{t('network')}</span>
                                                                                 <Icons.Globe className="w-4 h-4 text-cyan-400" />
                                                                             </div>
                                                                             <div className="text-lg font-mono font-bold text-white">{ipAddr || '-'}</div>
@@ -20400,16 +20415,16 @@
                                                                     {/* Guest Info + VM Info */}
                                                                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
-                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">VM Information</h3>
+                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">{t('vmInformation')}</h3>
                                                                             <div className="space-y-2 text-sm">
                                                                                 {[
-                                                                                    ['VM ID', vm.vm || vmwareSelectedVm],
-                                                                                    ['Guest OS', guestOS],
-                                                                                    ['Hardware Version', hwVersion || '-'],
-                                                                                    ['Guest Tools', toolsStatus || 'Not installed'],
-                                                                                    ['Power State', vm.power_state || '-'],
-                                                                                    ['IP Address', ipAddr || 'N/A'],
-                                                                                    ['Hostname', hostName || 'N/A'],
+                                                                                    [t('vmId'), vm.vm || vmwareSelectedVm],
+                                                                                    [t('esxiGuestOs'), guestOS],
+                                                                                    [t('hardwareVersion'), hwVersion || '-'],
+                                                                                    [t('guestTools'), toolsStatusLabel],
+                                                                                    [t('powerState'), powerStateLabel],
+                                                                                    [t('ipAddress'), ipAddr || 'N/A'],
+                                                                                    [t('hostname'), hostName || 'N/A'],
                                                                                 ].map(([label, value]) => (
                                                                                     <div key={label} className="flex justify-between">
                                                                                         <span className="text-gray-500">{label}</span>
@@ -20420,7 +20435,7 @@
                                                                         </div>
                                                                         
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
-                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">Disks</h3>
+                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">{t('disks')}</h3>
                                                                             {disksList.length > 0 ? (
                                                                                 <div className="space-y-2">
                                                                                     {disksList.map((disk, idx) => {
@@ -20430,8 +20445,8 @@
                                                                                                 <div className="flex items-center gap-2">
                                                                                                     <Icons.HardDrive className="w-4 h-4 text-gray-500" />
                                                                                                     <div>
-                                                                                                        <div className="text-sm text-white">{disk.label || `Disk ${idx}`}</div>
-                                                                                                        {disk.backing?.thin_provisioned && <div className="text-xs text-gray-600">Thin provisioned</div>}
+                                                                                                        <div className="text-sm text-white">{disk.label || `${t('disk')} ${idx}`}</div>
+                                                                                                        {disk.backing?.thin_provisioned && <div className="text-xs text-gray-600">{t('thinProvisioned')}</div>}
                                                                                                     </div>
                                                                                                 </div>
                                                                                                 <div className="text-right">
@@ -20442,14 +20457,14 @@
                                                                                         );
                                                                                     })}
                                                                                 </div>
-                                                                            ) : <div className="text-gray-600 text-sm">No disks found</div>}
+                                                                            ) : <div className="text-gray-600 text-sm">{t('noDisksFound')}</div>}
                                                                         </div>
                                                                     </div>
                                                                     
                                                                     {/* Network Adapters */}
                                                                     {netsList.length > 0 && (
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
-                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">Network Adapters</h3>
+                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">{t('networkAdapters')}</h3>
                                                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                                                                                 {netsList.map((nic, idx) => (
                                                                                     <div key={idx} className="flex items-center justify-between p-2.5 bg-proxmox-dark rounded-lg">
@@ -20481,7 +20496,7 @@
                                                                             <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-3">
                                                                                 <div className="flex items-center gap-2 text-yellow-400 text-sm">
                                                                                     <Icons.AlertTriangle className="w-4 h-4" />
-                                                                                    <span>VM is powered on - some changes (CPU, Memory) may require the VM to be powered off or need hot-add enabled.</span>
+                                                                                    <span>{t('vmPoweredOnConfigWarning')}</span>
                                                                                 </div>
                                                                             </div>
                                                                         )}
@@ -20490,21 +20505,21 @@
                                                                             {/* CPU & Memory */}
                                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                                 <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4 flex items-center gap-2">
-                                                                                    <Icons.Cpu className="w-4 h-4" /> Compute Resources
+                                                                                    <Icons.Cpu className="w-4 h-4" /> {t('computeResources')}
                                                                                 </h3>
                                                                                 <div className="space-y-4">
                                                                                     <div>
-                                                                                        <label className="block text-xs text-gray-500 mb-1.5">vCPUs</label>
+                                                                                        <label className="block text-xs text-gray-500 mb-1.5">{t('vcpus')}</label>
                                                                                         <div className="flex items-center gap-2">
                                                                                             <input type="number" min="1" max="128" 
                                                                                                 value={vmwareConfigEdit.cpu || cpuCount || ''} 
                                                                                                 onChange={e => setVmwareConfigEdit(p => ({...p, cpu: e.target.value}))}
                                                                                                 className="flex-1 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-white text-sm" />
-                                                                                            <span className="text-xs text-gray-500 w-16">cores</span>
+                                                                                            <span className="text-xs text-gray-500 w-16">{t('cpuCoresUnit')}</span>
                                                                                         </div>
                                                                                     </div>
                                                                                     <div>
-                                                                                        <label className="block text-xs text-gray-500 mb-1.5">Memory (MB)</label>
+                                                                                        <label className="block text-xs text-gray-500 mb-1.5">{t('memoryMb')}</label>
                                                                                         <div className="flex items-center gap-2">
                                                                                             <input type="number" min="256" step="256"
                                                                                                 value={vmwareConfigEdit.memory || (memGB * 1024) || ''} 
@@ -20525,14 +20540,14 @@
                                                                                     {/* Hot-Add Toggles */}
                                                                                     <div className="pt-2 border-t border-proxmox-border/50 space-y-2">
                                                                                         <label className="flex items-center justify-between cursor-pointer">
-                                                                                            <span className="text-sm text-gray-400">CPU Hot-Add</span>
+                                                                                            <span className="text-sm text-gray-400">{t('cpuHotAdd')}</span>
                                                                                             <div onClick={() => setVmwareConfigEdit(p => ({...p, cpu_hot_add: !p.cpu_hot_add}))}
                                                                                                 className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${vmwareConfigEdit.cpu_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
                                                                                                 <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${vmwareConfigEdit.cpu_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                                                                             </div>
                                                                                         </label>
                                                                                         <label className="flex items-center justify-between cursor-pointer">
-                                                                                            <span className="text-sm text-gray-400">Memory Hot-Add</span>
+                                                                                            <span className="text-sm text-gray-400">{t('memoryHotAdd')}</span>
                                                                                             <div onClick={() => setVmwareConfigEdit(p => ({...p, memory_hot_add: !p.memory_hot_add}))}
                                                                                                 className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${vmwareConfigEdit.memory_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
                                                                                                 <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${vmwareConfigEdit.memory_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
@@ -20546,12 +20561,12 @@
                                                                             <div className="space-y-4">
                                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                                     <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4 flex items-center gap-2">
-                                                                                        <Icons.FileText className="w-4 h-4" /> Notes
+                                                                                        <Icons.FileText className="w-4 h-4" /> {t('notes')}
                                                                                     </h3>
                                                                                     <textarea
                                                                                         value={vmwareConfigEdit.notes !== undefined && vmwareConfigEdit.notes !== '' ? vmwareConfigEdit.notes : (vm.annotation || vm.notes || vm.config?.annotation || '')}
                                                                                         onChange={e => setVmwareConfigEdit(p => ({...p, notes: e.target.value}))}
-                                                                                        placeholder="VM description / notes..."
+                                                                                        placeholder={t('vmDescriptionNotesPlaceholder')}
                                                                                         rows={4}
                                                                                         className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-white text-sm resize-none"
                                                                                     />
@@ -20560,13 +20575,13 @@
                                                                                 {/* Boot Order */}
                                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                                     <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4 flex items-center gap-2">
-                                                                                        <Icons.Play className="w-4 h-4" /> Boot Order
+                                                                                        <Icons.Play className="w-4 h-4" /> {t('bootOrder')}
                                                                                     </h3>
                                                                                     <div className="space-y-2">
                                                                                         {[
-                                                                                            { key: 'disk', label: 'Hard Disk', icon: '💾' },
-                                                                                            { key: 'cdrom', label: 'CD-ROM', icon: '💿' },
-                                                                                            { key: 'net', label: 'Network (PXE)', icon: '🌐' },
+                                                                                            { key: 'disk', label: t('hardDisk'), icon: '💾' },
+                                                                                            { key: 'cdrom', label: t('cdrom'), icon: '💿' },
+                                                                                            { key: 'net', label: t('networkPxe'), icon: '🌐' },
                                                                                         ].map((item, idx) => (
                                                                                             <div key={item.key} className="flex items-center gap-3 p-2.5 bg-proxmox-dark rounded-lg">
                                                                                                 <span className="text-xs text-gray-500 w-5">{idx + 1}.</span>
@@ -20576,7 +20591,7 @@
                                                                                         ))}
                                                                                         <button onClick={() => handleVmwareBootOrderSave(vmwareSelectedVm, ['disk', 'cdrom', 'net'])}
                                                                                             className="text-xs text-gray-500 hover:text-emerald-400 transition-colors">
-                                                                                            Reset to default (Disk → CD → Network)
+                                                                                            {t('resetBootOrderDefault')}
                                                                                         </button>
                                                                                     </div>
                                                                                 </div>
@@ -20585,7 +20600,7 @@
                                                                                 {netsList.length > 0 && (
                                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                                         <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4 flex items-center gap-2">
-                                                                                            <Icons.Globe className="w-4 h-4" /> Network Adapters
+                                                                                            <Icons.Globe className="w-4 h-4" /> {t('networkAdapters')}
                                                                                         </h3>
                                                                                         <div className="space-y-3">
                                                                                             {netsList.map((nic, idx) => (
@@ -20599,7 +20614,7 @@
                                                                                                             value={nic.network || nic.backing?.network_name || ''}
                                                                                                             onChange={e => handleVmwareNetworkChange(vmwareSelectedVm, nic.key || 0, e.target.value)}
                                                                                                             className="flex-1 bg-proxmox-card border border-proxmox-border rounded px-2 py-1.5 text-sm text-gray-300">
-                                                                                                            <option value={nic.network || nic.backing?.network_name || ''}>{nic.network || nic.backing?.network_name || 'Current Network'}</option>
+                                                                                                            <option value={nic.network || nic.backing?.network_name || ''}>{nic.network || nic.backing?.network_name || t('currentNetwork')}</option>
                                                                                                             {vmwareNetworks.filter(n => n.name !== (nic.network || nic.backing?.network_name)).map(n => (
                                                                                                                 <option key={n.network || n.name} value={n.name}>{n.name}</option>
                                                                                                             ))}
@@ -20616,23 +20631,23 @@
                                                                         {/* Performance Stats (if available) */}
                                                                         {perfData.cpu_usage_mhz !== undefined && (
                                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
-                                                                                <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">Live Performance</h3>
+                                                                                <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">{t('livePerformance')}</h3>
                                                                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                                                         <div className="text-lg font-bold text-blue-400">{perfData.cpu_usage_mhz || 0} MHz</div>
-                                                                                        <div className="text-xs text-gray-500">CPU Usage</div>
+                                                                                        <div className="text-xs text-gray-500">{t('cpuUsage')}</div>
                                                                                     </div>
                                                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                                                         <div className="text-lg font-bold text-purple-400">{perfData.memory_usage_mb || 0} MB</div>
-                                                                                        <div className="text-xs text-gray-500">Memory Used</div>
+                                                                                        <div className="text-xs text-gray-500">{t('memoryUsed')}</div>
                                                                                     </div>
                                                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                                                         <div className="text-lg font-bold text-emerald-400">{perfData.disk_committed ? (perfData.disk_committed / (1024**3)).toFixed(1) : '0'} GB</div>
-                                                                                        <div className="text-xs text-gray-500">Disk Used</div>
+                                                                                        <div className="text-xs text-gray-500">{t('diskUsed')}</div>
                                                                                     </div>
                                                                                     <div className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                                                         <div className="text-lg font-bold text-cyan-400">{perfData.uptime_seconds ? Math.floor(perfData.uptime_seconds / 3600) + 'h' : '0h'}</div>
-                                                                                        <div className="text-xs text-gray-500">Uptime</div>
+                                                                                        <div className="text-xs text-gray-500">{t('uptime')}</div>
                                                                                     </div>
                                                                                 </div>
                                                                             </div>
@@ -20642,13 +20657,13 @@
                                                                         <div className="flex justify-end gap-3">
                                                                             <button onClick={() => setVmwareConfigEdit({ cpu: '', memory: '', notes: '', cpu_hot_add: false, memory_hot_add: false })}
                                                                                 className="px-4 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm">
-                                                                                Reset
+                                                                                {t('resetChanges')}
                                                                             </button>
                                                                             <button onClick={() => handleVmwareConfigSave(vmwareSelectedVm)}
                                                                                 disabled={vmwareConfigSaving}
                                                                                 className="px-6 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium disabled:opacity-50 flex items-center gap-2">
                                                                                 {vmwareConfigSaving ? <Icons.RefreshCw className="w-4 h-4 animate-spin" /> : <Icons.Check className="w-4 h-4" />}
-                                                                                Save Changes
+                                                                                {t('saveChanges')}
                                                                             </button>
                                                                         </div>
                                                                     </div>
@@ -20661,26 +20676,26 @@
                                                                     <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3">
                                                                         <div className="flex items-center gap-2 text-blue-400 text-sm">
                                                                             <Icons.Info className="w-4 h-4" />
-                                                                            <span>Hardware overview (read-only). Use the Settings tab to change CPU, Memory, and Network.</span>
+                                                                            <span>{t('hardwareOverviewReadOnly')}</span>
                                                                         </div>
                                                                     </div>
                                                                     
                                                                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                                                         {/* Current Config */}
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
-                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4">Current Configuration</h3>
+                                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4">{t('currentConfiguration')}</h3>
                                                                             <div className="space-y-3">
                                                                                 <div className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg">
                                                                                     <div className="flex items-center gap-3">
                                                                                         <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center"><Icons.Cpu className="w-4 h-4 text-blue-400" /></div>
-                                                                                        <div><div className="text-sm text-white font-medium">CPU</div><div className="text-xs text-gray-500">Virtual CPUs</div></div>
+                                                                                        <div><div className="text-sm text-white font-medium">{t('cpu')}</div><div className="text-xs text-gray-500">{t('virtualCpus')}</div></div>
                                                                                     </div>
                                                                                     <div className="text-lg font-bold text-white">{cpuCount}</div>
                                                                                 </div>
                                                                                 <div className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg">
                                                                                     <div className="flex items-center gap-3">
                                                                                         <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center"><Icons.Memory className="w-4 h-4 text-purple-400" /></div>
-                                                                                        <div><div className="text-sm text-white font-medium">Memory</div><div className="text-xs text-gray-500">RAM allocation</div></div>
+                                                                                        <div><div className="text-sm text-white font-medium">{t('esxiMemory')}</div><div className="text-xs text-gray-500">{t('ramAllocation')}</div></div>
                                                                                     </div>
                                                                                     <div className="text-lg font-bold text-white">{memGB} GB</div>
                                                                                 </div>
@@ -20690,7 +20705,7 @@
                                                                                         <div key={idx} className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg">
                                                                                             <div className="flex items-center gap-3">
                                                                                                 <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center"><Icons.HardDrive className="w-4 h-4 text-emerald-400" /></div>
-                                                                                                <div><div className="text-sm text-white font-medium">{disk.label || `Disk ${idx}`}</div><div className="text-xs text-gray-500">{disk.backing?.thin_provisioned ? 'Thin' : 'Thick'} - {disk.backing?.datastore || ''}</div></div>
+                                                                                                <div><div className="text-sm text-white font-medium">{disk.label || `${t('disk')} ${idx}`}</div><div className="text-xs text-gray-500">{disk.backing?.thin_provisioned ? t('diskProvisioningThin') : t('diskProvisioningThick')} - {disk.backing?.datastore || ''}</div></div>
                                                                                             </div>
                                                                                             <div className="text-lg font-bold text-white">{capGB} GB</div>
                                                                                         </div>
@@ -20713,33 +20728,33 @@
                                                                             {/* VMware Hardware Details */}
                                                                             {vm.hardware && (vm.hardware.firmware || vm.hardware.scsi_controller) && (
                                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
-                                                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4">Hardware Details</h3>
+                                                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase mb-4">{t('hardwareDetails')}</h3>
                                                                                     <div className="space-y-2 text-sm">
                                                                                         <div className="flex justify-between p-2 bg-proxmox-dark rounded-lg">
-                                                                                            <span className="text-gray-400">Firmware</span>
+                                                                                            <span className="text-gray-400">{t('firmware')}</span>
                                                                                             <span className="text-white font-medium">{(vm.hardware.firmware || 'BIOS').toUpperCase()}</span>
                                                                                         </div>
                                                                                         <div className="flex justify-between p-2 bg-proxmox-dark rounded-lg">
-                                                                                            <span className="text-gray-400">SCSI Controller</span>
+                                                                                            <span className="text-gray-400">{t('scsiController')}</span>
                                                                                             <div className="text-right">
                                                                                                 <div className="text-white font-medium">{vm.hardware.scsi_controller || 'N/A'}</div>
                                                                                                 <div className="text-xs text-gray-500">→ Proxmox: {vm.hardware.scsi_controller_pve || 'auto'}</div>
                                                                                             </div>
                                                                                         </div>
                                                                                         <div className="flex justify-between p-2 bg-proxmox-dark rounded-lg">
-                                                                                            <span className="text-gray-400">Network Adapter</span>
+                                                                                            <span className="text-gray-400">{t('networkAdapter')}</span>
                                                                                             <div className="text-right">
                                                                                                 <div className="text-white font-medium">{vm.hardware.nic_type || 'N/A'}</div>
                                                                                                 <div className="text-xs text-gray-500">→ Proxmox: {vm.hardware.nic_type_pve || 'auto'}</div>
                                                                                             </div>
                                                                                         </div>
                                                                                         <div className="flex justify-between p-2 bg-proxmox-dark rounded-lg">
-                                                                                            <span className="text-gray-400">Disk Bus</span>
+                                                                                            <span className="text-gray-400">{t('diskBus')}</span>
                                                                                             <span className="text-white font-medium">{(vm.hardware.disk_bus || 'SCSI').toUpperCase()}</span>
                                                                                         </div>
                                                                                         {vm.hardware.version && (
                                                                                             <div className="flex justify-between p-2 bg-proxmox-dark rounded-lg">
-                                                                                                <span className="text-gray-400">HW Version</span>
+                                                                                                <span className="text-gray-400">{t('hardwareVersionShort')}</span>
                                                                                                 <span className="text-white font-medium">{vm.hardware.version}</span>
                                                                                             </div>
                                                                                         )}
@@ -20776,15 +20791,15 @@
                                                             {vmwareVmTab === 'snapshots' && (
                                                                 <div className="space-y-4">
                                                                     <div className="flex items-center justify-between">
-                                                                        <h3 className="text-sm font-semibold text-gray-400">Snapshots ({snapsList.length})</h3>
+                                                                        <h3 className="text-sm font-semibold text-gray-400">{t('snapshots')} ({snapsList.length})</h3>
                                                                         <button onClick={async () => {
-                                                                            const name = prompt('Snapshot name:');
+                                                                            const name = prompt(`${t('snapshotName')}:`);
                                                                             if (name) {
                                                                                 await vmwareSnapshotAction(vmwareSelectedVm, 'create', { name, description: '' });
                                                                                 fetchVMwareVmDetail(selectedVMware.id, vmwareSelectedVm);
                                                                             }
                                                                         }} className="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 text-sm font-medium">
-                                                                            + Create Snapshot
+                                                                            + {t('createSnapshot')}
                                                                         </button>
                                                                     </div>
                                                                     {snapsList.length > 0 ? (
@@ -20801,7 +20816,7 @@
                                                                                             {snap.created && <div className="text-xs text-gray-600">{fmtDate(snap.created)}</div>}
                                                                                         </div>
                                                                                     </div>
-                                                                                    <button onClick={() => vmwareSnapshotAction(vmwareSelectedVm, 'delete', { snapshot_id: snap.id || snap.snapshot })} className="p-2 text-red-400 hover:bg-red-500/10 rounded-lg" title="Delete snapshot">
+                                                                                    <button onClick={() => vmwareSnapshotAction(vmwareSelectedVm, 'delete', { snapshot_id: snap.id || snap.snapshot })} className="p-2 text-red-400 hover:bg-red-500/10 rounded-lg" title={t('deleteSnapshot')}>
                                                                                         <Icons.Trash className="w-4 h-4" />
                                                                                     </button>
                                                                                 </div>
@@ -20810,7 +20825,7 @@
                                                                     ) : (
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center text-gray-500">
                                                                             <Icons.Camera className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                                                                            <div className="text-sm">No snapshots. Create one to save the current VM state.</div>
+                                                                            <div className="text-sm">{t('noSnapshotsCreateHint')}</div>
                                                                         </div>
                                                                     )}
                                                                 </div>
@@ -20907,11 +20922,11 @@
                                                 {showVmwareClone && (
                                                     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowVmwareClone(false)}>
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-2xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
-                                                            <h3 className="text-lg font-bold text-white mb-4">Clone VM</h3>
+                                                            <h3 className="text-lg font-bold text-white mb-4">{t('cloneVm')}</h3>
                                                             <input value={vmwareCloneName} onChange={e => setVmwareCloneName(e.target.value)} placeholder="Clone name..." className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-xl text-white mb-4 focus:outline-none focus:border-emerald-500/50" />
                                                             <div className="flex gap-2 justify-end">
-                                                                <button onClick={() => setShowVmwareClone(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">Cancel</button>
-                                                                <button onClick={() => handleVmwareClone(vmwareSelectedVm, vmwareCloneName)} disabled={!vmwareCloneName.trim()} className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">Clone</button>
+                                                                <button onClick={() => setShowVmwareClone(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">{t('cancel')}</button>
+                                                                <button onClick={() => handleVmwareClone(vmwareSelectedVm, vmwareCloneName)} disabled={!vmwareCloneName.trim()} className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">{t('clone')}</button>
                                                             </div>
                                                         </div>
                                                     </div>
@@ -20921,11 +20936,11 @@
                                                 {showVmwareRename && (
                                                     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowVmwareRename(false)}>
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-2xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
-                                                            <h3 className="text-lg font-bold text-white mb-4">Rename VM</h3>
+                                                            <h3 className="text-lg font-bold text-white mb-4">{t('renameVm')}</h3>
                                                             <input value={vmwareRenameName} onChange={e => setVmwareRenameName(e.target.value)} placeholder="New name..." className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-xl text-white mb-4 focus:outline-none focus:border-emerald-500/50" />
                                                             <div className="flex gap-2 justify-end">
-                                                                <button onClick={() => setShowVmwareRename(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">Cancel</button>
-                                                                <button onClick={() => handleVmwareRename(vmwareSelectedVm, vmwareRenameName)} disabled={!vmwareRenameName.trim()} className="px-4 py-2 rounded-lg bg-blue-500 text-white text-sm font-medium disabled:opacity-50">Rename</button>
+                                                                <button onClick={() => setShowVmwareRename(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">{t('cancel')}</button>
+                                                                <button onClick={() => handleVmwareRename(vmwareSelectedVm, vmwareRenameName)} disabled={!vmwareRenameName.trim()} className="px-4 py-2 rounded-lg bg-blue-500 text-white text-sm font-medium disabled:opacity-50">{t('rename')}</button>
                                                             </div>
                                                         </div>
                                                     </div>
@@ -20935,11 +20950,11 @@
                                                 {showVmwareDelete && (
                                                     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowVmwareDelete(false)}>
                                                         <div className="bg-proxmox-card border border-red-500/30 rounded-2xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
-                                                            <h3 className="text-lg font-bold text-red-400 mb-2">Delete VM</h3>
+                                                            <h3 className="text-lg font-bold text-red-400 mb-2">{t('deleteVm')}</h3>
                                                             <p className="text-gray-400 text-sm mb-4">Are you sure you want to permanently delete <strong className="text-white">{vmwareVmDetail?.name}</strong>? This action cannot be undone.</p>
                                                             <div className="flex gap-2 justify-end">
-                                                                <button onClick={() => setShowVmwareDelete(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">Cancel</button>
-                                                                <button onClick={() => handleVmwareDeleteVm(vmwareSelectedVm)} className="px-4 py-2 rounded-lg bg-red-500 text-white text-sm font-medium">Delete VM</button>
+                                                                <button onClick={() => setShowVmwareDelete(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">{t('cancel')}</button>
+                                                                <button onClick={() => handleVmwareDeleteVm(vmwareSelectedVm)} className="px-4 py-2 rounded-lg bg-red-500 text-white text-sm font-medium">{t('deleteVm')}</button>
                                                             </div>
                                                         </div>
                                                     </div>
@@ -20949,12 +20964,12 @@
                                                 {showVmwareMigrate && vmwareMigrationPlan && (
                                                     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowVmwareMigrate(false)}>
                                                         <div className="bg-proxmox-card border border-emerald-500/30 rounded-2xl p-6 w-full max-w-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-                                                            <h3 className="text-lg font-bold text-white mb-1">Migrate to Proxmox</h3>
+                                                            <h3 className="text-lg font-bold text-white mb-1">{t('migrateToProxmox')}</h3>
                                                             <p className="text-xs text-gray-500 mb-3">Method: {vmwareMigrationPlan.method || 'HTTPS + Delta Sync'}</p>
 
                                                             {/* LW: 3-step wizard tabs */}
                                                             <div className="flex gap-1 mb-4 border-b border-proxmox-border pb-2">
-                                                                {[{id:'target',label:'Target',icon:'🎯'},{id:'hardware',label:'Hardware',icon:'🔧'},{id:'advanced',label:'Advanced',icon:'⚙️'}].map(tab => (
+                                                                {[{id:'target',label:t('target'),icon:'🎯'},{id:'hardware',label:t('hardware'),icon:'🔧'},{id:'advanced',label: t('advanced'),icon:'⚙️'}].map(tab => (
                                                                     <button key={tab.id} onClick={() => setMigrateWizardStep(tab.id)}
                                                                         className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${migrateWizardStep === tab.id ? 'bg-emerald-500/20 text-emerald-400' : 'text-gray-500 hover:text-gray-300'}`}
                                                                     >{tab.icon} {tab.label}</button>
@@ -20966,7 +20981,7 @@
                                                             <div className="space-y-3">
                                                                 {/* Target Cluster */}
                                                                 <div>
-                                                                    <label className="text-xs text-gray-500 mb-1 block">Target Cluster</label>
+                                                                    <label className="text-xs text-gray-500 mb-1 block">{t('targetCluster')}</label>
                                                                     <select value={vmwareMigrateForm.target_cluster} onChange={e => {
                                                                         setVmwareMigrateForm({...vmwareMigrateForm, target_cluster: e.target.value, target_node: '', target_storage: ''});
                                                                     }} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -20980,7 +20995,7 @@
                                                                 {/* Target Node */}
                                                                 {vmwareMigrateForm.target_cluster && (
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">Target Node</label>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('targetNode')}</label>
                                                                         <select value={vmwareMigrateForm.target_node} onChange={e => {
                                                                             setVmwareMigrateForm({...vmwareMigrateForm, target_node: e.target.value, target_storage: ''});
                                                                         }} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -20995,7 +21010,7 @@
                                                                 {/* Target Storage */}
                                                                 {vmwareMigrateForm.target_node && (
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">Target Storage</label>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('targetStorage')}</label>
                                                                         <select value={vmwareMigrateForm.target_storage} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, target_storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                                                             <option value="">Select storage...</option>
                                                                             {((vmwareMigrationPlan.targets || []).find(t => t.cluster_id === vmwareMigrateForm.target_cluster)?.storages?.[vmwareMigrateForm.target_node] || []).map(s => (
@@ -21043,7 +21058,7 @@
                                                                 {/* NICs from VMware */}
                                                                 {vmwareMigrationPlan?.source?.nics?.length > 0 && (
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">Network Interfaces ({vmwareMigrationPlan.source.nics.length} detected)</label>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('networkInterfaces')} ({vmwareMigrationPlan.source.nics.length} detected)</label>
                                                                         <div className="space-y-1 p-2 bg-proxmox-dark rounded-lg border border-proxmox-border max-h-32 overflow-y-auto">
                                                                             {vmwareMigrationPlan.source.nics.map((nic, i) => (
                                                                                 <div key={i} className="flex items-center gap-2 text-xs text-gray-300 py-1">
@@ -21087,7 +21102,7 @@
                                                                 <div className="flex items-center gap-4">
                                                                     <label className="flex items-center gap-2 text-sm text-gray-400">
                                                                         <input type="checkbox" checked={vmwareMigrateForm.start_after} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, start_after: e.target.checked})} className="rounded" />
-                                                                        Start VM after migration
+                                                                        {t('xhmStartAfter')}
                                                                     </label>
                                                                     <label className="flex items-center gap-2 text-sm text-gray-400">
                                                                         <input type="checkbox" checked={vmwareMigrateForm.remove_source} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, remove_source: e.target.checked})} className="rounded" />
@@ -21107,7 +21122,7 @@
                                                                 {/* Requirements */}
                                                                 {vmwareMigrationPlan.requirements && (
                                                                     <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-lg p-3">
-                                                                        <div className="text-xs text-yellow-400 font-semibold mb-1">Requirements:</div>
+                                                                        <div className="text-xs text-yellow-400 font-semibold mb-1">{t('requirements')}:</div>
                                                                         {vmwareMigrationPlan.requirements.map((r, i) => (
                                                                             <div key={i} className="text-xs text-yellow-400/70">- {r}</div>
                                                                         ))}
@@ -21130,7 +21145,7 @@
                                                                         </select>
                                                                     </div>
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">OS Type</label>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('osType')}</label>
                                                                         <select value={vmwareMigrateForm.ostype} onChange={e => setVmwareMigrateForm(f => ({...f, ostype: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
                                                                             <option value="auto">Auto ({vmwareMigrationPlan.source?.guest_OS || 'detect'})</option>
                                                                             <option value="l26">Linux (2.6-6.x)</option>
@@ -21138,11 +21153,11 @@
                                                                             <option value="win10">Windows 10/Server 2016-2019</option>
                                                                             <option value="win8">Windows 8/Server 2012</option>
                                                                             <option value="win7">Windows 7/Server 2008 R2</option>
-                                                                            <option value="other">Other</option>
+                                                                            <option value="other">{t('other')}</option>
                                                                         </select>
                                                                     </div>
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">SCSI Controller</label>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('scsiController')}</label>
                                                                         <select value={vmwareMigrateForm.scsihw} onChange={e => setVmwareMigrateForm(f => ({...f, scsihw: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
                                                                             <option value="auto">Auto ({vmwareMigrationPlan.source?.hardware?.scsi_controller || 'detect'})</option>
                                                                             <option value="virtio-scsi-single">VirtIO SCSI Single (recommended)</option>
@@ -21192,7 +21207,7 @@
                                                                         </select>
                                                                     </div>
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">CPU Sockets</label>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('cpuSockets')}</label>
                                                                         <input type="number" min="1" max="8" value={vmwareMigrateForm.sockets || vmwareMigrationPlan.source?.cpu?.sockets || 1}
                                                                             onChange={e => setVmwareMigrateForm(f => ({...f, sockets: parseInt(e.target.value)||1}))}
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white" />
@@ -21210,7 +21225,7 @@
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white" />
                                                                     </div>
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">CPU Type</label>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('cpuType')}</label>
                                                                         <select value={vmwareMigrateForm.cpu_type} onChange={e => setVmwareMigrateForm(f => ({...f, cpu_type: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
                                                                             <option value="host">host (match physical CPU)</option>
                                                                             <option value="kvm64">kvm64 (safe default)</option>
@@ -21231,18 +21246,18 @@
                                                                 <details className="group">
                                                                     <summary className="text-xs font-medium text-gray-400 cursor-pointer hover:text-gray-300 list-none flex items-center gap-1">
                                                                         <svg className="w-3 h-3 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-                                                                        💾 Disk Options
+                                                                        💾 {t('diskOptions')}
                                                                     </summary>
                                                                     <div className="grid grid-cols-2 gap-3 mt-2 ml-4">
                                                                         <div>
-                                                                            <label className="text-xs text-gray-500 mb-1 block">Format</label>
+                                                                            <label className="text-xs text-gray-500 mb-1 block">{t('diskFormat')}</label>
                                                                             <select value={vmwareMigrateForm.disk_format} onChange={e => setVmwareMigrateForm(f => ({...f, disk_format: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white">
                                                                                 <option value="raw">raw (best perf)</option>
                                                                                 <option value="qcow2">qcow2 (snapshots)</option>
                                                                             </select>
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-xs text-gray-500 mb-1 block">Cache</label>
+                                                                            <label className="text-xs text-gray-500 mb-1 block">{t('cache')}</label>
                                                                             <select value={vmwareMigrateForm.disk_cache} onChange={e => setVmwareMigrateForm(f => ({...f, disk_cache: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white">
                                                                                 <option value="none">none (recommended)</option>
                                                                                 <option value="writethrough">writethrough</option>
@@ -21266,7 +21281,7 @@
                                                                         </label>
                                                                         <label className="flex items-center gap-2 text-xs text-gray-400">
                                                                             <input type="checkbox" checked={vmwareMigrateForm.disk_ssd} onChange={e => setVmwareMigrateForm(f => ({...f, disk_ssd: e.target.checked}))} className="rounded" />
-                                                                            SSD Emulation
+                                                                            {t('ssdEmulation')}
                                                                         </label>
                                                                         <div>
                                                                             <label className="text-xs text-gray-500 mb-1 block">Discard (TRIM)</label>
@@ -21313,11 +21328,11 @@
                                                                         </label>
                                                                         <label className="flex items-center gap-2 text-xs text-gray-400">
                                                                             <input type="checkbox" checked={vmwareMigrateForm.agent} onChange={e => setVmwareMigrateForm(f => ({...f, agent: e.target.checked}))} className="rounded" />
-                                                                            QEMU Guest Agent
+                                                                            {t('qemuGuestAgent')}
                                                                         </label>
                                                                         <label className="flex items-center gap-2 text-xs text-gray-400">
                                                                             <input type="checkbox" checked={vmwareMigrateForm.onboot} onChange={e => setVmwareMigrateForm(f => ({...f, onboot: e.target.checked}))} className="rounded" />
-                                                                            Start on Boot
+                                                                            {t('startOnBoot')}
                                                                         </label>
                                                                         <div>
                                                                             <label className="text-xs text-gray-500 mb-1 block">Memory Balloon (MB, 0=off)</label>
@@ -21336,13 +21351,13 @@
                                                                     </summary>
                                                                     <div className="space-y-2 mt-2 ml-4">
                                                                         <div>
-                                                                            <label className="text-xs text-gray-500 mb-1 block">Tags</label>
+                                                                            <label className="text-xs text-gray-500 mb-1 block">{t('tags')}</label>
                                                                             <input type="text" value={vmwareMigrateForm.tags} onChange={e => setVmwareMigrateForm(f => ({...f, tags: e.target.value}))}
                                                                                 placeholder="e.g. migrated;production"
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white" />
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-xs text-gray-500 mb-1 block">Description</label>
+                                                                            <label className="text-xs text-gray-500 mb-1 block">{t('description')}</label>
                                                                             <textarea value={vmwareMigrateForm.description || vmwareMigrationPlan.source?.notes || ''} onChange={e => setVmwareMigrateForm(f => ({...f, description: e.target.value}))}
                                                                                 rows="2" className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white resize-none" />
                                                                         </div>
@@ -21436,13 +21451,13 @@
                                                             </div>
 
                                                             <div className="flex gap-2 justify-end mt-4">
-                                                                <button onClick={() => setShowVmwareMigrate(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">Cancel</button>
+                                                                <button onClick={() => setShowVmwareMigrate(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">{t('cancel')}</button>
                                                                 <button
                                                                     onClick={() => startVmwareMigration(vmwareSelectedVm)}
                                                                     disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading}
                                                                     title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : ''}
                                                                     className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
-                                                                    {vmwareMigrateLoading ? 'Starting...' : 'Start Migration'}
+                                                                    {vmwareMigrateLoading ? t('starting') : t('xhmStartMigration')}
                                                                 </button>
                                                             </div>
                                                         </div>
@@ -21457,12 +21472,12 @@
                                                 <table className="w-full">
                                                     <thead>
                                                         <tr className="border-b border-proxmox-border">
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Status</th>
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Name</th>
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Model</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('status')}</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('name')}</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('model')}</th>
                                                             <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">CPUs</th>
                                                             <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Memory</th>
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">VMs</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('vms')}</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody>
@@ -21605,8 +21620,8 @@
                                                         {dsVms.length > 0 ? (
                                                             <table className="w-full">
                                                                 <thead><tr className="border-b border-proxmox-border">
-                                                                    <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Status</th>
-                                                                    <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Name</th>
+                                                                    <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('status')}</th>
+                                                                    <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('name')}</th>
                                                                     <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">OS</th>
                                                                 </tr></thead>
                                                                 <tbody>
@@ -21632,8 +21647,8 @@
                                                 <table className="w-full">
                                                     <thead>
                                                         <tr className="border-b border-proxmox-border">
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Name</th>
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Type</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('name')}</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('type')}</th>
                                                             <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">VLAN</th>
                                                         </tr>
                                                     </thead>
@@ -21683,7 +21698,7 @@
                                                             {/* Resource Summary */}
                                                             <div className="grid grid-cols-3 gap-4 p-4 border-b border-proxmox-border/50">
                                                                 <div className="text-center">
-                                                                    <div className="text-xs text-gray-500">CPU</div>
+                                                                    <div className="text-xs text-gray-500">{t('cpu')}</div>
                                                                     <div className="text-sm text-white font-medium">{cl.total_cpu ? (cl.total_cpu / 1000).toFixed(1) + ' GHz' : 'N/A'}</div>
                                                                 </div>
                                                                 <div className="text-center">
@@ -21720,7 +21735,7 @@
                                                                             >
                                                                                 <option value="FULLY_AUTOMATED">Fully Automated</option>
                                                                                 <option value="PARTIALLY_AUTOMATED">Partially Automated</option>
-                                                                                <option value="MANUAL">Manual</option>
+                                                                                <option value="MANUAL">{t('manual')}</option>
                                                                             </select>
                                                                         )}
                                                                         <button 
@@ -21775,7 +21790,7 @@
                                                                                         <span className="text-sm text-gray-300">{h.name}</span>
                                                                                     </div>
                                                                                     <div className="flex items-center gap-2">
-                                                                                        {h.maintenance && <span className="text-xs bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">Maintenance</span>}
+                                                                                        {h.maintenance && <span className="text-xs bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">{t('maintenance')}</span>}
                                                                                         <span className="text-xs text-gray-500">{h.connection_state}</span>
                                                                                     </div>
                                                                                 </div>
@@ -21874,7 +21889,7 @@
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                         <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                                             <h3 className="text-sm font-semibold text-white">Migration Log - {vmwareMigrationDetail.vm_name} <span className="text-gray-500 font-normal">({vmwareSelectedMigration})</span></h3>
-                                                            <button onClick={() => setVmwareSelectedMigration(null)} className="text-xs text-gray-500 hover:text-white px-2 py-1 rounded bg-proxmox-dark">Close</button>
+                                                            <button onClick={() => setVmwareSelectedMigration(null)} className="text-xs text-gray-500 hover:text-white px-2 py-1 rounded bg-proxmox-dark">{t('close')}</button>
                                                         </div>
                                                         {vmwareMigrationDetail.disk_progress && Object.keys(vmwareMigrationDetail.disk_progress).length > 0 && (
                                                             <div className="p-4 border-b border-proxmox-border/50 space-y-2">
@@ -21895,7 +21910,7 @@
                                                                 <div key={i} className={line.includes('FAIL') || line.includes('ERROR') ? 'text-red-400' : line.includes('Phase:') ? 'text-emerald-400 font-bold' : line.includes('===') ? 'text-blue-400' : 'text-gray-500'}>{line}</div>
                                                             ))}
                                                         </div>
-                                                        {vmwareMigrationDetail.error && <div className="p-3 bg-red-500/10 border-t border-red-500/20 text-red-400 text-xs">Error: {vmwareMigrationDetail.error}</div>}
+                                                        {vmwareMigrationDetail.error && <div className="p-3 bg-red-500/10 border-t border-red-500/20 text-red-400 text-xs">{t('error')}: {vmwareMigrationDetail.error}</div>}
                                                         {vmwareMigrationDetail.status === 'completed' && <div className="p-3 bg-green-500/10 border-t border-green-500/20 text-green-400 text-xs">✓ Completed! VMID: {vmwareMigrationDetail.proxmox_vmid}{vmwareMigrationDetail.total_downtime_seconds ? ` - Downtime: ${vmwareMigrationDetail.total_downtime_seconds}s` : ''}</div>}
                                                     </div>
                                                 )}
@@ -22869,31 +22884,31 @@
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-2xl w-full max-w-lg shadow-2xl">
                                 <div className="p-6 border-b border-proxmox-border flex items-center justify-between">
-                                    <h2 className="text-lg font-bold text-white">{editingVMware ? 'Edit ESXi Server' : 'Add ESXi Server'}</h2>
+                                    <h2 className="text-lg font-bold text-white">{editingVMware ? 'Edit ESXi Server' : t('addEsxiServer')}</h2>
                                     <button onClick={() => { setShowAddVMware(false); setEditingVMware(null); setVmwareTestResult(null); }} className="p-1 text-gray-500 hover:text-white rounded"><Icons.X className="w-5 h-5" /></button>
                                 </div>
                                 <div className="p-6 space-y-4">
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Name</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
                                         <input value={vmwareForm.name} onChange={e => setVmwareForm(f => ({...f, name: e.target.value}))} placeholder="My ESXi Host" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
                                     </div>
                                     <div className="grid grid-cols-3 gap-3">
                                         <div className="col-span-2">
-                                            <label className="block text-sm text-gray-400 mb-1">Host</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('host')}</label>
                                             <input value={vmwareForm.host} onChange={e => setVmwareForm(f => ({...f, host: e.target.value}))} placeholder="192.168.1.100" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Port</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('port')}</label>
                                             <input type="number" value={vmwareForm.port} onChange={e => setVmwareForm(f => ({...f, port: parseInt(e.target.value) || 443}))} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
                                         </div>
                                     </div>
                                     <div className="grid grid-cols-2 gap-3">
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Username</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('esxiUsername')}</label>
                                             <input value={vmwareForm.username} onChange={e => setVmwareForm(f => ({...f, username: e.target.value}))} placeholder="root" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Password</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('esxiPassword')}</label>
                                             <input type="password" value={vmwareForm.password} onChange={e => setVmwareForm(f => ({...f, password: e.target.value}))} placeholder={editingVMware ? '(unchanged)' : 'Password'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
                                         </div>
                                     </div>
@@ -22902,7 +22917,7 @@
                                         <span className="text-sm text-gray-400">Verify SSL certificate</span>
                                     </label>
                                     <div>
-                                        <label className="block text-sm text-gray-400 mb-1">Notes</label>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('notes')}</label>
                                         <textarea value={vmwareForm.notes} onChange={e => setVmwareForm(f => ({...f, notes: e.target.value}))} rows={2} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50 resize-none" />
                                     </div>
 
@@ -22921,12 +22936,12 @@
                                 </div>
                                 <div className="p-6 border-t border-proxmox-border flex items-center justify-between">
                                     <button onClick={() => handleTestVMware(vmwareForm)} disabled={vmwareTestLoading || !vmwareForm.host} className="px-4 py-2 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-400 hover:text-white text-sm disabled:opacity-50">
-                                        {vmwareTestLoading ? 'Testing...' : 'Test Connection'}
+                                        {vmwareTestLoading ? 'Testing...' : t('testConnection')}
                                     </button>
                                     <div className="flex items-center gap-2">
-                                        <button onClick={() => { setShowAddVMware(false); setEditingVMware(null); setVmwareTestResult(null); }} className="px-4 py-2 rounded-lg text-gray-400 hover:text-white text-sm">Cancel</button>
+                                        <button onClick={() => { setShowAddVMware(false); setEditingVMware(null); setVmwareTestResult(null); }} className="px-4 py-2 rounded-lg text-gray-400 hover:text-white text-sm">{t('cancel')}</button>
                                         <button onClick={() => editingVMware ? handleUpdateVMware(editingVMware.id, vmwareForm) : handleAddVMware(vmwareForm)} disabled={!vmwareForm.host || (!editingVMware && !vmwareForm.password)} className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium hover:bg-emerald-600 disabled:opacity-50">
-                                            {editingVMware ? 'Update' : 'Add Server'}
+                                            {editingVMware ? t('update') : 'Add Server'}
                                         </button>
                                     </div>
                                 </div>
