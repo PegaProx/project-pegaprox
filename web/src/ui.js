@@ -2179,6 +2179,7 @@
 
         // PBS Health Badge — mirrors ClusterHealthBadge but for /api/pbs/<id>/health
         function PbsHealthBadge({ pbsId, authFetch, apiUrl }) {
+            const { t } = useTranslation();
             const [data, setData] = React.useState(null);
             const [showDetails, setShowDetails] = React.useState(false);
             const [hovering, setHovering] = React.useState(false);
@@ -2212,10 +2213,10 @@
                         onClick={() => setShowDetails(true)}
                         onMouseEnter={() => setHovering(true)}
                         onMouseLeave={() => setHovering(false)}
-                        title="PBS health — click for breakdown"
+                        title={t('pbsHealthTooltip') || 'PBS health — click for breakdown'}
                     >
                         <span style={{ fontWeight: 700 }}>{data.score}</span>
-                        <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>health</span>
+                        <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>{t('pbsHealthLabel') || 'health'}</span>
                         {hovering && Array.isArray(data.factors) && data.factors.length > 0 && (
                             <div style={{
                                 position: 'absolute', top: '100%', right: 0, marginTop: '4px',
@@ -2275,6 +2276,7 @@
 
         // Live Backup Progress Pane — tails a UPID's task log
         function BackupProgressPane({ clusterId, upid, node, authFetch, apiUrl, onClose }) {
+            const { t } = useTranslation();
             const [lines, setLines] = React.useState([]);
             const [done, setDone] = React.useState(false);
             const [exitstatus, setExitstatus] = React.useState(null);
@@ -2337,10 +2339,10 @@
                                   padding: '8px 12px', borderBottom: '1px solid var(--corp-border)' }}>
                         <div className="flex items-center gap-2">
                             <Icons.Clock className="w-4 h-4" style={{ color: done ? (exitstatus === 'OK' ? '#60b515' : '#f54f47') : '#f7b428' }} />
-                            <span className="font-medium text-sm">Backup {done ? (exitstatus === 'OK' ? 'completed' : `failed (${exitstatus})`) : 'in progress…'}</span>
+                            <span className="font-medium text-sm">{done ? (exitstatus === 'OK' ? (t('pbsBackupCompleted') || 'Backup completed') : `${t('pbsBackupFailed') || 'Backup failed'} (${exitstatus})`) : (t('pbsBackupInProgress') || 'Backup in progress…')}</span>
                             {throughput.length > 0 && (
                                 <span className="text-xs opacity-70" style={{ fontVariantNumeric: 'tabular-nums' }}>
-                                    {throughput[throughput.length - 1].mbps.toFixed(1)} MiB/s · peak {peakMbps.toFixed(1)}
+                                    {throughput[throughput.length - 1].mbps.toFixed(1)} MiB/s · {t('pbsPeak') || 'peak'} {peakMbps.toFixed(1)}
                                 </span>
                             )}
                         </div>
@@ -2357,7 +2359,7 @@
                     <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px',
                                   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                                   fontSize: '11.5px', whiteSpace: 'pre-wrap', lineHeight: '1.4' }}>
-                        {lines.length === 0 ? <span className="opacity-50">Waiting for output…</span>
+                        {lines.length === 0 ? <span className="opacity-50">{t('pbsWaitingForOutput') || 'Waiting for output…'}</span>
                             : lines.map((l, i) => (
                                 <div key={i} style={{
                                     color: /ERROR|FAIL/i.test(l) ? '#f54f47'
@@ -2419,6 +2421,7 @@
 
         // Storage-Add Pre-flight Indicator
         function StoragePreflightCheck({ clusterId, config, authFetch, apiUrl, onResult }) {
+            const { t } = useTranslation();
             const [state, setState] = React.useState({ status: 'idle', issues: [], info: {} });
             const run = async () => {
                 if (config.type !== 'pbs') return;
@@ -2449,10 +2452,10 @@
                             style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', padding: '2px 8px',
                                      borderRadius: '3px', border: 'none', cursor: 'pointer',
                                      opacity: state.status === 'checking' ? 0.5 : 1 }}>
-                            {state.status === 'checking' ? 'Checking…' : 'Run check'}
+                            {state.status === 'checking' ? (t('pbsCheckingEllipsis') || 'Checking…') : 'Run check'}
                         </button>
                     </div>
-                    {state.status === 'ok' && <div style={{ color: '#60b515', marginTop: '4px' }}>✓ All checks passed. Live fingerprint matches; auth ok; datastore exists.</div>}
+                    {state.status === 'ok' && <div style={{ color: '#60b515', marginTop: '4px' }}>✓ {t('pbsAllChecksPassed') || 'All checks passed. Live fingerprint matches; auth ok; datastore exists.'}</div>}
                     {state.status === 'fail' && (
                         <ul style={{ marginTop: '4px', paddingLeft: '18px' }}>
                             {state.issues.map((iss, i) => <li key={i} style={{ color: '#f54f47' }}>{iss}</li>)}
@@ -2470,10 +2473,11 @@
 
         // Auto-Fingerprint button — fetches the cert fingerprint via probe endpoint
         function FingerprintFetcher({ host, port, authFetch, apiUrl, onFetched }) {
+            const { t } = useTranslation();
             const [busy, setBusy] = React.useState(false);
             const [error, setError] = React.useState(null);
             const fetchIt = async () => {
-                if (!host) { setError('host required'); return; }
+                if (!host) { setError(t('pbsHostRequired') || 'host required'); return; }
                 setBusy(true); setError(null);
                 try {
                     const r = await authFetch(`${apiUrl}/pbs/probe-fingerprint`, {
@@ -2496,7 +2500,7 @@
                         style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', padding: '4px 10px',
                                  borderRadius: '3px', border: 'none', cursor: 'pointer', fontSize: '12px',
                                  opacity: (busy || !host) ? 0.5 : 1 }}
-                        title="Connect to host and capture the TLS fingerprint">
+                        title={t('pbsCaptureTlsFingerprint') || 'Connect to host and capture the TLS fingerprint'}>
                         {busy ? '…' : 'Auto-fetch'}
                     </button>
                     {error && <span style={{ color: '#f54f47', fontSize: '11px' }}>{error}</span>}
@@ -2507,6 +2511,7 @@
 
         // Backup Restore Wizard — three-mode (new/overwrite/test)
         function BackupRestoreWizard({ clusterId, snapshot, datastoreName, nodes, storages, authFetch, apiUrl, onClose, onStarted }) {
+            const { t } = useTranslation();
             // snapshot: {volid, vmid, type, backup_time}
             const [mode, setMode] = React.useState('new');
             const [targetNode, setTargetNode] = React.useState(nodes?.[0] || '');
@@ -2556,9 +2561,9 @@
             };
 
             const modeDescs = {
-                new: 'Restore as a new VM with the chosen VMID. Original VM stays untouched.',
-                overwrite: 'Overwrite an existing VM with the same VMID. Existing config + disks will be lost.',
-                test: 'Test-restore — restore + boot, then keep the test VM (no auto-cleanup). Useful for DR drills.',
+                new: t('pbsRestoreNewDesc') || 'Restore as a new VM with the chosen VMID. Original VM stays untouched.',
+                overwrite: t('pbsRestoreOverwriteDesc') || 'Overwrite an existing VM with the same VMID. Existing config + disks will be lost.',
+                test: t('pbsRestoreTestDesc') || 'Test-restore — restore + boot, then keep the test VM (no auto-cleanup). Useful for DR drills.',
             };
 
             return (
@@ -2569,14 +2574,14 @@
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
-                            <div className="text-base font-semibold">Restore backup</div>
+                            <div className="text-base font-semibold">{t('pbsRestoreBackup') || 'Restore backup'}</div>
                             <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}}>×</button>
                         </div>
                         <div className="p-5 space-y-3">
-                            <div className="text-xs opacity-70">Source: {snapshot?.volid || '(unknown)'}</div>
+                            <div className="text-xs opacity-70">{t('pbsRestoreSource') || 'Source'}: {snapshot?.volid || (t('pbsUnknown') || '(unknown)')}</div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Mode</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('pbsRestoreMode') || 'Mode'}</div>
                                 <div className="grid grid-cols-3 gap-2">
                                     {['new', 'overwrite', 'test'].map(m => (
                                         <button key={m} type="button" onClick={() => setMode(m)}
@@ -2595,7 +2600,7 @@
                             </div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Target node</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('pbsTargetNode') || 'Target node'}</div>
                                 <select value={targetNode} onChange={e => setTargetNode(e.target.value)}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
@@ -2604,18 +2609,18 @@
                             </div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Target VMID</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('pbsTargetVmid') || 'Target VMID'}</div>
                                 <input type="number" value={targetVmid} onChange={e => setTargetVmid(e.target.value)}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }} />
                             </div>
 
                             <div>
-                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">Target storage (optional)</div>
+                                <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('pbsTargetStorageOptional') || 'Target storage (optional)'}</div>
                                 <select value={targetStorage} onChange={e => setTargetStorage(e.target.value)}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
-                                    <option value="">— use default from backup —</option>
+                                    <option value="">{t('pbsUseBackupDefault') || '— use default from backup —'}</option>
                                     {(storages || []).map(s => <option key={s} value={s}>{s}</option>)}
                                 </select>
                             </div>
@@ -2626,14 +2631,14 @@
                                 <button type="button" onClick={onClose}
                                     className="px-3 py-1.5 text-sm"
                                     style={{ background: 'transparent', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                    Cancel
+                                    {t('cancel') || 'Cancel'}
                                 </button>
                                 <button type="button" onClick={submit} disabled={running || !targetNode || !targetVmid}
                                     className="px-3 py-1.5 text-sm font-medium"
                                     style={{ background: mode === 'overwrite' ? '#b94a3a' : 'var(--corp-accent, #0078a8)',
                                              color: '#fff', border: 'none', borderRadius: '3px',
                                              opacity: (running || !targetNode || !targetVmid) ? 0.5 : 1 }}>
-                                    {running ? 'Starting…' : `Start restore (${mode})`}
+                                    {running ? (t('pbsStartingEllipsis') || 'Starting…') : `${t('pbsStartRestore') || 'Start restore'} (${mode})`}
                                 </button>
                             </div>
                         </div>
@@ -2646,6 +2651,7 @@
         // LW May 2026 — Encryption key generator. Generates server-side, shows
         // once, lets the user download the JSON envelope + a printable sheet.
         function EncryptionKeyModal({ authFetch, apiUrl, onClose }) {
+            const { t } = useTranslation();
             const [data, setData] = React.useState(null);
             const [busy, setBusy] = React.useState(false);
             const [err, setErr] = React.useState(null);
@@ -2674,15 +2680,15 @@
                 const w = window.open('', 'pbs-key', 'width=720,height=900');
                 if (!w) return;
                 const safe = (s) => String(s).replace(/[<&>]/g, c => ({'<':'&lt;','&':'&amp;','>':'&gt;'})[c]);
-                w.document.write(`<!DOCTYPE html><html><head><title>PBS Encryption Key Recovery Sheet</title>
+                w.document.write(`<!DOCTYPE html><html><head><title>${safe(t('pbsEncryptionRecoveryDocumentTitle') || 'PBS Encryption Key Recovery Sheet')}</title>
 <style>body{font-family:ui-monospace,monospace;font-size:11pt;padding:24px;color:#000}
 h1{font-size:14pt;margin-bottom:6px}.warn{color:#a00;font-weight:bold}
 pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px;background:#f7f7f7}
 @media print{body{padding:0}}</style></head><body>
-<h1>PBS Encryption Key — Recovery Sheet</h1>
-<p class="warn">⚠ Without this key, all backups encrypted with it are UNRECOVERABLE. Store offline.</p>
+<h1>${safe(t('pbsEncryptionRecoveryHeading') || 'PBS Encryption Key — Recovery Sheet')}</h1>
+<p class="warn">⚠ ${safe(t('pbsEncryptionRecoveryWarning') || 'Without this key, all backups encrypted with it are UNRECOVERABLE. Store offline.')}</p>
 <pre>${safe(data?.recovery_sheet || '')}</pre>
-<p>JSON envelope (paste into /etc/pve/priv/storage/&lt;id&gt;.enc):</p>
+<p>${safe(t('pbsJsonEnvelopeInstruction') || 'JSON envelope (paste into /etc/pve/priv/storage/<id>.enc):')}</p>
 <pre>${safe(JSON.stringify(data?.key_json, null, 2))}</pre>
 </body></html>`);
                 w.document.close();
@@ -2699,7 +2705,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                         <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
                             <div className="text-base font-semibold flex items-center gap-2">
                                 <Icons.Lock className="w-4 h-4" />
-                                PBS Encryption Key
+                                {t('pbsEncryptionKey') || 'PBS Encryption Key'}
                             </div>
                             <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}}>×</button>
                         </div>
@@ -2707,12 +2713,11 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                             {!data && (
                                 <>
                                     <div className="text-sm opacity-80">
-                                        Generates a fresh AES-256 encryption key in PBS format. Without this key,
-                                        encrypted backups are unrecoverable — store offline.
+                                        {t('pbsEncryptionKeyDesc') || 'Generates a fresh AES-256 encryption key in PBS format. Without this key, encrypted backups are unrecoverable — store offline.'}
                                     </div>
                                     <div style={{ background: 'rgba(245,79,71,0.08)', border: '1px solid rgba(245,79,71,0.4)',
                                                   borderRadius: '4px', padding: '8px 10px', fontSize: '12px', color: '#f54f47' }}>
-                                        ⚠ The key is shown <strong>once</strong>. PegaProx does not retain a copy.
+                                        ⚠ {t('pbsEncryptionKeyShown') || 'The key is shown'} <strong>{t('pbsOnce') || 'once'}</strong>. {t('pbsEncryptionKeyNotRetained') || 'PegaProx does not retain a copy.'}
                                     </div>
                                     {err && <div style={{ color: '#f54f47', fontSize: '12px' }}>{err}</div>}
                                     <div className="flex justify-end">
@@ -2720,18 +2725,18 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                             className="px-4 py-2 text-sm font-medium"
                                             style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', border: 'none', borderRadius: '3px',
                                                      opacity: busy ? 0.5 : 1 }}>
-                                            {busy ? 'Generating…' : 'Generate key'}
+                                            {busy ? (t('pbsGeneratingEllipsis') || 'Generating…') : (t('pbsGenerateKey') || 'Generate key')}
                                         </button>
                                     </div>
                                 </>
                             )}
                             {data && (
                                 <>
-                                    <div className="text-xs uppercase tracking-wide opacity-70">Fingerprint</div>
+                                    <div className="text-xs uppercase tracking-wide opacity-70">{t('pbsFingerprint') || 'Fingerprint'}</div>
                                     <div className="font-mono text-xs" style={{ wordBreak: 'break-all', padding: '6px 8px', background: 'var(--corp-surface-2, #29414e)', borderRadius: '3px' }}>
                                         {data.fingerprint}
                                     </div>
-                                    <div className="text-xs uppercase tracking-wide opacity-70 mt-3">Recovery sheet (printable)</div>
+                                    <div className="text-xs uppercase tracking-wide opacity-70 mt-3">{t('pbsRecoverySheetPrintable') || 'Recovery sheet (printable)'}</div>
                                     <pre style={{ fontSize: '10.5px', maxHeight: '260px', overflowY: 'auto',
                                                   padding: '10px 12px', background: 'var(--corp-surface-2, #29414e)',
                                                   borderRadius: '3px', whiteSpace: 'pre-wrap' }}>{data.recovery_sheet}</pre>
@@ -2739,17 +2744,17 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                         <button onClick={() => download(`pbs-key-${data.fingerprint.slice(0,8)}.json`, JSON.stringify(data.key_json, null, 2), 'application/json')}
                                             className="px-3 py-1.5 text-sm"
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                            Download JSON
+                                            {t('download') || 'Download'} JSON
                                         </button>
                                         <button onClick={() => download(`pbs-key-recovery-${data.fingerprint.slice(0,8)}.txt`, data.recovery_sheet)}
                                             className="px-3 py-1.5 text-sm"
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                            Download .txt
+                                            {t('download') || 'Download'} .txt
                                         </button>
                                         <button onClick={printSheet}
                                             className="px-3 py-1.5 text-sm font-medium"
                                             style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', border: 'none', borderRadius: '3px' }}>
-                                            Print recovery sheet
+                                            {t('pbsPrintRecoverySheet') || 'Print recovery sheet'}
                                         </button>
                                     </div>
                                 </>
@@ -2764,6 +2769,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
         // NS May 2026 — settings panel for the auto-verify schedule.
         // Backend at /api/pbs/verify-schedule (GET/PUT). Single dialog toggle.
         function VerifyScheduleModal({ authFetch, apiUrl, onClose }) {
+            const { t } = useTranslation();
             const [cfg, setCfg] = React.useState(null);
             const [busy, setBusy] = React.useState(false);
             const [err, setErr] = React.useState(null);
@@ -2805,25 +2811,25 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                         <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--corp-border, #29414e)' }}>
                             <div className="text-base font-semibold flex items-center gap-2">
                                 <Icons.Clock className="w-4 h-4" />
-                                Auto Backup Verification
+                                {t('pbsAutoBackupVerification') || 'Auto Backup Verification'}
                             </div>
                             <button onClick={onClose} className="opacity-60 hover:opacity-100 leading-none" style={{fontSize:'18px'}}>×</button>
                         </div>
                         {!cfg ? (
-                            <div className="p-6 text-center opacity-70">{err || 'Loading…'}</div>
+                            <div className="p-6 text-center opacity-70">{err || (t('pbsLoadingEllipsis') || 'Loading…')}</div>
                         ) : (
                             <div className="p-5 space-y-3">
                                 <p className="text-xs opacity-70">
-                                    Schedules a weekly backup-verification: a small set of recent snapshots is restored to scratch, booted, then cleaned up. Catches silent backup corruption.
+                                    {t('pbsAutoBackupVerificationDesc') || 'Schedules a weekly backup-verification: a small set of recent snapshots is restored to scratch, booted, then cleaned up. Catches silent backup corruption.'}
                                 </p>
                                 <label className="flex items-center gap-3">
                                     <input type="checkbox" checked={!!cfg.enabled} onChange={(e) => update('enabled', e.target.checked)} />
-                                    <span>Enable scheduled auto-verification</span>
+                                    <span>{t('pbsEnableScheduledAutoVerification') || 'Enable scheduled auto-verification'}</span>
                                 </label>
                                 <div style={{ opacity: cfg.enabled ? 1 : 0.5 }}>
                                     <div className="grid grid-cols-2 gap-3">
                                         <label className="text-sm">
-                                            <div className="opacity-70 mb-1">Day</div>
+                                            <div className="opacity-70 mb-1">{t('day') || 'Day'}</div>
                                             <select value={cfg.day || 'sun'} onChange={(e) => update('day', e.target.value)}
                                                 className="w-full px-2 py-1.5 text-sm" disabled={!cfg.enabled}
                                                 style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
@@ -2831,7 +2837,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                             </select>
                                         </label>
                                         <label className="text-sm">
-                                            <div className="opacity-70 mb-1">Hour (0-23)</div>
+                                            <div className="opacity-70 mb-1">{t('pbsHourRange') || 'Hour (0-23)'}</div>
                                             <input type="number" min="0" max="23" value={cfg.hour ?? 4}
                                                 onChange={(e) => update('hour', Math.max(0, Math.min(23, parseInt(e.target.value) || 0)))}
                                                 disabled={!cfg.enabled}
@@ -2840,7 +2846,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                         </label>
                                     </div>
                                     <label className="text-sm block mt-3">
-                                        <div className="opacity-70 mb-1">Snapshots per run (1-50)</div>
+                                        <div className="opacity-70 mb-1">{t('pbsSnapshotsPerRun') || 'Snapshots per run (1-50)'}</div>
                                         <input type="number" min="1" max="50" value={cfg.weekly_count ?? 5}
                                             onChange={(e) => update('weekly_count', Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
                                             disabled={!cfg.enabled}
@@ -2848,13 +2854,13 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }} />
                                     </label>
                                     <label className="text-sm block mt-3">
-                                        <div className="opacity-70 mb-1">Scope</div>
+                                        <div className="opacity-70 mb-1">{t('scope') || 'Scope'}</div>
                                         <select value={cfg.scope || 'latest_per_vm'} onChange={(e) => update('scope', e.target.value)}
                                             disabled={!cfg.enabled}
                                             className="w-full px-2 py-1.5 text-sm"
                                             style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }}>
-                                            <option value="latest_per_vm">Latest snapshot per VM</option>
-                                            <option value="all">All snapshots in pool</option>
+                                            <option value="latest_per_vm">{t('pbsLatestSnapshotPerVm') || 'Latest snapshot per VM'}</option>
+                                            <option value="all">{t('pbsAllSnapshotsInPool') || 'All snapshots in pool'}</option>
                                         </select>
                                     </label>
                                 </div>
@@ -2863,13 +2869,13 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                     <button onClick={onClose}
                                         className="px-3 py-1.5 text-sm"
                                         style={{ background: 'transparent', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)', borderRadius: '3px' }}>
-                                        Cancel
+                                        {t('cancel') || 'Cancel'}
                                     </button>
                                     <button onClick={save} disabled={busy}
                                         className="px-3 py-1.5 text-sm font-medium"
                                         style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', border: 'none', borderRadius: '3px',
                                                  opacity: busy ? 0.5 : 1 }}>
-                                        {busy ? 'Saving…' : 'Save'}
+                                        {busy ? (t('pbsSavingEllipsis') || 'Saving…') : (t('save') || 'Save')}
                                     </button>
                                 </div>
                             </div>

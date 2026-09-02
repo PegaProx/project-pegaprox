@@ -18674,7 +18674,7 @@
                                                         <span>{selectedPBS.host}:{selectedPBS.port}</span>
                                                         <span className="flex items-center gap-1" style={{color: selectedPBS.connected ? '#60b515' : '#f54f47'}}>
                                                             <span className="w-2 h-2 rounded-full" style={{background: selectedPBS.connected ? '#60b515' : '#f54f47'}}></span>
-                                                            {selectedPBS.connected ? 'Connected' : 'Disconnected'}
+                                                            {selectedPBS.connected ? (t('pbsConnected') || 'Connected') : (t('disconnected') || 'Disconnected')}
                                                         </span>
                                                         {pbsStatus?.version && <span>v{pbsStatus.version.version}</span>}
                                                         {/* NS May 2026 — PBS health pill */}
@@ -18723,10 +18723,10 @@
                                             : 'flex items-center gap-1 p-1 bg-proxmox-card border border-proxmox-border rounded-xl w-fit'
                                         }>
                                             {[
-                                                { id: 'dashboard', label: 'Dashboard', icon: Icons.Activity },
+                                                { id: 'dashboard', label: t('pbsDashboardTab') || 'Dashboard', icon: Icons.Activity },
                                                 { id: 'datastores', label: t('datastores') || 'Datastores', icon: Icons.Database },
                                                 { id: 'tasks', label: t('tasks') || 'Tasks', icon: Icons.ClipboardList },
-                                                { id: 'jobs', label: 'Jobs', icon: Icons.Clock },
+                                                { id: 'jobs', label: t('pbsJobsTab') || 'Jobs', icon: Icons.Clock },
                                                 { id: 'reports', label: t('reports') || 'Reports', icon: Icons.FileText },  // MK Apr 2026: #273
                                             ].map(tab => (
                                                 <button key={tab.id} onClick={() => setPbsActiveTab(tab.id)}
@@ -18746,8 +18746,8 @@
                                             <div className="space-y-6">
                                                 {pbsStatus.errors && pbsStatus.errors.length > 0 && (
                                                     <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-sm text-yellow-300">
-                                                        <span className="font-medium">Could not load all data:</span> {pbsStatus.errors.join('; ')}
-                                                        <div className="text-xs text-yellow-400/70 mt-1">Check that the API token has Sys.Audit and Datastore.Audit privileges on the PBS server.</div>
+                                                        <span className="font-medium">{t('pbsLoadAllDataError') || 'Could not load all data:'}</span> {pbsStatus.errors.join('; ')}
+                                                        <div className="text-xs text-yellow-400/70 mt-1">{t('pbsApiTokenPrivilegesHint') || 'Check that the API token has Sys.Audit and Datastore.Audit privileges on the PBS server.'}</div>
                                                     </div>
                                                 )}
                                                 {/* Resource Gauges */}
@@ -18801,7 +18801,7 @@
                                                                 </div>
                                                                 <div className={cardCls} style={cardStyle}>
                                                                     <div className="flex items-center justify-between mb-3">
-                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>Root Disk</span>
+                                                                        <span className={isCorporate ? 'text-[12px]' : 'text-sm'} style={{color: '#adbbc4'}}>{t('pbsRootDisk') || 'Root Disk'}</span>
                                                                         <span className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{rootPct}%</span>
                                                                     </div>
                                                                     <div className={`w-full ${barH} bg-proxmox-dark ${barRound} overflow-hidden`} style={barBg ? {background: barBg, borderRadius: barRadius} : {}}>
@@ -18815,7 +18815,7 @@
                                                                         <Icons.Clock className="w-4 h-4" style={{color: 'var(--corp-text-muted)'}} />
                                                                     </div>
                                                                     <div className={isCorporate ? 'text-[14px] font-medium' : 'text-lg font-bold'} style={{color: '#e9ecef'}}>{days}d {hours}h {mins}m</div>
-                                                                    <div className="text-xs mt-2" style={{color: 'var(--corp-text-muted)'}}>Load: {(srv.loadavg || [0,0,0]).map(v => v.toFixed(2)).join(', ')}</div>
+                                                                    <div className="text-xs mt-2" style={{color: 'var(--corp-text-muted)'}}>{t('pbsLoadLabel') || 'Load'}: {(srv.loadavg || [0,0,0]).map(v => v.toFixed(2)).join(', ')}</div>
                                                                 </div>
                                                             </>
                                                         );
@@ -18869,8 +18869,8 @@
                                                                                 <div><span className="text-gray-500">{t('total') || 'Total'}:</span> <span className="text-gray-300">{formatBytes(total)}</span></div>
                                                                                 {gcStatus.index && (
                                                                                     <>
-                                                                                        <div><span className="text-gray-500">Dedup:</span> <span className="text-cyan-400">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span></div>
-                                                                                        <div><span className="text-gray-500">Chunks:</span> <span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span></div>
+                                                                                        <div><span className="text-gray-500">{t('pbsDedupShort') || 'Dedup'}:</span> <span className="text-cyan-400">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span></div>
+                                                                                        <div><span className="text-gray-500">{t('pbsChunksShort') || 'Chunks'}:</span> <span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span></div>
                                                                                     </>
                                                                                 )}
                                                                                 {detail['total-snapshots'] !== undefined && (
@@ -18882,7 +18882,7 @@
                                                                                     <button onClick={e => { e.stopPropagation(); setPbsActionLoading(p => ({...p, [`gc-${ds.name||ds.store}`]: true})); pbsAction('gc', ds.name || ds.store).finally(() => setPbsActionLoading(p => ({...p, [`gc-${ds.name||ds.store}`]: false}))); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-blue-500/20 transition-all" disabled={pbsActionLoading[`gc-${ds.name||ds.store}`]}>
                                                                                         {pbsActionLoading[`gc-${ds.name||ds.store}`] ? (t('starting') || 'Starting...') : 'GC'}
                                                                                     </button>
-                                                                                    <button onClick={e => { e.stopPropagation(); pbsAction('verify', ds.name || ds.store); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-green-500/20 transition-all">Verify</button>
+                                                                                    <button onClick={e => { e.stopPropagation(); pbsAction('verify', ds.name || ds.store); }} className="flex-1 px-2 py-1 rounded bg-proxmox-dark text-xs text-gray-400 hover:text-white hover:bg-green-500/20 transition-all">{t('pbsVerify') || 'Verify'}</button>
                                                                                 </div>
                                                                             )}
                                                                         </>
@@ -18942,7 +18942,7 @@
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('type') || 'Type'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('status') || 'Status'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('started') || 'Started'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('duration') || 'Duration'}</th><th className={isCorporate ? '' : 'text-left p-3'}>Worker</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('type') || 'Type'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('status') || 'Status'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('started') || 'Started'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('duration') || 'Duration'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsWorker') || 'Worker'}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsTasks.slice(0, 10).map((task, i) => (
@@ -18972,7 +18972,7 @@
                                                 {/* Linked Clusters */}
                                                 {selectedPBS.linked_clusters && selectedPBS.linked_clusters.length > 0 && (
                                                     <div>
-                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Linked PVE Clusters</h2>
+                                                        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('pbsLinkedPveClusters') || 'Linked PVE Clusters'}</h2>
                                                         <div className="flex gap-2 flex-wrap">
                                                             {selectedPBS.linked_clusters.map(cid => {
                                                                 const cl = clusters.find(c => c.id === cid);
@@ -18989,22 +18989,22 @@
                                                 {/* Traffic Control / Bandwidth Limits */}
                                                 {pbsTrafficControl && pbsTrafficControl.length > 0 && (
                                                     <div>
-                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>Traffic Control</h2>
+                                                        <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('pbsTrafficControl') || 'Traffic Control'}</h2>
                                                         <div className={isCorporate ? 'overflow-hidden' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}>
                                                             <table className={isCorporate ? 'corp-datagrid' : 'w-full text-sm'}>
                                                                 <thead><tr className={isCorporate ? '' : 'border-b border-proxmox-border text-gray-500 text-xs'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('name') || 'Name'}</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate In</th><th className={isCorporate ? '' : 'text-left p-3'}>Rate Out</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst In</th><th className={isCorporate ? '' : 'text-left p-3'}>Burst Out</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('network') || 'Network'}</th><th className={isCorporate ? '' : 'text-left p-3'}>Timeframe</th>
+                                                                    <th className={isCorporate ? '' : 'text-left p-3'}>{t('name') || 'Name'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsRateIn') || 'Rate In'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsRateOut') || 'Rate Out'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsBurstIn') || 'Burst In'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsBurstOut') || 'Burst Out'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('network') || 'Network'}</th><th className={isCorporate ? '' : 'text-left p-3'}>{t('pbsTimeframe') || 'Timeframe'}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsTrafficControl.map((tc, i) => (
                                                                         <tr key={i} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/30">
                                                                             <td className="p-3 text-white font-medium">{tc.name || '-'}</td>
-                                                                            <td className="p-3 text-cyan-400">{tc['rate-in'] ? formatBytes(tc['rate-in']) + '/s' : 'unlimited'}</td>
-                                                                            <td className="p-3 text-cyan-400">{tc['rate-out'] ? formatBytes(tc['rate-out']) + '/s' : 'unlimited'}</td>
+                                                                            <td className="p-3 text-cyan-400">{tc['rate-in'] ? formatBytes(tc['rate-in']) + '/s' : (t('pbsUnlimited') || 'unlimited')}</td>
+                                                                            <td className="p-3 text-cyan-400">{tc['rate-out'] ? formatBytes(tc['rate-out']) + '/s' : (t('pbsUnlimited') || 'unlimited')}</td>
                                                                             <td className="p-3 text-gray-400">{tc['burst-in'] ? formatBytes(tc['burst-in']) : '-'}</td>
                                                                             <td className="p-3 text-gray-400">{tc['burst-out'] ? formatBytes(tc['burst-out']) : '-'}</td>
-                                                                            <td className="p-3 text-gray-400">{(tc.network || []).join(', ') || 'all'}</td>
-                                                                            <td className="p-3 text-gray-500">{tc.timeframe || 'always'}</td>
+                                                                            <td className="p-3 text-gray-400">{(tc.network || []).join(', ') || (t('pbsNetworkAll') || 'all')}</td>
+                                                                            <td className="p-3 text-gray-500">{tc.timeframe || (t('pbsTimeframeAlways') || 'always')}</td>
                                                                         </tr>
                                                                     ))}
                                                                 </tbody>
@@ -19021,7 +19021,7 @@
                                                             {pbsNotifications.targets?.length > 0 && (
                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <h3 className="text-sm font-medium text-gray-300 mb-3 flex items-center gap-2">
-                                                                        <Icons.Bell className="w-4 h-4 text-blue-400" />Targets ({pbsNotifications.targets.length})
+                                                                        <Icons.Bell className="w-4 h-4 text-blue-400" />{t('pbsNotificationTargets') || 'Targets'} ({pbsNotifications.targets.length})
                                                                     </h3>
                                                                     <div className="space-y-2">
                                                                         {pbsNotifications.targets.map((target, i) => (
@@ -19045,7 +19045,7 @@
                                                             {pbsNotifications.matchers?.length > 0 && (
                                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <h3 className="text-sm font-medium text-gray-300 mb-3 flex items-center gap-2">
-                                                                        <Icons.Filter className="w-4 h-4 text-yellow-400" />Matchers ({pbsNotifications.matchers.length})
+                                                                        <Icons.Filter className="w-4 h-4 text-yellow-400" />{t('pbsNotificationMatchers') || 'Matchers'} ({pbsNotifications.matchers.length})
                                                                     </h3>
                                                                     <div className="space-y-2">
                                                                         {pbsNotifications.matchers.map((m, i) => (
@@ -19069,7 +19069,7 @@
                                                     <div className="flex items-center justify-between mb-4">
                                                         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('syslog') || 'Syslog'}</h2>
                                                         <button onClick={() => fetchPBSSyslog(selectedPBS.id, 200)} className="text-xs text-gray-500 hover:text-white transition-colors flex items-center gap-1">
-                                                            <Icons.RefreshCw className="w-3 h-3" />Load More
+                                                            <Icons.RefreshCw className="w-3 h-3" />{t('pbsLoadMore') || 'Load More'}
                                                         </button>
                                                     </div>
                                                     {pbsSyslog.length > 0 ? (
@@ -19085,7 +19085,7 @@
                                                     ) : (
                                                         <button onClick={() => fetchPBSSyslog(selectedPBS.id)} className="w-full text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl hover:border-blue-500/30 transition-all cursor-pointer">
                                                             <Icons.Terminal className="w-6 h-6 mx-auto mb-2 opacity-30" />
-                                                            <span className="text-sm">Click to load syslog</span>
+                                                            <span className="text-sm">{t('pbsLoadSyslog') || 'Click to load syslog'}</span>
                                                         </button>
                                                     )}
                                                 </div>
@@ -19130,13 +19130,13 @@
                                                             {isAdmin && (
                                                                 <div className="flex items-center gap-2 flex-wrap">
                                                                     <button onClick={() => { setPbsActionLoading(p => ({...p, gc: true})); pbsAction('gc', pbsSelectedStore).finally(() => setPbsActionLoading(p => ({...p, gc: false}))); }} disabled={pbsActionLoading.gc} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-blue-500/30 transition-all flex items-center gap-2 disabled:opacity-50">
-                                                                        <Icons.Trash className="w-4 h-4" /> {pbsActionLoading.gc ? 'Starting...' : 'Garbage Collection'}
+                                                                        <Icons.Trash className="w-4 h-4" /> {pbsActionLoading.gc ? 'Starting...' : (t('pbsGarbageCollection') || 'Garbage Collection')}
                                                                     </button>
                                                                     <button onClick={() => { setPbsActionLoading(p => ({...p, verify: true})); pbsAction('verify', pbsSelectedStore).finally(() => setPbsActionLoading(p => ({...p, verify: false}))); }} disabled={pbsActionLoading.verify} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-green-500/30 transition-all flex items-center gap-2 disabled:opacity-50">
-                                                                        <Icons.CheckCircle className="w-4 h-4" /> {pbsActionLoading.verify ? 'Starting...' : 'Verify'}
+                                                                        <Icons.CheckCircle className="w-4 h-4" /> {pbsActionLoading.verify ? 'Starting...' : (t('pbsVerify') || 'Verify')}
                                                                     </button>
                                                                     <button onClick={() => setShowPbsPrune(pbsSelectedStore)} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-yellow-500/30 transition-all flex items-center gap-2">
-                                                                        <Icons.Archive className="w-4 h-4" /> Prune
+                                                                        <Icons.Archive className="w-4 h-4" /> {t('pbsPruneAction') || 'Prune'}
                                                                     </button>
                                                                 </div>
                                                             )}
@@ -19160,20 +19160,20 @@
                                                                                         fetchPBSGroups(selectedPBS.id, pbsSelectedStore, ns);
                                                                                     }}
                                                                                 >
-                                                                                    <option value="">Root</option>
+                                                                                    <option value="">{t('pbsNamespaceRoot') || 'Root'}</option>
                                                                                     {pbsNamespaces.map((ns, i) => <option key={i} value={ns.ns || ns.name}>{ns.ns || ns.name}</option>)}
                                                                                 </select>
                                                                             </div>
                                                                         )}
                                                                         {gcStatus['last-run-endtime'] && (
                                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-3 flex-1 min-w-[300px]">
-                                                                                <span className="text-xs text-gray-500 block mb-1.5">Garbage Collection</span>
+                                                                                <span className="text-xs text-gray-500 block mb-1.5">{t('pbsGarbageCollection') || 'Garbage Collection'}</span>
                                                                                 <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                                                                                    <span className="text-gray-500">Last GC:</span><span className="text-gray-300">{fmtDate(gcStatus['last-run-endtime'] * 1000)}</span>
+                                                                                    <span className="text-gray-500">{t('pbsLastGc') || 'Last GC'}:</span><span className="text-gray-300">{fmtDate(gcStatus['last-run-endtime'] * 1000)}</span>
                                                                                     <span className="text-gray-500">{t('duration') || 'Duration'}:</span><span className="text-gray-300">{gcStatus['last-run-duration'] ? `${Math.floor(gcStatus['last-run-duration'] / 60)}m ${gcStatus['last-run-duration'] % 60}s` : '-'}</span>
-                                                                                    <span className="text-gray-500">Dedup Factor:</span><span className="text-cyan-400 font-medium">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span>
-                                                                                    <span className="text-gray-500">Disk Chunks:</span><span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span>
-                                                                                    <span className="text-gray-500">Disk Bytes:</span><span className="text-gray-300">{formatBytes(gcStatus['disk-bytes'] || 0)}</span>
+                                                                                    <span className="text-gray-500">{t('pbsDedupFactor') || 'Dedup Factor'}:</span><span className="text-cyan-400 font-medium">{(gcStatus['dedup-factor'] || 1).toFixed(2)}x</span>
+                                                                                    <span className="text-gray-500">{t('pbsDiskChunks') || 'Disk Chunks'}:</span><span className="text-gray-300">{(gcStatus['disk-chunks'] || 0).toLocaleString()}</span>
+                                                                                    <span className="text-gray-500">{t('pbsDiskBytes') || 'Disk Bytes'}:</span><span className="text-gray-300">{formatBytes(gcStatus['disk-bytes'] || 0)}</span>
                                                                                     {gcStatus['pending-chunks'] > 0 && (
                                                                                         <><span className="text-gray-500">{t('pending') || 'Pending'}:</span><span className="text-yellow-400">{gcStatus['pending-chunks']} chunks ({formatBytes(gcStatus['pending-bytes'] || 0)})</span></>
                                                                                     )}
@@ -19189,7 +19189,7 @@
 
                                                             {/* Backup Groups */}
                                                             <div>
-                                                                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Backup Groups ({pbsGroups.length})</h3>
+                                                                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">{t('pbsBackupGroups') || 'Backup Groups'} ({pbsGroups.length})</h3>
                                                                 {pbsGroups.length > 0 ? (
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                                         <table className="w-full text-sm">
@@ -19233,7 +19233,7 @@
                                                                         </table>
                                                                     </div>
                                                                 ) : (
-                                                                    <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">No backup groups found</div>
+                                                                    <div className="text-center py-8 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl">{t('pbsNoBackupGroupsFound') || 'No backup groups found'}</div>
                                                                 )}
                                                             </div>
 
@@ -19248,7 +19248,7 @@
                                                                         })() : `(${t('all') || 'All'})`}
                                                                     </h3>
                                                                     {pbsSelectedGroup && (
-                                                                        <button onClick={() => setPbsSelectedGroup(null)} className="text-xs text-gray-500 hover:text-white transition-colors">Show All</button>
+                                                                        <button onClick={() => setPbsSelectedGroup(null)} className="text-xs text-gray-500 hover:text-white transition-colors">{t('pbsShowAll') || 'Show All'}</button>
                                                                     )}
                                                                 </div>
                                                                 {(() => {
@@ -19283,17 +19283,17 @@
                                                                                                 ) : <span className="text-gray-600">-</span>}
                                                                                             </td>
                                                                                             <td className="p-3 text-center">
-                                                                                                <button onClick={() => isAdmin && pbsToggleProtected(snap)} className={`px-2 py-0.5 rounded text-xs transition-all ${snap.protected ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-proxmox-dark text-gray-600 border border-proxmox-border'} ${isAdmin ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`} title={isAdmin ? 'Toggle protection' : (snap.protected ? 'Protected' : 'Unprotected')}>
+                                                                                                <button onClick={() => isAdmin && pbsToggleProtected(snap)} className={`px-2 py-0.5 rounded text-xs transition-all ${snap.protected ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-proxmox-dark text-gray-600 border border-proxmox-border'} ${isAdmin ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`} title={isAdmin ? (t('pbsToggleProtection') || 'Toggle protection') : (snap.protected ? 'Protected' : 'Unprotected')}>
                                                                                                     {snap.protected ? Icons.Shield ? <Icons.Shield className="w-3.5 h-3.5 inline" /> : 'Yes' : '-'}
                                                                                                 </button>
                                                                                             </td>
                                                                                             <td className="p-3 text-right flex items-center justify-end gap-1">
                                                                                                 {snap['backup-type'] === 'host' ? (
-                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title="Browse Files">
+                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title={t('pbsBrowseFiles') || 'Browse Files'}>
                                                                                                         {Icons.FolderOpen ? <Icons.FolderOpen className="w-3.5 h-3.5" /> : <Icons.Folder className="w-3.5 h-3.5" />}
                                                                                                     </button>
                                                                                                 ) : (
-                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-600 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title="Browse Catalog (if available)">
+                                                                                                    <button onClick={() => pbsOpenFileBrowser(snap)} className="px-2 py-1 rounded text-xs text-gray-600 hover:text-blue-400 hover:bg-blue-500/10 transition-all" title={t('pbsBrowseCatalog') || 'Browse Catalog (if available)'}>
                                                                                                         <Icons.Folder className="w-3.5 h-3.5" />
                                                                                                     </button>
                                                                                                 )}
@@ -19350,7 +19350,7 @@
                                                     ) : (
                                                         <div className="text-center py-16 text-gray-500">
                                                             <Icons.Database className="w-12 h-12 mx-auto mb-4 opacity-30" />
-                                                            <p>Select a datastore to view details</p>
+                                                            <p>{t('pbsSelectDatastoreDetails') || 'Select a datastore to view details'}</p>
                                                         </div>
                                                     )}
                                                 </div>
@@ -19369,7 +19369,7 @@
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                     <table className="w-full text-sm">
                                                         <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                            <th className="text-left p-3">{t('type') || 'Type'}</th><th className="text-left p-3">Worker ID</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('started') || 'Started'}</th><th className="text-left p-3">{t('duration') || 'Duration'}</th><th className="text-left p-3">{t('user') || 'User'}</th>
+                                                            <th className="text-left p-3">{t('type') || 'Type'}</th><th className="text-left p-3">{t('pbsWorkerId') || 'Worker ID'}</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('started') || 'Started'}</th><th className="text-left p-3">{t('duration') || 'Duration'}</th><th className="text-left p-3">{t('user') || 'User'}</th>
                                                         </tr></thead>
                                                         <tbody>
                                                             {pbsTasks.map((task, i) => (
@@ -19392,23 +19392,23 @@
                                                             ))}
                                                         </tbody>
                                                     </table>
-                                                    {pbsTasks.length === 0 && <div className="text-center py-8 text-gray-500">No tasks found</div>}
+                                                    {pbsTasks.length === 0 && <div className="text-center py-8 text-gray-500">{t('pbsNoTasksFound') || 'No tasks found'}</div>}
                                                 </div>
 
                                                 {/* Task Log Viewer */}
                                                 {pbsTaskLog && (
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                         <div className="flex items-center justify-between p-3 border-b border-proxmox-border">
-                                                            <span className="text-sm font-medium text-white">Task Log</span>
+                                                            <span className="text-sm font-medium text-white">{t('pbsTaskLog') || 'Task Log'}</span>
                                                             <button onClick={() => setPbsTaskLog(null)} className="text-gray-500 hover:text-white"><Icons.X className="w-4 h-4" /></button>
                                                         </div>
                                                         <div className="p-3">
                                                             <div className="text-xs text-gray-500 mb-2">
-                                                                Status: <span className={pbsTaskLog.status?.status === 'stopped' ? 'text-green-400' : 'text-blue-400'}>{pbsTaskLog.status?.status || '?'}</span>
-                                                                {pbsTaskLog.status?.exitstatus && <span> | Exit: {pbsTaskLog.status.exitstatus}</span>}
+                                                                {t('status') || 'Status'}: <span className={pbsTaskLog.status?.status === 'stopped' ? 'text-green-400' : 'text-blue-400'}>{pbsTaskLog.status?.status || '?'}</span>
+                                                                {pbsTaskLog.status?.exitstatus && <span> | {t('pbsExitStatus') || 'Exit'}: {pbsTaskLog.status.exitstatus}</span>}
                                                             </div>
                                                             <pre className="text-xs text-gray-300 font-mono bg-proxmox-dark rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">
-                                                                {(pbsTaskLog.log || []).map(l => l.t || l.d || '').join('\n') || 'No log output'}
+                                                                {(pbsTaskLog.log || []).map(l => l.t || l.d || '').join('\n') || (t('pbsNoLogOutput') || 'No log output')}
                                                             </pre>
                                                         </div>
                                                     </div>
@@ -19421,12 +19421,12 @@
                                             <div className="space-y-6">
                                                 {/* Sync Jobs */}
                                                 <div>
-                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Sync Jobs ({(pbsJobs.sync || []).length})</h3>
+                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">{t('pbsSyncJobs') || 'Sync Jobs'} ({(pbsJobs.sync || []).length})</h3>
                                                     {(pbsJobs.sync || []).length > 0 ? (
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">Store</th><th className="text-left p-3">Remote</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsStore') || 'Store'}</th><th className="text-left p-3">{t('pbsRemote') || 'Remote'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
                                                                     {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
@@ -19449,17 +19449,17 @@
                                                                 </tbody>
                                                             </table>
                                                         </div>
-                                                    ) : <div className="text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl text-sm">No sync jobs configured</div>}
+                                                    ) : <div className="text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl text-sm">{t('pbsNoSyncJobsConfigured') || 'No sync jobs configured'}</div>}
                                                 </div>
 
                                                 {/* Verify Jobs */}
                                                 <div>
-                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Verify Jobs ({(pbsJobs.verify || []).length})</h3>
+                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">{t('pbsVerifyJobs') || 'Verify Jobs'} ({(pbsJobs.verify || []).length})</h3>
                                                     {(pbsJobs.verify || []).length > 0 ? (
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">Store</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">Ignore Verified</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsStore') || 'Store'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('pbsIgnoreVerified') || 'Ignore Verified'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
                                                                     {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
@@ -19482,17 +19482,17 @@
                                                                 </tbody>
                                                             </table>
                                                         </div>
-                                                    ) : <div className="text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl text-sm">No verify jobs configured</div>}
+                                                    ) : <div className="text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl text-sm">{t('pbsNoVerifyJobsConfigured') || 'No verify jobs configured'}</div>}
                                                 </div>
 
                                                 {/* Prune Jobs */}
                                                 <div>
-                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Prune Jobs ({(pbsJobs.prune || []).length})</h3>
+                                                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">{t('pbsPruneJobs') || 'Prune Jobs'} ({(pbsJobs.prune || []).length})</h3>
                                                     {(pbsJobs.prune || []).length > 0 ? (
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">Store</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('retention') || 'Retention'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsStore') || 'Store'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('retention') || 'Retention'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th>
                                                                     {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
@@ -19517,17 +19517,17 @@
                                                                 </tbody>
                                                             </table>
                                                         </div>
-                                                    ) : <div className="text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl text-sm">No prune jobs configured</div>}
+                                                    ) : <div className="text-center py-6 text-gray-500 bg-proxmox-card border border-proxmox-border rounded-xl text-sm">{t('pbsNoPruneJobsConfigured') || 'No prune jobs configured'}</div>}
                                                 </div>
 
                                                 {/* Remotes */}
                                                 {pbsRemotes.length > 0 && (
                                                     <div>
-                                                        <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Remotes ({pbsRemotes.length})</h3>
+                                                        <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">{t('pbsRemotes') || 'Remotes'} ({pbsRemotes.length})</h3>
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">{t('name') || 'Name'}</th><th className="text-left p-3">{t('host') || 'Host'}</th><th className="text-left p-3">Auth ID</th><th className="text-left p-3">Fingerprint</th>
+                                                                    <th className="text-left p-3">{t('name') || 'Name'}</th><th className="text-left p-3">{t('host') || 'Host'}</th><th className="text-left p-3">{t('pbsAuthId') || 'Auth ID'}</th><th className="text-left p-3">{t('pbsFingerprint') || 'Fingerprint'}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {pbsRemotes.map((remote, i) => (
@@ -19551,31 +19551,31 @@
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl w-full max-w-md animate-scale-in">
                                                     <div className="p-6">
-                                                        <h2 className="text-xl font-bold text-white mb-1">Prune Datastore</h2>
+                                                        <h2 className="text-xl font-bold text-white mb-1">{t('pbsPruneDatastore') || 'Prune Datastore'}</h2>
                                                         <p className="text-sm text-gray-400 mb-4">{showPbsPrune}</p>
                                                         <div className="space-y-3">
-                                                            {[{k: 'keep_last', l: 'Keep Last'}, {k: 'keep_daily', l: 'Keep Daily'}, {k: 'keep_weekly', l: 'Keep Weekly'}, {k: 'keep_monthly', l: 'Keep Monthly'}, {k: 'keep_yearly', l: 'Keep Yearly'}].map(f => (
+                                                            {[{k: 'keep_last', l: t('pbsKeepLast') || 'Keep Last'}, {k: 'keep_daily', l: t('pbsKeepDaily') || 'Keep Daily'}, {k: 'keep_weekly', l: t('pbsKeepWeekly') || 'Keep Weekly'}, {k: 'keep_monthly', l: t('pbsKeepMonthly') || 'Keep Monthly'}, {k: 'keep_yearly', l: t('pbsKeepYearly') || 'Keep Yearly'}].map(f => (
                                                                 <div key={f.k} className="flex items-center justify-between">
                                                                     <label className="text-sm text-gray-300">{f.l}</label>
                                                                     <input type="number" min="0" max="365" value={pbsPruneForm[f.k] || ''} onChange={e => setPbsPruneForm(p => ({...p, [f.k]: parseInt(e.target.value) || 0}))} className="w-20 bg-proxmox-dark border border-proxmox-border rounded px-2 py-1 text-sm text-white text-center" />
                                                                 </div>
                                                             ))}
                                                             <div className="flex items-center justify-between pt-2">
-                                                                <label className="text-sm text-gray-300">Dry Run (preview only)</label>
+                                                                <label className="text-sm text-gray-300">{t('pbsDryRunPreview') || 'Dry Run (preview only)'}</label>
                                                                 <button onClick={() => setPbsPruneForm(p => ({...p, dry_run: !p.dry_run}))} className={`w-10 h-5 rounded-full transition-all ${pbsPruneForm.dry_run ? 'bg-blue-500' : 'bg-red-500'}`}>
                                                                     <div className={`w-4 h-4 bg-white rounded-full transition-transform ${pbsPruneForm.dry_run ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
                                                                 </button>
                                                             </div>
                                                             {!pbsPruneForm.dry_run && (
                                                                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-xs text-red-400">
-                                                                    Warning: This will permanently delete backups that don't match the retention policy!
+                                                                    {t('pbsPrunePermanentWarning') || "Warning: This will permanently delete backups that don't match the retention policy!"}
                                                                 </div>
                                                             )}
                                                         </div>
                                                         <div className="flex justify-end gap-2 mt-6">
                                                             <button onClick={() => setShowPbsPrune(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">{t('cancel') || 'Cancel'}</button>
                                                             <button onClick={() => { pbsAction('prune', showPbsPrune, pbsPruneForm); setShowPbsPrune(null); }} className={`px-4 py-2 rounded-lg text-white text-sm font-medium ${pbsPruneForm.dry_run ? 'bg-blue-500 hover:bg-blue-600' : 'bg-red-500 hover:bg-red-600'}`}>
-                                                                {pbsPruneForm.dry_run ? 'Preview Prune' : 'Execute Prune'}
+                                                                {pbsPruneForm.dry_run ? (t('pbsPreviewPrune') || 'Preview Prune') : (t('pbsExecutePrune') || 'Execute Prune')}
                                                             </button>
                                                         </div>
                                                     </div>
