@@ -14702,7 +14702,7 @@
                                 {pbsServers.length > 0 && (
                                     <div className="mt-4 pt-4 border-t border-proxmox-border">
                                         <div className="flex items-center justify-between px-1 mb-2">
-                                            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Backup Servers</h2>
+                                            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('backupServers') || 'Backup Servers'}</h2>
                                             {isAdmin && (
                                                 <button onClick={() => setShowAddPBS(true)} className="p-1 text-gray-500 hover:text-proxmox-orange rounded transition-colors" title="Add PBS">
                                                     <Icons.Plus className="w-4 h-4" />
@@ -19130,10 +19130,10 @@
                                                             {isAdmin && (
                                                                 <div className="flex items-center gap-2 flex-wrap">
                                                                     <button onClick={() => { setPbsActionLoading(p => ({...p, gc: true})); pbsAction('gc', pbsSelectedStore).finally(() => setPbsActionLoading(p => ({...p, gc: false}))); }} disabled={pbsActionLoading.gc} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-blue-500/30 transition-all flex items-center gap-2 disabled:opacity-50">
-                                                                        <Icons.Trash className="w-4 h-4" /> {pbsActionLoading.gc ? 'Starting...' : 'Garbage Collection'}
+                                                                        <Icons.Trash className="w-4 h-4" /> {pbsActionLoading.gc ? (t('starting') || 'Starting...') : 'Garbage Collection'}
                                                                     </button>
                                                                     <button onClick={() => { setPbsActionLoading(p => ({...p, verify: true})); pbsAction('verify', pbsSelectedStore).finally(() => setPbsActionLoading(p => ({...p, verify: false}))); }} disabled={pbsActionLoading.verify} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-green-500/30 transition-all flex items-center gap-2 disabled:opacity-50">
-                                                                        <Icons.CheckCircle className="w-4 h-4" /> {pbsActionLoading.verify ? 'Starting...' : 'Verify'}
+                                                                        <Icons.CheckCircle className="w-4 h-4" /> {pbsActionLoading.verify ? (t('starting') || 'Starting...') : 'Verify'}
                                                                     </button>
                                                                     <button onClick={() => setShowPbsPrune(pbsSelectedStore)} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-yellow-500/30 transition-all flex items-center gap-2">
                                                                         <Icons.Archive className="w-4 h-4" /> Prune
@@ -19283,8 +19283,8 @@
                                                                                                 ) : <span className="text-gray-600">-</span>}
                                                                                             </td>
                                                                                             <td className="p-3 text-center">
-                                                                                                <button onClick={() => isAdmin && pbsToggleProtected(snap)} className={`px-2 py-0.5 rounded text-xs transition-all ${snap.protected ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-proxmox-dark text-gray-600 border border-proxmox-border'} ${isAdmin ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`} title={isAdmin ? 'Toggle protection' : (snap.protected ? 'Protected' : 'Unprotected')}>
-                                                                                                    {snap.protected ? Icons.Shield ? <Icons.Shield className="w-3.5 h-3.5 inline" /> : 'Yes' : '-'}
+                                                                                                <button onClick={() => isAdmin && pbsToggleProtected(snap)} className={`px-2 py-0.5 rounded text-xs transition-all ${snap.protected ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-proxmox-dark text-gray-600 border border-proxmox-border'} ${isAdmin ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`} title={isAdmin ? 'Toggle protection' : (snap.protected ? (t('protected') || 'Protected') : (t('unprotected') || 'Unprotected'))}>
+                                                                                                    {snap.protected ? Icons.Shield ? <Icons.Shield className="w-3.5 h-3.5 inline" /> : (t('yes') || 'Yes') : '-'}
                                                                                                 </button>
                                                                                             </td>
                                                                                             <td className="p-3 text-right flex items-center justify-end gap-1">
@@ -22621,7 +22621,7 @@
                                         placeholder="Enter notes..."
                                     />
                                     <div className="flex justify-end gap-3 mt-4">
-                                        <button onClick={() => setPbsEditingNotes(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">Cancel</button>
+                                        <button onClick={() => setPbsEditingNotes(null)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 hover:text-white transition-colors text-sm">{t('cancel') || 'Cancel'}</button>
                                         <button onClick={() => pbsSaveNotes(pbsEditingNotes.type, pbsEditingNotes.params)} className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors text-sm font-medium">Save Notes</button>
                                     </div>
                                 </div>

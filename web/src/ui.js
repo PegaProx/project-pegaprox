@@ -2374,6 +2374,7 @@
 
         // PBS Capacity Forecast Tile
         function PbsCapacityForecast({ pbsId, authFetch, apiUrl }) {
+            const { t } = useTranslation();
             const [data, setData] = React.useState(null);
             React.useEffect(() => {
                 if (!pbsId) return;
@@ -2389,7 +2390,7 @@
             if (!data || data.length === 0) return null;
             return (
                 <div className="rounded-md p-3" style={{ background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)' }}>
-                    <div className="text-xs uppercase tracking-wide opacity-70 mb-2">Capacity forecast</div>
+                    <div className="text-xs uppercase tracking-wide opacity-70 mb-2">{t('capacityForecast') || 'Capacity forecast'}</div>
                     <div className="space-y-2">
                         {data.map(d => {
                             const days = d.eta_days_to_full;
@@ -2419,6 +2420,7 @@
 
         // Storage-Add Pre-flight Indicator
         function StoragePreflightCheck({ clusterId, config, authFetch, apiUrl, onResult }) {
+            const { t } = useTranslation();
             const [state, setState] = React.useState({ status: 'idle', issues: [], info: {} });
             const run = async () => {
                 if (config.type !== 'pbs') return;
@@ -2444,12 +2446,12 @@
             return (
                 <div style={{ background: 'var(--corp-surface-2, #29414e)', padding: '8px 10px', borderRadius: '4px', fontSize: '12px' }}>
                     <div className="flex items-center justify-between">
-                        <span className="opacity-80">Pre-flight check (PBS)</span>
+                        <span className="opacity-80">{t('preflightCheck') || 'Pre-flight check (PBS)'}</span>
                         <button onClick={run} disabled={state.status === 'checking'}
                             style={{ background: 'var(--corp-accent, #0078a8)', color: '#fff', padding: '2px 8px',
                                      borderRadius: '3px', border: 'none', cursor: 'pointer',
                                      opacity: state.status === 'checking' ? 0.5 : 1 }}>
-                            {state.status === 'checking' ? 'Checking…' : 'Run check'}
+                            {state.status === 'checking' ? 'Checking…' : (t('runCheck') || 'Run check')}
                         </button>
                     </div>
                     {state.status === 'ok' && <div style={{ color: '#60b515', marginTop: '4px' }}>✓ All checks passed. Live fingerprint matches; auth ok; datastore exists.</div>}
@@ -2460,7 +2462,7 @@
                     )}
                     {state.info.live_fingerprint && state.status !== 'ok' && (
                         <div style={{ marginTop: '4px', opacity: 0.7, fontFamily: 'ui-monospace, monospace', fontSize: '11px', wordBreak: 'break-all' }}>
-                            Live fingerprint: {state.info.live_fingerprint}
+                            {t('liveFingerprint') || 'Live fingerprint'}: {state.info.live_fingerprint}
                         </div>
                     )}
                 </div>
@@ -2470,6 +2472,7 @@
 
         // Auto-Fingerprint button — fetches the cert fingerprint via probe endpoint
         function FingerprintFetcher({ host, port, authFetch, apiUrl, onFetched }) {
+            const { t } = useTranslation();
             const [busy, setBusy] = React.useState(false);
             const [error, setError] = React.useState(null);
             const fetchIt = async () => {
@@ -2497,7 +2500,7 @@
                                  borderRadius: '3px', border: 'none', cursor: 'pointer', fontSize: '12px',
                                  opacity: (busy || !host) ? 0.5 : 1 }}
                         title="Connect to host and capture the TLS fingerprint">
-                        {busy ? '…' : 'Auto-fetch'}
+                        {busy ? '…' : (t('autoFetch') || 'Auto-fetch')}
                     </button>
                     {error && <span style={{ color: '#f54f47', fontSize: '11px' }}>{error}</span>}
                 </span>
