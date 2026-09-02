@@ -664,6 +664,34 @@ def get_vm_pool_cached(cluster_id: str, vmid: int, vm_type: str = None) -> str:
         # Try both types
         return membership.get(f"{vmid}:qemu") or membership.get(f"{vmid}:lxc")
 
+def _pool_perms_for(cluster_id: str, username: str, groups=None) -> dict:
+    """get_user_pool_permissions, memoised for the current request.
+
+    MK Sep 2026 (#773 scale follow-up): the per-VM authz loop over a /resources read on a
+    large cluster called get_user_pool_permissions once PER VM with identical args — up to
+    ~10k indexed SELECTs to answer one list. The grant set is the same for a given
+    (cluster, user, groups) throughout a request, so memoise it on Flask's request global.
+    Outside a request context (background workers, tests) it reads straight through; the memo
+    only ever lives for one request, so there's no stale-grant window across requests, and
+    writers (api/users pool grant/revoke) don't need to invalidate anything. Callers only read
+    the returned dict, never mutate it, so sharing the memoised object is safe."""
+    db = get_db()
+    key = (cluster_id, username, tuple(sorted(groups or [])))
+    try:
+        from flask import g, has_request_context
+        if has_request_context():
+            memo = getattr(g, '_pool_perms_memo', None)
+            if memo is None:
+                memo = {}
+                g._pool_perms_memo = memo
+            if key not in memo:
+                memo[key] = db.get_user_pool_permissions(cluster_id, username, groups)
+            return memo[key]
+    except Exception:
+        pass
+    return db.get_user_pool_permissions(cluster_id, username, groups)
+
+
 def user_has_any_pool_access(user: dict, cluster_id: str) -> bool:
     """#555 — does this user hold ANY pool permission in this cluster?
     One cheap DB read, no membership scan. For the cluster gates."""
@@ -673,7 +701,7 @@ def user_has_any_pool_access(user: dict, cluster_id: str) -> bool:
     if not username:
         return False
     try:
-        perms = get_db().get_user_pool_permissions(cluster_id, username, user.get('groups', []))
+        perms = _pool_perms_for(cluster_id, username, user.get('groups', []))
     except Exception as e:
         logging.error(f"[POOL] any-access check failed for {username}@{cluster_id}: {e}")
         return False
@@ -697,7 +725,7 @@ def get_user_pool_vmids(user: dict, cluster_id: str, permission: str = None, _pe
         user_pool_perms = _perms
     else:
         try:
-            user_pool_perms = get_db().get_user_pool_permissions(cluster_id, username, user.get('groups', []))
+            user_pool_perms = _pool_perms_for(cluster_id, username, user.get('groups', []))
         except Exception as e:
             logging.error(f"[POOL] vmid-list failed for {username}@{cluster_id}: {e}")
             return set()
@@ -828,9 +856,8 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
             # Get user's groups
             user_groups = user.get('groups', [])
             
-            # Get user's pool permissions from DB (not API)
-            db = get_db()
-            user_pool_perms = db.get_user_pool_permissions(cluster_id, username, user_groups)
+            # Get user's pool permissions (request-memoised — same grants for every VM in the loop)
+            user_pool_perms = _pool_perms_for(cluster_id, username, user_groups)
             
             # Check if user has required permission for this pool
             pool_perms = user_pool_perms.get(pool_id, [])
@@ -876,11 +903,11 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
     # to their granted resources — even when live pool membership can't be resolved to concrete
     # vmids, so an unresolvable pool membership fails CLOSED (deny) instead of widening to the
     # whole tenant cluster. Pure operators (no ACL, no pool grant) keep cluster-wide access.
-    # Resolve the pool grant ONCE (get_user_pool_permissions is not cached) and reuse it, so the
-    # per-VM authz path stays a single DB read instead of two.
+    # Resolve the pool grant ONCE and reuse it via _perms= below, so this per-VM authz path stays
+    # a single lookup instead of two (and _pool_perms_for memoises the DB read across the request).
     has_pool_grant = False
     try:
-        _pp = get_db().get_user_pool_permissions(cluster_id, username, user.get('groups', []))
+        _pp = _pool_perms_for(cluster_id, username, user.get('groups', []))
         has_pool_grant = any(p for p in (_pp or {}).values())
         if has_pool_grant:
             scoped_vms |= get_user_pool_vmids(user, cluster_id, _perms=_pp)

@@ -74,6 +74,31 @@ def test_pool_scoped_owner_visibility_is_pool_union_acl(api, seed):
     assert 900 not in vmids
 
 
+def test_pool_perms_read_is_memoised_per_request(api, seed, db, monkeypatch):
+    """#773 scale follow-up: the per-VM authz loop must read the user's pool grants ONCE per
+    request, not once per VM. Without the request memo this was ~N+1 identical indexed SELECTs
+    for an N-VM cluster; _pool_perms_for() collapses it to a small constant on Flask's g."""
+    seed.tenant('tenant_x', clusters=['cluster_1'])
+    mallory = seed.user('mallory', role='viewer', tenant_id='tenant_x')
+    seed.pool('cluster_1', 'pool_1', 'mallory', ['pool.view', 'vm.view'])
+    _seed_pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    # a wider VM list so once-per-VM would be visibly larger than the memoised count
+    big = [{'vmid': v, 'name': f'vm{v}', 'type': 'qemu', 'status': 'running'} for v in range(100, 110)]
+    api.set_manager('cluster_1', api.make_fake_manager(cluster_id='cluster_1', get_vm_resources=big))
+
+    calls = {'n': 0}
+    real = db.get_user_pool_permissions
+    def counting(*a, **k):
+        calls['n'] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(db, 'get_user_pool_permissions', counting)
+
+    resp = api.as_user(mallory).get(RES_ROUTE)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    # 10 VMs → once-per-VM would be ~11 reads; memoised to a small constant for the request.
+    assert calls['n'] <= 2, f"pool-perms read {calls['n']}x for 10 VMs; expected memoised (<=2)"
+
+
 def test_plain_operator_without_pool_grant_is_unchanged(api, seed):
     """Guard the fix's blast radius: a same-tenant 'user' with vm.view and NO pool/ACL grant must
     keep the cluster-wide restrictive-ACL listing — with no ACLs at all, that's every VM. If the
