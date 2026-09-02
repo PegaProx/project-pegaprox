@@ -30,7 +30,7 @@ from flask import Blueprint, jsonify
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
-from pegaprox.api.helpers import check_cluster_access
+from pegaprox.api.helpers import check_cluster_access, scope_vm_rows
 
 bp = Blueprint('topology', __name__)
 
@@ -161,6 +161,9 @@ def topology(cluster_id):
         resources = mgr.get_vm_resources(max_age=6) or []
     except Exception:
         resources = []
+    # #773 audit — the topology graph enumerates every VM/CT (id/name/status/tags); scope it to
+    # the caller so a pool-/ACL-scoped user sees only their VMs, not the whole cluster's guests.
+    resources = scope_vm_rows(cluster_id, resources)
     for r in resources:
         if r.get('type') not in ('qemu', 'lxc'): continue
         node = r.get('node')

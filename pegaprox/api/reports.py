@@ -21,7 +21,7 @@ from pegaprox.models.permissions import *
 
 from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.rbac import get_user_clusters
-from pegaprox.api.helpers import check_cluster_access, load_server_settings
+from pegaprox.api.helpers import check_cluster_access, load_server_settings, scope_vm_rows
 from pegaprox.background.metrics import load_metrics_history, start_metrics_collector
 from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP
 from pegaprox.api.schedules import start_scheduler
@@ -533,11 +533,13 @@ def get_top_vms():
             continue
         
         try:
-            resources = mgr.get_vm_resources()
+            # #773 audit — tenant filtering (accessible_clusters) gates the CLUSTER; still scope
+            # the per-VM rows so a pool-/ACL-scoped user doesn't see every VM on a cluster they own.
+            resources = scope_vm_rows(cluster_id, mgr.get_vm_resources())
             for r in resources:
                 if r.get('status') != 'running':
                     continue
-                
+
                 vm_data = {
                     'cluster_id': cluster_id,
                     'cluster_name': mgr.config.name,

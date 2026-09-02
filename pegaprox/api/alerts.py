@@ -15,7 +15,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import check_cluster_access, safe_error
+from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows
 from pegaprox.background.alerts import load_alerts_config, save_alerts_config
 
 bp = Blueprint('alerts', __name__)
@@ -42,7 +42,9 @@ def get_cluster_top_vms(cluster_id):
     
     vms = []
     try:
-        resources = mgr.get_vm_resources()
+        # #773 audit — top-VMs is per-VM identifiable; scope to what the caller may see so a
+        # pool-/ACL-scoped user gets their own top VMs, not the whole cluster's.
+        resources = scope_vm_rows(cluster_id, mgr.get_vm_resources())
         for r in resources:
             if r.get('status') != 'running':
                 continue

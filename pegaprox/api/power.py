@@ -33,7 +33,7 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
-from pegaprox.api.helpers import check_cluster_access, load_metrics_window
+from pegaprox.api.helpers import check_cluster_access, load_metrics_window, scope_vm_rows
 from pegaprox.core.db import get_db
 from pegaprox.models.permissions import ROLE_ADMIN
 
@@ -316,6 +316,8 @@ def cluster_summary(cluster_id):
 
     mgr = cluster_managers[cluster_id]
     rows = _compute_per_vm(snaps, mgr, rates, days * 24)
+    # #773 audit — scope per-VM power rows (top_consumers/by_node/vm_count derive from these)
+    rows = scope_vm_rows(cluster_id, rows)
 
     total_kwh = sum(r['kwh'] for r in rows)
     total_cost = sum(r['cost'] for r in rows)
@@ -369,6 +371,7 @@ def per_vm(cluster_id):
         return jsonify({'enough_data': False, 'rates': rates, 'rows': []})
     mgr = cluster_managers[cluster_id]
     rows = _compute_per_vm(snaps, mgr, rates, days * 24)
+    rows = scope_vm_rows(cluster_id, rows)  # #773 audit — per-VM rows scoped to the caller
     factor = 30.0 / days if days < 30 else 1.0
     for r in rows:
         r['monthly_kwh'] = round(r['kwh'] * factor, 2)

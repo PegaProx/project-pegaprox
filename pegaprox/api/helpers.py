@@ -414,6 +414,35 @@ def check_cluster_access(cluster_id):
     return True, None
 
 
+def scope_vm_rows(cluster_id, rows, *, vmid_key='vmid', type_key='type'):
+    """Filter a list of per-VM row dicts to the VMs the current caller may actually see.
+
+    MK Sep 2026 (#773 follow-up audit) — several read endpoints (costs / power / topology /
+    top-vms) enumerate EVERY VM on a cluster via get_vm_resources() and hand back per-VM rows
+    (vmid / name / node / usage / cost). check_cluster_access above only gates cluster
+    REACHABILITY — its own #555 pool fallback (line 402) admits a pool-scoped user and defers
+    "per-VM gating downstream" — so without this filter a pool-/ACL-scoped user received per-VM
+    data for VMs outside their grant (the same class as the #773 /resources leak).
+
+    Admins and plain cluster-wide operators keep every row (user_can_access_vm returns True for
+    them); a pool-/ACL-scoped caller is confined to their VMs. A row whose vmid can't be parsed
+    is dropped (fail closed). Cheap at scale: the pool-perm read behind user_can_access_vm is
+    request-memoised (rbac._pool_perms_for), so this is one DB read for the whole list."""
+    from flask import request
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    out = []
+    for r in rows or []:
+        try:
+            vmid = int(r.get(vmid_key))
+        except (TypeError, ValueError):
+            continue
+        if user_can_access_vm(user, cluster_id, vmid, 'vm.view', r.get(type_key)):
+            out.append(r)
+    return out
+
+
 def check_pbs_access(pbs_id):
     """Check if current user can access a PBS server based on its linked clusters.
     Returns (True, None) if allowed, (False, error_response) if not.
