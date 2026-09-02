@@ -1102,7 +1102,8 @@ def get_cluster_resources(cluster_id):
 
     # NS Aug 2026 — build the authz user so an admin-owned scoped API token is floored to its
     # effective_role (the stored-role fast-path let such a token see everything).
-    from pegaprox.utils.rbac import user_can_access_vm as _ucav, get_user_clusters as _guc
+    from pegaprox.utils.rbac import (user_can_access_vm as _ucav, get_user_clusters as _guc,
+                                     user_has_any_pool_access as _uhpa)
     from pegaprox.utils.auth import build_authz_user
     user = build_authz_user(request.session['user'], request.session)
     user['username'] = request.session['user']
@@ -1117,7 +1118,15 @@ def get_cluster_resources(cluster_id):
     # the tenant gate). None => admin/default-tenant (unscoped).
     _tenant_clusters = _guc(user, include_pools=False)
     _is_tenant_owner = _tenant_clusters is None or cluster_id in _tenant_clusters
-    if not _is_tenant_owner:
+    # MK Sep 2026 (#773, mbo-nw) — a caller with an explicit POOL grant is confined to their pool's
+    # (+ any ACL'd) VMs even on a cluster their tenant owns. The restrictive-ACL listing below would
+    # otherwise fall a pool-scoped operator through to the blanket vm.view branch and hand back the
+    # WHOLE cluster, while the portal (get_user_pool_vmids) shows only that pool's members — a
+    # portal-only user querying /resources directly saw every VM + template. Route pool-scoped
+    # callers, like non-owners, through the same per-VM user_can_access_vm check (which confines
+    # them to exactly their ACL + pool VMs), so the list matches per-VM access. Pure operators with no
+    # pool/ACL grant keep the restrictive tenant-owner listing below unchanged.
+    if (not _is_tenant_owner) or _uhpa(user, cluster_id):
         filtered = []
         for vm in all_resources:
             _vmid = vm.get('vmid')
