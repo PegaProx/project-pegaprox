@@ -179,6 +179,25 @@ def _wrap_with_sudo(cmd):
     return f"echo {enc} | base64 -d | sudo -n bash"
 
 
+def _normalise_private_key(key):
+    """Make a configured private key safe to write to a file for `ssh -i`.
+
+    #717 — OpenSSH refuses a key file that does not end in a newline, and one with CRLF
+    line endings; both fail as `Load key "...": invalid format`. ssh then has no identity
+    to offer, the node answers `Permission denied (publickey).`, and the operator is told
+    to add an SSH key they already added — the key never left the container. The paste
+    path does not normalise anything (the textarea sends `e.target.value` verbatim and the
+    DB stores it encrypted as-is), so normalise here, once, for every SSH path.
+
+    Returns '' when there is no usable key, so callers can bail instead of writing an
+    empty file and getting the same opaque `invalid format` back.
+    """
+    if not key or not key.strip():
+        return ''
+    data = key.replace('\r\n', '\n').replace('\r', '\n').strip()
+    return data + '\n'
+
+
 def _ssh_stderr_excerpt(stderr, max_chars=240):
     """Last meaningful line of SSH stderr, capped.
 
@@ -194,6 +213,13 @@ def _ssh_stderr_excerpt(stderr, max_chars=240):
     lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
     if not lines:
         return 'no error output'
+    # #717 — but OpenSSH prints `Load key "...": invalid format` BEFORE the generic
+    # `Permission denied (publickey).`, so last-line-only threw away the one line that
+    # says our own key never loaded, and what remained read as a node-side rejection.
+    # Keep both when the key itself failed to load.
+    load_err = next((ln for ln in lines if ln.lower().startswith('load key')), None)
+    if load_err and load_err != lines[-1]:
+        return f"{load_err} | {lines[-1]}"[:max_chars]
     return lines[-1][:max_chars]
 
 
@@ -210,6 +236,14 @@ def _ssh_auth_hint(stderr):
     if not stderr:
         return None
     low = stderr.lower()
+    # #717 — check this BEFORE 'permission denied': when our key fails to load, ssh emits
+    # BOTH lines, and the publickey branch below would otherwise tell an operator who has
+    # already configured a key to go add one.
+    if 'load key' in low and ('invalid format' in low or 'error in libcrypto' in low
+                              or 'bad permissions' in low):
+        return ("the configured SSH private key could not be loaded (invalid format) — "
+                "re-paste it in the cluster's SSH key field: it must be the complete "
+                "PEM/OpenSSH block with LF line endings, ending in a newline")
     if 'host key verification failed' in low:
         return ("the node's SSH host key changed — clear the pinned entry to re-pin it "
                 "(cluster edit reconnects and re-learns it)")
@@ -6732,8 +6766,16 @@ echo "AGENT_INSTALLED_OK"
         try:
             import tempfile
 
+            # #717 — write a key OpenSSH can actually load (see _normalise_private_key).
+            # The sibling _ssh_run_command_with_key has always done this; this path did not,
+            # so a stored key missing its trailing newline failed here and nowhere else.
+            key_data = _normalise_private_key(key)
+            if not key_data:
+                self.logger.debug(f"[SSH] No usable private key configured for {host}")
+                return None
+
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.key') as f:
-                f.write(key)
+                f.write(key_data)
                 key_file = f.name
             os.chmod(key_file, 0o600)
             
@@ -7648,7 +7690,8 @@ echo "AGENT_INSTALLED_OK"
         if host and host.startswith('[') and host.endswith(']'):
             host = host[1:-1]
 
-        if not key_content or not key_content.strip():
+        key_content = _normalise_private_key(key_content)
+        if not key_content:
             return False
         
         key_fd = None
@@ -7660,11 +7703,8 @@ echo "AGENT_INSTALLED_OK"
             os.chmod(key_path, 0o600)
             
             with os.fdopen(key_fd, 'w') as f:
-                # Ensure key has proper newlines
-                key_data = key_content.strip()
-                if not key_data.endswith('\n'):
-                    key_data += '\n'
-                f.write(key_data)
+                # normalised above by _normalise_private_key (#717)
+                f.write(key_content)
             key_fd = None  # fd is now closed
             
             self.logger.info(f"[HA] Trying SSH with configured key...")
