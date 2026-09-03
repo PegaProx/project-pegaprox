@@ -1397,6 +1397,38 @@ def _create_listener(bind_host, port_num):
         return (bind_host, port_num)
 
 
+# #777 (Frisch12) — the gevent pywsgi request pool holds one greenlet per CONNECTION, and an idle
+# keep-alive (or a client that finished the TLS handshake then went silent) parks in
+# read_requestline forever, pinning its pool slot; once the pool fills, gevent.baseserver stops
+# accepting and the whole instance goes unreachable while the process sits idle. This mixin bounds
+# ONLY the inter-request idle read — a request that is actually being served (headers/body, SSE
+# streams, uploads, websocket upgrades) is never touched. PEGAPROX_KEEPALIVE_TIMEOUT=0 restores the
+# old unbounded behaviour.
+_KEEPALIVE_IDLE_TIMEOUT = float(os.environ.get('PEGAPROX_KEEPALIVE_TIMEOUT', '75'))
+
+
+class _IdleTimeoutMixin:
+    """Bound the idle wait for the next request line. Compose ahead of a gevent pywsgi handler
+    class in the MRO so `super().read_requestline()` reaches the real handler."""
+    _idle_timeout = _KEEPALIVE_IDLE_TIMEOUT
+
+    def read_requestline(self):
+        to = self._idle_timeout
+        if not to or to <= 0:
+            return super().read_requestline()          # disabled → old unbounded behaviour
+        import gevent
+        t = gevent.Timeout(to)
+        t.start()
+        try:
+            return super().read_requestline()
+        except gevent.Timeout as ex:
+            if ex is t:
+                return b''    # idle → empty requestline; gevent closes the conn, slot returns
+            raise
+        finally:
+            t.close()
+
+
 def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port=-1):
     """Start production server with Gevent."""
     from gevent.pywsgi import WSGIServer
@@ -1560,7 +1592,17 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
             if not self.ssl_args:
                 return super().wrap_socket_and_handle(client_socket, address)
             try:
-                first_byte = client_socket.recv(1, socket.MSG_PEEK)
+                # #777 — bound the pre-request wait: a client that opens the socket but never
+                # sends a byte would otherwise park here holding a pool slot until TCP gives up.
+                # Drop it after the keep-alive idle window (None = disabled = old blocking behaviour).
+                import gevent as _gv
+                _pk = _KEEPALIVE_IDLE_TIMEOUT if _KEEPALIVE_IDLE_TIMEOUT > 0 else None
+                try:
+                    with _gv.Timeout(_pk):
+                        first_byte = client_socket.recv(1, socket.MSG_PEEK)
+                except _gv.Timeout:
+                    client_socket.close()
+                    return
                 if not first_byte:
                     client_socket.close()
                     return
@@ -1684,9 +1726,18 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
     # `workers`; per-request fanouts (storage scan, PBS scan, SSH calls)
     # still spawn inside their own request handler.
     from gevent.pool import Pool as _RequestPool
-    server_kwargs = {'log': None, 'spawn': _RequestPool(workers)}
+
+    # #777 — compose the idle-read timeout (module-scope _IdleTimeoutMixin) onto whichever handler
+    # is in use, so an idle keep-alive hands its request-pool slot back instead of pinning it.
+    from gevent.pywsgi import WSGIHandler as _BaseWSGIHandler
     if use_websocket_handler and QuietWebSocketHandler:
-        server_kwargs['handler_class'] = QuietWebSocketHandler
+        class _IdleTimeoutHandler(_IdleTimeoutMixin, QuietWebSocketHandler):
+            pass
+    else:
+        class _IdleTimeoutHandler(_IdleTimeoutMixin, _BaseWSGIHandler):
+            pass
+
+    server_kwargs = {'log': None, 'spawn': _RequestPool(workers), 'handler_class': _IdleTimeoutHandler}
 
     is_ipv6_bind = ':' in bind_host
 
