@@ -11774,7 +11774,7 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(config),
                     });
-                    const data = resp ? await resp.json().catch(() => ({ error: t('unknown') })) : { error: t('unknown') };
+                    const data = resp && resp.ok ? await resp.json() : { error: t('connectionFailed') };
                     setVmwareTestResult(data);
                 } catch (e) { setVmwareTestResult({ error: e.message }); }
                 setVmwareTestLoading(false);
