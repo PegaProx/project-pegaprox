@@ -2285,7 +2285,7 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('name')}</label>
                                     <input type="text" value={vmwConfig.name} onChange={e => setVmwConfig({...vmwConfig, name: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                        placeholder="ESXi Host 1" />
+                                        placeholder={t('esxiServerNameExamplePlaceholder')} />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('host')}</label>
@@ -2305,10 +2305,10 @@
                                     <label className="block text-sm font-medium text-gray-300 mb-2">{t('password')}</label>
                                     <input type="password" value={vmwConfig.password} onChange={e => setVmwConfig({...vmwConfig, password: e.target.value})} required
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                        placeholder="Password" />
+                                        placeholder={t('password')} />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-300 mb-2">Port</label>
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">{t('port')}</label>
                                     <input type="number" value={vmwConfig.port} onChange={e => setVmwConfig({...vmwConfig, port: parseInt(e.target.value) || 443})}
                                         className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:outline-none focus:border-emerald-400 transition-colors" />
                                 </div>
@@ -2320,7 +2320,7 @@
                                 <label className="block text-sm font-medium text-gray-300 mb-2">{t('notes') || 'Notes'} ({t('optional') || 'Optional'})</label>
                                 <input type="text" value={vmwConfig.notes} onChange={e => setVmwConfig({...vmwConfig, notes: e.target.value})}
                                     className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-400 transition-colors"
-                                    placeholder="Production ESXi host" />
+                                    placeholder={t('esxiServerNotesPlaceholder')} />
                             </div>
                             </>)}
 
@@ -2338,7 +2338,7 @@
                                     }`}>
                                     {loading ? t('connecting') : reconfigureConfig ? (t('reconfigure') || 'Re-configure')
                                         : connectionType === 'pbs' ? (t('addPbsServer') || 'Add Backup Server')
-                                        : connectionType === 'vmware' ? (t('addVmwareServer') || 'Add VMware')
+                                        : connectionType === 'vmware' ? t('addEsxiServer')
                                         : connectionType === 'xcpng' ? (t('addXcpngPool') || 'Add XCP-ng Pool')
                                         : t('addCluster')}
                                 </button>
