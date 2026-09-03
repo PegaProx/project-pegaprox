@@ -1520,14 +1520,18 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
     # Custom error handler to suppress SSL errors (from bots/scanners/disconnects)
     class QuietWSGIServer(WSGIServer):
         def wrap_socket_and_handle(self, client_socket, address):
-            """Override to catch SSL errors during handshake"""
+            """Override to catch SSL errors and shutdown GreenletExit during handshake"""
             try:
                 return super().wrap_socket_and_handle(client_socket, address)
-            except Exception as e:
-                if 'ssl' in str(type(e).__name__).lower() or 'ssl' in str(e).lower():
-                    pass
-                else:
+            except BaseException as e:
+                # GreenletExit (raised by gevent when a connection greenlet is
+                # cancelled during shutdown) is a BaseException, not an Exception,
+                # so catch it explicitly and suppress it - it's expected at exit.
+                if isinstance(e, Exception):
+                    if 'ssl' in str(type(e).__name__).lower() or 'ssl' in str(e).lower():
+                        return
                     raise
+                return
 
         def handle_error(self, *args):
             """Suppress SSL errors - they're normal with self-signed certs"""
@@ -1721,8 +1725,13 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
     # Handle graceful shutdown
     def signal_handler(signum, frame):
         print("\nShutting down gracefully...")
-        http_server.stop()
-        sys.exit(0)
+        # gevent runs signal handlers inside the hub greenlet, where blocking
+        # calls (like http_server.stop() -> pool.join()) are illegal and raise
+        # BlockingSwitchOutError. Defer the shutdown to a dedicated greenlet so
+        # the hub is never blocked; serve_forever() returns once stop() sets the
+        # stop event.
+        from gevent import spawn
+        spawn(http_server.stop)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
