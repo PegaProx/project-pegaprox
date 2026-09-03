@@ -11723,15 +11723,15 @@
                         body: JSON.stringify(config),
                     });
                     if (resp && resp.ok) {
-                        addToast('ESXi server added', 'success');
+                        addToast(t('esxiServerAdded'), 'success');
                         setShowAddVMware(false);
                         setVmwareForm({ name: '', host: '', port: 443, username: 'root', password: '', ssl_verify: false, notes: '' });
                         fetchVMwareServers();
                     } else {
                         const err = resp ? await resp.json().catch(() => ({})) : {};
-                        addToast(`Failed: ${err.error || 'unknown'}`, 'error');
+                        addToast(`${t('esxiServerAddFailed')}: ${err.error || t('unknown')}`, 'error');
                     }
-                } catch (e) { addToast('Error: ' + e.message, 'error'); }
+                } catch (e) { addToast(t('error') + ': ' + e.message, 'error'); }
             };
             
             const handleUpdateVMware = async (vmwId, config) => {
@@ -11742,27 +11742,27 @@
                         body: JSON.stringify(config),
                     });
                     if (resp && resp.ok) {
-                        addToast('ESXi server updated', 'success');
+                        addToast(t('esxiServerUpdated'), 'success');
                         setShowAddVMware(false);
                         setEditingVMware(null);
                         fetchVMwareServers();
                     } else {
                         const err = resp ? await resp.json().catch(() => ({})) : {};
-                        addToast(`Update failed: ${err.error || 'unknown'}`, 'error');
+                        addToast(`${t('updateFailed')}: ${err.error || t('unknown')}`, 'error');
                     }
-                } catch (e) { addToast('Error: ' + e.message, 'error'); }
+                } catch (e) { addToast(t('error') + ': ' + e.message, 'error'); }
             };
             
             const handleDeleteVMware = async (vmwId) => {
-                if (!confirm('Delete this ESXi server?')) return;
+                if (!confirm(t('deleteEsxiServerConfirm'))) return;
                 try {
                     const resp = await authFetch(`${API_URL}/vmware/${vmwId}`, { method: 'DELETE' });
                     if (resp && resp.ok) {
-                        addToast('ESXi server deleted', 'success');
+                        addToast(t('esxiServerDeleted'), 'success');
                         if (selectedVMware?.id === vmwId) setSelectedVMware(null);
                         fetchVMwareServers();
                     }
-                } catch (e) { addToast('Delete error: ' + e.message, 'error'); }
+                } catch (e) { addToast(t('deleteError') + ': ' + e.message, 'error'); }
             };
             
             const handleTestVMware = async (config) => {
@@ -11774,7 +11774,7 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(config),
                     });
-                    const data = resp && resp.ok ? await resp.json() : { error: 'Connection failed' };
+                    const data = resp ? await resp.json().catch(() => ({ error: t('unknown') })) : { error: t('unknown') };
                     setVmwareTestResult(data);
                 } catch (e) { setVmwareTestResult({ error: e.message }); }
                 setVmwareTestLoading(false);
@@ -22884,13 +22884,13 @@
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-2xl w-full max-w-lg shadow-2xl">
                                 <div className="p-6 border-b border-proxmox-border flex items-center justify-between">
-                                    <h2 className="text-lg font-bold text-white">{editingVMware ? 'Edit ESXi Server' : t('addEsxiServer')}</h2>
+                                    <h2 className="text-lg font-bold text-white">{editingVMware ? t('editEsxiServer') : t('addEsxiServer')}</h2>
                                     <button onClick={() => { setShowAddVMware(false); setEditingVMware(null); setVmwareTestResult(null); }} className="p-1 text-gray-500 hover:text-white rounded"><Icons.X className="w-5 h-5" /></button>
                                 </div>
                                 <div className="p-6 space-y-4">
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
-                                        <input value={vmwareForm.name} onChange={e => setVmwareForm(f => ({...f, name: e.target.value}))} placeholder="My ESXi Host" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
+                                        <input value={vmwareForm.name} onChange={e => setVmwareForm(f => ({...f, name: e.target.value}))} placeholder={t('esxiServerNamePlaceholder')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
                                     </div>
                                     <div className="grid grid-cols-3 gap-3">
                                         <div className="col-span-2">
@@ -22909,12 +22909,12 @@
                                         </div>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('esxiPassword')}</label>
-                                            <input type="password" value={vmwareForm.password} onChange={e => setVmwareForm(f => ({...f, password: e.target.value}))} placeholder={editingVMware ? '(unchanged)' : 'Password'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
+                                            <input type="password" value={vmwareForm.password} onChange={e => setVmwareForm(f => ({...f, password: e.target.value}))} placeholder={editingVMware ? t('passwordUnchangedPlaceholder') : t('password')} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500/50" />
                                         </div>
                                     </div>
                                     <label className="flex items-center gap-2 cursor-pointer">
                                         <input type="checkbox" checked={vmwareForm.ssl_verify} onChange={e => setVmwareForm(f => ({...f, ssl_verify: e.target.checked}))} className="rounded" />
-                                        <span className="text-sm text-gray-400">Verify SSL certificate</span>
+                                        <span className="text-sm text-gray-400">{t('sslVerification')}</span>
                                     </label>
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">{t('notes')}</label>
@@ -22930,18 +22930,18 @@
 
                                     {vmwareTestResult && (
                                         <div className={`p-3 rounded-lg text-sm ${vmwareTestResult.error ? 'bg-red-500/10 border border-red-500/30 text-red-400' : 'bg-green-500/10 border border-green-500/30 text-green-400'}`}>
-                                            {vmwareTestResult.error ? `Connection failed: ${vmwareTestResult.error}` : 'Connection successful!'}
+                                            {vmwareTestResult.error ? `${t('connectionFailed')}: ${vmwareTestResult.error}` : t('connectionSuccessful')}
                                         </div>
                                     )}
                                 </div>
                                 <div className="p-6 border-t border-proxmox-border flex items-center justify-between">
                                     <button onClick={() => handleTestVMware(vmwareForm)} disabled={vmwareTestLoading || !vmwareForm.host} className="px-4 py-2 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-400 hover:text-white text-sm disabled:opacity-50">
-                                        {vmwareTestLoading ? 'Testing...' : t('testConnection')}
+                                        {vmwareTestLoading ? t('testingConnection') : t('testConnection')}
                                     </button>
                                     <div className="flex items-center gap-2">
                                         <button onClick={() => { setShowAddVMware(false); setEditingVMware(null); setVmwareTestResult(null); }} className="px-4 py-2 rounded-lg text-gray-400 hover:text-white text-sm">{t('cancel')}</button>
                                         <button onClick={() => editingVMware ? handleUpdateVMware(editingVMware.id, vmwareForm) : handleAddVMware(vmwareForm)} disabled={!vmwareForm.host || (!editingVMware && !vmwareForm.password)} className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium hover:bg-emerald-600 disabled:opacity-50">
-                                            {editingVMware ? t('update') : 'Add Server'}
+                                            {editingVMware ? t('update') : t('addEsxiServer')}
                                         </button>
                                     </div>
                                 </div>
