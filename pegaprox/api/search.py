@@ -713,6 +713,14 @@ def update_vm_tags(cluster_id, vmid):
         vmid = int(vmid)
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid VM ID'}), 400
+    # sec (private disclosure Sep 2026 — audit): the GET sibling gates per-VM but these tag WRITES did
+    # not — a pool-/ACL-scoped vm.config holder (admitted to the cluster via the #248/#555 fallback)
+    # could rewrite/erase a FOREIGN VM's tags, which drive backup/snapshot/affinity selection. Gate the
+    # target VM per-object like get_vm_tags does. Own-scope VM passes; a VM outside the grant is denied.
+    from pegaprox.utils.auth import build_authz_user
+    if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
+                              cluster_id, vmid, 'vm.config'):
+        return jsonify({'error': 'Access denied to this VM'}), 403
     data = request.json or {}
     tags_db = load_vm_tags()
     
@@ -762,6 +770,15 @@ def remove_vm_tag(cluster_id, vmid, tag_name):
     # any vm.config holder could yank tags off a VM in a cluster they don't own.
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (private disclosure Sep 2026 — audit): per-VM gate on the tag WRITE, matching the GET sibling
+    from pegaprox.utils.auth import build_authz_user
+    try:
+        _v = int(str(vmid).split(':')[0])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid VM ID'}), 400
+    if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
+                              cluster_id, _v, 'vm.config'):
+        return jsonify({'error': 'Access denied to this VM'}), 403
     tags_db = load_vm_tags()
 
     if cluster_id not in tags_db:

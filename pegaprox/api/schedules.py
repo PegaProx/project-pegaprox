@@ -754,8 +754,20 @@ def delete_schedule(schedule_id):
     if perm_err:
         return perm_err
 
+    # sec (private disclosure Sep 2026 — audit): create/update gate the target VM per-object; delete
+    # did not, so a co-tenant could delete another tenant's scheduled action by its enumerable id.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    try:
+        if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
+                                  schedule.get('cluster_id', ''), int(schedule.get('vmid')),
+                                  _perm_for_action(schedule.get('action', 'start')), schedule.get('vm_type')):
+            return jsonify({'error': 'Access denied to this VM'}), 403
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid schedule target'}), 400
+
     schedules['actions'] = [s for s in schedules.get('actions', []) if s.get('id') != schedule_id]
-    
+
     save_schedules(schedules)
     
     log_audit(request.session.get('user', 'system'), 'schedule.deleted', 

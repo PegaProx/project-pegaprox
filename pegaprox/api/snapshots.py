@@ -624,8 +624,11 @@ def update_policy(cluster_id, pid):
     if not ok: return err
     body = request.get_json(silent=True) or {}
 
-    # re-validate target authz if the policy's targeting is being changed
-    if 'target_type' in body or 'target_value' in body:
+    # sec (private disclosure Sep 2026 — audit): ALWAYS re-validate the caller against the policy's
+    # target VMs, not only when the body changes targeting — else a body like {"enabled":0} could edit
+    # a policy whose target VMs are outside the caller's scope. Effective target = new value if the
+    # body supplies it, else the stored one (handled by the body.get(..., cur[...]) fallbacks below).
+    if body is not None:
         mgr = cluster_managers.get(cluster_id)
         if not mgr:
             return jsonify({'error': 'cluster manager not found'}), 404
