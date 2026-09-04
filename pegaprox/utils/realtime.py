@@ -279,6 +279,65 @@ def _filtered_resources_frame(resources, cluster_id, username, timestamp):
     return _serialize_sse_message('resources', allowed, cluster_id, timestamp)
 
 
+def _sse_user_can_view_vm(username, cluster_id, vmid):
+    """sec (private disclosure Sep 2026 — audit M1): SSE only per-VM-filtered the 'resources' frame;
+    'vm_config' (full VM config incl. possible cloud-init secrets) and per-VM 'tasks' rows were
+    broadcast cluster-wide to any subscribed non-admin. This is the per-VM gate for those frames.
+    Single-user fetch (never load_users, the hot-path landmine), same pattern as the resources frame."""
+    if not username:
+        return False
+    from pegaprox.core.db import get_db
+    from pegaprox.utils.rbac import user_can_access_vm
+    try:
+        stored = get_db().get_user(username)
+    except Exception:
+        stored = None
+    if not stored:
+        return False
+    user = dict(stored)
+    user['username'] = username
+    try:
+        return user_can_access_vm(user, cluster_id, int(vmid), 'vm.view')
+    except (TypeError, ValueError):
+        return False
+
+
+def _filtered_tasks_frame(tasks, cluster_id, username, timestamp):
+    """Per-VM-authorized 'tasks' frame for a non-admin client: keep only rows whose vmid the caller
+    may view (task rows without a resolvable vmid — node/cluster tasks — are dropped for a scoped
+    client). None => unknown user, fail closed."""
+    if not isinstance(tasks, list) or not username:
+        return None
+    from pegaprox.core.db import get_db
+    from pegaprox.utils.rbac import user_can_access_vm
+    try:
+        stored = get_db().get_user(username)
+    except Exception:
+        stored = None
+    if not stored:
+        return None
+    user = dict(stored)
+    user['username'] = username
+
+    def _vmid_of(t):
+        for k in ('vmid', 'id'):
+            v = t.get(k)
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    allowed = []
+    for t in tasks:
+        _vid = _vmid_of(t)
+        if _vid is None:
+            continue  # node/cluster task → not for a per-VM-scoped client
+        if user_can_access_vm(user, cluster_id, _vid, 'vm.view'):
+            allowed.append(t)
+    return _serialize_sse_message('tasks', allowed, cluster_id, timestamp)
+
+
 def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_clusters=None):
     """Broadcast update to SSE clients
 
@@ -328,6 +387,8 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         # #736 — cache each scoped user's filtered 'resources' frame within this broadcast, so we
         # filter O(distinct-scoped-users) times rather than once per client.
         _res_frame_cache = {}
+        _cfg_access_cache = {}    # uname -> bool: may this user view THIS vm_config frame's vmid (audit M1)
+        _tasks_frame_cache = {}   # uname -> per-VM-filtered 'tasks' frame (audit M1)
         with sse_clients_lock:
             for client_id, client_info in list(sse_clients.items()):
                 try:
@@ -370,6 +431,23 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                             if client_message is _SSE_FILTER_MISSING:
                                 client_message = _filtered_resources_frame(data, cluster_id, uname, timestamp)
                                 _res_frame_cache[uname] = client_message
+                        elif update_type == 'vm_config' and cluster_id is not None and not client_info.get('is_admin', False):
+                            # audit M1 — vm_config carries the full VM config (disks/net/cloud-init);
+                            # deliver only to a scoped client that may view this vmid.
+                            uname = client_info.get('user')
+                            _ok_cfg = _cfg_access_cache.get(uname, _SSE_FILTER_MISSING)
+                            if _ok_cfg is _SSE_FILTER_MISSING:
+                                _ok_cfg = _sse_user_can_view_vm(uname, cluster_id, (data or {}).get('vmid'))
+                                _cfg_access_cache[uname] = _ok_cfg
+                            if not _ok_cfg:
+                                continue  # foreign VM's config → not for this scoped client
+                        elif update_type == 'tasks' and cluster_id is not None and not client_info.get('is_admin', False):
+                            # audit M1 — filter per-VM task rows to the ones this client may view.
+                            uname = client_info.get('user')
+                            client_message = _tasks_frame_cache.get(uname, _SSE_FILTER_MISSING)
+                            if client_message is _SSE_FILTER_MISSING:
+                                client_message = _filtered_tasks_frame(data, cluster_id, uname, timestamp)
+                                _tasks_frame_cache[uname] = client_message
                         if client_message is None:
                             continue  # unknown user -> fail closed, send nothing
                         if len(client_message) > _MAX_BROADCAST_BYTES:
