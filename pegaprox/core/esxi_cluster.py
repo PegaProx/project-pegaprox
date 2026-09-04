@@ -131,8 +131,10 @@ class ESXiClusterManager:
             }
         }
 
-    def get_vm_resources(self):
-        """for SSE broadcast compatibility"""
+    def get_vm_resources(self, max_age: float = 0.0):
+        """for SSE broadcast compatibility.
+        #781 — accept+ignore max_age so Proxmox-shaped callers (/resources, topology) don't
+        TypeError on an ESXi cluster; there's no cached snapshot here, so it's always fresh."""
         return self.get_vms() + self.get_nodes()
 
     # migration helpers

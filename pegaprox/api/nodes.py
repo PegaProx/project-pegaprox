@@ -56,7 +56,10 @@ def get_node_ip_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    cluster_host, cluster_port = mgr.host, mgr.api_port
+    # #781 (Panxatony) — read only what this endpoint uses. It formerly unpacked mgr.api_port too
+    # (never used here), which AttributeError'd BEFORE the cluster-type branch below on XCP-ng
+    # (XcpngManager has no api_port) → 500 on the node-IP endpoint for XCP-ng clusters.
+    cluster_host = mgr.host
     node_ip = None
     source = None
 
@@ -190,7 +193,13 @@ def get_node_sensors_api(cluster_id, node):
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    result = cluster_managers[cluster_id].get_node_sensors(node)
+    mgr = cluster_managers[cluster_id]
+    # #781 (Panxatony) — lm-sensors is a Proxmox-manager feature; XCP-ng / ESXi managers don't
+    # implement get_node_sensors, so calling it unconditionally AttributeError'd → 500. Degrade the
+    # same way the endpoint already does for a host without lm-sensors: a clear "not available".
+    if not hasattr(mgr, 'get_node_sensors'):
+        return jsonify({'error': 'Sensor readings are not available for this cluster type'}), 200
+    result = mgr.get_node_sensors(node)
     if isinstance(result, dict) and result.get('error'):
         return jsonify(result), 502
     return jsonify(result)

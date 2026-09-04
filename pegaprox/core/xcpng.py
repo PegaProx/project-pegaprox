@@ -757,9 +757,12 @@ class XcpngManager:
             }
         return result
 
-    def get_vm_resources(self) -> list:
+    def get_vm_resources(self, max_age: float = 0.0) -> list:
         """Return VM+node list for broadcast loop - same format as Proxmox /cluster/resources.
-        MK: include nodes so SSE doesn't think connection is stale when cluster has zero VMs."""
+        MK: include nodes so SSE doesn't think connection is stale when cluster has zero VMs.
+        #781 (Panxatony) — accept (and ignore) max_age so callers written for the Proxmox manager
+        (clusters.py /resources, topology.py) don't TypeError on an XCP-ng cluster. There's no
+        cached snapshot to reuse here; this always builds fresh, which is what max_age=0 means."""
         vms = self.get_vms() or []
         nodes = self.get_nodes() or []
         return vms + nodes
