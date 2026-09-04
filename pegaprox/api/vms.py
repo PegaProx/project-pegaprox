@@ -1693,6 +1693,18 @@ def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):
     user['username'] = request.session['user']
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.backup', vm_type):
         return jsonify({'error': 'Permission denied: vm.backup'}), 403
+    # sec (private disclosure Sep 2026 — audit): authorize the SOURCE backup, not only the URL vmid —
+    # else a scoped backup.delete holder could delete ANOTHER VM's backup by naming its volid (the
+    # source vmid is embedded in vzdump-<type>-<vmid>-...). Mirrors restore_vm_backup's source check.
+    _authz_user = build_authz_user(request.session.get('user', ''), request.session)
+    if _authz_user.get('effective_role', _authz_user.get('role')) != ROLE_ADMIN:
+        import re as _re
+        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
+        _src_vmid = int(_sm.group(1)) if _sm else None
+        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
+        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
+                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+            return jsonify({'error': 'Permission denied for source backup'}), 403
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error

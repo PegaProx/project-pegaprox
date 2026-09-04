@@ -625,31 +625,40 @@ def update_policy(cluster_id, pid):
     body = request.get_json(silent=True) or {}
 
     # sec (private disclosure Sep 2026 — audit): ALWAYS re-validate the caller against the policy's
-    # target VMs, not only when the body changes targeting — else a body like {"enabled":0} could edit
-    # a policy whose target VMs are outside the caller's scope. Effective target = new value if the
-    # body supplies it, else the stored one (handled by the body.get(..., cur[...]) fallbacks below).
-    if body is not None:
-        mgr = cluster_managers.get(cluster_id)
-        if not mgr:
-            return jsonify({'error': 'cluster manager not found'}), 404
-        cc = get_db().conn.cursor()
-        cc.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
-        row0 = cc.fetchone()
-        if not row0:
-            return jsonify({'error': 'not found'}), 404
-        cur = _row_to_policy(row0)
-        tt = body.get('target_type', cur['target_type'])
-        tv = body.get('target_value', cur['target_value'])
-        creator = build_authz_user(request.session.get('user', ''), request.session)
+    # target VMs, not only when the body changes targeting — else a bare {"enabled":0} could edit a
+    # policy whose targets are out of scope. Effective target = new value if supplied, else the stored
+    # one. Resolve via the live manager when present; when the cluster is OFFLINE, authorize a direct-VM
+    # target by its vmid (no round-trip) and fail closed for a scoped caller on a tag target we can't
+    # expand — but NEVER 404 a non-targeting edit just because the manager is momentarily absent.
+    cc = get_db().conn.cursor()
+    cc.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+    row0 = cc.fetchone()
+    if not row0:
+        return jsonify({'error': 'not found'}), 404
+    cur = _row_to_policy(row0)
+    tt = body.get('target_type', cur['target_type'])
+    tv = body.get('target_value', cur['target_value'])
+    creator = build_authz_user(request.session.get('user', ''), request.session)
+    mgr = cluster_managers.get(cluster_id)
+    if mgr:
         try:
             denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, {
                           'target_type': tt, 'target_value': tv, 'cluster_id': cluster_id})
                       if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
         except Exception as e:
             return jsonify({'error': f'failed to resolve targets: {e}'}), 400
-        if denied:
-            logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) updating policy {pid}@{cluster_id}")
-            return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
+    else:
+        _tv = str(tv).strip()
+        if str(tt).lower() in ('vm', 'vmid') and _tv.lstrip('-').isdigit():
+            denied = [] if user_can_access_vm(creator, cluster_id, int(_tv), 'vm.snapshot') else [_tv]
+        else:
+            from pegaprox.utils.rbac import get_user_clusters as _guc, user_has_any_pool_access as _uhpa
+            _tc = _guc(creator, include_pools=False)
+            _confined = (_tc is not None and cluster_id not in _tc) or _uhpa(creator, cluster_id)
+            denied = ['<unresolved: cluster offline>'] if _confined else []
+    if denied:
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) updating policy {pid}@{cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
 
     # #586 — validate the new schedule fields when present
     if body.get('schedule') and body['schedule'] not in ('hourly', 'daily', 'weekly', 'monthly', 'once', 'cron'):
