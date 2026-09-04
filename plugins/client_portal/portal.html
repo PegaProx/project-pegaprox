@@ -985,6 +985,11 @@ window.pUnmountIso=async function(c,v){
 window.pCreateSnap=function(c,v){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);const n=document.getElementById('snap-name')?.value||'';if(vm)createSnapshot(vm,n,'');};
 window.pRollback=function(c,v,snapname){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)rollbackSnapshot(vm,snapname);};
 window.pDeleteSnap=function(c,v,snapname){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)deleteSnapshot(vm,snapname);};
+// #765 (grobe0ba) — the CT create/destroy handlers were defined in-IIFE (pCreateCt/submitCreateCt/
+// pDestroy/submitDestroy above) but never re-exported to window, so their inline onclick= resolved
+// against window, found nothing, and threw ReferenceError — the +Container / Destroy buttons did
+// nothing for everyone with those features enabled. Export them like every other inline handler.
+window.pCreateCt=pCreateCt;window.submitCreateCt=submitCreateCt;window.pDestroy=pDestroy;window.submitDestroy=submitDestroy;
 window.closeModal=function(){
     // MK May 2026 (#396): if a noVNC console is open, disconnect cleanly so
     // Proxmox releases the vncproxy task. Without this the server-side ws
