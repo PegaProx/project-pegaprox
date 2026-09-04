@@ -2333,7 +2333,9 @@ def download_from_url(cluster_id, node, storage):
         # validation defeats a rebind on its own — an internal IP won't present the mirror's cert).
         from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
         try:
-            url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'))
+            # sec (audit): tls_verified=False pins the resolved IP for https too (defense-in-depth vs
+            # DNS-rebind), matching the sibling ISO-download path in vms.py; PVE still cert-verifies.
+            url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'), tls_verified=False)
         except SsrfError as _ssrf:
             return jsonify({'error': f'URL rejected by SSRF guard: {_ssrf}'}), 400
 

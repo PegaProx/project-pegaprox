@@ -542,8 +542,14 @@ def get_alerts():
 def create_alert():
     """Create a new alert"""
     data = request.json or {}
+    # sec (private disclosure Sep 2026 — audit): gate on the target cluster, not just the (delegatable)
+    # alert.manage perm, so a tenant-scoped holder can't create alerts against clusters they can't
+    # reach. Admins pass check_cluster_access unconditionally. Mirrors the cluster-scoped alert routes.
+    ok, err = check_cluster_access(data.get('cluster_id', ''))
+    if not ok:
+        return err
     config = load_alerts_config()
-    
+
     import uuid
     new_alert = {
         'id': str(uuid.uuid4())[:8],
@@ -575,6 +581,17 @@ def update_alert(alert_id):
     
     for alert in config['alerts']:
         if alert['id'] == alert_id:
+            # sec (private disclosure Sep 2026 — audit): must be able to reach the alert's cluster
+            # (was IDOR — any alert.manage holder could edit/disclose another tenant's alert), and
+            # any cluster it's being retargeted to.
+            ok, err = check_cluster_access(alert.get('cluster_id', ''))
+            if not ok:
+                return err
+            _new_cid = data.get('cluster_id', alert.get('cluster_id', ''))
+            if _new_cid != alert.get('cluster_id', ''):
+                ok2, err2 = check_cluster_access(_new_cid)
+                if not ok2:
+                    return err2
             alert.update({
                 'name': data.get('name', alert['name']),
                 'cluster_id': data.get('cluster_id', alert['cluster_id']),
@@ -595,9 +612,17 @@ def update_alert(alert_id):
 def delete_alert(alert_id):
     """Delete an alert"""
     config = load_alerts_config()
+    # sec (private disclosure Sep 2026 — audit): gate on the alert's cluster before deleting (was
+    # IDOR — any alert.manage holder could delete another tenant's alert by guessing its id).
+    _target = next((a for a in config['alerts'] if a['id'] == alert_id), None)
+    if _target is None:
+        return jsonify({'error': 'Alert not found'}), 404
+    ok, err = check_cluster_access(_target.get('cluster_id', ''))
+    if not ok:
+        return err
     config['alerts'] = [a for a in config['alerts'] if a['id'] != alert_id]
     save_alerts_config(config)
-    
+
     user = request.session.get('user', 'unknown')
     log_audit(user, 'alert.deleted', f"Deleted alert: {alert_id}")
 

@@ -2827,7 +2827,7 @@ def join_node_to_cluster(cluster_id):
         if force_rejoin:
             join_cmd += ' --force'
         if link0_address:
-            join_cmd += f' --link0 {link0_address}'
+            join_cmd += f' --link0 {shlex.quote(link0_address)}'   # sec (audit): quote — was raw into the ssh shell
         
         channel.send(join_cmd + '\n')
         time.sleep(2)  # Wait for password prompt
