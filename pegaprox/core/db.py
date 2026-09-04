@@ -3133,10 +3133,27 @@ class PegaProxDB:
         self.conn.commit()
 
     def delete_cluster(self, cluster_id: str):
-        """Delete cluster"""
+        """Delete a cluster and ALL of its cluster-scoped rows.
+
+        #779 (zobsg) — this used to remove only the clusters row + xcpng_vmid_map, leaving orphaned
+        rows in pool_permissions, vm_acls, node_maintenance, migration_history and ~20 other
+        cluster_id-keyed tables (stale UI counts, DB bloat, and a small tail where a reused 8-char
+        cluster id could inherit a stale pool/VM grant). Sweep every table that actually carries a
+        cluster_id column so the delete is exhaustive and stays correct as new cluster-scoped tables
+        are added, instead of a hand-maintained list that silently drifts. tenants.clusters is a JSON
+        array (not a cluster_id column) — the caller prunes that separately.
+        """
         cursor = self.conn.cursor()
         cursor.execute('DELETE FROM clusters WHERE id = ?', (cluster_id,))
-        cursor.execute('DELETE FROM xcpng_vmid_map WHERE cluster_id = ?', (cluster_id,))
+        # table names come from sqlite_master (not user input) → safe to interpolate; cluster_id is bound
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        for (tbl,) in cursor.fetchall():
+            try:
+                cols = [row[1] for row in cursor.execute('PRAGMA table_info("%s")' % tbl).fetchall()]
+            except Exception:
+                continue
+            if 'cluster_id' in cols:
+                cursor.execute('DELETE FROM "%s" WHERE cluster_id = ?' % tbl, (cluster_id,))
         self.conn.commit()
 
     # XCP-ng VMID mapping helpers - MK Mar 2026

@@ -592,17 +592,30 @@ def delete_cluster(cluster_id):
     # MK: Delete cluster and all related data from database
     try:
         db = get_db()
-        cursor = db.conn.cursor()
-        
-        # Delete cluster
+        # #779 (zobsg) — db.delete_cluster now sweeps EVERY cluster_id-keyed table (vm_acls,
+        # affinity_rules, cluster_alerts, pool_permissions, node_maintenance, … ~20 of them), so the
+        # per-table DELETEs that used to live here are gone — they only ever covered three of them.
         db.delete_cluster(cluster_id)
-        
-        # Clean up related tables
-        cursor.execute('DELETE FROM vm_acls WHERE cluster_id = ?', (cluster_id,))
-        cursor.execute('DELETE FROM affinity_rules WHERE cluster_id = ?', (cluster_id,))
-        cursor.execute('DELETE FROM cluster_alerts WHERE cluster_id = ?', (cluster_id,))
-        db.conn.commit()
-        
+
+        # tenants.clusters is a JSON array, not a cluster_id column, so prune it separately: drop the
+        # deleted cluster from every tenant's assigned-clusters list, else the tenant's "N clusters"
+        # badge stays stale and a reused 8-char id could re-inherit that grant.
+        try:
+            from pegaprox.utils.rbac import load_tenants, save_tenants
+            import pegaprox.utils.rbac as _rbac
+            _tenants = load_tenants()
+            _changed = False
+            for _t in _tenants.values():
+                _cl = _t.get('clusters') or []
+                if cluster_id in _cl:
+                    _t['clusters'] = [c for c in _cl if c != cluster_id]
+                    _changed = True
+            if _changed:
+                save_tenants(_tenants)
+                _rbac.tenants_db = {}   # invalidate the process cache so get_user_clusters reloads
+        except Exception as _te:
+            logging.error(f"Failed to prune deleted cluster {cluster_id} from tenants: {_te}")
+
         logging.info(f"Deleted cluster {cluster_id} and related data from database")
     except Exception as e:
         logging.error(f"Failed to delete cluster from database: {e}")
