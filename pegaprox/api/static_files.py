@@ -182,6 +182,42 @@ def delete_pool(cluster_id, pool_id):
         return jsonify({'error': f'Failed to delete pool: {error_msg}'}), 500
 
 
+def _authorize_pool_assignment(cluster_id, pool_id, vmid, vm_type=None):
+    """sec (private disclosure Sep 2026 — regression of #766): the pool-member add/remove gate was
+    lowered from admin.users to pool.assign (a DEFAULT ROLE_USER perm). Without a per-object check a
+    pool.assign holder could re-pool a FOREIGN VM into a pool they control and self-grant access to it
+    (pool membership drives user_can_access_vm), or detach any VM from any reachable pool. Require BOTH:
+    (1) the caller can ALREADY manage the VM (so assigning cannot CONFER new access), and (2) the caller
+    manages the target pool — admins and plain cluster-wide operators manage all pools on an owned
+    cluster; a pool-scoped caller only pools they hold a grant on. Returns (ok, error_response)."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import (user_can_access_vm, _pool_perms_for,
+                                     get_user_clusters, user_has_any_pool_access)
+    from pegaprox.models.permissions import ROLE_ADMIN
+    try:
+        _vid = int(vmid)
+    except (TypeError, ValueError):
+        return False, (jsonify({'error': 'Invalid VMID'}), 400)
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    # (1) assigning/removing must not itself grant access — the caller must already be able to reach
+    # the VM. vm.view is the access floor: a foreign VM the caller can't see is blocked (kills the
+    # self-grant escalation), while a VM already in the caller's scope stays assignable (#766 intact).
+    if not user_can_access_vm(user, cluster_id, _vid, 'vm.view', vm_type):
+        return False, (jsonify({'error': 'Access denied to this VM'}), 403)
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return True, None
+    # (2) confine a pool-scoped caller to pools they manage; a plain cluster-wide operator keeps all
+    _tc = get_user_clusters(user, include_pools=False)
+    _is_owner = _tc is None or cluster_id in _tc
+    if not ((not _is_owner) or user_has_any_pool_access(user, cluster_id)):
+        return True, None
+    _granted = {pid for pid, perms in (_pool_perms_for(cluster_id, user.get('username', ''),
+                                                        user.get('groups', [])) or {}).items() if perms}
+    if pool_id not in _granted:
+        return False, (jsonify({'error': 'Access denied to this pool'}), 403)
+    return True, None
+
+
 @bp.route('/api/clusters/<cluster_id>/pools/<pool_id>/members', methods=['POST'])
 @require_auth(perms=['pool.assign'])   # #766 (cybrwerk) — was admin.users; the granular perm for this action is pool.assign
 def add_pool_member(cluster_id, pool_id):
@@ -199,7 +235,10 @@ def add_pool_member(cluster_id, pool_id):
     
     if not vmid:
         return jsonify({'error': 'VMID is required'}), 400
-    
+
+    ok, err = _authorize_pool_assignment(cluster_id, pool_id, vmid, vm_type)
+    if not ok: return err
+
     manager = cluster_managers.get(cluster_id)
     if not manager:
         logging.error(f"Cluster {_sl(cluster_id)} not found in cluster_managers")
@@ -269,7 +308,10 @@ def remove_pool_member(cluster_id, pool_id, vmid):
     """Remove a VM/CT from a pool"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
+    ok, err = _authorize_pool_assignment(cluster_id, pool_id, vmid)
+    if not ok: return err
+
     manager = cluster_managers.get(cluster_id)
     if not manager:
         return jsonify({'error': 'Cluster not found'}), 404
