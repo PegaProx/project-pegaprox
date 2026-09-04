@@ -183,7 +183,7 @@ def delete_pool(cluster_id, pool_id):
 
 
 @bp.route('/api/clusters/<cluster_id>/pools/<pool_id>/members', methods=['POST'])
-@require_auth(perms=['admin.users'])
+@require_auth(perms=['pool.assign'])   # #766 (cybrwerk) — was admin.users; the granular perm for this action is pool.assign
 def add_pool_member(cluster_id, pool_id):
     """Add a VM/CT to a pool"""
     logging.info(f"add_pool_member called: cluster={_sl(cluster_id)}, pool={_sl(pool_id)}")
@@ -264,7 +264,7 @@ def add_pool_member(cluster_id, pool_id):
 
 
 @bp.route('/api/clusters/<cluster_id>/pools/<pool_id>/members/<int:vmid>', methods=['DELETE'])
-@require_auth(perms=['admin.users'])
+@require_auth(perms=['pool.assign'])   # #766 — same as add: removing a VM from a pool is pool.assign, not admin.users
 def remove_pool_member(cluster_id, pool_id, vmid):
     """Remove a VM/CT from a pool"""
     ok, err = check_cluster_access(cluster_id)
