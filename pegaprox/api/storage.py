@@ -23,7 +23,7 @@ from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection
 from pegaprox import globals as _g
 
@@ -2254,6 +2254,14 @@ def get_node_storage_content(cluster_id, node, storage):
                 if entry.get('size') in (None, 0) and entry.get('approximate-size') is not None:
                     entry['size'] = entry['approximate-size']
                     entry['size_is_approx'] = True
+            # sec (private disclosure Sep 2026 — audit): content rows for images/rootdir/backup carry a
+            # vmid + volid (vm-<id>-disk, vzdump-<type>-<id>-...), so an unscoped list leaked every VM's
+            # disks + backups to any pool-/ACL-scoped storage.view holder. Scope the vmid-carrying rows
+            # per-VM; ISO/vztmpl rows have no vmid (shared storage content) and stay for everyone.
+            _ok_vmids = {r.get('vmid') for r in scope_vm_rows(cluster_id, [r for r in data
+                         if isinstance(r, dict) and r.get('vmid') is not None])}
+            data = [r for r in data if not (isinstance(r, dict) and r.get('vmid') is not None)
+                    or r.get('vmid') in _ok_vmids]
             return jsonify(data)
         else:
             return jsonify([])
@@ -2395,7 +2403,12 @@ def get_backup_jobs(cluster_id):
         r = manager._create_session().get(url, timeout=5)
         
         if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
+            jobs = r.json().get('data', [])
+            # sec (private disclosure Sep 2026 — audit): read-side of the _authz_backup_targets write
+            # gate — a scoped caller sees only jobs whose targets they could manage (own every vmid;
+            # all=1/pool/exclude are admin-only). Admins get None back for every job → full list.
+            jobs = [j for j in jobs if _authz_backup_targets(cluster_id, j) is None]
+            return jsonify(jobs)
         return jsonify([])
     except:
         return jsonify([])

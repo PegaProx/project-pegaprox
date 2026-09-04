@@ -607,7 +607,8 @@ def scan_all_nodes_cves(cluster_id):
             scan = mgr.scan_node_packages(node_name)
             results.append(scan)
         except Exception as e:
-            results.append({'node': node_name, 'error': str(e)})
+            logging.warning(f"[cve-scan] node {node_name} scan failed: {e}")  # detail to logs, not the response
+            results.append({'node': node_name, 'error': 'package scan failed'})   # sec (audit): no raw str(e) to the client
 
     total_sec = sum(r.get('security_count', 0) for r in results)
     total_upd = sum(r.get('total_count', 0) for r in results)

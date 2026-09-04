@@ -680,9 +680,15 @@ def force_snapshot():
         from pegaprox.background.metrics import collect_metrics_snapshot, save_metrics_snapshot
         snap = collect_metrics_snapshot()
         save_metrics_snapshot(snap)
-        # mini-summary
+        # mini-summary — sec (private disclosure Sep 2026 — audit): the summary leaked every cluster's
+        # name + VM/storage/node counts to a cluster-scoped admin.api holder. Confine to their clusters.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import get_user_clusters as _guc
+        _allowed = _guc(build_authz_user(request.session.get('user', ''), request.session))
         out = {'ok': True, 'clusters': {}}
         for cid, cd in (snap.get('clusters') or {}).items():
+            if _allowed is not None and cid not in _allowed:
+                continue
             out['clusters'][cid] = {
                 'name': cd.get('name'),
                 'vms_sampled': len(cd.get('vms') or {}),

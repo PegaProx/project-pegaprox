@@ -440,7 +440,7 @@ def delete_plugin(plugin_id):
     try:
         shutil.rmtree(str(plugins_path))
     except Exception as e:
-        return jsonify({'error': f'Failed to delete plugin files: {e}'}), 500
+        return jsonify({'error': safe_error(e, 'Failed to delete plugin files')}), 500
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'plugins.deleted', f"Deleted plugin: {plugin_id}")
@@ -501,7 +501,7 @@ def save_plugin_config(plugin_id):
     try:
         config_path.write_text(raw, encoding='utf-8')
     except Exception as e:
-        return jsonify({'error': f'Failed to write: {e}'}), 500
+        return jsonify({'error': safe_error(e, 'Failed to write config')}), 500
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'plugins.config_saved', f"Updated config for plugin: {plugin_id}")

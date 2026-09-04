@@ -446,7 +446,13 @@ def get_user_vm_access(username):
     users = load_users()
     if username not in users:
         return jsonify({'error': 'User not found'}), 404
-    
+    # sec (private disclosure Sep 2026 — audit): a tenant-scoped admin.users holder must not read a
+    # user's VM-ACL grants in ANOTHER tenant (cross-tenant disclosure). Mirror get_user_perms.
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = users.get(request.session.get('user', ''), {})
+        if users[username].get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
+            return jsonify({'error': 'Access denied'}), 403
+
     acls = get_vm_acls()
     access = []
     

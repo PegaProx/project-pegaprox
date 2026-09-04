@@ -467,6 +467,9 @@ def check_readiness(plan_id):
     ok, err = check_cluster_access(plan['target_cluster'])
     if not ok:
         return err
+    ok, err = _authz_plan_vms(plan)   # sec (audit): per-VM gate, matching the read/failover routes
+    if not ok:
+        return err
 
     issues = []
     vms = _get_plan_vms(plan_id)
@@ -799,6 +802,9 @@ def cancel_action(plan_id):
     if not ok:
         return err
     ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+    ok, err = _authz_plan_vms(plan)   # sec (audit): per-VM gate, matching the read/failover routes
     if not ok:
         return err
 
