@@ -20,7 +20,7 @@ from pegaprox.utils.auth import (
     create_initial_admin, is_initialized,
     create_session, validate_session, invalidate_session,
     invalidate_all_user_sessions, cleanup_expired_sessions,
-    generate_api_token, create_api_token, validate_api_token,
+    generate_api_token, create_api_token, validate_api_token, revoke_user_api_tokens,
     list_user_tokens, revoke_api_token, require_auth,
     generate_session_id, mark_admin_initialized, ensure_api_tokens_table,
     dummy_verify_password,
@@ -1494,9 +1494,10 @@ def auth_change_password():
     # want it to keep access. Frontend reads relogin_required and redirects to /login.
     current_session_id = request.cookies.get('session_id') or request.headers.get('X-Session-ID')
     sessions_removed = invalidate_all_user_sessions(username)  # no except_session — all go
+    tokens_revoked = revoke_user_api_tokens(username)  # sec (audit): tokens survived a password change
 
-    logging.info(f"User '{username}' changed their password — all sessions invalidated")
-    log_audit(username, 'user.password_changed', f"Password changed, {sessions_removed} session(s) invalidated (incl. current)")
+    logging.info(f"User '{username}' changed their password — all sessions invalidated, {tokens_revoked} token(s) revoked")
+    log_audit(username, 'user.password_changed', f"Password changed, {sessions_removed} session(s) invalidated (incl. current), {tokens_revoked} API token(s) revoked")
 
     resp = jsonify({
         'success': True,

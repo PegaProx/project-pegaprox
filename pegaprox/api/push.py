@@ -419,42 +419,21 @@ def _is_internal_or_metadata_host(host):
     or metadata-fetch oracle by registering an internal endpoint and watching
     /api/siem/targets-style status fields. Blocking at subscribe time makes
     the attack surface basically nil."""
-    import ipaddress, socket
     if not host:
         return True
-    # NS Aug 2026 (Aikido #469089273) — parsed.hostname is already port/bracket-free; do NOT
-    # split on ':' (that mangled every IPv6 literal, e.g. '::1' -> '', bypassing the block).
-    h = host.strip().strip('[]')
-    # quick string checks
-    if h in ('localhost', '0.0.0.0', '::', '::1'):
-        return True
-    if h.endswith('.local') or h.endswith('.internal') or h.endswith('.localdomain'):
-        return True
-    # parse as IP
+    # sec (private disclosure Sep 2026 — audit): delegate to the central SSRF guard. The old inline
+    # check FAILED OPEN when DNS didn't resolve ("can't resolve — let it through") and used an
+    # IPv4-only socket.gethostbyname, so an IPv6-only or 6to4/NAT64/Teredo-encoded internal target
+    # slipped past. is_safe_outbound_url resolves + fails CLOSED and classifies transition addresses,
+    # and pins the resolved IP. public/safe => not internal; anything it rejects => block.
     try:
-        ip = ipaddress.ip_address(h)
-        if getattr(ip, 'ipv4_mapped', None):   # unwrap ::ffff:a.b.c.d so private/metadata checks apply
-            ip = ip.ipv4_mapped
-        # block private + loopback + link-local + multicast + unspecified +
-        # carrier-grade NAT (100.64/10) + AWS/GCP metadata (169.254.169.254)
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_multicast or ip.is_unspecified or ip.is_reserved):
-            return True
-        if str(ip).startswith('100.'):  # CGN range — too coarse but safer
-            try:
-                if ipaddress.ip_address('100.64.0.0') <= ip <= ipaddress.ip_address('100.127.255.255'):
-                    return True
-            except Exception:
-                pass
-    except ValueError:
-        # not an IP — try DNS resolution to catch hostnames pointing internal
-        try:
-            resolved = socket.gethostbyname(h)
-            return _is_internal_or_metadata_host(resolved)
-        except Exception:
-            # can't resolve — let it through (offline DNS shouldn't deny)
-            return False
-    return False
+        from pegaprox.utils.url_security import is_safe_outbound_url
+        # parsed.hostname is bracket-free, so re-bracket a bare IPv6 literal or the URL is malformed
+        _h = f'[{host}]' if (':' in host and not host.startswith('[')) else host
+        safe, _reason = is_safe_outbound_url(f'https://{_h}/', allow_private=False)
+        return not safe   # guard says safe(public) => not internal; anything it rejects => block
+    except Exception:
+        return True   # fail closed
 
 
 @bp.route('/api/push/subscribe', methods=['POST'])

@@ -18,7 +18,7 @@ from pegaprox.utils.sanitization import sanitize_username, sanitize_log_message 
 from pegaprox.utils.auth import (
     hash_password, verify_password, validate_password_policy,
     load_users, save_users, require_auth, ARGON2_AVAILABLE,
-    mark_admin_initialized, invalidate_all_user_sessions,
+    mark_admin_initialized, invalidate_all_user_sessions, revoke_user_api_tokens,
 )
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import (
@@ -392,9 +392,10 @@ def admin_change_password(username):
     
     # Invalidate ALL sessions for this user (security: force re-login)
     sessions_removed = invalidate_all_user_sessions(username)
+    tokens_revoked = revoke_user_api_tokens(username)  # sec (audit): revoke API tokens too, not just sessions
 
     admin_username = request.session['user']
-    logging.info(f"Admin '{admin_username}' changed password for user '{username}'")
+    logging.info(f"Admin '{admin_username}' changed password for user '{username}' — {tokens_revoked} token(s) revoked")
     log_audit(admin_username, 'user.password_reset', f"Admin reset password for user: {username} ({sessions_removed} sessions invalidated)")
 
     # NS 2026-04-24 — if admin reset their OWN password, their session just died too

@@ -740,6 +740,26 @@ def create_api_token(username: str, token_name: str, role: str = None,
         return {'error': str(e)}
 
 
+def revoke_user_api_tokens(username: str) -> int:
+    """Revoke ALL of a user's API tokens. sec (private disclosure Sep 2026 — audit): a password
+    change / admin reset already invalidates the user's sessions but NOT their pgx_ tokens, so an
+    exfiltrated token survived the standard 'lock the intruder out' action. Called alongside
+    invalidate_all_user_sessions. Returns the number of tokens removed."""
+    try:
+        ensure_api_tokens_table()
+        db = get_db()
+        cur = db.conn.cursor()
+        cur.execute('DELETE FROM api_tokens WHERE username = ?', (username,))
+        db.conn.commit()
+        n = cur.rowcount or 0
+        if n:
+            logging.info(f"[APIToken] Revoked {n} token(s) for '{username}' on credential change")
+        return n
+    except Exception as e:
+        logging.error(f"[APIToken] Failed to revoke tokens for '{username}': {e}")
+        return 0
+
+
 def validate_api_token(token: str) -> dict:
     """Validate an API token and return user info if valid
     
