@@ -529,15 +529,29 @@ def get_schedules():
     # user_data['clusters'] field and FELL OPEN (`if not user_clusters` -> returned every tenant's
     # schedules) when it was empty. get_user_clusters returns None only for a genuine admin/
     # default-tenant all-cluster user; otherwise it's the caller's reachable cluster set.
-    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.utils.rbac import get_user_clusters, user_can_access_vm
+    from pegaprox.utils.auth import build_authz_user
     _ud = dict(user_data)
     _ud['username'] = user
     allowed = get_user_clusters(_ud)
     if is_admin or allowed is None:
         return jsonify(schedules.get('actions', []))
 
-    filtered = [a for a in schedules.get('actions', []) if a.get('cluster_id') in allowed]
-    return jsonify(filtered)
+    # sec (private disclosure Sep 2026 — audit M6): the cluster filter alone let a pool-/ACL-scoped
+    # caller read per-VM schedule rows (incl. other users' created_by) for every VM on a reachable
+    # cluster. The create/update paths already gate per-VM via user_can_access_vm; gate the LIST too.
+    # Plain operators keep every action on their clusters (user_can_access_vm returns True for them).
+    authz = build_authz_user(user, request.session)
+    out = []
+    for a in schedules.get('actions', []):
+        if a.get('cluster_id') not in allowed:
+            continue
+        try:
+            if user_can_access_vm(authz, a['cluster_id'], int(a.get('vmid')), 'vm.view', a.get('vm_type')):
+                out.append(a)
+        except (TypeError, ValueError):
+            continue   # malformed / non-VM action → drop from a scoped listing (fail closed)
+    return jsonify(out)
 
 
 @bp.route('/api/schedules', methods=['POST'])

@@ -12,7 +12,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access
+from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -2753,27 +2753,11 @@ def get_vms_backup_status(cluster_id):
     now = _t.time()
 
     def _scope_backup_out(rows):
-        # per-VM ACL scoping for non-admins; admins see all
-        from pegaprox.utils.auth import load_users
-        from pegaprox.utils.rbac import get_vm_acls, has_permission
-        u = load_users().get(request.session['user'], {})
-        u['username'] = request.session['user']
-        if u.get('role') == ROLE_ADMIN:
-            return rows
-        cluster_acls = get_vm_acls().get(cluster_id, {})
-        has_general = has_permission(u, 'vm.view')
-        if not cluster_acls:
-            return rows if has_general else []
-        scoped = []
-        for row in rows:
-            acl = cluster_acls.get(str(row.get('vmid', '')), {})
-            if acl:
-                allowed = acl.get('users', [])
-                if u['username'] in allowed or '*' in allowed:
-                    scoped.append(row)
-            elif has_general:
-                scoped.append(row)
-        return scoped
+        # sec (private disclosure Sep 2026 — audit M2): the old inline filter honoured VM-ACLs +
+        # global vm.view but NOT pool grants, so a pool-scoped caller with global vm.view saw the
+        # whole cluster's backup posture. scope_vm_rows is the canonical per-VM gate (ACL + pool +
+        # tenant, admins/plain operators keep all) used by /resources and search — reuse it.
+        return scope_vm_rows(cluster_id, rows)
 
     _bc = _backup_status_cache.get(cluster_id)
     if _bc and (now - _bc[0]) < _bc[2]:

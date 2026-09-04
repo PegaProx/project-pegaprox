@@ -19,7 +19,7 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
-from pegaprox.api.helpers import check_cluster_access, safe_error, load_metrics_window
+from pegaprox.api.helpers import check_cluster_access, safe_error, load_metrics_window, scope_vm_rows
 from pegaprox.core.db import get_db
 
 bp = Blueprint('insights', __name__)
@@ -394,7 +394,9 @@ def rollups(cluster_id):
     if not mgr.is_connected:
         return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
 
-    vms = mgr.get_vm_resources() or []
+    # sec (private disclosure Sep 2026 — audit M5): scope before aggregating so a pool-/ACL-scoped
+    # caller's per-pool/per-tag rollups reflect only their VMs, not the whole cluster's totals/names.
+    vms = scope_vm_rows(cluster_id, mgr.get_vm_resources() or [])
     only_running = (request.args.get('status') or 'all').lower() == 'running'
     if only_running:
         vms = [v for v in vms if v.get('status') == 'running']
