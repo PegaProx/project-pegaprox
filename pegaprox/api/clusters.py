@@ -24,7 +24,7 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immedi
 from pegaprox.core.config import load_config, save_config
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
-from pegaprox.api.helpers import load_server_settings, get_connected_manager, check_cluster_access, safe_error
+from pegaprox.api.helpers import load_server_settings, get_connected_manager, check_cluster_access, safe_error, scope_vm_rows
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
@@ -1490,7 +1490,11 @@ def get_excluded_vms(cluster_id):
                 'created_by': row['created_by'],
                 'created_at': row['created_at']
             })
-        
+
+        # sec (private disclosure Sep 2026 — audit LOW): confine the LB-excluded list to VMs the
+        # caller can access (was every excluded VM cluster-wide). Admins/plain operators keep all.
+        excluded = scope_vm_rows(cluster_id, excluded)
+
         # Get VM names for display
         vms = mgr.get_vm_resources() if mgr.is_connected else []
         vm_names = {vm['vmid']: vm.get('name', f"VM {vm['vmid']}") for vm in vms if vm.get('vmid')}

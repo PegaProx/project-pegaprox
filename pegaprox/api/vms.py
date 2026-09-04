@@ -6033,6 +6033,9 @@ def get_replication_jobs_api(cluster_id):
     manager = cluster_managers[cluster_id]
     vmid = request.args.get('vmid', type=int)
     jobs = manager.get_replication_jobs(vmid)
+    # sec (private disclosure Sep 2026 — audit LOW): confine to the caller's VMs (the ?vmid= filter
+    # alone let a scoped caller name a foreign vmid). Replication jobs key the VM as 'guest'.
+    jobs = scope_vm_rows(cluster_id, jobs, vmid_key='guest')
     return jsonify(jobs)
 
 
