@@ -3171,7 +3171,38 @@ def get_cluster_audit_log_api(cluster_id):
         filtered.append(entry)
         if len(filtered) >= limit:
             break
-    
+
+    # sec (private disclosure Sep 2026 — audit): the cluster audit trail (co-tenants' usernames,
+    # source IPs, actions) was returned to any cluster-reaching caller. Confine a pool-/ACL-scoped
+    # caller to entries that reference a VM they can access; admins and plain cluster-wide operators
+    # keep the full log (mirrors the /clusters/<id>/tasks confinement). vmids are detected from the
+    # entry's free-text details with the same patterns the ?vmid filter above uses.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import (get_user_clusters as _guc, user_has_any_pool_access as _uhpa,
+                                     get_user_pool_vmids as _gupv, get_vm_acls as _gva)
+    _au = build_authz_user(request.session.get('user', ''), request.session)
+    if _au.get('effective_role', _au.get('role')) != ROLE_ADMIN:
+        _tc = _guc(_au, include_pools=False)
+        _is_owner = _tc is None or cluster_id in _tc
+        if (not _is_owner) or _uhpa(_au, cluster_id):
+            _acc = set(_gupv(_au, cluster_id) or [])
+            for _v, _a in (_gva().get(cluster_id, {}) or {}).items():
+                if _au.get('username') in (_a.get('users') or []) and str(_v).lstrip('-').isdigit():
+                    _acc.add(int(_v))
+
+            def _mentions_accessible(_d):
+                for _vid in _acc:
+                    s = str(_vid)
+                    for p in (f"VM {s} ", f"VM {s}-", f"VM {s})", f"CT {s} ", f"CT {s}-", f"CT {s})",
+                              f"QEMU {s} ", f"LXC {s} ", f"/{s} ", f"/{s})", f"qemu/{s}", f"lxc/{s}"):
+                        if p in _d:
+                            return True
+                    if _d.endswith((f"VM {s}", f"CT {s}", f"QEMU {s}", f"LXC {s}")):
+                        return True
+                return False
+
+            filtered = [e for e in filtered if _mentions_accessible(e.get('details', ''))]
+
     return jsonify(filtered)
 
 
