@@ -1808,19 +1808,46 @@ POOL_PERMISSIONS = [
 ]
 
 
+def _pool_visibility(cluster_id):
+    """sec (private disclosure Sep 2026 — audit H3): pool list/detail were gated only by
+    check_cluster_access (cluster reach), whose #555 pool fallback admits a pool-scoped user to the
+    whole cluster — so they enumerated every pool's members, and /pools/<id> was a straight IDOR
+    (pool-A user read pool-B). Gate at the POOL level: an admin or a plain cluster-wide operator sees
+    all pools; a pool-/ACL-scoped caller sees only pools they hold a grant on. A pool grant authorizes
+    viewing that pool's membership, so no per-member scoping is needed once the pool gate passes.
+
+    Returns (confined, granted_pools): confined=True means restrict to granted_pools."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import _pool_perms_for, user_has_any_pool_access
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return False, set()
+    _tc = get_user_clusters(user, include_pools=False)
+    _is_owner = _tc is None or cluster_id in _tc
+    _pp = _pool_perms_for(cluster_id, user.get('username', ''), user.get('groups', []))
+    granted = {pid for pid, perms in (_pp or {}).items() if perms}
+    # pool-scoped (or non-owner reach) → confine to granted pools; plain operator on an owned cluster keeps all
+    confined = (not _is_owner) or user_has_any_pool_access(user, cluster_id)
+    return confined, granted
+
+
 @bp.route('/api/clusters/<cluster_id>/pools', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_cluster_pools(cluster_id):
     """Get all resource pools from Proxmox"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     mgr = cluster_managers[cluster_id]
     pools = mgr.get_pools()
-    
+
+    _confined, _granted = _pool_visibility(cluster_id)
+    if _confined:
+        pools = [p for p in pools if p.get('poolid') in _granted]
+
     # Add pool member details
     for pool in pools:
         try:
@@ -1850,10 +1877,16 @@ def get_pool_details(cluster_id, pool_id):
     """Get pool details including members"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
+    # sec (private disclosure Sep 2026 — audit H3): this was an IDOR — a pool-scoped caller could read
+    # ANY pool's members by naming its id. Confine to pools the caller holds a grant on.
+    _confined, _granted = _pool_visibility(cluster_id)
+    if _confined and pool_id not in _granted:
+        return jsonify({'error': 'Access denied to this pool'}), 403
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     mgr = cluster_managers[cluster_id]
     pool_data = mgr.get_pool_members(pool_id)
     

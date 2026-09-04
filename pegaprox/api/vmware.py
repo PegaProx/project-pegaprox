@@ -287,7 +287,16 @@ def get_vmware_vms(vmware_id):
                 result = mgr.get_vms()
     if 'error' in result:
         return jsonify(result), result.get('status_code', 500)
-    return jsonify(result.get('data', []))
+    # sec (private disclosure Sep 2026 — audit H2): the list returned the FULL ESXi inventory gated
+    # only by server reach (check_vmware_access admits a tenant caller, and returns True when the
+    # server has no linked_clusters — the common single-ESXi case). Every sibling per-VM route calls
+    # user_can_access_vmware_vm; the list didn't → the ESXi analog of the #773 /resources leak. Filter
+    # per-VM so an ACL-scoped caller sees only their VMs; admins/plain operators pass the helper.
+    _vmw_user = build_authz_user(request.session.get('user', ''), request.session)
+    _vms = result.get('data', []) or []
+    _scoped = [v for v in _vms
+               if user_can_access_vmware_vm(_vmw_user, vmware_id, str(v.get('vm', '')), 'vmware.vm.view')]
+    return jsonify(_scoped)
 
 
 @bp.route('/api/vmware/<vmware_id>/vms/<vm_id>', methods=['GET'])

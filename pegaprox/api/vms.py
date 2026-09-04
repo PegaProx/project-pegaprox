@@ -25,7 +25,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, validate_session, build_authz_user
 from pegaprox.utils.audit import log_audit
-from pegaprox.utils.rbac import user_can_access_vm, get_user_permissions
+from pegaprox.utils.rbac import user_can_access_vm, get_user_permissions, get_user_clusters
 
 
 def _require_vm_access(cluster_id, vmid, perm, vm_type=None):
@@ -41,7 +41,7 @@ def _require_vm_access(cluster_id, vmid, perm, vm_type=None):
     return None
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update
 from pegaprox.core.config import save_config
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows
 from pegaprox.utils.ssh import get_paramiko
 from pegaprox.utils.sanitization import sanitize_int
 from urllib.parse import urlencode, quote as url_quote
@@ -5864,16 +5864,18 @@ def snapshots_overview():
     """
     from pegaprox.utils.concurrent import run_concurrent
     user = request.session.get('user', '')
-    users_db = load_users()
-    user_data = users_db.get(user, {})
-    user_data['username'] = user
+    # sec (private disclosure Sep 2026 — audit H1): the old gate read user_data.get('clusters', []),
+    # a key the auth user record NEVER carries (only tenant rows do) → it was always [] → the
+    # `and user_clusters` short-circuited → NO cluster gate ran and this scanned every VM on every
+    # cluster cross-tenant for any vm.view holder. Resolve reachable clusters properly and scope each
+    # cluster's VM list per-VM, same as /resources + search. build_authz_user floors scoped tokens.
+    user_data = build_authz_user(user, request.session)
     data = request.get_json(silent=True) or {}
     # NS: don't filter by date unless user explicitly sets one — old default hid today's snapshots
     date_filter = data.get("date")
     filter_limit = data.get("limit", 200)
     filter_cluster = data.get("cluster_id")
-    is_admin = user_data.get('role') == ROLE_ADMIN
-    user_clusters = user_data.get('clusters', [])
+    accessible_clusters = get_user_clusters(user_data)  # None = admin / all
 
     cutoff_date = None
     if date_filter:
@@ -5888,10 +5890,10 @@ def snapshots_overview():
             continue
         if filter_cluster and cluster_id != filter_cluster:
             continue
-        if not is_admin and user_clusters and cluster_id not in user_clusters:
+        if accessible_clusters is not None and cluster_id not in accessible_clusters:
             continue
         try:
-            for r in mgr.get_vm_resources():
+            for r in scope_vm_rows(cluster_id, mgr.get_vm_resources()):
                 vmid = r.get('vmid')
                 node = r.get('node')
                 if vmid and node:
