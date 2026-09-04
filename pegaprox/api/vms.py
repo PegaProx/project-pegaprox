@@ -9475,6 +9475,11 @@ async def ssh_handler(websocket):
         print(f"Connecting SSH to {ssh_user}@{node_ip}...")
         
         # Try SSH key authentication first if provided
+        # #778 (zobsg) — paramiko needs a bare host; strip IPv6 brackets before connecting. The
+        # allow-list check above already matched node_ip in its bracketed form, so this affects only
+        # the outbound SSH connection, not the authorization. (The manager-internal SSH helpers all
+        # debracket the same way; these two console handlers were the only SSH paths that didn't.)
+        _ssh_host = node_ip[1:-1] if node_ip and node_ip.startswith('[') and node_ip.endswith(']') else node_ip
         if ssh_key:
             try:
                 import io
@@ -9495,7 +9500,7 @@ async def ssh_handler(websocket):
                 
                 if pkey:
                     print(f"Using SSH key authentication")
-                    ssh.connect(node_ip, port=22, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
+                    ssh.connect(_ssh_host, port=22, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
                     _persist_ssh_hostkeys()
                 else:
                     raise Exception("Could not parse SSH key - unsupported format")
@@ -9506,7 +9511,7 @@ async def ssh_handler(websocket):
                 return
         else:
             # Password authentication
-            ssh.connect(node_ip, port=22, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
+            ssh.connect(_ssh_host, port=22, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
             _persist_ssh_hostkeys()
 
         channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)
@@ -10076,10 +10081,13 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         # Create SSH client
         ssh = paramiko.SSHClient()
         apply_host_key_policy(ssh, paramiko)
-        
+
+        # #778 (zobsg) — strip IPv6 brackets before handing the host to paramiko (node_ip can fall
+        # back to the bracketed config host); a bracketed literal fails to resolve in ssh.connect.
+        _ssh_host = node_ip[1:-1] if node_ip and node_ip.startswith('[') and node_ip.endswith(']') else node_ip
         # Connect
         ssh.connect(
-            hostname=node_ip,
+            hostname=_ssh_host,
             port=22,
             username=ssh_user,
             password=ssh_pass,
