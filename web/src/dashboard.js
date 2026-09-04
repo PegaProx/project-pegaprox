@@ -8543,7 +8543,12 @@
             // hung request — see POLL_TIMEOUT_MS / #594. No timeout by default so long ops
             // (uploads, migrations) keep running. -LW
             // TODO: maybe use axios instead? -ns
-            const authFetch = async (url, opts = {}) => {
+            // #782 (Frisch12) — memoize so authFetch has a STABLE identity. It was recreated every
+            // render, giving every downstream fetchHealth/poll useCallback (health, PBS, latency, …)
+            // a new identity, which tore down + re-ran their effects on every SSE-driven render — the
+            // 60s poll never elapsed (~4 req/s from one idle tab). Deps: only getAuthHeaders (now
+            // stable); setSessionExpired/setConnectionError are stable React setters.
+            const authFetch = React.useCallback(async (url, opts = {}) => {
                 const { timeout, ...rest } = opts;
                 let ctrl, timer;
                 if (timeout) {
@@ -8574,7 +8579,7 @@
                 } finally {
                     if (timer) clearTimeout(timer);
                 }
-            };
+            }, [getAuthHeaders]);
             
             // Keep ref in sync with state
             // NS: this is a hack for the websocket callback closure issue

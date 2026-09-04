@@ -4549,8 +4549,12 @@ return updated;});// Apply theme immediately AND save to localStorage
 if(data.theme&&PEGAPROX_THEMES[data.theme]){applyTheme(data.theme);}return{success:true,data};}const errorData=await r.json().catch(()=>({}));console.error('updatePreferences: Request failed:',errorData);return{success:false,error:errorData.error};}catch(e){console.error('Failed to update preferences:',e);return{success:false,error:e.message};}};const updateCurrentUser=updates=>{setUser(currentUser=>currentUser?{...currentUser,...updates}:currentUser);};const logout=async()=>{try{await fetch(`${API_URL}/auth/logout`,{method:'POST',credentials:'include'});}catch(err){console.error('Logout request failed:',err);}setUser(null);setSessionId(null);setIsAuthenticated(false);// LW: #295 — re-fetch login page info so OIDC button shows after logout
 try{const r=await fetch(`${API_URL}/auth/check?t=${Date.now()}`,{credentials:'include'});const d=await r.json();if(d.oidc_enabled!==undefined){setOidcEnabled(d.oidc_enabled);setOidcButtonText(d.oidc_button_text||'Sign in with SSO');}if(d.ldap_enabled!==undefined)setLdapEnabled(d.ldap_enabled);if(d.login_background)setLoginBackground(d.login_background);}catch(e){}};// NS: No more X-Session-ID header needed for fetch - cookies are automatic
 // But sessionId is still available for WebSocket URLs
-const getAuthHeaders=()=>{return{};// Empty - credentials: 'include' handles auth for fetch
-};return/*#__PURE__*/React.createElement(AuthContext.Provider,{value:{user,sessionId,isAuthenticated,loading,error,login,logout,getAuthHeaders,isAdmin:user?.role==='admin',passwordExpiry,requires2FASetup,setRequires2FASetup,updatePreferences,updateCurrentUser,ldapEnabled,oidcEnabled,oidcButtonText,loginBackground,reverseProxyEnabled,needsSetup,setNeedsSetup}},children);}function useAuth(){return useContext(AuthContext);}// LW: Feb 2026 - layout hook (reads from user preferences)
+// #782 (Frisch12) — stable identity. getAuthHeaders returns a constant {} (auth is via
+// credentials:'include'), but a fresh function every render propagates through authFetch
+// -> every component's fetchHealth/poll useCallback -> its effect, re-arming the 60s
+// timers on every SSE-driven render (the ~4 req/s idle storm). useCallback([]) pins it.
+const getAuthHeaders=useCallback(()=>{return{};// Empty - credentials: 'include' handles auth for fetch
+},[]);return/*#__PURE__*/React.createElement(AuthContext.Provider,{value:{user,sessionId,isAuthenticated,loading,error,login,logout,getAuthHeaders,isAdmin:user?.role==='admin',passwordExpiry,requires2FASetup,setRequires2FASetup,updatePreferences,updateCurrentUser,ldapEnabled,oidcEnabled,oidcButtonText,loginBackground,reverseProxyEnabled,needsSetup,setNeedsSetup}},children);}function useAuth(){return useContext(AuthContext);}// LW: Feb 2026 - layout hook (reads from user preferences)
 // returns layout type and convenience boolean for corporate mode
 function useLayout(){const{user}=useAuth();const layout=user?.ui_layout||'modern';const isCorporate=layout==='corporate';// NS 2026-06-05 — Cloud skin (Preview). Third layout alongside modern/corporate.
 const isCloud=layout==='cloud';// Set data-layout on body whenever layout changes
@@ -7165,12 +7169,17 @@ useEffect(()=>{setCveResults(null);setCveScanLoading(false);setCveExpandedNodes(
 // hung request — see POLL_TIMEOUT_MS / #594. No timeout by default so long ops
 // (uploads, migrations) keep running. -LW
 // TODO: maybe use axios instead? -ns
-const authFetch=async(url,opts={})=>{const{timeout,...rest}=opts;let ctrl,timer;if(timeout){ctrl=new AbortController();timer=setTimeout(()=>ctrl.abort(),timeout);}try{const res=await fetch(url,{...rest,credentials:'include',signal:ctrl?ctrl.signal:rest.signal,headers:{...rest.headers,...getAuthHeaders()}});// #144: detect session loss early — don't auto-logout on auth/check or SSE
+// #782 (Frisch12) — memoize so authFetch has a STABLE identity. It was recreated every
+// render, giving every downstream fetchHealth/poll useCallback (health, PBS, latency, …)
+// a new identity, which tore down + re-ran their effects on every SSE-driven render — the
+// 60s poll never elapsed (~4 req/s from one idle tab). Deps: only getAuthHeaders (now
+// stable); setSessionExpired/setConnectionError are stable React setters.
+const authFetch=React.useCallback(async(url,opts={})=>{const{timeout,...rest}=opts;let ctrl,timer;if(timeout){ctrl=new AbortController();timer=setTimeout(()=>ctrl.abort(),timeout);}try{const res=await fetch(url,{...rest,credentials:'include',signal:ctrl?ctrl.signal:rest.signal,headers:{...rest.headers,...getAuthHeaders()}});// #144: detect session loss early — don't auto-logout on auth/check or SSE
 if(res.status===401&&!url.includes('/auth/')&&!url.includes('/sse')){console.warn('[authFetch] 401 on',url.split('?')[0]);// Session invalid/expired (server restart, timeout, revoked token) — surface a
 // clear overlay instead of letting every poll fail silently. Idempotent, so
 // a burst of concurrent 401s only shows the prompt once.
 setSessionExpired(true);}setConnectionError(null);return res;}catch(err){// an aborted poll is a soft-fail — callers already treat null as "skip this round"
-if(err.name!=='AbortError')console.error('authFetch err:',err);return null;}finally{if(timer)clearTimeout(timer);}};// Keep ref in sync with state
+if(err.name!=='AbortError')console.error('authFetch err:',err);return null;}finally{if(timer)clearTimeout(timer);}},[getAuthHeaders]);// Keep ref in sync with state
 // NS: this is a hack for the websocket callback closure issue
 // NS: Reset ref IMMEDIATELY when cluster changes to prevent cross-cluster data leaks
 useEffect(()=>{// First update the ref synchronously

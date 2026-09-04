@@ -470,9 +470,13 @@
             
             // NS: No more X-Session-ID header needed for fetch - cookies are automatic
             // But sessionId is still available for WebSocket URLs
-            const getAuthHeaders = () => {
+            // #782 (Frisch12) — stable identity. getAuthHeaders returns a constant {} (auth is via
+            // credentials:'include'), but a fresh function every render propagates through authFetch
+            // -> every component's fetchHealth/poll useCallback -> its effect, re-arming the 60s
+            // timers on every SSE-driven render (the ~4 req/s idle storm). useCallback([]) pins it.
+            const getAuthHeaders = useCallback(() => {
                 return {};  // Empty - credentials: 'include' handles auth for fetch
-            };
+            }, []);
             
             return(
                 <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, updateCurrentUser, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground, reverseProxyEnabled, needsSetup, setNeedsSetup }}>
