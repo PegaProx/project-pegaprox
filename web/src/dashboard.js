@@ -20160,13 +20160,13 @@
                                                         <table className={isCorporate ? 'corp-datagrid' : 'w-full'}>
                                                             <thead>
                                                                 <tr className={isCorporate ? '' : 'border-b border-proxmox-border'}>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('status')}</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('name')}</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiGuestOs')}</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiCpus')}</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiMemory')}</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('ipAddress')}</th>
-                                                                    <th className={isCorporate ? '' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('host')}</th>
+                                                                    <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('status')}</th>
+                                                                    <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('name')}</th>
+                                                                    <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiGuestOs')}</th>
+                                                                    <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiCpus')}</th>
+                                                                    <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiMemory')}</th>
+                                                                    <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('ipAddress')}</th>
+                                                                    <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('host')}</th>
                                                                     <th className={isCorporate ? 'text-right' : 'text-right p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('actions')}</th>
                                                                 </tr>
                                                             </thead>
