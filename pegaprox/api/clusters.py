@@ -26,7 +26,8 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immedi
 from pegaprox.core.config import load_config, save_config
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
-from pegaprox.api.helpers import load_server_settings, get_connected_manager, check_cluster_access, safe_error, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
+                                  safe_error, scope_vm_rows, require_unconfined, parse_pve_error)
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)

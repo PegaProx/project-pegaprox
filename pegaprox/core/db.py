@@ -4141,6 +4141,43 @@ class PegaProxDB:
             # because clusters failed first). stats['sessions_rotated'] stays
             # at 0 for backwards-compat with the UI counter.
             
+            # 3a2. Rotate the remaining encrypted stores.
+            # sec (audit): the loop above only covers columns whose NAME ends in _encrypted,
+            # so BMC endpoint passwords and every secret living in server_settings were left on
+            # the old key. _decrypt RAISES, so after a rotation ldap_bind_password broke every
+            # LDAP login, smtp_password broke all alert mail, and the ACME DNS secrets broke
+            # renewals — silently, on a feature run FOR compliance.
+            try:
+                cursor.execute("SELECT cluster_id, node, bmc_password_encrypted "
+                               "FROM node_bmc_endpoints "
+                               "WHERE bmc_password_encrypted IS NOT NULL "
+                               "AND bmc_password_encrypted != ''")
+                for _r in cursor.fetchall():
+                    _v = _r['bmc_password_encrypted']
+                    if _v and str(_v).startswith('aes256:'):
+                        _p = self._decrypt_with_key(_v, old_aesgcm)
+                        cursor.execute('UPDATE node_bmc_endpoints SET bmc_password_encrypted = ? '
+                                       'WHERE cluster_id = ? AND node = ?',
+                                       (self._encrypt_with_key(_p, new_aesgcm), _r['cluster_id'], _r['node']))
+            except Exception as e:
+                stats['errors'].append(f"BMC secrets: {e}")
+
+            try:
+                _ss = self.get_server_settings() or {}
+                _SECRET_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret',
+                                'acme_dns_rfc2136_secret', 'acme_dns_cloudflare_token')
+                _changed = False
+                for _k in _SECRET_KEYS:
+                    _v = _ss.get(_k)
+                    if _v and isinstance(_v, str) and _v.startswith('aes256:'):
+                        _ss[_k] = self._encrypt_with_key(
+                            self._decrypt_with_key(_v, old_aesgcm), new_aesgcm)
+                        _changed = True
+                if _changed:
+                    self.save_server_settings(_ss)
+            except Exception as e:
+                stats['errors'].append(f"Server settings secrets: {e}")
+
             # 3b. Re-sign the audit log.
             # sec (audit): _audit_hmac signs with self.aes_key, so after a rotation every
             # historical row verifies against a key that no longer exists and the whole trail

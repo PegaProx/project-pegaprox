@@ -962,6 +962,11 @@ def set_update_schedule(cluster_id):
     """Set the scheduled update configuration for a cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): the DELETE twin below got this gate in the sweep and the POST — the one that
+    # ARMS a cluster-wide evacuate-and-reboot — did not.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

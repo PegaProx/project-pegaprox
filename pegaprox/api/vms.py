@@ -7823,6 +7823,17 @@ def delete_cross_cluster_replication(job_id):
             if not ok:
                 return err
 
+    # sec (audit): cluster reach alone — the create and list siblings gate the guest itself, so
+    # a scoped caller could still delete or force-run a co-tenant's job (and with delete_target,
+    # tear down the replica).
+    _xu = build_authz_user(request.session.get('user', ''), request.session)
+    try:
+        if not user_can_access_vm(_xu, job.get('source_cluster') or '',
+                                  int(job.get('vmid')), 'vm.migrate'):
+            return jsonify({'error': 'Access denied to this replication job'}), 403
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Replication job has no valid guest'}), 403
+
     want_teardown = _wants_delete_target(job)
 
     # Don't race an in-flight run: tearing the replica down mid-run just lets the run
@@ -7882,6 +7893,16 @@ def run_cross_cluster_replication(job_id):
                 return err
 
     # MK May 2026 (#455 @DarmokNoob) — block duplicate triggers while a previous
+    # sec (audit): same gap as the delete twin — cluster reach only, while create and list
+    # gate the guest. Forcing a run snapshots and clones that guest.
+    _xu = build_authz_user(request.session.get('user', ''), request.session)
+    try:
+        if not user_can_access_vm(_xu, _job.get('source_cluster') or '',
+                                  int(_job.get('vmid')), 'vm.migrate'):
+            return jsonify({'error': 'Access denied to this replication job'}), 403
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Replication job has no valid guest'}), 403
+
     # run is still in-flight. The scheduler uses the same _claim_job() guard.
     from pegaprox.background.cross_cluster_replication import _claim_job, _release_job, _tracked_run
     if not _claim_job(job_id):

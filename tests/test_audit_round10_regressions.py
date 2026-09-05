@@ -556,3 +556,98 @@ def test_a_tampered_audit_row_is_not_laundered_by_rotation(db):
     assert res.get('audit_unverifiable', 0) >= 1, res
     after = (db.query('SELECT * FROM audit_log') or [])[0]
     assert not db._verify_audit_hmac(dict(after)), "a tampered row must stay detectable"
+
+
+# ── round 11: two more of my own campaign regressions ──────────────────────
+def test_portal_password_change_actually_writes(api, seed, monkeypatch):
+    """The identity rewrite deleted the `users = load_users()` binding but left
+    `save_users(users)` behind, so this route raised NameError: the hash was never written and
+    the session revocation below it never ran."""
+    import symtable
+    src = open('plugins/client_portal/__init__.py').read()
+    st = symtable.symtable(src, 'x', 'exec')
+    fn = [f for f in st.get_children() if f.get_name() == '_change_password'][0]
+    names = {s.get_name() for s in fn.get_symbols() if s.is_global() and not s.is_assigned()}
+    assert 'users' not in names, "_change_password still references an unbound `users`"
+    # strip comments first — this file's own commentary quotes the old call
+    code = '\n'.join(l.split('#')[0] for l in src.split('\n'))
+    assert 'save_users(users)' not in code
+
+
+def test_portal_admin_checks_read_the_floored_role():
+    src = open('plugins/client_portal/__init__.py').read()
+    assert "user.get('role') == ROLE_ADMIN" not in src, \
+        "a portal admin check still reads the stored role"
+
+
+def test_custom_role_token_guard_sees_tenant_roles(seed, monkeypatch):
+    """get_role_permissions_for_user only consults TENANT custom roles when given a tenant_id.
+    The guard called it without one, so it fell through to the viewer fallback, _extra came out
+    empty and every tenant custom role passed — the exact case it exists to catch."""
+    from pegaprox.utils.auth import create_api_token
+    import pegaprox.utils.rbac as rbacmod
+    seed.tenant('acme', clusters=['cluster_1'])
+    seed.user('tenantuser', role='user', tenant_id='acme')
+    monkeypatch.setattr(rbacmod, 'get_custom_roles', lambda: {
+        'global': {},
+        'tenants': {'acme': {'superops': {'permissions': ['vm.delete', 'node.update',
+                                                          'admin.settings']}}},
+    })
+    res = create_api_token('tenantuser', 'sneaky', role='superops')
+    assert 'error' in res, res
+    assert 'beyond your own role' in res['error'], res
+
+
+def test_key_rotation_covers_server_settings_and_bmc_secrets(db):
+    """Rotation only walked columns whose NAME ends in _encrypted, so the secrets living in
+    server_settings — and BMC endpoint passwords — stayed on the old key. _decrypt raises, so
+    after a rotation ldap_bind_password broke every LDAP login and smtp_password broke alert
+    mail, silently, on a task run FOR compliance."""
+    s = db.get_server_settings() or {}
+    s['ldap_bind_password'] = db._encrypt('ldap-secret')
+    s['smtp_password'] = db._encrypt('smtp-secret')
+    db.save_server_settings(s)
+    assert db._decrypt(db.get_server_settings()['ldap_bind_password']) == 'ldap-secret'
+    res = db.rotate_encryption_key()
+    assert not res.get('errors'), res
+    after = db.get_server_settings()
+    assert db._decrypt(after['ldap_bind_password']) == 'ldap-secret'
+    assert db._decrypt(after['smtp_password']) == 'smtp-secret'
+
+
+# ── round 11: asymmetries this campaign itself left behind ─────────────────
+def test_portal_snapshot_name_cannot_traverse(api, seed):
+    """The portal interpolated the snapshot name straight into the PVE API path while the gate
+    above it validated only the vmid, so a name carrying dot-segments reached a DIFFERENT
+    guest's endpoint."""
+    src = open('plugins/client_portal/__init__.py').read()
+    assert '_valid_snapshot_name' in src
+    import re
+    ok = lambda n: bool(n) and bool(re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,62}', str(n)))
+    for good in ('daily', 'pre-upgrade', 'snap_1'):
+        assert ok(good), good
+    for bad in ('../../../../qemu/999/snapshot/x', 'a/b', '', '1snap', 'a b', 'x' * 70):
+        assert not ok(bad), bad
+
+
+def test_update_schedule_post_has_the_same_gate_as_its_delete_twin():
+    """The sweep gave DELETE the confinement gate and missed the POST — the one that ARMS a
+    cluster-wide evacuate-and-reboot."""
+    src = open('pegaprox/api/schedules.py').read()
+    post = src[src.index('def set_update_schedule('):src.index('def delete_update_schedule(')]
+    assert 'require_unconfined' in post, "the POST twin is still ungated"
+
+
+def test_cross_cluster_replication_delete_and_run_gate_the_guest():
+    src = open('pegaprox/api/vms.py').read()
+    for fn in ('def delete_cross_cluster_replication(', 'def run_cross_cluster_replication('):
+        i = src.index(fn)
+        body = src[i:i + 3000]
+        assert 'user_can_access_vm' in body, f"{fn} still gates on cluster reach alone"
+
+
+def test_parse_pve_error_is_imported_where_it_is_used():
+    """Both uses sit on the error branch of the API-token rotation, so a PVE error became a
+    NameError and the caller fell through to the destructive delete+recreate path."""
+    import pegaprox.api.clusters as c
+    assert hasattr(c, 'parse_pve_error')
