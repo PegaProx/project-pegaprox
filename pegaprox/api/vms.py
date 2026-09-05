@@ -6020,13 +6020,16 @@ def snapshots_overview_delete():
     Bulk delete for snapshot cleanup
     """
     user = request.session.get('user', '')
-    users_db = load_users()
-    user_data = users_db.get(user, {})
-    user_data['username'] = user
+    # sec (audit): this is the bulk-delete twin of snapshots_overview, whose READ side was the
+    # first HIGH of this campaign. Two defects, both still here: the identity came from the raw
+    # stored record (no effective_role, so an admin-owned scoped token got the admin bypass in
+    # user_can_access_vm below), and `user_data.get('clusters', [])` reads a key the record does
+    # not have — always [], so the cluster guard short-circuited to no guard at all.
+    user_data = build_authz_user(user, request.session)
     data = request.get_json(silent=True) or {}
     snapshots = data.get('snapshots', [])
-    is_admin = user_data.get('role') == ROLE_ADMIN
-    user_clusters = user_data.get('clusters', [])
+    is_admin = user_data.get('effective_role', user_data.get('role')) == ROLE_ADMIN
+    user_clusters = get_user_clusters(user_data)   # None => all clusters
     
     deleted_count = 0
     errors = []
@@ -6050,7 +6053,7 @@ def snapshots_overview_delete():
                 errors.append(f"Cluster {cluster_id} not connected")
                 continue
 
-            if not is_admin and user_clusters and cluster_id not in user_clusters:
+            if not is_admin and user_clusters is not None and cluster_id not in user_clusters:
                 errors.append(f"No access to cluster {cluster_id}")
                 continue
 

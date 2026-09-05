@@ -750,3 +750,57 @@ def test_legacy_ha_toggle_has_the_confinement_gate():
     i = src.index('def set_ha_status(')
     body = src[i:i + 1500]
     assert 'require_unconfined' in body, "the legacy HA toggle is still ungated"
+
+
+# ── the bulk-delete twin of the campaign's very first HIGH ─────────────────
+def test_bulk_snapshot_delete_gates_clusters_and_the_token(api, seed):
+    """snapshots_overview (the READ) was the first HIGH of this campaign. Its bulk-DELETE twin
+    kept both defects: identity from the raw record, and `user_data.get('clusters', [])`
+    reading a key the record does not have — always [], so the cluster guard short-circuited."""
+    src = open('pegaprox/api/vms.py').read()
+    i = src.index('def snapshots_overview_delete(')
+    body = src[i:i + 2500]
+    # strip comments — the fix's own commentary quotes the old expression
+    body = '\n'.join(l.split('#')[0] for l in body.split('\n'))
+    assert 'build_authz_user' in body, "still builds identity from the raw record"
+    assert "user_data.get('clusters', [])" not in body, "still reads a key that does not exist"
+    assert 'user_clusters is not None' in body, "the cluster guard still short-circuits on []"
+
+
+def test_ceph_mirror_image_status_is_scoped(api, seed, monkeypatch):
+    """An RBD image is named vm-<vmid>-disk-N, so the image name is a guest reference. The
+    listing was scoped earlier this campaign; the per-image status beside it was not."""
+    u = _pool_user_for_ceph(seed)
+    _cluster(api)
+    import pegaprox.api.ceph as ceph_mod
+    monkeypatch.setattr(ceph_mod, '_valid_pool', lambda p: True)
+    monkeypatch.setattr(ceph_mod, '_valid_image', lambda i: True)
+    r = api.as_user(u).get('/api/clusters/cluster_1/ceph/mirror/pool/rbd/image/vm-300-disk-0/status')
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+
+def _pool_user_for_ceph(seed):
+    seed.tenant('tenant_x', clusters=['cluster_1'])
+    u = seed.user('cephview', role='viewer', tenant_id='tenant_x', permissions=['cluster.view'])
+    seed.pool('cluster_1', 'pool_1', 'cephview', ['pool.view', 'vm.view'])
+    _pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    return u
+
+
+# ── a ciphertext we cannot read is not a credential ────────────────────────
+def test_smtp_refuses_to_send_an_undecryptable_ciphertext_as_the_password():
+    """The legacy-plaintext fallback applied to ANY decryption failure, so a rotated or damaged
+    key meant the literal aes256:... string went to the mail relay as the password."""
+    src = open('pegaprox/utils/email.py').read()
+    assert "startswith('aes256:')" in src
+    assert 'refusing to' in src
+
+
+def test_v2p_key_cleanup_can_actually_authenticate():
+    """The cleanup authenticates with -i <key>, but its option list was copied from the
+    password-auth helpers and excluded publickey — so the removal could never succeed."""
+    src = open('pegaprox/core/v2p.py').read()
+    i = src.index('def _cleanup_temp_ssh_key(')
+    body = src[i:i + 1500]
+    assert 'PreferredAuthentications=publickey' in body, \
+        "the key-based cleanup still cannot offer publickey"

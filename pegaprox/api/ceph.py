@@ -1274,10 +1274,29 @@ def list_mirror_images(cluster_id, pool):
     return jsonify({'images': result, 'pool': pool})
 
 
+def _mirror_image_visible(cluster_id, image):
+    """An RBD image is named vm-<vmid>-disk-N / base-<vmid>-disk-N, so the image name IS a
+    guest reference. The listing route was scoped earlier this campaign; the per-image status
+    beside it was not, and it confirms a guest's existence plus its mirror state."""
+    import re as _re
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.api.helpers import caller_is_scoped
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    if not caller_is_scoped(_u, cluster_id):
+        return True
+    m = _re.match(r'(?:base|vm)-(\d+)-disk', str(image))
+    if not m:
+        return False
+    return user_can_access_vm(_u, cluster_id, int(m.group(1)), 'vm.view')
+
+
 @bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/image/<image>/status', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_mirror_image_status(cluster_id, pool, image):
     ok, err = check_cluster_access(cluster_id)
+    if ok and not _mirror_image_visible(cluster_id, image):
+        return jsonify({'error': 'Access denied to this image'}), 403
     if not ok: return err
     if not _valid_pool(pool) or not _valid_image(image):
         return jsonify({'error': 'Invalid pool or image name'}), 400

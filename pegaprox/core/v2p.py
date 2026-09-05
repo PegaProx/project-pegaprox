@@ -3849,7 +3849,10 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
         "-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
         "-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
-        "-o PreferredAuthentications=keyboard-interactive,password "
+        # This command authenticates with -i <key>, so publickey has to be offered — the list
+        # was copied from the password-auth helpers and excluded it, which meant the key
+        # removal below could never authenticate no matter how it was invoked.
+        "-o PreferredAuthentications=publickey,keyboard-interactive,password "
     )
     
     # sec (audit): this used to read {key_path}.pub first and skip the remote removal unless

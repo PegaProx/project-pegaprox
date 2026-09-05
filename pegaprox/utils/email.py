@@ -41,7 +41,16 @@ def send_email(to_addresses: list, subject: str, body: str, html_body: str = Non
         try:
             smtp_password = get_db()._decrypt(raw_smtp_password) if raw_smtp_password else ''
         except Exception:
-            smtp_password = raw_smtp_password  # Fallback for unencrypted legacy values
+            # sec (audit): the fallback exists for genuinely legacy PLAINTEXT values, but it
+            # applied to any failure — so when a stored ciphertext could not be decrypted (a
+            # rotated or damaged key) the literal "aes256:..." string was sent to the mail relay
+            # as the password. Only fall back for a value that was never encrypted; a
+            # ciphertext we cannot read is an error, not a credential.
+            if str(raw_smtp_password or '').startswith('aes256:'):
+                logging.error("[MAIL] stored SMTP password could not be decrypted — refusing to "
+                              "send the stored value as a credential; re-enter it in settings")
+                return False, "SMTP password could not be decrypted (re-enter it in Settings)"
+            smtp_password = raw_smtp_password  # genuinely legacy unencrypted value
     from_email = settings.get('smtp_from_email', '')
     from_name = settings.get('smtp_from_name', '') or 'PegaProx'
     use_tls = settings.get('smtp_tls', True)
