@@ -625,10 +625,9 @@ def delete_cluster(cluster_id):
                     _changed = True
             if _changed:
                 save_tenants(_tenants)
-                # sec (audit): drop the rbac tenant cache, else a cluster removed from a tenant
-                # stays reachable for its users until the process restarts
+                # the cluster just left this tenant — drop rbac's cached copy so
+                # get_user_clusters stops handing it out
                 invalidate_tenants_cache()
-                _rbac.tenants_db = {}   # invalidate the process cache so get_user_clusters reloads
         except Exception as _te:
             logging.error(f"Failed to prune deleted cluster {cluster_id} from tenants: {_te}")
 

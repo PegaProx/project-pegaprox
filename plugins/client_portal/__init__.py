@@ -28,6 +28,17 @@ def _load_config():
         return {"allowed_actions": ["vm.view", "vm.start", "vm.stop", "vm.console"]}
 
 
+def _portal_user(username):
+    """The acting user for authz checks.
+
+    Always build this with build_authz_user rather than a raw load_users() lookup: the stored
+    record carries no effective_role, so an admin-owned but viewer-scoped API token would reach
+    user_can_access_vm with its owner's admin role and short-circuit the per-VM gate.
+    """
+    from pegaprox.utils.auth import build_authz_user
+    return build_authz_user(username, request.session)
+
+
 def _get_portal_config():
     """Return portal configuration (public, no secrets)"""
     cfg = _load_config()
@@ -57,12 +68,7 @@ def _get_my_vms():
     if not username:
         return {'error': 'Not authenticated'}, 401
 
-    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
-    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
-    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
-    # does this (and says why); these siblings were missed.
-    from pegaprox.utils.auth import build_authz_user as _bau
-    user = _bau(username, request.session)
+    user = _portal_user(username)
     user['username'] = username
 
     # don't let admins use the portal — redirect them
@@ -242,12 +248,7 @@ def _vm_power():
 def _vm_console():
     """Get VNC console ticket + WS token for embedded noVNC"""
     username = request.session.get('user', '')
-    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
-    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
-    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
-    # does this (and says why); these siblings were missed.
-    from pegaprox.utils.auth import build_authz_user as _bau
-    user = _bau(username, request.session)
+    user = _portal_user(username)
     user['username'] = username
     cfg = _load_config()
 
@@ -293,12 +294,7 @@ def _vm_console():
 def _vm_snapshots():
     """List or create snapshots for a VM"""
     username = request.session.get('user', '')
-    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
-    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
-    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
-    # does this (and says why); these siblings were missed.
-    from pegaprox.utils.auth import build_authz_user as _bau
-    user = _bau(username, request.session)
+    user = _portal_user(username)
     user['username'] = username
     cfg = _load_config()
 
@@ -379,12 +375,7 @@ def _vm_snapshots():
 def _vm_snapshot_rollback():
     """Rollback VM to a snapshot"""
     username = request.session.get('user', '')
-    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
-    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
-    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
-    # does this (and says why); these siblings were missed.
-    from pegaprox.utils.auth import build_authz_user as _bau
-    user = _bau(username, request.session)
+    user = _portal_user(username)
     user['username'] = username
     cfg = _load_config()
 
@@ -431,12 +422,7 @@ def _vm_snapshot_rollback():
 def _vm_snapshot_delete():
     """Delete a snapshot"""
     username = request.session.get('user', '')
-    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
-    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
-    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
-    # does this (and says why); these siblings were missed.
-    from pegaprox.utils.auth import build_authz_user as _bau
-    user = _bau(username, request.session)
+    user = _portal_user(username)
     user['username'] = username
     cfg = _load_config()
 
@@ -508,12 +494,7 @@ def _change_password():
         return {'error': 'Current and new password required'}
 
     from pegaprox.utils.auth import verify_password, hash_password, save_single_user
-    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
-    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
-    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
-    # does this (and says why); these siblings were missed.
-    from pegaprox.utils.auth import build_authz_user as _bau
-    user = _bau(username, request.session)
+    user = _portal_user(username)
 
     if user.get('auth_source', 'local') != 'local':
         return {'error': 'Password managed by external provider'}
@@ -695,12 +676,7 @@ def _portal_snapshot_policies():
     caller has access to (via VM-ACL / pool / tenant). NS May 2026."""
     from pegaprox.core.db import get_db
     username = request.session.get('user', '')
-    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
-    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
-    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
-    # does this (and says why); these siblings were missed.
-    from pegaprox.utils.auth import build_authz_user as _bau
-    user = _bau(username, request.session)
+    user = _portal_user(username)
     user['username'] = username
 
     # collect (cluster_id, vmid, tags) the caller can reach via _get_my_vms logic
@@ -752,10 +728,7 @@ def _ct_create_options():
     username = request.session.get('user', '')
     if not username:
         return {'error': 'Not authenticated'}, 401
-    # sec (audit): the raw record carries no effective_role, so the admin check below read
-    # the OWNER's role for an admin-owned but viewer-scoped API token.
-    from pegaprox.utils.auth import build_authz_user as _bau2
-    user = _bau2(username, request.session)
+    user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return {'redirect': '/', 'reason': 'admin'}
@@ -791,10 +764,7 @@ def _create_ct():
     username = request.session.get('user', '')
     if not username:
         return {'error': 'Not authenticated'}, 401
-    # sec (audit): the raw record carries no effective_role, so the admin check below read
-    # the OWNER's role for an admin-owned but viewer-scoped API token.
-    from pegaprox.utils.auth import build_authz_user as _bau2
-    user = _bau2(username, request.session)
+    user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return {'redirect': '/', 'reason': 'admin'}
@@ -876,10 +846,7 @@ def _destroy_options():
     username = request.session.get('user', '')
     if not username:
         return {'error': 'Not authenticated'}, 401
-    # sec (audit): the raw record carries no effective_role, so the admin check below read
-    # the OWNER's role for an admin-owned but viewer-scoped API token.
-    from pegaprox.utils.auth import build_authz_user as _bau2
-    user = _bau2(username, request.session)
+    user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return {'redirect': '/', 'reason': 'admin'}
@@ -905,10 +872,7 @@ def _destroy_guest():
     username = request.session.get('user', '')
     if not username:
         return {'error': 'Not authenticated'}, 401
-    # sec (audit): the raw record carries no effective_role, so the admin check below read
-    # the OWNER's role for an admin-owned but viewer-scoped API token.
-    from pegaprox.utils.auth import build_authz_user as _bau2
-    user = _bau2(username, request.session)
+    user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return {'redirect': '/', 'reason': 'admin'}

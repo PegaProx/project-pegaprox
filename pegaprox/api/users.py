@@ -107,7 +107,8 @@ def _caller_can_grant_perms(permissions):
 
 
 def _authz_object_write(cluster_id, subjects=(), permissions=()):
-    """sec (audit): vm-acls and pool-permissions are the authorization objects the per-VM gate
+    """sec (audit): vm-acls, pool permissions and the pools themselves are the authorization
+    objects the per-VM gate
     consults — writing them IS granting access, so cluster reach is nowhere near enough. Every
     other grant path in this file already asks these questions; these routes asked none of them.
     Returns an error response, or None when the write is allowed.
@@ -1267,10 +1268,7 @@ def create_tenant():
     
     save_tenants(tenants_db)
     
-    # sec (audit): drop the rbac tenant cache, else a cluster removed from a tenant
-    
-    # stays reachable for its users until the process restarts
-    
+    # new tenant, so the cached copy in rbac is stale either way
     invalidate_tenants_cache()
     log_audit(request.session['user'], 'tenant.created', f"Created tenant: {name} (id={tid})")
     
@@ -1322,10 +1320,7 @@ def update_tenant(tenant_id):
 
     save_tenants(tenants_db)
 
-    # sec (audit): drop the rbac tenant cache, else a cluster removed from a tenant
-
-    # stays reachable for its users until the process restarts
-
+    # a cluster removed here must stop being reachable now, not after the next restart
     invalidate_tenants_cache()
     log_audit(request.session['user'], 'tenant.updated', f"Updated tenant: {tenant_id}")
     
@@ -2104,9 +2099,6 @@ def refresh_pool_cache_api(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    # sec (audit): a pool is an authorization container — its membership is what
-    # user_can_access_vm consults — so creating or removing one is a grant-level action,
-    # not cluster housekeeping. Same predicate the pool-permission writes use.
     _perr = _authz_object_write(cluster_id)
     if _perr:
         return _perr
@@ -2132,9 +2124,6 @@ def refresh_pool_cache_api(cluster_id):
 def create_pool_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    # sec (audit): a pool is an authorization container — its membership is what
-    # user_can_access_vm consults — so creating or removing one is a grant-level action,
-    # not cluster housekeeping. Same predicate the pool-permission writes use.
     _perr = _authz_object_write(cluster_id)
     if _perr:
         return _perr
@@ -2166,9 +2155,6 @@ def create_pool_api(cluster_id):
 def update_pool_api(cluster_id, pool_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    # sec (audit): a pool is an authorization container — its membership is what
-    # user_can_access_vm consults — so creating or removing one is a grant-level action,
-    # not cluster housekeeping. Same predicate the pool-permission writes use.
     _perr = _authz_object_write(cluster_id)
     if _perr:
         return _perr
@@ -2197,9 +2183,6 @@ def rm_pool(cluster_id, pool_id):
     # LW: intentionally different name than the others, we're not consistent lol
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    # sec (audit): a pool is an authorization container — its membership is what
-    # user_can_access_vm consults — so creating or removing one is a grant-level action,
-    # not cluster housekeeping. Same predicate the pool-permission writes use.
     _perr = _authz_object_write(cluster_id)
     if _perr:
         return _perr
