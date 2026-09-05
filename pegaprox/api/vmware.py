@@ -18,7 +18,7 @@ from pegaprox.utils.audit import log_audit
 # vmware_id from URL. Sanitise both before logging for consistency.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import user_can_access_vmware_vm
-from pegaprox.api.helpers import check_cluster_access, check_vmware_access
+from pegaprox.api.helpers import check_cluster_access, check_vmware_access, caller_is_scoped
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server
 from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
 from pegaprox.background.broadcast import broadcast_resources_loop
@@ -1151,6 +1151,13 @@ def start_vmware_migration(vmware_id, vm_id):
         return jsonify({'error': 'Target cluster not found'}), 404
 
     # gate the migration target on cluster access
+    # sec (audit): reachability only — but this CREATES a guest on the target, and a new vmid
+    # matches no per-object grant, so a pool-scoped caller admitted by the #555 fallback could
+    # land a VM on a cluster they do not own. The XHM twin (api/xhm.py) already asks the
+    # confinement question about its target; ask it here too.
+    _v2p_u = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_v2p_u, data['target_cluster']):
+        return jsonify({'error': 'Access denied to the target cluster'}), 403
     allowed, err_response = check_cluster_access(data['target_cluster'])
     if not allowed:
         return err_response

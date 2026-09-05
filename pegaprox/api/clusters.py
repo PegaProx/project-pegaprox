@@ -2438,9 +2438,15 @@ def uninstall_self_fence_agent(cluster_id):
 @bp.route('/api/clusters/<cluster_id>/ha', methods=['PUT'])
 @require_auth(perms=['ha.config'])
 def set_ha_status(cluster_id):
+    # sec (audit): the legacy HA toggle. Its modern siblings (enable_ha / disable_ha /
+    # update_ha_config) all got the confinement gate in this campaign and this one was missed —
+    # it flips HA for the whole cluster.
     """Enable or disable HA for a cluster (legacy endpoint)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

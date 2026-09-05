@@ -571,7 +571,7 @@ def get_pbs_snapshots(pbs_id, store):
             nm = name_map.get((bt, str(bid)))
             if nm:
                 s['vm_name'] = nm
-    return jsonify(snaps)
+    return jsonify(_scope_pbs_rows(mgr, snaps))
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/groups', methods=['GET'])
@@ -600,7 +600,7 @@ def get_pbs_groups(pbs_id, store):
             nm = name_map.get((bt, str(bid)))
             if nm:
                 g['vm_name'] = nm
-    return jsonify(groups)
+    return jsonify(_scope_pbs_rows(mgr, groups))
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/gc', methods=['POST'])
@@ -672,6 +672,32 @@ def pbs_prune(pbs_id, store):
     if 'error' not in result:
         log_audit(request.session.get('user', 'admin'), 'pbs.prune', f"{action} on {mgr.name}/{store}")
     return jsonify(result)
+
+
+def _scope_pbs_rows(mgr, rows, type_key='backup-type', id_key='backup-id',
+                    permission='vm.view'):
+    """sec (audit): a datastore is shared across every VM on every linked cluster, and
+    pbs.datastore.view is a BUILTIN ROLE_USER and ROLE_VIEWER permission — so the snapshot and
+    group listings handed every user the whole install's backup inventory (enriched with VM
+    names), while the per-object routes beside them were gated. Same predicate, applied per row.
+
+    An admin or a caller who is not confined keeps everything; a scoped caller keeps only the
+    rows whose guest they may see. Rows with no resolvable guest (host-type backups) are
+    dropped for a scoped caller, matching _authz_pbs_backup."""
+    from pegaprox.utils.auth import build_authz_user
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return rows
+    from pegaprox.api.helpers import caller_is_scoped
+    _cids = list(mgr.linked_clusters or []) or list(cluster_managers.keys())
+    if not any(caller_is_scoped(user, c) for c in _cids):
+        return rows                      # plain cluster-wide operator — unchanged
+    out = []
+    for r in rows or []:
+        ok, _ = _authz_pbs_backup(mgr, r.get(type_key), r.get(id_key), permission)
+        if ok:
+            out.append(r)
+    return out
 
 
 def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup'):

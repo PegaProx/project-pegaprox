@@ -704,3 +704,49 @@ def test_sse_broadcast_does_not_hold_the_global_lock_across_authz():
         if l.strip():
             block.append(l.strip())
     assert block == ['_clients_snapshot = list(sse_clients.items())'], block
+
+
+# ── PBS listings handed every user the whole install's backup inventory ────
+def test_pbs_snapshot_listing_is_scoped(api, seed):
+    """pbs.datastore.view is a BUILTIN ROLE_USER and ROLE_VIEWER permission, and a datastore is
+    shared across every VM on every linked cluster — so these listings (enriched with VM names)
+    showed every tenant's backups while the per-object routes beside them were gated."""
+    from unittest.mock import MagicMock
+    import pegaprox.globals as g
+    seed.tenant('tenant_x', clusters=['cluster_1'])
+    u = seed.user('pbsviewer', role='viewer', tenant_id='tenant_x',
+                  permissions=['pbs.datastore.view', 'cluster.view'])
+    seed.pool('cluster_1', 'pool_1', 'pbsviewer', ['pool.view', 'vm.view'])
+    _pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    _cluster(api)
+    pm = MagicMock()
+    pm.connected = True
+    pm.linked_clusters = ['cluster_1']
+    pm.get_snapshots.return_value = {'data': [
+        {'backup-type': 'vm', 'backup-id': '100', 'backup-time': 1},
+        {'backup-type': 'vm', 'backup-id': '300', 'backup-time': 2},
+    ]}
+    g.pbs_managers['pbs-s'] = pm
+    try:
+        r = api.as_user(u).get('/api/pbs/pbs-s/datastores/store1/snapshots')
+        if r.status_code == 200:
+            ids = [s['backup-id'] for s in r.get_json()]
+            assert ids == ['100'], ids
+    finally:
+        g.pbs_managers.pop('pbs-s', None)
+
+
+def test_v2p_target_cluster_is_confined():
+    """Starting a V2P migration CREATES a guest on the target, and a new vmid matches no
+    per-object grant — the XHM twin asks the confinement question about its target."""
+    src = open('pegaprox/api/vmware.py').read()
+    i = src.index('def start_vmware_migration(')
+    body = src[i:i + 4000]
+    assert 'caller_is_scoped' in body, "the V2P target is still gated on reachability alone"
+
+
+def test_legacy_ha_toggle_has_the_confinement_gate():
+    src = open('pegaprox/api/clusters.py').read()
+    i = src.index('def set_ha_status(')
+    body = src[i:i + 1500]
+    assert 'require_unconfined' in body, "the legacy HA toggle is still ungated"
