@@ -3852,20 +3852,27 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
         "-o PreferredAuthentications=keyboard-interactive,password "
     )
     
-    # Read public key to build removal pattern
-    rc, pub_key, _ = _pve_node_exec(pve_mgr, node, f"cat {key_path}.pub 2>/dev/null", timeout=5)
-    if rc == 0 and pub_key and pub_key.strip():
-        # Remove from ESXi -- both paths
-        _pve_node_exec(pve_mgr, node,
-            f"ssh -i {key_path} {ESXI_SSH_OPTS} "
-            f"{esxi_user}@{esxi_host} "
-            f"'grep -v \"pegaprox-v2p-{key_id}\" /etc/ssh/keys-{esxi_user}/authorized_keys > "
-            f"/etc/ssh/keys-{esxi_user}/authorized_keys.tmp 2>/dev/null && "
-            f"mv /etc/ssh/keys-{esxi_user}/authorized_keys.tmp /etc/ssh/keys-{esxi_user}/authorized_keys 2>/dev/null; "
-            f"grep -v \"pegaprox-v2p-{key_id}\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp 2>/dev/null && "
-            f"mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys 2>/dev/null; "
-            f"echo CLEANED' 2>&1", timeout=10)
-    
+    # sec (audit): this used to read {key_path}.pub first and skip the remote removal unless
+    # the read succeeded — but the removal below greps for the pegaprox-v2p-<key_id> COMMENT and
+    # never uses the key material, so the guard only ever caused us to leave an authorized key
+    # behind on the customer's ESXi host whenever the local .pub had already gone. Always try,
+    # and say so in the log when it does not work, rather than failing silently.
+    # Remove from ESXi -- both paths
+    _rc_rm, _out_rm, _err_rm = _pve_node_exec(pve_mgr, node,
+        f"ssh -i {key_path} {ESXI_SSH_OPTS} "
+        f"{esxi_user}@{esxi_host} "
+        f"'grep -v \"pegaprox-v2p-{key_id}\" /etc/ssh/keys-{esxi_user}/authorized_keys > "
+        f"/etc/ssh/keys-{esxi_user}/authorized_keys.tmp 2>/dev/null && "
+        f"mv /etc/ssh/keys-{esxi_user}/authorized_keys.tmp /etc/ssh/keys-{esxi_user}/authorized_keys 2>/dev/null; "
+        f"grep -v \"pegaprox-v2p-{key_id}\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp 2>/dev/null && "
+        f"mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys 2>/dev/null; "
+        f"echo CLEANED' 2>&1", timeout=10)
+    if _rc_rm != 0 or 'CLEANED' not in (_out_rm or ''):
+        logging.warning(
+            f"[V2P] could not remove the temporary migration key from {esxi_host} "
+            f"(pegaprox-v2p-{key_id}) — it may still be authorized there: "
+            f"rc={_rc_rm} {(_err_rm or _out_rm or '')[:200]}")
+
     # Remove local key files + SSH config
     _pve_node_exec(pve_mgr, node,
         f"rm -f {key_path} {key_path}.pub {ssh_config_path}", timeout=5)

@@ -663,7 +663,19 @@ def watch_vmware_vm(vmware_id, vm_id):
         return err
     if not hasattr(broadcast_resources_loop, '_vmw_watched'):
         broadcast_resources_loop._vmw_watched = {}
-    broadcast_resources_loop._vmw_watched[(vmware_id, vm_id)] = time.time()
+    _w = broadcast_resources_loop._vmw_watched
+    # sec (audit): this dict is keyed on a caller-supplied vm_id and had no bound, while the
+    # detail push walks EVERY entry every 5s and issues three ESXi calls per entry. A caller
+    # holding vmware.vm.view — a builtin viewer permission — could enqueue unlimited ids and
+    # keep a worker thread busy indefinitely. Expire stale entries and cap the registry.
+    _now = time.time()
+    for _k in [k for k, t in list(_w.items()) if _now - t > 120]:
+        _w.pop(_k, None)
+    _MAX_WATCHED = 200
+    if (vmware_id, vm_id) not in _w and len(_w) >= _MAX_WATCHED:
+        for _k, _ in sorted(_w.items(), key=lambda kv: kv[1])[:max(1, len(_w) - _MAX_WATCHED + 1)]:
+            _w.pop(_k, None)
+    _w[(vmware_id, vm_id)] = _now
     return jsonify({'ok': True, 'watching': vm_id, 'ttl': 120})
 
 

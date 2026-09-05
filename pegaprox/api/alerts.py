@@ -888,6 +888,24 @@ def alerts_force_check():
     """Run check_and_send_alerts() once, optionally clearing the cooldown
     map so an alert that already fired in this process can re-fire."""
     from pegaprox.background import alerts as A
+    # sec (audit): check_and_send_alerts() evaluates and FIRES every tenant's rules, and
+    # _alert_last_sent is the global cooldown map — so a delegated alert.manage holder in one
+    # tenant could spam every other tenant's notification channels on demand, and wipe the
+    # cooldown that stops repeat sends. Both side effects are global; only a global admin gets
+    # them. Everyone else still gets the diagnostic read below, scoped to their own clusters.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _fc_admin = (_bau(request.session.get('user', ''), request.session)
+                 .get('effective_role', request.session.get('role')) == ROLE_ADMIN)
+    if not _fc_admin:
+        _ev_only = A._last_eval
+        from pegaprox.utils.rbac import get_user_clusters as _guc
+        _al = _guc(_bau(request.session.get('user', ''), request.session))
+        if _al is not None:
+            _rc = {a.get('id'): a.get('cluster_id')
+                   for a in (A.load_alerts_config().get('alerts') or [])}
+            _ev_only = {k: v for k, v in _ev_only.items() if _rc.get(k) in _al}
+        return jsonify({'ok': True, 'evaluations': _ev_only, 'forced': False,
+                        'note': 'a forced run fires every tenant\'s rules — global admin only'})
     if (request.args.get('reset_cooldown', '').lower() in ('1', 'true', 'yes')):
         A._alert_last_sent.clear()
     try:

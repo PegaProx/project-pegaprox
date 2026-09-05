@@ -467,3 +467,61 @@ def test_save_single_user_persists_only_that_account(db, seed):
     after = load_users()
     assert after['alice']['display_name'] == 'Alice A'
     assert 'bob' in after, "the sibling account must be untouched"
+
+
+# ── force-check fired every tenant's alerts on demand ───────────────────────
+def test_force_check_does_not_fire_globally_for_a_delegate(api, seed, monkeypatch):
+    """check_and_send_alerts() evaluates and SENDS every tenant's rules, and _alert_last_sent
+    is the global cooldown map — so a delegated alert.manage holder could spam every other
+    tenant's channels and wipe the cooldown that prevents repeats."""
+    seed.tenant('acme', clusters=['cluster_1'])
+    u = seed.user('alertdelegate', role='user', tenant_id='acme',
+                  permissions=['alert.manage', 'cluster.view'])
+    _cluster(api)
+    import pegaprox.background.alerts as A
+    fired = []
+    monkeypatch.setattr(A, 'check_and_send_alerts', lambda: fired.append(1))
+    monkeypatch.setattr(A, 'load_alerts_config', lambda: {'alerts': []})
+    monkeypatch.setattr(A, '_last_eval', {})
+    monkeypatch.setattr(A, '_alert_last_sent', {'someone-elses-alert': 12345})
+    body = api.as_user(u).post('/api/alerts/force-check?reset_cooldown=1').get_json()
+    assert fired == [], "a delegate triggered the global alert loop"
+    assert A._alert_last_sent == {'someone-elses-alert': 12345}, "the global cooldown was cleared"
+    assert body['forced'] is False
+
+
+def test_force_check_still_works_for_a_global_admin(api, seed, monkeypatch):
+    seed.tenant('acme', clusters=['cluster_1'])
+    u = seed.user('rootfc', role='admin', tenant_id='acme')
+    _cluster(api)
+    import pegaprox.background.alerts as A
+    fired = []
+    monkeypatch.setattr(A, 'check_and_send_alerts', lambda: fired.append(1))
+    monkeypatch.setattr(A, 'load_alerts_config', lambda: {'alerts': []})
+    monkeypatch.setattr(A, '_last_eval', {})
+    r = api.as_user(u).post('/api/alerts/force-check')
+    assert r.status_code == 200 and fired == [1], (r.status_code, fired)
+
+
+# ── the ESXi watch registry had no bound ───────────────────────────────────
+def test_vmware_watch_registry_is_bounded(api, seed):
+    """The detail push walks every entry every 5s and issues three ESXi calls per entry, and
+    the key is a caller-supplied vm_id — so vmware.vm.view, a builtin viewer permission, could
+    keep a worker thread busy indefinitely."""
+    from unittest.mock import MagicMock
+    import pegaprox.globals as g
+    from pegaprox.background.broadcast import broadcast_resources_loop
+    seed.tenant('acme', clusters=['cluster_1'])
+    u = seed.user('watcher', role='viewer', tenant_id='acme', permissions=['vmware.vm.view'])
+    vm = MagicMock()
+    vm.linked_clusters = []
+    g.vmware_managers['esxi-w'] = vm
+    broadcast_resources_loop._vmw_watched = {}
+    try:
+        for i in range(400):
+            api.as_user(u).post(f'/api/vmware/esxi-w/vms/vm-{i}/watch', json={})
+        assert len(broadcast_resources_loop._vmw_watched) <= 200, \
+            len(broadcast_resources_loop._vmw_watched)
+    finally:
+        g.vmware_managers.pop('esxi-w', None)
+        broadcast_resources_loop._vmw_watched = {}
