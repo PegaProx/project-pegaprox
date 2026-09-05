@@ -1823,13 +1823,12 @@ def _pool_visibility(cluster_id):
     user = build_authz_user(request.session.get('user', ''), request.session)
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return False, set()
-    _tc = get_user_clusters(user, include_pools=False)
-    _is_owner = _tc is None or cluster_id in _tc
     _pp = _pool_perms_for(cluster_id, user.get('username', ''), user.get('groups', []))
     granted = {pid for pid, perms in (_pp or {}).items() if perms}
-    # pool-scoped (or non-owner reach) → confine to granted pools; plain operator on an owned cluster keeps all
-    confined = (not _is_owner) or user_has_any_pool_access(user, cluster_id)
-    return confined, granted
+    # shared predicate — also catches the VM-ACL-scoped (Client Portal) caller the old inline
+    # check missed; a plain cluster-wide operator on an owned cluster still keeps every pool.
+    from pegaprox.api.helpers import caller_is_scoped
+    return caller_is_scoped(user, cluster_id), granted
 
 
 @bp.route('/api/clusters/<cluster_id>/pools', methods=['GET'])

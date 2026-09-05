@@ -414,6 +414,43 @@ def check_cluster_access(cluster_id):
     return True, None
 
 
+def caller_is_scoped(user, cluster_id):
+    """True when this caller is confined to specific resources in `cluster_id`.
+
+    Confined means: they reached the cluster through a non-owning tenant (the #248 ACL / #555 pool
+    fallback in check_cluster_access), OR they hold a pool grant here, OR they hold any VM-ACL entry
+    here. Admins and plain cluster-wide operators (their tenant owns the cluster and they have no
+    pool/ACL grant) are NOT confined and keep whole-cluster views.
+
+    sec (private disclosure Sep 2026 — audit): the confinement predicate was open-coded in several
+    endpoints as `(not is_owner) or user_has_any_pool_access(...)`, which misses the VM-ACL-scoped
+    caller whose tenant DOES own the cluster — the Client Portal case. Those endpoints therefore
+    treated a portal user as a cluster-wide operator and handed back the whole cluster. Centralised
+    here so the rule can't drift between call sites again."""
+    from pegaprox.models.permissions import ROLE_ADMIN
+    from pegaprox.utils.rbac import get_user_clusters, user_has_any_pool_access, get_vm_acls
+    if not user:
+        return True   # unknown identity → treat as confined (fail closed)
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return False
+    tenant_clusters = get_user_clusters(user, include_pools=False)
+    if tenant_clusters is not None and cluster_id not in tenant_clusters:
+        return True
+    try:
+        if user_has_any_pool_access(user, cluster_id):
+            return True
+    except Exception:
+        return True
+    username = user.get('username', '')
+    try:
+        for _vmid, acl in (get_vm_acls().get(cluster_id, {}) or {}).items():
+            if username in (acl.get('users') or []):
+                return True
+    except Exception:
+        return True
+    return False
+
+
 def scope_vm_rows(cluster_id, rows, *, vmid_key='vmid', type_key='type'):
     """Filter a list of per-VM row dicts to the VMs the current caller may actually see.
 

@@ -1708,15 +1708,11 @@ def get_cluster_tasks(cluster_id):
     # keep the full log; a pool-/ACL-scoped caller sees only tasks for VMs they can access (node/cluster
     # tasks are dropped for them). Mirrors the /resources confinement predicate.
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import (user_can_access_vm as _ucav, get_user_clusters as _guc,
-                                     user_has_any_pool_access as _uhpa)
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    from pegaprox.api.helpers import caller_is_scoped
     authz = build_authz_user(request.session.get('user', ''), request.session)
-    if authz.get('effective_role', authz.get('role')) == ROLE_ADMIN:
-        return jsonify(tasks)
-    _tc = _guc(authz, include_pools=False)
-    _is_owner = _tc is None or cluster_id in _tc
-    if not ((not _is_owner) or _uhpa(authz, cluster_id)):
-        return jsonify(tasks)   # plain cluster-wide operator → full log
+    if not caller_is_scoped(authz, cluster_id):
+        return jsonify(tasks)   # admin or plain cluster-wide operator → full log
 
     def _task_vmid(t):
         for k in ('vmid', 'id'):

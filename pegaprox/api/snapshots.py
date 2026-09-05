@@ -652,10 +652,8 @@ def update_policy(cluster_id, pid):
         if str(tt).lower() in ('vm', 'vmid') and _tv.lstrip('-').isdigit():
             denied = [] if user_can_access_vm(creator, cluster_id, int(_tv), 'vm.snapshot') else [_tv]
         else:
-            from pegaprox.utils.rbac import get_user_clusters as _guc, user_has_any_pool_access as _uhpa
-            _tc = _guc(creator, include_pools=False)
-            _confined = (_tc is not None and cluster_id not in _tc) or _uhpa(creator, cluster_id)
-            denied = ['<unresolved: cluster offline>'] if _confined else []
+            from pegaprox.api.helpers import caller_is_scoped
+            denied = ['<unresolved: cluster offline>'] if caller_is_scoped(creator, cluster_id) else []
     if denied:
         logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) updating policy {pid}@{cluster_id}")
         return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403

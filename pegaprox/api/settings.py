@@ -3181,10 +3181,9 @@ def get_cluster_audit_log_api(cluster_id):
     from pegaprox.utils.rbac import (get_user_clusters as _guc, user_has_any_pool_access as _uhpa,
                                      get_user_pool_vmids as _gupv, get_vm_acls as _gva)
     _au = build_authz_user(request.session.get('user', ''), request.session)
-    if _au.get('effective_role', _au.get('role')) != ROLE_ADMIN:
-        _tc = _guc(_au, include_pools=False)
-        _is_owner = _tc is None or cluster_id in _tc
-        if (not _is_owner) or _uhpa(_au, cluster_id):
+    if True:
+        from pegaprox.api.helpers import caller_is_scoped
+        if caller_is_scoped(_au, cluster_id):
             _acc = set(_gupv(_au, cluster_id) or [])
             for _v, _a in (_gva().get(cluster_id, {}) or {}).items():
                 if _au.get('username') in (_a.get('users') or []) and str(_v).lstrip('-').isdigit():

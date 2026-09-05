@@ -2404,10 +2404,30 @@ def get_backup_jobs(cluster_id):
         
         if r.status_code == 200:
             jobs = r.json().get('data', [])
-            # sec (private disclosure Sep 2026 — audit): read-side of the _authz_backup_targets write
-            # gate — a scoped caller sees only jobs whose targets they could manage (own every vmid;
-            # all=1/pool/exclude are admin-only). Admins get None back for every job → full list.
-            jobs = [j for j in jobs if _authz_backup_targets(cluster_id, j) is None]
+            # sec (private disclosure Sep 2026 — audit): a scoped caller must not see backup coverage
+            # for VMs outside their grant. The first revision reused the WRITE gate
+            # (_authz_backup_targets) here, which also demanded vm.backup on every target and treated
+            # cluster-wide jobs as admin-only — that blanked the Backup page for EVERY non-admin,
+            # viewers and plain cluster-wide operators included. Confine only a genuinely scoped
+            # caller, and to viewing rights: explicit-vmid jobs whose targets they can all see.
+            # all=1 / pool / exclude jobs span VMs beyond their grant, so those stay hidden from them.
+            from pegaprox.utils.auth import build_authz_user
+            from pegaprox.utils.rbac import user_can_access_vm
+            from pegaprox.api.helpers import caller_is_scoped
+            _bu = build_authz_user(request.session.get('user', ''), request.session)
+            if caller_is_scoped(_bu, cluster_id):
+                def _job_visible(j):
+                    if (str(j.get('all', '')).strip() in ('1', 'true', 'True', 'yes')
+                            or (j.get('pool') or '').strip() or (j.get('exclude') or '').strip()):
+                        return False
+                    _vmids = [x.strip() for x in str(j.get('vmid') or '').split(',') if x.strip()]
+                    if not _vmids:
+                        return False
+                    try:
+                        return all(user_can_access_vm(_bu, cluster_id, int(v), 'vm.view') for v in _vmids)
+                    except (TypeError, ValueError):
+                        return False
+                jobs = [j for j in jobs if _job_visible(j)]
             return jsonify(jobs)
         return jsonify([])
     except:

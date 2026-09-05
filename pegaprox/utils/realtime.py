@@ -323,10 +323,8 @@ def _filtered_tasks_frame(tasks, cluster_id, username, timestamp):
     # (non-admin, tenant owns the cluster, no pool/ACL scope) keeps the FULL task log, matching the
     # REST /clusters/<id>/tasks confinement. Without this the live 'tasks' stream silently dropped
     # every node/cluster-level task for legitimate operators.
-    from pegaprox.utils.rbac import get_user_clusters as _guc, user_has_any_pool_access as _uhpa
-    _tc = _guc(user, include_pools=False)
-    _is_owner = _tc is None or cluster_id in _tc
-    if not ((not _is_owner) or _uhpa(user, cluster_id)):
+    from pegaprox.api.helpers import caller_is_scoped
+    if not caller_is_scoped(user, cluster_id):
         return _serialize_sse_message('tasks', tasks, cluster_id, timestamp)
 
     def _vmid_of(t):

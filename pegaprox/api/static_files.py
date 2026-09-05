@@ -206,10 +206,9 @@ def _authorize_pool_assignment(cluster_id, pool_id, vmid, vm_type=None):
         return False, (jsonify({'error': 'Access denied to this VM'}), 403)
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return True, None
-    # (2) confine a pool-scoped caller to pools they manage; a plain cluster-wide operator keeps all
-    _tc = get_user_clusters(user, include_pools=False)
-    _is_owner = _tc is None or cluster_id in _tc
-    if not ((not _is_owner) or user_has_any_pool_access(user, cluster_id)):
+    # (2) confine a scoped caller to pools they manage; a plain cluster-wide operator keeps all
+    from pegaprox.api.helpers import caller_is_scoped
+    if not caller_is_scoped(user, cluster_id):
         return True, None
     _granted = {pid for pid, perms in (_pool_perms_for(cluster_id, user.get('username', ''),
                                                         user.get('groups', [])) or {}).items() if perms}
