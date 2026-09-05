@@ -219,3 +219,38 @@ def test_storage_cluster_delete_allows_the_owning_tenant_despite_a_pool_grant(ap
     _cluster(api)
     r = api.as_user(u).delete('/api/clusters/cluster_1/storage-clusters/sc1')
     assert r.status_code != 403, r.get_data(as_text=True)
+
+
+# ── pool CRUD is grant-level: membership is what user_can_access_vm reads ────
+def test_scoped_caller_cannot_create_or_delete_a_pool(api, seed):
+    u = _scoped(seed, 'poolmal', ['admin.users', 'cluster.view'])
+    _cluster(api)
+    assert api.as_user(u).post('/api/clusters/cluster_1/pools',
+                               json={'poolid': 'mine'}).status_code == 403
+    assert api.as_user(u).delete('/api/clusters/cluster_1/pools/pool_other').status_code == 403
+
+
+def test_scoped_caller_cannot_rename_a_foreign_pool(api, seed):
+    u = _scoped(seed, 'poolmal2', ['admin.users', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).put('/api/clusters/cluster_1/pools/pool_other',
+                           json={'comment': 'taken'})
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+
+def test_owning_admin_can_still_manage_pools(api, seed):
+    seed.tenant('acme', clusters=['cluster_1'])
+    u = seed.user('pooladmin', role='admin', tenant_id='acme')
+    m = _cluster(api)
+    m.create_pool.return_value = {'success': True}
+    r = api.as_user(u).post('/api/clusters/cluster_1/pools', json={'poolid': 'newpool'})
+    assert r.status_code != 403, r.get_data(as_text=True)
+
+
+def test_scoped_caller_cannot_rewrite_the_power_tariff(api, seed):
+    u = _scoped(seed, 'tariffmal', ['cluster.config', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).put('/api/power/rates/cluster_1',
+                           json={'cpu_per_core_h': 0.0, 'mem_per_gb_h': 0.0,
+                                 'storage_per_gb_month': 0.0})
+    assert r.status_code == 403, r.get_data(as_text=True)

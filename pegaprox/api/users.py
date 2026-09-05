@@ -2085,6 +2085,12 @@ def refresh_pool_cache_api(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): a pool is an authorization container — its membership is what
+    # user_can_access_vm consults — so creating or removing one is a grant-level action,
+    # not cluster housekeeping. Same predicate the pool-permission writes use.
+    _perr = _authz_object_write(cluster_id)
+    if _perr:
+        return _perr
     
     # Invalidate and refresh
     invalidate_pool_cache(cluster_id)
@@ -2107,6 +2113,12 @@ def refresh_pool_cache_api(cluster_id):
 def create_pool_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): a pool is an authorization container — its membership is what
+    # user_can_access_vm consults — so creating or removing one is a grant-level action,
+    # not cluster housekeeping. Same predicate the pool-permission writes use.
+    _perr = _authz_object_write(cluster_id)
+    if _perr:
+        return _perr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -2135,6 +2147,15 @@ def create_pool_api(cluster_id):
 def update_pool_api(cluster_id, pool_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): a pool is an authorization container — its membership is what
+    # user_can_access_vm consults — so creating or removing one is a grant-level action,
+    # not cluster housekeeping. Same predicate the pool-permission writes use.
+    _perr = _authz_object_write(cluster_id)
+    if _perr:
+        return _perr
+    _confined, _granted = _pool_visibility(cluster_id)
+    if _confined and pool_id not in _granted:
+        return jsonify({'error': 'Access denied to this pool'}), 403
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -2157,6 +2178,15 @@ def rm_pool(cluster_id, pool_id):
     # LW: intentionally different name than the others, we're not consistent lol
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): a pool is an authorization container — its membership is what
+    # user_can_access_vm consults — so creating or removing one is a grant-level action,
+    # not cluster housekeeping. Same predicate the pool-permission writes use.
+    _perr = _authz_object_write(cluster_id)
+    if _perr:
+        return _perr
+    _confined, _granted = _pool_visibility(cluster_id)
+    if _confined and pool_id not in _granted:
+        return jsonify({'error': 'Access denied to this pool'}), 403
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 

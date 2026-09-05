@@ -237,6 +237,11 @@ def upsert(cluster_id):
         ok, err = check_cluster_access(cluster_id)
         if not ok:
             return err
+        # sec (audit): the tariff is cluster-wide and feeds every tenant's cost reporting —
+        # no per-object notion, so a confined caller has no business rewriting it.
+        _cerr = require_unconfined(cluster_id)
+        if _cerr:
+            return _cerr
     # NS Aug 2026 (Aikido pentest) — __default__ is the shared fallback row for every cluster;
     # only a global admin may overwrite it (a cluster.config holder edits only its own cluster).
     # effective_role, not the raw role, so an admin-owned scoped token can't do it either.

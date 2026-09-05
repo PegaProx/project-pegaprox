@@ -31,12 +31,28 @@ bp = Blueprint('static_files', __name__)
 # Create, edit, delete pools and manage pool members directly from PegaProx
 # ============================================================================
 
+def _pool_write_denied(cluster_id):
+    """Pool create/update is grant-level: a pool's membership is what user_can_access_vm reads."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import caller_is_scoped
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, cluster_id):
+        return jsonify({'error': 'Access denied: you cannot manage pools on this cluster'}), 403
+    return None
+
+
 @bp.route('/api/clusters/<cluster_id>/pools', methods=['POST'])
 @require_auth(perms=['admin.users'])
 def create_pool(cluster_id):
     """Create a new resource pool in Proxmox"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): duplicate of users.create_pool_api / update_pool_api — that blueprint wins
+    # at registration so this is currently unreachable, but an unguarded second implementation
+    # of a grant-level action is not something to leave lying around.
+    _perr = _pool_write_denied(cluster_id)
+    if _perr:
+        return _perr
     
     data = request.get_json() or {}
     poolid = data.get('poolid', '').strip()
@@ -94,6 +110,12 @@ def update_pool(cluster_id, pool_id):
     """Update a pool's comment"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): duplicate of users.create_pool_api / update_pool_api — that blueprint wins
+    # at registration so this is currently unreachable, but an unguarded second implementation
+    # of a grant-level action is not something to leave lying around.
+    _perr = _pool_write_denied(cluster_id)
+    if _perr:
+        return _perr
     
     data = request.get_json() or {}
     comment = data.get('comment', '')
