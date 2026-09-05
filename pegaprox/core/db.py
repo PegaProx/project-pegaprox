@@ -4217,18 +4217,50 @@ class PegaProxDB:
                 self.aes_key = _saved_key
                 stats['errors'].append(f"Audit re-sign: {e}")
 
-            self.conn.commit()
-
-            # 4. Save new key (backup old key first)
+            # 4. Persist the new key BEFORE committing the re-encrypted rows.
+            # sec (audit): this used to commit first and write the key afterwards, so a failure
+            # in the file step (full disk, permissions, read-only mount) left a database
+            # encrypted with a key that existed only in this process's memory — unreadable
+            # after the next restart, with no way back. Write the key first, fsync it, and roll
+            # the transaction back if anything about the file step fails; the rows are still
+            # readable with the old key in that case.
             backup_file = aes_key_file + f'.backup.{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-            with open(backup_file, 'wb') as f:
-                f.write(old_key)
-            os.chmod(backup_file, 0o600)
-            
-            with open(aes_key_file, 'wb') as f:
-                f.write(new_key)
-            os.chmod(aes_key_file, 0o600)
-            
+            try:
+                with open(backup_file, 'wb') as f:
+                    f.write(old_key)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(backup_file, 0o600)
+
+                with open(aes_key_file, 'wb') as f:
+                    f.write(new_key)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(aes_key_file, 0o600)
+            except Exception as e:
+                self.conn.rollback()
+                logging.error(f"Key rotation aborted while persisting the new key: {e}")
+                stats['errors'].append(f"Could not persist the new key: {e}")
+                stats['success'] = False
+                return stats
+
+            try:
+                self.conn.commit()
+            except Exception as e:
+                # the rows did not land — put the old key back so the database stays readable
+                try:
+                    with open(aes_key_file, 'wb') as f:
+                        f.write(old_key)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.chmod(aes_key_file, 0o600)
+                except Exception:
+                    logging.critical("Key rotation: commit failed AND the old key could not be "
+                                     f"restored — recover it from {backup_file}")
+                stats['errors'].append(f"Commit failed, rotation rolled back: {e}")
+                stats['success'] = False
+                return stats
+
             # 5. Update in-memory key
             self.aes_key = new_key
             self.aesgcm = new_aesgcm

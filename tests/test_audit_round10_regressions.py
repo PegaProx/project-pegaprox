@@ -890,3 +890,21 @@ def test_site_recovery_tokens_are_per_migration():
     src = open('pegaprox/background/site_recovery.py').read()
     assert "create_api_token('pegaprox-sr')" not in src, "still a fixed token name"
     assert '_sr_token_name' in src and 'uuid.uuid4()' in src
+
+
+def test_key_rotation_aborts_cleanly_if_the_key_cannot_be_persisted(db, monkeypatch, tmp_path):
+    """Rotation used to commit the re-encrypted rows and write the key afterwards, so a failure
+    in the file step left a database encrypted with a key that existed only in memory —
+    unreadable after the next restart. The rows must stay readable with the OLD key instead."""
+    db.save_cluster('c-abort', {'name': 'a', 'host': 'h', 'user': 'root@pam', 'pass': 'keepme'})
+    real_open = open
+    def _boom(path, mode='r', *a, **kw):
+        if 'w' in mode and str(path).endswith(('.key', '.backup')) or '.backup.' in str(path):
+            raise OSError('no space left on device')
+        return real_open(path, mode, *a, **kw)
+    monkeypatch.setattr('builtins.open', _boom)
+    res = db.rotate_encryption_key()
+    monkeypatch.undo()
+    assert res.get('success') is False, res
+    # the cluster must still be readable with the key that is actually on disk
+    assert db.get_cluster('c-abort')['pass'] == 'keepme'
