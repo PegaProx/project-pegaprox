@@ -23,7 +23,7 @@ from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection
 from pegaprox import globals as _g
 
@@ -158,6 +158,9 @@ def connect_esxi_host(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -241,6 +244,9 @@ def disconnect_esxi_host(cluster_id, host_id):
     """Remove ESXi storage from Proxmox"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -618,6 +624,17 @@ def delete_storage_cluster(cluster_id, sc_id):
     """Delete a storage cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (audit): the POST and PUT siblings both gate on tenant ownership with
+    # include_pools=False; the DELETE had nothing. Mirror them rather than reaching for
+    # require_unconfined — that also denies on a pool grant or a VM-ACL entry, so an
+    # owning-tenant admin who happens to hold one pool could still arm auto_balance via PUT
+    # but no longer disarm it by deleting the group. Same predicate as the siblings.
+    from pegaprox.utils.rbac import get_user_clusters as _guc
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _allowed = _guc(_bau(request.session.get('user', 'system'), request.session),
+                    include_pools=False)
+    if _allowed is not None and cluster_id not in _allowed:
+        return jsonify({'error': 'Access denied to this cluster'}), 403
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1383,6 +1400,9 @@ def create_storage(cluster_id):
     """create new storage on proxmox - NS Dec 2025"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1519,6 +1539,9 @@ def update_storage(cluster_id, storage_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1578,6 +1601,9 @@ def delete_storage(cluster_id, storage_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1674,6 +1700,9 @@ def rescan_storage(cluster_id, storage_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1986,6 +2015,9 @@ def scan_storage(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:

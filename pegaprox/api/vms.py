@@ -41,7 +41,7 @@ def _require_vm_access(cluster_id, vmid, perm, vm_type=None):
     return None
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update
 from pegaprox.core.config import save_config
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
 from pegaprox.utils.ssh import get_paramiko
 from pegaprox.utils.sanitization import sanitize_int
 from urllib.parse import urlencode, quote as url_quote
@@ -988,6 +988,23 @@ def get_datastore_content(cluster_id, storage_name):
         return jsonify({'error': safe_error(e, 'Failed to get datastore content')}), 500
 
 
+def _in_use_response(message, vmid, vm_type, scoped, user, cluster_id):
+    """The 'volume is in use' branch names the guest holding it. That scan walks every VM config
+    on the cluster, so for a confined caller it can name a guest they cannot see — turning a
+    referential-integrity message into a guest-enumeration oracle for shared content (ISOs carry
+    no vmid of their own, so the gate above cannot cover them). Keep the identity for callers who
+    may see that guest; give everyone else the bare fact that something still references it."""
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    if scoped:
+        try:
+            _visible = _ucav(user, cluster_id, int(vmid), 'vm.view')
+        except (TypeError, ValueError):
+            _visible = False
+        if not _visible:
+            return jsonify({'error': 'Volume is still in use', 'in_use': True}), 400
+    return jsonify({'error': message, 'in_use': True, 'vmid': vmid, 'type': vm_type}), 400
+
+
 @bp.route('/api/clusters/<cluster_id>/datastores/<storage_name>/content/<path:volid>', methods=['DELETE'])
 @require_auth(perms=['storage.delete'])
 def delete_datastore_content(cluster_id, storage_name, volid):
@@ -995,6 +1012,41 @@ def delete_datastore_content(cluster_id, storage_name, volid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # sec (audit): this permanently destroys a volume, and the only thing between a scoped caller
+    # and another tenant's data was an "is it referenced in a live VM config" scan — which is a
+    # referential-integrity check, not authorization, and which backup archives never trip. Its own
+    # LIST sibling was scoped this round, so leaving the DELETE open made that fix bypassable by URL.
+    # Mirrors the source-vmid guard delete_vm_backup already has.
+    #
+    # Two deliberate narrowings, both to avoid over-gating:
+    #   - only for a CONFINED caller. storage_admin holds storage.delete but neither vm.backup nor
+    #     vm.config, so an unconfined storage admin would otherwise be 403'd on every vmid-carrying
+    #     volid — the exact job that role exists for.
+    #   - vm.view, and vm_type left None. An LXC rootfs on Ceph/LVM-thin is still named
+    #     vm-<vmid>-disk-N, so guessing 'qemu' makes the pool-membership lookup miss and denies a
+    #     pool user their own container's volume; None makes rbac try both types.
+    # A volid with no vmid (iso, vztmpl, snippets, import) is shared content — left alone, since
+    # scoped tenant admins do routine ISO housekeeping.
+    _dc_scoped = False
+    _dc_user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_dc_user, cluster_id):
+        _dc_scoped = True
+        import re as _re
+        _seg = str(volid).split(':', 1)[-1]
+        _parts = _seg.split('/')
+        # A disk name only belongs to a guest when it sits at the root of the storage
+        # (local-lvm:vm-100-disk-0) or under that guest's own numeric directory
+        # (local:100/vm-100-disk-0.qcow2). Under any other directory it is just a filename that
+        # happens to look like one — local:snippets/vm-100-cloudinit.yml is a user snippet, not
+        # guest 100's disk, and attributing it would deny a scoped caller their own file.
+        _disk_ok = len(_parts) == 1 or (len(_parts) == 2 and _parts[0].isdigit())
+        _m = (_re.search(r'/(?:vm|ct)/(\d+)/', volid)
+              or _re.search(r'(?:^|/)vzdump-(?:qemu|lxc|openvz)-(\d+)-', _seg)
+              or (_re.match(r'(?:vm|base|subvol)-(\d+)-(?:disk|state|cloudinit)', _parts[-1])
+                  if _disk_ok else None))
+        _src = int(_m.group(1)) if _m else None
+        if _src is not None and not user_can_access_vm(_dc_user, cluster_id, _src, 'vm.view'):
+            return jsonify({'error': 'Access denied to this volume'}), 403
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -1039,35 +1091,23 @@ def delete_datastore_content(cluster_id, storage_name, volid):
                         # Check for disk images
                         if volid in value:
                             resource_name = 'VM' if vm_type == 'qemu' else 'Container'
-                            return jsonify({
-                                'error': f'Volume is in use by {resource_name} {vmid} ({key})',
-                                'in_use': True,
-                                'vmid': vmid,
-                                'type': vm_type
-                            }), 400
+                            return _in_use_response(f'Volume is in use by {resource_name} {vmid} ({key})', vmid, vm_type, _dc_scoped, _dc_user,
+                                                        cluster_id)
                         
                         # Check for mounted ISOs (ide*, sata*, scsi* with media=cdrom)
                         if volid.endswith('.iso'):
                             # check this ISO is mounted
                             iso_name = volid.split('/')[-1] if '/' in volid else volid
                             if iso_name in value or volid in value:
-                                return jsonify({
-                                    'error': f'ISO is mounted in VM {vmid} ({key})',
-                                    'in_use': True,
-                                    'vmid': vmid,
-                                    'type': 'qemu'
-                                }), 400
+                                return _in_use_response(f'ISO is mounted in VM {vmid} ({key})', vmid, 'qemu', _dc_scoped, _dc_user,
+                                                            cluster_id)
                     
                     # For containers, also check mount points
                     if vm_type == 'lxc':
                         for key, value in config.items():
                             if key.startswith('mp') and isinstance(value, str) and volid in value:
-                                return jsonify({
-                                    'error': f'Volume is mounted in Container {vmid} ({key})',
-                                    'in_use': True,
-                                    'vmid': vmid,
-                                    'type': 'lxc'
-                                }), 400
+                                return _in_use_response(f'Volume is mounted in Container {vmid} ({key})', vmid, 'lxc', _dc_scoped, _dc_user,
+                                                            cluster_id)
         
         # Delete the volume
         # URL encode the volid properly
@@ -1827,6 +1867,9 @@ def get_firewall_options(cluster_id):
 def set_firewall_options(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1875,6 +1918,9 @@ def get_firewall_rules(cluster_id):
 def create_firewall_rule(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1901,6 +1947,9 @@ def create_firewall_rule(cluster_id):
 def update_firewall_rule(cluster_id, pos):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1925,6 +1974,9 @@ def update_firewall_rule(cluster_id, pos):
 def delete_firewall_rule(cluster_id, pos):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2528,6 +2580,9 @@ def get_maintenance_status(cluster_id, node_name):
 def exit_maintenance_mode_api(cluster_id, node_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2551,6 +2606,9 @@ def acknowledge_maintenance_warning(cluster_id, node_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -2583,6 +2641,9 @@ def test_node_connection(cluster_id):
     # LW: Feb 2026 - Pre-flight check before join, also detects orphaned cluster configs
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2686,6 +2747,9 @@ def join_node_to_cluster(cluster_id):
     # LW: Force rejoin option added to handle nodes removed via pvecm delnode that still have stale configs
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -3029,6 +3093,9 @@ def remove_node_from_cluster(cluster_id, node_name):
     # MK: IP must be resolved BEFORE delnode or we might wipe the wrong node!
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     # MK Apr 2026 — Validate node_name strictly. URL-routed param flows into
     # `pvecm delnode {node_name}` via SSH (line ~2617). Without validation, a
@@ -3437,6 +3504,9 @@ def start_node_update(cluster_id, node_name):
     """Start updating a node (must be in maintenance mode unless force=true)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -3494,6 +3564,9 @@ def get_update_status(cluster_id, node_name):
 def clear_update_status_api(cluster_id, node_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -6076,12 +6149,27 @@ def create_replication_job_api(cluster_id):
         return jsonify({'error': result['error']}), 500
 
 
+def _replication_job_authorized(cluster_id, job_id, perm='vm.config'):
+    """sec (audit): a PVE replication job id is '<vmid>-<jobnum>' — manager.create_replication_job
+    mints it that way and run_replication_now derives the guest back out the same way. The create
+    sibling gained a per-VM gate last round; delete and run-now still took the id on trust, and
+    a delete with the default keep=False also destroys the replicated disks on the target."""
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    _head = str(job_id or '').split('-', 1)[0]
+    if not _head.isdigit():
+        return False
+    return _ucav(_u, cluster_id, int(_head), perm)
+
+
 @bp.route('/api/clusters/<cluster_id>/replication/<job_id>', methods=['DELETE'])
 @require_auth(perms=['cluster.config'])
 def delete_replication_job_api(cluster_id, job_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    if not _replication_job_authorized(cluster_id, job_id):
+        return jsonify({'error': 'Access denied to this replication job'}), 403
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -6109,6 +6197,8 @@ def run_replication_now_api(cluster_id, job_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    if not _replication_job_authorized(cluster_id, job_id):
+        return jsonify({'error': 'Access denied to this replication job'}), 403
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
