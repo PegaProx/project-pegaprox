@@ -466,16 +466,19 @@ def subscribe():
         return jsonify({'error': 'session missing'}), 401
 
     try:
+        # sec (audit): the upsert used to overwrite `username` too, so anyone who knew a victim's
+        # endpoint could re-point it at their own account — the victim then received the
+        # attacker's alerts and stopped receiving their own. Only the owner may refresh a row.
         c = get_db().conn.cursor()
         c.execute('''
             INSERT INTO push_subscriptions (username, endpoint, p256dh, auth, user_agent, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(endpoint) DO UPDATE SET
-                username=excluded.username,
                 p256dh=excluded.p256dh,
                 auth=excluded.auth,
                 user_agent=excluded.user_agent,
                 failures=0
+            WHERE push_subscriptions.username = excluded.username
         ''', (user, endpoint, p256dh, auth, ua, datetime.now().isoformat()))
         get_db().conn.commit()
         return jsonify({'ok': True})
@@ -491,8 +494,11 @@ def unsubscribe():
     if not endpoint:
         return jsonify({'error': 'endpoint required'}), 400
     try:
+        # sec (audit): scoped to the caller — an endpoint alone used to be enough to delete
+        # someone else's subscription.
         c = get_db().conn.cursor()
-        c.execute('DELETE FROM push_subscriptions WHERE endpoint = ?', (endpoint,))
+        c.execute('DELETE FROM push_subscriptions WHERE endpoint = ? AND username = ?',
+                  (endpoint, request.session.get('user', '')))
         get_db().conn.commit()
         return jsonify({'ok': True})
     except Exception as e:

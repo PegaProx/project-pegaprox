@@ -2169,6 +2169,29 @@ def complete_acme_dns_challenge():
 # MK: AES-256-GCM with PBKDF2 key derivation
 # ============================================
 
+# Any field whose NAME says "secret" is one. Matching by shape rather than by an
+# enumerated list means a field added later is stripped by default instead of shipping
+# in a backup the operator believes carries no secrets.
+_SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'private_key',
+                         'api_key', 'apikey', 'credential')
+_SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'has_password',
+                      'has_token', 'has_ssh_key', 'password_expires_at',
+                      'password_changed_at', 'token_id')
+
+
+def _strip_secret_fields(d):
+    """Drop secret-bearing keys from a dict destined for an export."""
+    if not isinstance(d, dict):
+        return d
+    for k in list(d.keys()):
+        lk = str(k).lower()
+        if lk in _SECRET_FIELD_KEEP:
+            continue
+        if lk.endswith('_encrypted') or any(m in lk for m in _SECRET_FIELD_MARKERS):
+            d.pop(k, None)
+    return d
+
+
 @bp.route('/api/config/backup', methods=['POST'])
 
 @require_auth(roles=[ROLE_ADMIN])
@@ -2286,15 +2309,13 @@ def backup_config():
         clusters = database.get_all_clusters()
         if not include_secrets:
             # Remove passwords and keys - clusters is a dict: {'id': {data}}
+            # sec (audit): this popped GUESSED key names and get_all_clusters returns DECRYPTED
+            # values, so 'api_token_secret' (the name it actually uses) shipped in a backup
+            # labelled "secrets excluded" — the two api_token* pops matched nothing. Sweep by
+            # shape as well as by name so a newly added secret field can't slip through again.
             for cluster_id, cluster_data in clusters.items():
                 if isinstance(cluster_data, dict):
-                    cluster_data.pop('password_encrypted', None)
-                    cluster_data.pop('password', None)
-                    cluster_data.pop('pass', None)
-                    cluster_data.pop('ssh_key_encrypted', None)
-                    cluster_data.pop('ssh_key', None)
-                    cluster_data.pop('api_token_encrypted', None)
-                    cluster_data.pop('api_token', None)
+                    _strip_secret_fields(cluster_data)
         backup_data['clusters'] = clusters
         
         # Users (optional)
@@ -2304,10 +2325,10 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for username, user_data in users_data.items():
                     if isinstance(user_data, dict):
+                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
-                        user_data.pop('totp_secret', None)
-                        user_data.pop('totp_secret_encrypted', None)
             backup_data['users'] = users_data
         
         # Tenants
@@ -3651,11 +3672,30 @@ def generate_support_bundle():
                 settings = load_server_settings()
                 safe_settings = {}
                 sensitive_keys = ['smtp_password', 'ssl_key', 'password', 'secret', 'token', 'api_key']
+
+                def _redact(value):
+                    # sec (audit): the old pass matched TOP-LEVEL key names only, so
+                    # 'alert_webhooks' — a list of dicts each holding a raw webhook url and
+                    # token — matched nothing and went into the bundle verbatim. Support
+                    # bundles get emailed to third parties, so recurse.
+                    if isinstance(value, dict):
+                        return {k: ('[REDACTED]' if v and any(s in str(k).lower() for s in sensitive_keys)
+                                    else _redact(v))
+                                for k, v in value.items()}
+                    if isinstance(value, list):
+                        return [_redact(v) for v in value]
+                    return value
+
+                from pegaprox.api.alerts import _mask_channel
                 for key, value in settings.items():
-                    if any(s in key.lower() for s in sensitive_keys):
+                    if key == 'alert_webhooks' and isinstance(value, list):
+                        # keep id/name/type/enabled for diagnostics, mask the bearer bits
+                        safe_settings[key] = [_mask_channel(c) if isinstance(c, dict) else c
+                                              for c in value]
+                    elif any(s in key.lower() for s in sensitive_keys):
                         safe_settings[key] = '[REDACTED]' if value else ''
                     else:
-                        safe_settings[key] = value
+                        safe_settings[key] = _redact(value)
                 zf.writestr(f"{bundle_prefix}/server_settings.json", json.dumps(safe_settings, indent=2))
             except Exception as e:
                 zf.writestr(f"{bundle_prefix}/server_settings_error.txt", f"Failed: {str(e)}")

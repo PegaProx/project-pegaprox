@@ -190,7 +190,12 @@ def create_app():
                 origin = request.headers.get('Origin', '')
                 referer = request.headers.get('Referer', '')
                 allowed_origins = get_allowed_origins() or []
-                fwd_host = request.headers.get('X-Forwarded-Host', '')
+                # NS: only trust the forwarded host from a trusted proxy — otherwise a client
+                # sets X-Forwarded-Host to its own domain and its foreign Origin matches.
+                # (Same discipline as X-Forwarded-Proto in add_security_headers below.)
+                from pegaprox.utils.audit import _is_trusted_proxy
+                fwd_host = (request.headers.get('X-Forwarded-Host', '')
+                            if _is_trusted_proxy(request.remote_addr) else '')
 
                 # NS May 2026 (#382 follow-up) — safer Origin matcher.
                 # The previous version used `value.startswith(f"{scheme}://{host}")`
@@ -300,7 +305,13 @@ def create_app():
                 # in non-browser contexts).
                 # MK May 2026: Referer parses as a full URL — pass it directly to
                 # _origin_ok which now uses urlparse, no manual splitting needed.
-                ok_origin = _origin_ok(origin) or _origin_ok(referer)
+                # Origin is authoritative when the browser sends it: a matching Referer must not
+                # rescue a foreign Origin (the `origin and not _origin_ok(origin)` guard below sits
+                # inside the not-ok_origin branch, so a same-host Referer skipped it entirely).
+                if origin:
+                    ok_origin = _origin_ok(origin)
+                else:
+                    ok_origin = _origin_ok(referer)
                 if not ok_origin:
                     # If neither Origin nor Referer matches, only allow when XHR
                     # marker is set AND there's no foreign Origin/Referer.

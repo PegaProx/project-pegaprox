@@ -139,16 +139,55 @@ def ws_live_updates(ws):
         logging.info(f"WebSocket client disconnected: {client_id}")
 
 
+def _floor_by_token_role(user, token_role):
+    """Cap a stored user record at the role its ws/API token was issued with, so a token can
+    never out-rank itself through its owner's account. Mirrors build_authz_user / the inline
+    floor in api/helpers.check_cluster_access; a non-builtin (custom) role name is kept as-is,
+    exactly like build_authz_user does, so the tenant remap still resolves."""
+    from pegaprox.models.permissions import ROLE_ADMIN, ROLE_USER, ROLE_VIEWER
+    if not isinstance(user, dict) or not token_role:
+        return user
+    _h = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
+    if token_role not in _h:
+        return {**user, 'effective_role': token_role}
+    _eff = min(_h[token_role], _h.get(user.get('role'), 1))
+    return {**user, 'effective_role': next((r for r, lvl in _h.items() if lvl == _eff), ROLE_VIEWER)}
+
+
+def _stream_identity(username):
+    """Identity for SSE cluster scoping. Two reasons not to use load_users() here, both already
+    learned on the WebSocket twins in this file: it can transiently degrade to {} under gevent/WAL
+    contention, and an EMPTY dict resolves to "all clusters" in get_user_clusters (default tenant,
+    no cluster list) — i.e. it fails OPEN. It also skips the API-token role floor, so an
+    admin-owned viewer-scoped token inherited its owner's reach. Single-user read + the floored
+    role require_auth published. Returns None when the account is gone: caller must fail closed."""
+    from pegaprox.core.db import get_db
+    try:
+        stored = get_db().get_user(username)
+    except Exception:
+        stored = None
+    if not stored:
+        return None
+    u = dict(stored)
+    u['username'] = username
+    _eff = request.session.get('effective_role') if getattr(request, 'session', None) else None
+    if _eff:
+        u['effective_role'] = _eff
+    return u
+
+
 @bp.route('/api/sse/token', methods=['POST'])
 @require_auth()
 def get_sse_token():
     """Get SSE token for URL param auth"""
     user = request.session.get('user', 'unknown')
-    users = load_users()
-    user_data = users.get(user, {})
+    user_data = _stream_identity(user)
+    if user_data is None:
+        return jsonify({'error': 'Unauthorized'}), 401
     allowed_clusters = get_user_clusters(user_data)
 
-    token = create_sse_token(user, allowed_clusters)
+    token = create_sse_token(user, allowed_clusters,
+                             user_data.get('effective_role', user_data.get('role')))
 
     return jsonify({
         'token': token,
@@ -227,6 +266,14 @@ def validate_ws_token_api():
             if not user.get('enabled', True):
                 logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is disabled")
                 return jsonify({'error': 'Account disabled'}), 401
+            # sec (audit): `user` is the OWNER's stored record, so every gate below read the
+            # owner's role. For an admin-owned but viewer-scoped API token that meant
+            # get_user_clusters returned None (= all clusters) and the node.shell check
+            # short-circuited on the admin bypass — a read-only CI token could open a root
+            # shell on any node. The token's own role is right here in `data`; floor by it.
+            # (check_cluster_access does the same inline from request.session; there is no
+            # session on this route, so the token role is the source.)
+            user = _floor_by_token_role(user, data.get('role'))
             allowed = get_user_clusters(user)
             access_ok = allowed is None or requested_cluster in allowed
             if not access_ok:
@@ -330,6 +377,7 @@ def sse_updates():
     user = None
     allowed_clusters = None
     auth_method = None
+    _token_role = None
 
     if sse_token:
         # Validate SSE token
@@ -337,6 +385,7 @@ def sse_updates():
         if token_data:
             user = token_data['user']
             allowed_clusters = token_data['allowed_clusters']
+            _token_role = token_data.get('effective_role')
             auth_method = 'token'
 
     # NS Mar 2026 - removed session_id fallback, token-only auth for SSE
@@ -368,9 +417,16 @@ def sse_updates():
     # `subscribed is None` does NOT mean admin: get_user_clusters() returns None for a default-tenant
     # scoped user too (rbac.py:347). Capture the real admin role ONCE here so the broadcast loop
     # filters those users' frames instead of leaking the full inventory. Fail-closed (unknown → filter).
+    # sec (audit): this read the STORED role, so an admin-owned but viewer-scoped API token was
+    # flagged is_admin and every per-VM filter in the broadcast loop was skipped for it —
+    # unfiltered 'resources', 'vm_config' (full guest configs incl. cloud-init) and 'tasks'.
+    # _stream_identity carries the floored role require_auth published.
     try:
-        from pegaprox.core.db import get_db as _gdb_role
-        _is_admin = ((_gdb_role().get_user(user) or {}).get('role') == ROLE_ADMIN)
+        _ident = _stream_identity(user)
+        # the token's minted role wins — this route has no session, so the stored role would
+        # hand an admin-owned scoped token the admin flag again
+        _eff = _token_role or (_ident or {}).get('effective_role') or (_ident or {}).get('role')
+        _is_admin = bool(_ident) and _eff == ROLE_ADMIN
     except Exception:
         _is_admin = False
 
@@ -430,8 +486,9 @@ def update_sse_subscription():
     username = request.session.get('user', 'unknown')
 
     # RBAC: what clusters is this user allowed to see?
-    users = load_users()
-    user_data = users.get(username, {})
+    user_data = _stream_identity(username)
+    if user_data is None:
+        return jsonify({'error': 'Unauthorized'}), 401
     allowed = get_user_clusters(user_data)  # None = admin
 
     # filter requested against allowed

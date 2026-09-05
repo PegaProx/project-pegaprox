@@ -21,6 +21,20 @@ from pegaprox.background.alerts import load_alerts_config, save_alerts_config
 bp = Blueprint('alerts', __name__)
 
 
+def _mask_channel(ch):
+    """Webhook URLs and tokens are bearer capabilities — never hand them back on a read or as
+    the echo of a write. Only GET ?full=1 (admin.settings) returns the raw values."""
+    c = dict(ch)
+    u = c.get('url') or ''
+    if len(u) > 32:
+        c['url'] = u[:24] + '…' + u[-6:]
+    elif u:
+        c['url'] = '********'
+    if c.get('token'):
+        c['token'] = '********'
+    return c
+
+
 def _alert_scoper(cluster_id):
     """sec (audit): the cluster-scoped alert reads sit behind check_cluster_access only, which by
     design admits pool-/ACL-scoped callers. Their rows name VMs (target_id / target_name) and carry
@@ -710,16 +724,7 @@ def list_alert_channels():
                               'admin.settings'):
             return jsonify({'error': 'Permission denied: admin.settings'}), 403
         return jsonify(channels)
-    masked = []
-    for ch in channels:
-        c = dict(ch)
-        u = c.get('url') or ''
-        if len(u) > 32:
-            c['url'] = u[:24] + '…' + u[-6:]
-        if c.get('token'):
-            c['token'] = '********'
-        masked.append(c)
-    return jsonify(masked)
+    return jsonify([_mask_channel(ch) for ch in channels])
 
 
 @bp.route('/api/alert-channels', methods=['POST'])
@@ -736,7 +741,7 @@ def create_alert_channel():
     settings['alert_webhooks'] = channels
     save_server_settings(settings)
     log_audit(request.session.get('user', 'admin'), 'alerts.channel_create', f"added webhook '{ch.get('name')}' ({ch.get('type')})")
-    return jsonify({'success': True, 'channel': ch})
+    return jsonify({'success': True, 'channel': _mask_channel(ch)})
 
 
 @bp.route('/api/alert-channels/<cid>', methods=['PUT'])
@@ -762,7 +767,7 @@ def update_alert_channel(cid):
         settings['alert_webhooks'] = channels
         save_server_settings(settings)
         log_audit(request.session.get('user', 'admin'), 'alerts.channel_update', f"updated webhook '{updated.get('name')}'")
-        return jsonify({'success': True, 'channel': updated})
+        return jsonify({'success': True, 'channel': _mask_channel(updated)})
     return jsonify({'error': 'channel not found'}), 404
 
 

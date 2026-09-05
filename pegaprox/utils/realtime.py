@@ -147,8 +147,13 @@ def broadcast_action(action: str, resource_type: str, resource_id: str, details:
     }, cluster_id)
 
 
-def create_sse_token(username: str, allowed_clusters: list) -> str:
-    """Create SSE token - avoids session ID in URL"""
+def create_sse_token(username: str, allowed_clusters: list, effective_role: str = None) -> str:
+    """Create SSE token - avoids session ID in URL
+
+    sec (audit): effective_role is captured at mint time because /api/sse/updates authenticates
+    on the token alone — it has no session to floor an API token's role from, and reading the
+    stored role there flagged an admin-owned viewer-scoped token as admin, which switched off
+    every per-VM filter in the broadcast loop."""
     token = base64.urlsafe_b64encode(os.urandom(24)).decode('utf-8')
     expires = time.time() + SSE_TOKEN_TTL
 
@@ -162,7 +167,8 @@ def create_sse_token(username: str, allowed_clusters: list) -> str:
         sse_tokens[token] = {
             'user': username,
             'expires': expires,
-            'allowed_clusters': allowed_clusters
+            'allowed_clusters': allowed_clusters,
+            'effective_role': effective_role,
         }
 
     return token
@@ -321,6 +327,82 @@ def _sse_user_has_perm(username, permission):
     return has_permission(user, permission)
 
 
+def _sse_stored_user(username):
+    """The acting user as a plain dict, fetched one row at a time. SSE runs in background threads
+    with no request context, so there is no session to build an identity from."""
+    if not username:
+        return None
+    from pegaprox.core.db import get_db
+    try:
+        stored = get_db().get_user(username)
+    except Exception:
+        return None
+    if not stored:
+        return None
+    user = dict(stored)
+    user['username'] = username
+    return user
+
+
+# sec (audit): the migration and DR progress frames carry a VM name, direction, target vmid and
+# free-text log lines, and every one of them was broadcast with no cluster and no target_clusters —
+# i.e. globally, to every SSE client in the install. Their REST twins are gated per-object
+# (_migration_reachable / _xhm_reachable / _authz_plan_vms), so the stream was a way around those
+# gates. Map each frame back to its underlying object and ask the same question.
+_SSE_OBJECT_FRAMES = ('xhm_migration', 'xhm_migration_log',
+                      'vmware_migration', 'vmware_migration_log', 'site_recovery')
+
+
+def _sse_may_see_object_frame(username, update_type, data):
+    """True if this client may see one of the _SSE_OBJECT_FRAMES. Fails closed: an unknown user, or
+    a frame naming an object we can no longer resolve, gets nothing (an admin short-circuits)."""
+    from pegaprox.models.permissions import ROLE_ADMIN
+    user = _sse_stored_user(username)
+    if not user:
+        return False
+    if user.get('role') == ROLE_ADMIN:
+        return True
+    data = data or {}
+    try:
+        if update_type.startswith('xhm_'):
+            from pegaprox.globals import _xhm_migrations
+            from pegaprox.utils.rbac import user_can_access_vm
+            t = _xhm_migrations.get(data.get('id'))
+            vmid, cid = getattr(t, 'source_vmid', None), getattr(t, 'source_cluster', None)
+            if t is None or not vmid or not cid:
+                return False
+            return user_can_access_vm(user, cid, int(vmid), 'vm.migrate')
+
+        if update_type.startswith('vmware_migration'):
+            # the live V2P registry is vmware.py's module-level dict; globals._v2p_migrations
+            # is a leftover that nothing writes to
+            from pegaprox.api.vmware import _vmware_migrations
+            from pegaprox.utils.rbac import user_can_access_vmware_vm
+            t = _vmware_migrations.get(data.get('id'))
+            vmw, vid = getattr(t, 'vmware_id', None), getattr(t, 'vm_id', None)
+            if t is None or not vmw or not vid:
+                return False
+            return user_can_access_vmware_vm(user, vmw, str(vid), 'vmware.vm.migrate')
+
+        # site_recovery: mirror _authz_plan_vms — every VM in the plan must be visible
+        from pegaprox.core.db import get_db
+        from pegaprox.utils.rbac import user_can_access_vm
+        db = get_db()
+        plan = db.query_one('SELECT source_cluster FROM site_recovery_plans WHERE id = ?',
+                            (data.get('plan_id'),))
+        if not plan:
+            return False
+        cid = dict(plan).get('source_cluster')
+        vms = db.query('SELECT vmid, vm_type FROM site_recovery_vms WHERE plan_id = ?',
+                       (data.get('plan_id'),)) or []
+        if not cid or not vms:
+            return False
+        return all(user_can_access_vm(user, cid, int(dict(v)['vmid']), 'vm.view',
+                                      dict(v).get('vm_type', 'qemu')) for v in vms)
+    except Exception:
+        return False
+
+
 def _filtered_tasks_frame(tasks, cluster_id, username, timestamp):
     """Per-VM-authorized 'tasks' frame for a non-admin client: keep only rows whose vmid the caller
     may view (task rows without a resolvable vmid — node/cluster tasks — are dropped for a scoped
@@ -417,6 +499,7 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         _cfg_access_cache = {}    # uname -> bool: may this user view THIS vm_config frame's vmid (audit M1)
         _tasks_frame_cache = {}   # uname -> per-VM-filtered 'tasks' frame (audit M1)
         _vmw_perm_cache = {}      # uname -> bool: holds the vmware.* perm the REST twin requires
+        _obj_frame_cache = {}     # uname -> bool: may see THIS migration/DR-plan frame (audit)
         with sse_clients_lock:
             for client_id, client_info in list(sse_clients.items()):
                 try:
@@ -476,7 +559,9 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                             if client_message is _SSE_FILTER_MISSING:
                                 client_message = _filtered_tasks_frame(data, cluster_id, uname, timestamp)
                                 _tasks_frame_cache[uname] = client_message
-                        elif update_type.startswith('vmware_') and not client_info.get('is_admin', False):
+                        elif (update_type.startswith('vmware_')
+                              and update_type not in _SSE_OBJECT_FRAMES
+                              and not client_info.get('is_admin', False)):
                             # audit — mirror the REST perm gate (vmware.vm.view / vmware.view) that
                             # the stream skipped entirely. Both are default viewer perms, so this
                             # only bites a custom role that deliberately withholds them.
@@ -487,6 +572,14 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                                 _ok_vmw = _sse_user_has_perm(uname, _need)
                                 _vmw_perm_cache[uname, _need] = _ok_vmw
                             if not _ok_vmw:
+                                continue
+                        elif update_type in _SSE_OBJECT_FRAMES and not client_info.get('is_admin', False):
+                            uname = client_info.get('user')
+                            _ok_obj = _obj_frame_cache.get(uname, _SSE_FILTER_MISSING)
+                            if _ok_obj is _SSE_FILTER_MISSING:
+                                _ok_obj = _sse_may_see_object_frame(uname, update_type, data)
+                                _obj_frame_cache[uname] = _ok_obj
+                            if not _ok_obj:
                                 continue
                         if client_message is None:
                             continue  # unknown user -> fail closed, send nothing

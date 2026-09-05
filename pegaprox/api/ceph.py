@@ -1195,6 +1195,22 @@ def list_mirror_images(cluster_id, pool):
             continue
         result.append({'name': img, 'mirroring': by_name.get(img)})
 
+    # sec (audit): PVE names RBD images vm-<vmid>-disk-N / base-<vmid>-disk-N, so this list is
+    # the cluster's whole guest inventory by another route — same leak class as /resources, and
+    # cluster.view is a default viewer perm. Confine a scoped caller to their own guests.
+    import re as _re
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.api.helpers import caller_is_scoped
+    _au = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        def _own(name):
+            m = _re.match(r'(?:base|vm)-(\d+)-disk', str(name))
+            if not m:
+                return False        # unattributable image → not for a confined caller
+            return user_can_access_vm(_au, cluster_id, int(m.group(1)), 'vm.view')
+        result = [r for r in result if _own(r['name'])]
+
     return jsonify({'images': result, 'pool': pool})
 
 

@@ -121,9 +121,12 @@ def get_reports_summary():
     period = request.args.get('period', 'day')
 
     # NS: Feb 2026 - tenant filtering for multi-tenant security
+    # sec (audit): was the raw stored record, so an admin-owned viewer-scoped token inherited the
+    # owner's admin reach and get_user_clusters returned None = every cluster. (top-vms in this
+    # same file already builds its identity correctly — these three were the stragglers.)
+    from pegaprox.utils.auth import build_authz_user
     usr = getattr(request, 'session', {}).get('user', 'system')
-    users_db = load_users()
-    user_data = users_db.get(usr, {})
+    user_data = build_authz_user(usr, getattr(request, 'session', {}) or {})
     accessible_clusters = get_user_clusters(user_data)  # None = admin (all clusters)
 
     history = load_metrics_history()
@@ -432,9 +435,12 @@ def get_reports_timeline():
     metric = request.args.get('metric', 'all')
 
     # NS: Feb 2026 - tenant filtering for multi-tenant security
+    # sec (audit): was the raw stored record, so an admin-owned viewer-scoped token inherited the
+    # owner's admin reach and get_user_clusters returned None = every cluster. (top-vms in this
+    # same file already builds its identity correctly — these three were the stragglers.)
+    from pegaprox.utils.auth import build_authz_user
     usr = getattr(request, 'session', {}).get('user', 'system')
-    users_db = load_users()
-    user_data = users_db.get(usr, {})
+    user_data = build_authz_user(usr, getattr(request, 'session', {}) or {})
     accessible_clusters = get_user_clusters(user_data)  # None = admin (all clusters)
 
     history = load_metrics_history()
@@ -518,9 +524,12 @@ def get_top_vms():
     limit = int(request.args.get('limit', 10))
 
     # NS: Feb 2026 - tenant filtering for multi-tenant security
+    # sec (audit): was the raw stored record, so an admin-owned viewer-scoped token inherited the
+    # owner's admin reach and get_user_clusters returned None = every cluster. (top-vms in this
+    # same file already builds its identity correctly — these three were the stragglers.)
+    from pegaprox.utils.auth import build_authz_user
     usr = getattr(request, 'session', {}).get('user', 'system')
-    users_db = load_users()
-    user_data = users_db.get(usr, {})
+    user_data = build_authz_user(usr, getattr(request, 'session', {}) or {})
     accessible_clusters = get_user_clusters(user_data)  # None = admin (all clusters)
 
     vms = []
@@ -583,6 +592,15 @@ def scan_all_nodes_cves(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # sec (audit): node.view is a default viewer perm and check_cluster_access admits a
+    # pool-/ACL-scoped caller by design — but this returns every node's kernel, pveversion,
+    # pending-reboot state and full CVE list (an unpatched-target map), and fans out one SSH
+    # session per node. There is no per-object notion for a node, so deny a confined caller.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import caller_is_scoped
+    if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id):
+        return jsonify({'error': 'Access denied to this cluster'}), 403
+
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -638,6 +656,15 @@ def scan_single_node_cves(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # sec (audit): node.view is a default viewer perm and check_cluster_access admits a
+    # pool-/ACL-scoped caller by design — but this returns every node's kernel, pveversion,
+    # pending-reboot state and full CVE list (an unpatched-target map), and fans out one SSH
+    # session per node. There is no per-object notion for a node, so deny a confined caller.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import caller_is_scoped
+    if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id):
+        return jsonify({'error': 'Access denied to this cluster'}), 403
+
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

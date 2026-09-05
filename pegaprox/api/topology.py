@@ -26,7 +26,7 @@ Returns:
 `kind`: cluster | node | bridge | bond | sdn_vnet | vm | ct
 """
 import logging
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
@@ -73,12 +73,21 @@ def topology(cluster_id):
 
     # NS Jul 2026 (pentest DoS) — building the topology fires one PVE /config roundtrip
     # per guest (O(N) at 1000+ VMs) and is reachable by any cluster.view holder. The
-    # diagram changes slowly, so serve a 30s per-cluster TTL cache to bound how often
-    # a low-priv caller can drive that N+1 (full coverage kept; only frequency bounded).
+    # diagram changes slowly, so serve a 30s TTL cache to bound how often a low-priv
+    # caller can drive that N+1 (full coverage kept; only frequency bounded).
+    # sec (audit): the cache used to hold the FINISHED payload, which is caller-dependent
+    # (scope_vm_rows below) — one shared slot on a process-global manager, so whoever built it
+    # first decided what everyone saw for the next 30s. An admin's build handed the full guest
+    # inventory to the next pool-scoped caller; a scoped caller's build truncated the admin's
+    # diagram. Cache only the caller-INDEPENDENT half — the per-guest /config lookups that are
+    # the actual N+1 — and assemble the graph per request, after scoping.
     import time as _t
-    _tc = getattr(mgr, '_topology_cache', None)
-    if _tc is not None and (_t.monotonic() - getattr(mgr, '_topology_cache_time', 0.0)) < 30.0:
-        return jsonify(_tc)
+    _now = _t.monotonic()
+    _cfg_cache = getattr(mgr, '_topology_cfg_cache', None)
+    if not isinstance(_cfg_cache, dict) or (_now - getattr(mgr, '_topology_cfg_time', 0.0)) >= 30.0:
+        _cfg_cache = {}
+        mgr._topology_cfg_cache = _cfg_cache
+        mgr._topology_cfg_time = _now
 
     nodes_out = []
     links_out = []
@@ -180,14 +189,21 @@ def topology(cluster_id):
                               'tags': r.get('tags') or '',
                           }})
 
-        # fetch VM config to get net0/net1/...
-        try:
-            cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{r['type']}/{vmid}/config"
-            cfg_resp = mgr._api_get(cfg_url)
-            cfg = cfg_resp.json().get('data') if cfg_resp and cfg_resp.status_code == 200 else {}
-        except Exception:
-            cfg = {}
-        for br_name in _vm_net_bridges(cfg):
+        # fetch VM config to get net0/net1/... — cached per guest for the TTL above, so a
+        # second caller within the window costs no PVE roundtrips
+        _ck = (r['type'], vmid)
+        if _ck in _cfg_cache:
+            _brs = _cfg_cache[_ck]
+        else:
+            try:
+                cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{r['type']}/{vmid}/config"
+                cfg_resp = mgr._api_get(cfg_url)
+                cfg = cfg_resp.json().get('data') if cfg_resp and cfg_resp.status_code == 200 else {}
+            except Exception:
+                cfg = {}
+            _brs = list(_vm_net_bridges(cfg))
+            _cfg_cache[_ck] = _brs
+        for br_name in _brs:
             # Try matching to a same-node bridge first; fall back to any node's
             br_target = f'br:{node}:{br_name}'
             if not any(n['id'] == br_target for n in nodes_out):
@@ -211,9 +227,4 @@ def topology(cluster_id):
             'cts': len([r for r in resources if r.get('type') == 'lxc']),
         },
     }
-    # NS Jul 2026 (pentest DoS) — cache the built payload per cluster (see TTL note
-    # at the top of the handler). Full coverage kept; only the frequency is bounded.
-    import time as _t
-    mgr._topology_cache = payload
-    mgr._topology_cache_time = _t.monotonic()
     return jsonify(payload)

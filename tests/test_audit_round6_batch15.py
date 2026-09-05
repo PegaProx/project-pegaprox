@@ -358,3 +358,87 @@ def test_metrics_rejects_a_demoted_admins_token(api, seed, monkeypatch):
     monkeypatch.setattr(mx, 'validate_api_token', lambda tok: {'user': 'demoted', 'role': 'admin'})
     r = api.anon().get('/api/metrics', headers={'Authorization': 'Bearer pgx_dummy'})
     assert r.status_code == 401, r.get_data(as_text=True)
+
+
+# ── migration / DR progress frames were broadcast globally, around the REST gates ──
+import json as _json
+import queue as _queue
+
+
+def _register_sse(user, is_admin, clusters=None):
+    q = _queue.Queue()
+    cid = f'test-sse-{user}'
+    with ppglobals.sse_clients_lock:
+        ppglobals.sse_clients[cid] = {
+            'queue': q, 'user': user, 'clusters': clusters, 'is_admin': is_admin,
+            'connected_at': 'x', 'auth_method': 'test',
+        }
+    return q, cid
+
+
+def _drain_sse(q):
+    out = []
+    try:
+        while True:
+            out.append(_json.loads(q.get_nowait()))
+    except _queue.Empty:
+        pass
+    return out
+
+
+def test_xhm_frame_not_broadcast_to_everyone(api, seed, db):
+    from pegaprox.utils.realtime import broadcast_sse
+    # the stream mirrors the REST gate exactly: _xhm_reachable asks for vm.migrate, so this
+    # pool grant carries it — otherwise she legitimately can't see the migration either way
+    seed.tenant('tenant_x', clusters=['cluster_1'])
+    seed.user('mallory11', role='viewer', tenant_id='tenant_x', permissions=['cluster.view'])
+    seed.pool('cluster_1', 'pool_1', 'mallory11', ['pool.view', 'vm.view', 'vm.migrate'])
+    _seed_pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    seed.user('rootsse', role='admin', tenant_id='acme')
+    _cluster(api)
+    ppglobals._xhm_migrations['x1'] = types.SimpleNamespace(
+        source_cluster='cluster_1', source_vmid=300, vm_name='finance-db')
+    mq, mcid = _register_sse('mallory11', False, ['cluster_1'])
+    aq, acid = _register_sse('rootsse', True)
+    try:
+        broadcast_sse('xhm_migration', {'id': 'x1', 'vm_name': 'finance-db', 'phase': 'copy'})
+        assert _drain_sse(mq) == [], "a pool user must not see a foreign VM's migration frame"
+        assert len(_drain_sse(aq)) == 1, "admin still sees it"
+        # ...and their own VM's migration still reaches them
+        ppglobals._xhm_migrations['x2'] = types.SimpleNamespace(
+            source_cluster='cluster_1', source_vmid=100, vm_name='mine')
+        broadcast_sse('xhm_migration', {'id': 'x2', 'vm_name': 'mine', 'phase': 'copy'})
+        assert len(_drain_sse(mq)) == 1
+    finally:
+        ppglobals._xhm_migrations.pop('x1', None)
+        ppglobals._xhm_migrations.pop('x2', None)
+        with ppglobals.sse_clients_lock:
+            ppglobals.sse_clients.pop(mcid, None)
+            ppglobals.sse_clients.pop(acid, None)
+
+
+def test_site_recovery_frame_not_broadcast_to_everyone(api, seed, db):
+    from pegaprox.utils.realtime import broadcast_sse
+    u = _pool_user(seed, 'mallory12')
+    _cluster(api)
+    _seed_plan(db, 'plan_sse', vmids=(200,))
+    mq, mcid = _register_sse('mallory12', False, ['cluster_1'])
+    try:
+        broadcast_sse('site_recovery', {'plan_id': 'plan_sse', 'message': 'failing over prod-db'})
+        assert _drain_sse(mq) == [], "DR progress for a plan they can't open must not reach them"
+    finally:
+        with ppglobals.sse_clients_lock:
+            ppglobals.sse_clients.pop(mcid, None)
+
+
+def test_unresolvable_migration_frame_fails_closed(api, seed):
+    from pegaprox.utils.realtime import broadcast_sse
+    _pool_user(seed, 'mallory13')
+    _cluster(api)
+    mq, mcid = _register_sse('mallory13', False, ['cluster_1'])
+    try:
+        broadcast_sse('vmware_migration_log', {'id': 'gone', 'line': 'esxi-host-01 datastore ds1'})
+        assert _drain_sse(mq) == [], "a frame we cannot resolve must not be delivered to a non-admin"
+    finally:
+        with ppglobals.sse_clients_lock:
+            ppglobals.sse_clients.pop(mcid, None)

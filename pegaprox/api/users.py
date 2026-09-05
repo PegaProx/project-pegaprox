@@ -1021,8 +1021,12 @@ def update_user(username):
     if _password_changed:
         from pegaprox.utils.auth import invalidate_all_user_sessions
         invalidate_all_user_sessions(username)
+        # sec (audit): the dedicated reset route revokes API tokens too; this one didn't, so an
+        # exfiltrated pgx_ token survived the standard "lock the intruder out" action for up to a year.
+        _revoked = revoke_user_api_tokens(username)
         log_audit(request.session['user'], 'user.sessions_invalidated',
-                  f"Invalidated sessions after password change for {username}")
+                  f"Invalidated sessions after password change for {username} "
+                  f"({_revoked} API token(s) revoked)")
 
     # NS Aug 2026 (audit) — disabling an account must immediately drop its live sessions (root cause
     # of the "disabled operator keeps node-shell" gap); the enabled recheck added to the WS-auth

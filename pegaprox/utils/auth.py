@@ -1023,6 +1023,12 @@ def require_auth(roles: list = None, perms: list = None):
                         return jsonify({'error': 'Permission denied', 'code': 'MISSING_PERMISSION', 'required': p}), 403
             
             # Add session info to request context
+            # sec (audit): publish the floored role here. Several routes gate on
+            # `session.get('effective_role', session.get('role'))` — for token auth session['role']
+            # is deliberately left at the token's declared value (audit/logging), so without this
+            # every one of those guards read a stale role and silently did nothing. fresh_role is
+            # already min(token, owner) for tokens and the DB-refreshed role for sessions.
+            session = {**session, 'effective_role': fresh_role}
             request.session = session
             
             return f(*args, **kwargs)

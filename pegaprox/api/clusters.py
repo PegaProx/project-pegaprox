@@ -1680,8 +1680,10 @@ def get_migration_log(cluster_id):
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
-    return jsonify(cluster_managers[cluster_id].last_migration_log)
+
+    # sec (audit): rows are per-VM ({vm, vmid, from_node, to_node, success}) and vm.view is a
+    # default viewer perm — the sibling /tasks route right below was scoped, this one wasn't.
+    return jsonify(scope_vm_rows(cluster_id, cluster_managers[cluster_id].last_migration_log or []))
 
 
 @bp.route('/api/clusters/<cluster_id>/tasks', methods=['GET'])

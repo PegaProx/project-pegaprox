@@ -11,7 +11,7 @@ from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
-from pegaprox.api.helpers import check_cluster_access
+from pegaprox.api.helpers import check_cluster_access, caller_is_scoped
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
     _run_xcpng_to_pve, _run_pve_to_xcpng,
@@ -55,6 +55,11 @@ def xhm_plan():
     
     if not user_can_access_vm(user, source_cluster, vmid_int, 'vm.migrate'):
         return jsonify({'error': 'Access denied to source VM'}), 403
+    # sec (audit): the target got check_cluster_access only — which admits a pool-/ACL-scoped
+    # caller — yet this creates a BRAND-NEW guest there on a caller-chosen node and storage.
+    # A new vmid matches no per-object grant, so confinement is the right question to ask.
+    if caller_is_scoped(user, target_cluster):
+        return jsonify({'error': 'Access denied to target cluster'}), 403
 
     # auto-detect direction from cluster types
     src_mgr = cluster_managers.get(source_cluster)
@@ -125,6 +130,8 @@ def xhm_start():
     
     if not user_can_access_vm(user, data['source_cluster'], vmid_int, 'vm.migrate'):
         return jsonify({'error': 'Access denied to source VM'}), 403
+    if caller_is_scoped(user, data['target_cluster']):
+        return jsonify({'error': 'Access denied to target cluster'}), 403
 
     src_mgr = cluster_managers.get(data['source_cluster'])
     tgt_mgr = cluster_managers.get(data['target_cluster'])
