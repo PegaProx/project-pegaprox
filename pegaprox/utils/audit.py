@@ -225,7 +225,20 @@ def get_client_ip():
     if _is_trusted_proxy(request.remote_addr):
         xff = request.headers.get('X-Forwarded-For')
         if xff:
-            return _canonical_ip(xff.split(',')[0].strip())
+            # sec (audit): the LEFTMOST entry is whatever the client sent — a proxy APPENDS the
+            # peer it saw, so `X-Forwarded-For: 1.2.3.4` from the client arrives as
+            # "1.2.3.4, <real ip>". Taking [0] let any user behind the proxy choose their own
+            # source address, which is the key for the login-lockout buckets, the auth-action
+            # rate limiter, the IP allow/deny list and every audit line.
+            # Walk from the RIGHT instead and take the first hop we did not put there
+            # ourselves. A replacing proxy (single entry) and an appending one both land on
+            # the real client.
+            _hops = [p.strip() for p in xff.split(',') if p.strip()]
+            for _cand in reversed(_hops):
+                if not _is_trusted_proxy(_cand):
+                    return _canonical_ip(_cand)
+            # every hop is one of our own proxies — the peer is as close as we get
+            return _canonical_ip(request.remote_addr)
         xri = request.headers.get('X-Real-IP')
         if xri:
             return _canonical_ip(xri.strip())

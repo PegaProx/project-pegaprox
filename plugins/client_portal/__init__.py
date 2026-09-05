@@ -57,8 +57,12 @@ def _get_my_vms():
     if not username:
         return {'error': 'Not authenticated'}, 401
 
-    users = load_users()
-    user = users.get(username, {})
+    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
+    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
+    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
+    # does this (and says why); these siblings were missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user = _bau(username, request.session)
     user['username'] = username
 
     # don't let admins use the portal — redirect them
@@ -238,8 +242,12 @@ def _vm_power():
 def _vm_console():
     """Get VNC console ticket + WS token for embedded noVNC"""
     username = request.session.get('user', '')
-    users = load_users()
-    user = users.get(username, {})
+    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
+    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
+    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
+    # does this (and says why); these siblings were missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user = _bau(username, request.session)
     user['username'] = username
     cfg = _load_config()
 
@@ -268,7 +276,11 @@ def _vm_console():
         result = mgr.get_vnc_ticket(vm.get('node'), int(vmid), vm.get('type', 'qemu'))
         if result.get('success'):
             from pegaprox.utils.realtime import create_ws_token
-            ws_token = create_ws_token(username, user.get('role', 'viewer'))
+            # sec (audit): mint at the caller's EFFECTIVE role. Using the stored role handed an
+            # admin-owned viewer token a ws_token stamped 'admin', and the ws-token validate path
+            # floors its gates by exactly that stamp — so the ceiling was defeated at the source.
+            ws_token = create_ws_token(username,
+                                       user.get('effective_role', user.get('role', 'viewer')))
             result['ws_token'] = ws_token
             from pegaprox.utils.audit import log_audit
             log_audit(username, 'vm.console', f'Portal: VNC console opened for VM {vmid}', cluster=mgr.config.name)
@@ -281,8 +293,12 @@ def _vm_console():
 def _vm_snapshots():
     """List or create snapshots for a VM"""
     username = request.session.get('user', '')
-    users = load_users()
-    user = users.get(username, {})
+    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
+    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
+    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
+    # does this (and says why); these siblings were missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user = _bau(username, request.session)
     user['username'] = username
     cfg = _load_config()
 
@@ -363,8 +379,12 @@ def _vm_snapshots():
 def _vm_snapshot_rollback():
     """Rollback VM to a snapshot"""
     username = request.session.get('user', '')
-    users = load_users()
-    user = users.get(username, {})
+    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
+    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
+    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
+    # does this (and says why); these siblings were missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user = _bau(username, request.session)
     user['username'] = username
     cfg = _load_config()
 
@@ -409,8 +429,12 @@ def _vm_snapshot_rollback():
 def _vm_snapshot_delete():
     """Delete a snapshot"""
     username = request.session.get('user', '')
-    users = load_users()
-    user = users.get(username, {})
+    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
+    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
+    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
+    # does this (and says why); these siblings were missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user = _bau(username, request.session)
     user['username'] = username
     cfg = _load_config()
 
@@ -470,8 +494,12 @@ def _change_password():
         return {'error': 'Current and new password required'}
 
     from pegaprox.utils.auth import verify_password, hash_password, save_users
-    users = load_users()
-    user = users.get(username, {})
+    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
+    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
+    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
+    # does this (and says why); these siblings were missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user = _bau(username, request.session)
 
     if user.get('auth_source', 'local') != 'local':
         return {'error': 'Password managed by external provider'}
@@ -634,8 +662,12 @@ def _portal_snapshot_policies():
     caller has access to (via VM-ACL / pool / tenant). NS May 2026."""
     from pegaprox.core.db import get_db
     username = request.session.get('user', '')
-    users = load_users()
-    user = users.get(username, {})
+    # sec (audit): build_authz_user, not a raw load_users() lookup — the raw record carries no
+    # effective_role, so an admin-owned but viewer-scoped API token reaches user_can_access_vm
+    # with its OWNER's admin role and the per-VM gate short-circuits. _ct_create_options already
+    # does this (and says why); these siblings were missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user = _bau(username, request.session)
     user['username'] = username
 
     # collect (cluster_id, vmid, tags) the caller can reach via _get_my_vms logic

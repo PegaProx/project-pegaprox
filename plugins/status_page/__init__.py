@@ -53,12 +53,14 @@ def _check_key():
 
 def _require_admin():
     """Check if current user is admin — returns error tuple or None"""
-    from pegaprox.utils.auth import load_users
+    # sec (audit): the STORED role, so an admin-owned but viewer-scoped API token passed this
+    # admin check with its owner's rights. build_authz_user carries the token-floored
+    # effective_role, which is what every gate in the core uses.
+    from pegaprox.utils.auth import build_authz_user
     from pegaprox.models.permissions import ROLE_ADMIN
     username = request.session.get('user', '')
-    users = load_users()
-    user = users.get(username, {})
-    if user.get('role') != ROLE_ADMIN:
+    user = build_authz_user(username, request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         return {'error': 'Admin access required'}, 403
     return None
 

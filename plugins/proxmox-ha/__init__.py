@@ -172,9 +172,13 @@ def ha_handler():
     method = request.method
 
     # ---- RBAC --------------------------------------------------------------
-    _users_db = load_users()
-    _current_user = _users_db.get(request.session.get('user'), {})
+    # sec (audit): the raw stored record carries no effective_role, so an admin-owned but
+    # viewer-scoped API token reached has_permission with its owner's admin role. The per-SID
+    # gate below already builds the identity correctly; this one drives the ha.view/ha.config
+    # decision and was missed.
+    from pegaprox.utils.auth import build_authz_user as _bau
     _username = request.session.get('user', 'system')
+    _current_user = _bau(request.session.get('user', ''), request.session)
 
     # Permission constants — aligned with the built-in HA resources API:
     #   GET  uses ha.view   (read-only, unchanged)

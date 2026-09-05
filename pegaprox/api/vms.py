@@ -7588,7 +7588,21 @@ def get_cross_cluster_replications():
         d = dict(r)
         if allowed is None or d.get('source_cluster') in allowed or d.get('target_cluster') in allowed:
             out.append(d)
+    # sec (audit): rows are per-VM, so cluster reach alone showed a scoped caller every
+    # co-tenant's replication job. Each row names its own source cluster, so the confinement
+    # question is asked per row rather than once for the request.
+    out = [d for d in out
+           if not caller_is_scoped(user, d.get('source_cluster') or '')
+           or _xcrepl_row_visible(user, d)]
     return jsonify(out)
+
+
+def _xcrepl_row_visible(user, row):
+    """A cross-cluster replication row names a guest; a confined caller only sees their own."""
+    try:
+        return user_can_access_vm(user, row.get('source_cluster') or '', int(row.get('vmid')), 'vm.view')
+    except (TypeError, ValueError):
+        return False
 
 
 @bp.route('/api/cross-cluster-replications', methods=['POST'])
@@ -7618,6 +7632,19 @@ def create_cross_cluster_replication():
         ok, err = check_cluster_access(_cid)
         if not ok:
             return err
+
+    # sec (audit): both clusters were gated for REACH, the vmid for nothing — so a scoped
+    # cluster.config holder could author a job that has the worker snapshot and clone a
+    # co-tenant's VM into a cluster they control. The XHM twin (api/xhm.py) gates the source
+    # guest and confines the target; do the same here, since this moves guest data off-cluster.
+    _xu = build_authz_user(request.session.get('user', ''), request.session)
+    try:
+        if not user_can_access_vm(_xu, source_cluster, int(vmid), 'vm.migrate'):
+            return jsonify({'error': 'Access denied to the source VM'}), 403
+    except (TypeError, ValueError):
+        return jsonify({'error': 'vmid must be a number'}), 400
+    if caller_is_scoped(_xu, target_cluster):
+        return jsonify({'error': 'Access denied to the target cluster'}), 403
 
     # NS: Mar 2026 - same-cluster snapshot replication for non-ZFS (Issue #103)
     # target_node required when source == target cluster
