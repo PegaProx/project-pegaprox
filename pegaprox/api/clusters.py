@@ -18,6 +18,7 @@ from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117
 from pegaprox.utils.rbac import (
+    invalidate_tenants_cache,
     has_permission, get_user_clusters, filter_clusters_for_user,
     user_can_access_vm, invalidate_pool_cache, get_vm_acls,
 )
@@ -623,6 +624,9 @@ def delete_cluster(cluster_id):
                     _changed = True
             if _changed:
                 save_tenants(_tenants)
+                # sec (audit): drop the rbac tenant cache, else a cluster removed from a tenant
+                # stays reachable for its users until the process restarts
+                invalidate_tenants_cache()
                 _rbac.tenants_db = {}   # invalidate the process cache so get_user_clusters reloads
         except Exception as _te:
             logging.error(f"Failed to prune deleted cluster {cluster_id} from tenants: {_te}")

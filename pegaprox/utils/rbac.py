@@ -309,6 +309,16 @@ def get_user_effective_role(user: dict, tenant_id: str = None) -> str:
         return tenant_perms[tenant_id].get('role', user.get('role', ROLE_VIEWER))
     return user.get('role', ROLE_VIEWER)
 
+def invalidate_tenants_cache():
+    """sec (audit): tenants_db is the cache get_user_clusters reads, and it was only ever
+    populated (`if not tenants_db`) — never invalidated. So removing a cluster from a tenant
+    did not revoke anything until the process restarted; the tenant's users kept working.
+    costs.py already reloaded it inline for exactly this reason. Call this after every
+    tenant write."""
+    global tenants_db
+    tenants_db = {}
+
+
 def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     """Get list of cluster IDs user can access based on tenant
     
@@ -1031,7 +1041,13 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
         _mgr = vmware_managers.get(vmware_id)
         _linked = (getattr(_mgr, 'linked_clusters', None) or []) if _mgr else []
         if _linked:
-            _uc = get_user_clusters(user)   # None => all clusters (admin/default-tenant)
+            # sec (audit): include_pools=False. A Proxmox POOL grant says nothing about the ESXi
+            # guests on a server that happens to be linked to that cluster — but the default
+            # (include_pools=True) let a pool-scoped caller through this gate, and the scope-wins
+            # guard below only confines callers who hold a vmware:<id> ACL. So a pool grant on one
+            # Proxmox cluster widened into every VM on a linked ESXi server. Tenant ownership is
+            # the right question here.
+            _uc = get_user_clusters(user, include_pools=False)   # None => all (admin/default tenant)
             if _uc is not None and not any(c in _uc for c in _linked):
                 logging.debug(f"[VMWARE-ACL] {username} cannot reach any linked cluster of {vmware_id} → deny {permission}")
                 return False

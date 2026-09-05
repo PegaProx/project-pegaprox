@@ -581,8 +581,17 @@ def _mount_iso():
         return {'error': 'cluster_id, vmid, iso required'}, 400
 
     # check VM access
-    if not user_can_access_vm(username, cluster_id, vmid):
-        return {'error': 'Access denied'}, 403
+    # fix (audit): user_can_access_vm takes the user DICT — passing the username string made
+    # its first `user.get(...)` raise AttributeError, so mounting an ISO from the portal has
+    # always 500'd. Build the identity the same way every other handler here does, and gate on
+    # vm.config: attaching a CD-ROM is a config change, not a read.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _iso_user = _bau(username, request.session)
+    try:
+        if not user_can_access_vm(_iso_user, cluster_id, int(vmid), 'vm.config'):
+            return {'error': 'Access denied'}, 403
+    except (TypeError, ValueError):
+        return {'error': 'vmid must be a number'}, 400
 
     # MK: security audit — verify ISO is in explicit allowed list or allowed storage
     cfg = _load_config()
@@ -632,8 +641,14 @@ def _unmount_iso():
 
     if not all([cluster_id, vmid]):
         return {'error': 'cluster_id, vmid required'}, 400
-    if not user_can_access_vm(username, cluster_id, vmid):
-        return {'error': 'Access denied'}, 403
+    # same defect as _mount_iso — a username string where a user dict belongs
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _iso_user = _bau(username, request.session)
+    try:
+        if not user_can_access_vm(_iso_user, cluster_id, int(vmid), 'vm.config'):
+            return {'error': 'Access denied'}, 403
+    except (TypeError, ValueError):
+        return {'error': 'vmid must be a number'}, 400
 
     mgr = cluster_managers.get(cluster_id)
     if not mgr or not mgr.is_connected:

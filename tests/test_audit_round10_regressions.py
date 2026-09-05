@@ -396,3 +396,74 @@ def test_key_rotation_keeps_ha_settings_readable(db):
     after = db.get_cluster('c-rot')          # raises if ha_settings kept the old key
     assert after['ha_settings']['pegaprox_vmid'] == '101', after['ha_settings']
     assert after['pass'] == 'pw', "the other secrets must still round-trip too"
+
+
+# ── revoking a cluster from a tenant did not revoke anything ────────────────
+def test_removing_a_cluster_from_a_tenant_takes_effect_immediately(api, seed):
+    """rbac.tenants_db is the cache get_user_clusters reads and was only ever populated,
+    never invalidated — so a revoked cluster stayed reachable until the process restarted."""
+    import pegaprox.utils.rbac as rbacmod
+    seed.tenant('acme', clusters=['cluster_1', 'cluster_2'])
+    admin = seed.user('rootinv', role='admin', tenant_id='acme')
+    u = {'username': 'member', 'role': 'user', 'tenant_id': 'acme'}
+    # warm the cache the way a real request would
+    assert 'cluster_2' in (rbacmod.get_user_clusters(u) or [])
+    api.as_user(admin).put('/api/tenants/acme',
+                           json={'name': 'acme', 'clusters': ['cluster_1']})
+    assert 'cluster_2' not in (rbacmod.get_user_clusters(u) or []), \
+        "the revoked cluster is still reachable"
+
+
+# ── the portal ISO handlers were permanently broken ─────────────────────────
+def test_portal_iso_handlers_pass_a_user_dict():
+    """user_can_access_vm takes the user DICT; both ISO handlers passed the username string,
+    so its first user.get(...) raised AttributeError and the routes always 500'd."""
+    src = open('plugins/client_portal/__init__.py').read()
+    assert 'user_can_access_vm(username,' not in src, \
+        "a portal handler still passes the username string where a dict belongs"
+
+
+# ── a Proxmox pool grant must not widen into a linked ESXi server ───────────
+def test_pool_grant_does_not_widen_into_esxi(api, seed):
+    """The VMware tenant gate called get_user_clusters with the default include_pools=True, so
+    a Proxmox pool grant on a cluster satisfied it — and the scope-wins guard below only
+    confines callers holding a vmware:<id> ACL. A pool on one Proxmox cluster therefore reached
+    every guest on any ESXi server linked to it."""
+    from unittest.mock import MagicMock
+    import pegaprox.globals as g
+    from pegaprox.utils.rbac import user_can_access_vmware_vm
+    seed.tenant('tenant_x', clusters=[])          # tenant owns NO cluster
+    u = seed.user('poolonly', role='user', tenant_id='tenant_x',
+                  permissions=['vmware.vm.view'])
+    seed.pool('cluster_1', 'pool_1', 'poolonly', ['pool.view', 'vm.view'])
+    _pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    vm = MagicMock()
+    vm.linked_clusters = ['cluster_1']
+    g.vmware_managers['esxi-x'] = vm
+    try:
+        assert user_can_access_vmware_vm(u, 'esxi-x', 'vm-999', 'vmware.vm.view') is False
+    finally:
+        g.vmware_managers.pop('esxi-x', None)
+
+
+# ── auth handlers rewrote the whole user table from a stale snapshot ───────
+def test_auth_handlers_write_a_single_row():
+    """Each handler did users_db = load_users(); mutate one entry; save_users(users_db). Two
+    concurrent requests each hold a snapshot from before the other's write, so the second save
+    silently reverts the first."""
+    src = open('pegaprox/api/auth.py').read()
+    assert 'save_users(users_db)' not in src, \
+        "an auth handler still rewrites the whole user table from its own snapshot"
+    assert src.count('save_single_user(username, user)') >= 5
+
+
+def test_save_single_user_persists_only_that_account(db, seed):
+    from pegaprox.utils.auth import save_single_user, load_users
+    seed.user('alice', role='user', tenant_id='default')
+    seed.user('bob', role='user', tenant_id='default')
+    a = load_users()['alice']
+    a['display_name'] = 'Alice A'
+    save_single_user('alice', a)
+    after = load_users()
+    assert after['alice']['display_name'] == 'Alice A'
+    assert 'bob' in after, "the sibling account must be untouched"

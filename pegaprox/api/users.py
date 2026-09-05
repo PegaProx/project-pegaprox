@@ -23,6 +23,7 @@ from pegaprox.utils.auth import (
 )
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import (
+    invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
     get_role_permissions_for_user, load_tenants, save_tenants,
     get_user_permissions, has_permission, get_user_effective_role,
@@ -1265,6 +1266,12 @@ def create_tenant():
     }
     
     save_tenants(tenants_db)
+    
+    # sec (audit): drop the rbac tenant cache, else a cluster removed from a tenant
+    
+    # stays reachable for its users until the process restarts
+    
+    invalidate_tenants_cache()
     log_audit(request.session['user'], 'tenant.created', f"Created tenant: {name} (id={tid})")
     
     return jsonify({'success': True, 'tenant': tenants_db[tid]})
@@ -1314,6 +1321,12 @@ def update_tenant(tenant_id):
         tenants_db[tenant_id]['quota_enforcement'] = data['quota_enforcement'] or 'block'
 
     save_tenants(tenants_db)
+
+    # sec (audit): drop the rbac tenant cache, else a cluster removed from a tenant
+
+    # stays reachable for its users until the process restarts
+
+    invalidate_tenants_cache()
     log_audit(request.session['user'], 'tenant.updated', f"Updated tenant: {tenant_id}")
     
     return jsonify({'success': True, 'tenant': tenants_db[tenant_id]})
@@ -1364,10 +1377,11 @@ def delete_tenant(tenant_id):
         logging.error(f"Error deleting tenant from database: {e}")
         return jsonify({'error': 'Database error'}), 500
     
-    # Update cache
+    # Update cache — this module's copy AND rbac's, which is the one get_user_clusters reads
     if tenant_id in tenants_db:
         del tenants_db[tenant_id]
-    
+    invalidate_tenants_cache()
+
     log_audit(request.session['user'], 'tenant.deleted', f"Deleted tenant: {tenant_id}")
     
     return jsonify({'success': True})

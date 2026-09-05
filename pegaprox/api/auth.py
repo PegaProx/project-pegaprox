@@ -17,7 +17,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import (
     hash_password, verify_password, needs_password_rehash,
-    validate_password_policy, load_users, save_users,
+    validate_password_policy, load_users, save_users, save_single_user,
     create_initial_admin, is_initialized,
     create_session, validate_session, invalidate_session,
     invalidate_all_user_sessions, cleanup_expired_sessions,
@@ -827,7 +827,7 @@ def auth_login():
             new_salt, new_hash = hash_password(password)
             user['password_salt'] = new_salt
             user['password_hash'] = new_hash
-            save_users(users_db)
+            save_single_user(username, user)
             logging.info(f"Migrated password for user '{username}' to Argon2id (Military Grade)")
         except Exception as e:
             logging.warning(f"Failed to migrate password for {username}: {e}")
@@ -838,7 +838,7 @@ def auth_login():
     
     # Update last login
     user['last_login'] = datetime.now().isoformat()
-    save_users(users_db)
+    save_single_user(username, user)
     
     logging.info(f"User '{username}' logged in successfully")
     log_audit(username, 'user.login', f"User logged in" + (" (with 2FA)" if user.get('totp_enabled') else ""))
@@ -1533,7 +1533,7 @@ def auth_change_password():
         user['is_default'] = False
         mark_admin_initialized()
 
-    save_users(users_db)
+    save_single_user(username, user)
     
     # NS 2026-04-24 — security audit finding #1: invalidate ALL sessions including the
     # caller's current one. If a stolen cookie is the one changing the password, we don't
@@ -1591,7 +1591,7 @@ def setup_2fa():
     
     # Store pending secret (not activated yet)
     user['totp_pending_secret'] = secret
-    save_users(users_db)
+    save_single_user(username, user)
     logging.info(f"2FA setup: saved pending secret for user {username}")  # MK: Debug
     
     # Generate provisioning URI
@@ -1661,7 +1661,7 @@ def verify_2fa_setup():
     user['totp_secret'] = pending_secret
     user['totp_enabled'] = True
     del user['totp_pending_secret']
-    save_users(users_db)
+    save_single_user(username, user)
     
     logging.info(f"User '{username}' enabled 2FA")
     log_audit(username, '2fa.enabled', "User enabled 2FA")
@@ -1712,7 +1712,7 @@ def disable_2fa():
     user['totp_enabled'] = False
     user.pop('totp_secret', None)
     user.pop('totp_pending_secret', None)
-    save_users(users_db)
+    save_single_user(username, user)
     
     logging.info(f"User '{username}' disabled 2FA")
     log_audit(username, '2fa.disabled', "User disabled 2FA")

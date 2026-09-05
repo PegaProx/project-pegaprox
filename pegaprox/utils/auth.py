@@ -398,6 +398,22 @@ def _load_users_legacy() -> dict:
     return {}
 
 
+def save_single_user(username: str, data: dict):
+    """Persist ONE account.
+
+    sec/correctness (audit): every auth handler did `users_db = load_users()` (a full snapshot),
+    mutated one entry and then `save_users(users_db)` — writing the whole table back. Two
+    concurrent requests each hold a snapshot taken before the other's write, so the second
+    save silently reverts the first: a password change can undo a role change, a 2FA enrolment
+    can undo an account creation. Under gevent the password hashing in between is a generous
+    window. Handlers that touch a single account use this instead.
+    """
+    try:
+        get_db().save_user(username, data)
+    except Exception as e:
+        logging.error(f"save failed for '{username}': {e}")
+
+
 def save_users(users: dict):
     """save users to db"""
     try:
