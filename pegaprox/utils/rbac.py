@@ -254,7 +254,10 @@ def get_user_permissions(user: dict, tenant_id: str = None) -> list:
         tp = tenant_perms[tenant_id]
         role = tp.get('role', user.get('role', ROLE_VIEWER))
         extra = tp.get('extra', [])
-        denied = tp.get('denied', [])
+        # sec (audit): the user's GLOBAL denies were dropped entirely in this branch, so an
+        # explicit deny stopped applying the moment the user gained a tenant override — a
+        # silent un-deny. They compose; a tenant override may add, never un-forbid.
+        denied = list(tp.get('denied', []) or []) + list(user.get('denied_permissions', []) or [])
     else:
         # use global user settings — effective_role wins when set (API-token scoping)
         role = user.get('effective_role', user.get('role', ROLE_VIEWER))
@@ -271,7 +274,17 @@ def get_user_permissions(user: dict, tenant_id: str = None) -> list:
     
     # remove denied
     base_perms = [p for p in base_perms if p not in denied]
-    
+
+    # sec (audit): an API token must never out-grant its own role — but the tenant-override
+    # branch above reads tp['role'] and never looked at effective_role, so an admin-owned
+    # viewer-scoped token inherited the full tenant role wherever the owner had an override.
+    # Cap the result by what the token's own role grants. Unset for session auth, so this is
+    # a no-op there; an admin effective_role caps to everything, i.e. also a no-op.
+    _eff = user.get('effective_role')
+    if _eff and _eff != role:
+        _cap = set(get_role_permissions_for_user({'role': _eff}, tenant_id))
+        base_perms = [p for p in base_perms if p in _cap]
+
     return base_perms
 
 def has_permission(user: dict, permission: str, tenant_id: str = None) -> bool:

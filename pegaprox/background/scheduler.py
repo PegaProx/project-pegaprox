@@ -31,13 +31,34 @@ def load_scheduled_tasks():
         
         tasks = []
         for row in cursor.fetchall():
+            # the schedule fields go in as a JSON blob and used to come back as the raw
+            # string, so _calc_next_run fell through to its defaults ('daily' 02:00) for every
+            # task on every restart. Unpack both blobs here.
+            try:
+                _sched = json.loads(row['schedule'] or '{}')
+            except (TypeError, ValueError):
+                _sched = {}
+            try:
+                _blob = json.loads(row['config'] or '{}')
+            except (TypeError, ValueError):
+                _blob = {}
+            # rows written before this fix hold the bare config dict and carry the action in
+            # the task_type column — keep reading those correctly
+            _new_shape = isinstance(_blob, dict) and 'action' in _blob
             tasks.append({
                 'id': row['id'],
                 'cluster_id': row['cluster_id'],
                 'name': row['name'],
                 'task_type': row['task_type'],
                 'schedule': row['schedule'],
-                'config': json.loads(row['config'] or '{}'),
+                'schedule_type': _sched.get('schedule_type', 'daily'),
+                'schedule_time': _sched.get('schedule_time', '02:00'),
+                'schedule_day': _sched.get('schedule_day', 0),
+                'action': (_blob.get('action') if _new_shape else '') or row['task_type'] or '',
+                'target_type': _blob.get('target_type', 'vm') if _new_shape else 'vm',
+                'target_id': _blob.get('target_id', '') if _new_shape else '',
+                'target_node': _blob.get('target_node', '') if _new_shape else '',
+                'config': (_blob.get('config') or {}) if _new_shape else _blob,
                 'enabled': bool(row['enabled']),
                 'last_run': row['last_run'],
                 'next_run': row['next_run'],
@@ -86,7 +107,17 @@ def save_scheduled_tasks(config):
                     'schedule_time': task.get('schedule_time', '02:00'),
                     'schedule_day': task.get('schedule_day', 0),
                 }),
-                json.dumps(task.get('config', {})),
+                # fix (audit): the executor dispatches on action/target_type/target_id/
+                # target_node, and none of them had a column — so after a restart every task
+                # loaded with empty values, did nothing, and still logged as executed. Carry
+                # them in the config blob rather than migrating the schema.
+                json.dumps({
+                    'config': task.get('config', {}),
+                    'action': task.get('action', task.get('task_type', '')),
+                    'target_type': task.get('target_type', 'vm'),
+                    'target_id': task.get('target_id', ''),
+                    'target_node': task.get('target_node', ''),
+                }),
                 1 if task.get('enabled', True) else 0,
                 task.get('last_run'),
                 task.get('next_run'),

@@ -313,3 +313,68 @@ def test_v2p_helper_scripts_are_not_world_readable():
     src = open('pegaprox/core/v2p.py').read()
     assert 'chmod +x {script}' not in src, "a helper script is still created world-readable"
     assert src.count('umask 077') >= 3
+
+
+# ── RBAC core: the tenant-override branch dropped two things ────────────────
+def test_tenant_override_still_honours_a_global_deny(api, seed):
+    from pegaprox.utils.rbac import get_user_permissions
+    u = {'role': 'user', 'tenant_id': 'acme',
+         'denied_permissions': ['vm.delete'],
+         'tenant_permissions': {'acme': {'role': 'admin'}}}
+    perms = get_user_permissions(u, 'acme')
+    assert 'vm.delete' not in perms, "a tenant override silently un-denied a global deny"
+
+
+def test_token_role_caps_a_tenant_override(api, seed):
+    # an admin-owned viewer-scoped token whose OWNER has a tenant admin override must not
+    # inherit that override — the tenant branch never looked at effective_role
+    from pegaprox.utils.rbac import get_user_permissions
+    u = {'role': 'admin', 'effective_role': 'viewer', 'tenant_id': 'acme',
+         'tenant_permissions': {'acme': {'role': 'admin'}}}
+    perms = get_user_permissions(u, 'acme')
+    assert 'vm.delete' not in perms and 'admin.users' not in perms, perms
+    assert 'vm.view' in perms, "the viewer floor must still grant viewer rights"
+
+
+def test_a_plain_session_with_a_tenant_override_is_unchanged(api, seed):
+    from pegaprox.utils.rbac import get_user_permissions
+    u = {'role': 'user', 'tenant_id': 'acme',
+         'tenant_permissions': {'acme': {'role': 'admin'}}}
+    perms = get_user_permissions(u, 'acme')
+    assert 'admin.users' in perms, "no effective_role means no cap — session auth unaffected"
+
+
+# ── scheduled tasks silently never executed ────────────────────────────────
+def test_scheduled_task_survives_a_save_load_round_trip(db):
+    """The executor dispatches on action/target_*, and the scheduler on schedule_type/_time/
+    _day. None of them survived the round trip, so after any restart every task loaded with
+    empty values, did nothing, and still logged 'Executing scheduled task'."""
+    from pegaprox.background.scheduler import save_scheduled_tasks, load_scheduled_tasks
+    original = {'tasks': [{
+        'id': 't1', 'cluster_id': 'cluster_1', 'name': 'nightly stop',
+        'action': 'stop', 'target_type': 'vm', 'target_id': '100', 'target_node': 'n1',
+        'schedule_type': 'weekly', 'schedule_time': '23:30', 'schedule_day': 3,
+        'enabled': True, 'config': {'foo': 'bar'},
+    }]}
+    save_scheduled_tasks(original)
+    back = load_scheduled_tasks()['tasks'][0]
+    for k in ('action', 'target_type', 'target_id', 'target_node',
+              'schedule_type', 'schedule_time', 'schedule_day'):
+        assert back.get(k) == original['tasks'][0][k], f"{k} lost: {back.get(k)!r}"
+    assert back['config'] == {'foo': 'bar'}
+
+
+def test_legacy_scheduled_rows_still_load(db):
+    # rows written before the fix hold the bare config dict and the action in task_type
+    import json
+    from pegaprox.background.scheduler import load_scheduled_tasks
+    db.conn.execute(
+        "INSERT INTO scheduled_tasks (id, cluster_id, name, task_type, schedule, config, "
+        "enabled, created_at) VALUES ('old1','cluster_1','legacy','stop',?,?,1,'2026-01-01')",
+        (json.dumps({'schedule_type': 'daily', 'schedule_time': '05:00', 'schedule_day': 0}),
+         json.dumps({'foo': 'bar'})))
+    db.conn.commit()
+    row = [t for t in load_scheduled_tasks()['tasks'] if t['id'] == 'old1'][0]
+    assert row['action'] == 'stop', "the legacy action must be recovered from task_type"
+    assert row['schedule_time'] == '05:00'
+    assert row['config'] == {'foo': 'bar'}
