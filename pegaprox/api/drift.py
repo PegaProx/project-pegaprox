@@ -34,7 +34,7 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
-from pegaprox.api.helpers import check_cluster_access
+from pegaprox.api.helpers import check_cluster_access, require_unconfined
 from pegaprox.core.db import get_db
 from pegaprox.models.permissions import ROLE_ADMIN
 
@@ -519,6 +519,9 @@ def manual_scan(cluster_id):
     exists, write current state as baseline silently (initial setup)."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     body = request.get_json(silent=True) or {}
     seed = bool(body.get('seed', False))
     return jsonify(_scan_cluster(cluster_id, autobaseline=seed))
@@ -531,6 +534,9 @@ def reset_baseline(cluster_id):
     open events implicitly (they reference old baselines)."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'cluster not found'}), 404
     mgr = cluster_managers[cluster_id]

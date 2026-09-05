@@ -16,7 +16,7 @@ from pegaprox.utils.audit import log_audit
 # MK 2026-06-04 (CWE-117): group_id from URL path goes into the logger below.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import DEFAULT_TENANT_ID, get_user_clusters
-from pegaprox.api.helpers import load_server_settings, save_server_settings, check_cluster_access
+from pegaprox.api.helpers import load_server_settings, save_server_settings, check_cluster_access, require_unconfined
 
 bp = Blueprint('groups', __name__)
 
@@ -235,6 +235,9 @@ def rename_cluster(cluster_id):
     """Rename a cluster (set display_name) - requires admin.groups permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     data = request.json or {}
     new_name = data.get('display_name', '').strip() if data.get('display_name') is not None else None
@@ -279,6 +282,9 @@ def assign_cluster_to_group(cluster_id):
     """Assign a cluster to a group (or remove from group with null) - requires admin.groups permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     data = request.json or {}
     group_id = data.get('group_id')  # Can be None to ungroup
@@ -580,6 +586,9 @@ def update_node_options_api(cluster_id, node):
     """Update node options"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -616,6 +625,9 @@ def refresh_node_apt_api(cluster_id, node):
     """Refresh APT package database"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

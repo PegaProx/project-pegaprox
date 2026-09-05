@@ -519,6 +519,9 @@ def set_bmc_endpoint_api(cluster_id, node):
 def delete_bmc_endpoint_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     removed = get_db().delete_bmc_endpoint(cluster_id, node)
@@ -628,6 +631,9 @@ def install_ipmitool_api(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -1153,6 +1159,9 @@ def update_node_subscription_api(cluster_id, node):
     """Update subscription key - admin only"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1174,6 +1183,9 @@ def check_node_subscription_api(cluster_id, node):
     """Refresh subscription status - admin only"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1195,6 +1207,9 @@ def delete_node_subscription_api(cluster_id, node):
     """Delete subscription key - admin only"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1586,6 +1601,9 @@ def update_smbios_autoconfig(cluster_id):
     """save smbios settings - gets deployed to nodes when they click deploy"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1674,6 +1692,9 @@ def deploy_smbios_autoconfig(cluster_id, node):
     """Deploy SMBIOS auto-config script to node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1750,6 +1771,9 @@ def remove_smbios_autoconfig(cluster_id, node):
     """Remove SMBIOS auto-config from node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1802,6 +1826,9 @@ def control_smbios_autoconfig(cluster_id, node):
     """Start/Stop/Rescan SMBIOS auto-config service on node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1941,6 +1968,9 @@ def deploy_smbios_autoconfig_all(cluster_id):
     """Deploy SMBIOS auto-config script to ALL nodes in cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2161,6 +2191,9 @@ def install_starlvm_plugin(cluster_id):
     Signed deb822 source only — no unsigned fallback. Idempotent per node."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2440,6 +2473,9 @@ def create_custom_script(cluster_id):
     """Create a new custom script - requires admin.scripts permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     data = request.json or {}
     
@@ -2488,6 +2524,9 @@ def update_custom_script(cluster_id, script_id):
     """Update a custom script - requires admin.scripts permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     data = request.json or {}
     db = get_db()
@@ -2539,6 +2578,9 @@ def delete_custom_script(cluster_id, script_id):
     """Soft-delete a custom script - will be permanently deleted after 20 days"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     db = get_db()
     
@@ -2576,6 +2618,9 @@ def run_custom_script(cluster_id, script_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2771,6 +2816,9 @@ def restore_deleted_script(cluster_id, script_id):
     """Restore a soft-deleted script before it's permanently purged"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     db = get_db()
     script = db.query_one('SELECT * FROM custom_scripts WHERE id = ? AND cluster_id = ? AND deleted_at IS NOT NULL', (script_id, cluster_id))
@@ -2844,6 +2892,9 @@ def get_pool_ha_api(cluster_id):
 def enable_pool_ha_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2864,6 +2915,9 @@ def enable_pool_ha_api(cluster_id):
 def disable_pool_ha_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]

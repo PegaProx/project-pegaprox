@@ -33,7 +33,7 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
-from pegaprox.api.helpers import check_cluster_access, load_metrics_window, scope_vm_rows
+from pegaprox.api.helpers import check_cluster_access, load_metrics_window, scope_vm_rows, require_unconfined
 from pegaprox.core.db import get_db
 from pegaprox.models.permissions import ROLE_ADMIN
 
@@ -286,6 +286,9 @@ def delete_rate(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     try:
         c = get_db().conn.cursor()
         c.execute('DELETE FROM power_rates WHERE cluster_id=?', (cluster_id,))

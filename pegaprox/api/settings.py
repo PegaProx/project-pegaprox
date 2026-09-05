@@ -28,7 +28,7 @@ from pegaprox.utils.audit import log_audit, get_client_ip
 from pegaprox.api.helpers import (
     load_server_settings, save_server_settings, check_cluster_access,
     get_login_settings, get_session_timeout, safe_error,
-    acme_dns_config_from_settings,
+    acme_dns_config_from_settings, require_unconfined,
 )
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
@@ -3957,6 +3957,9 @@ def check_cluster_updates(cluster_id):
     """Check for updates on all nodes in the cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -4250,6 +4253,9 @@ def start_rolling_update(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -4852,6 +4858,9 @@ def cancel_rolling_update(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -4882,6 +4891,9 @@ def resume_rolling_update(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     manager = cluster_managers[cluster_id]
@@ -4903,6 +4915,9 @@ def clear_rolling_update_status(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -5154,6 +5169,9 @@ def update_node_repo(cluster_id, node, repo_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -5277,6 +5295,9 @@ def refresh_node_repos(cluster_id, node):
     """Run apt update on a node to refresh package lists"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

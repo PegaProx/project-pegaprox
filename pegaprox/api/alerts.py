@@ -15,7 +15,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows
+from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, require_unconfined
 from pegaprox.background.alerts import load_alerts_config, save_alerts_config
 
 bp = Blueprint('alerts', __name__)
@@ -265,6 +265,9 @@ def create_cluster_alert(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     data = request.get_json()
     if not data:
@@ -309,6 +312,9 @@ def update_cluster_alert(cluster_id, alert_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     data = request.get_json()
     alerts = load_cluster_alerts()
@@ -341,6 +347,9 @@ def delete_cluster_alert(cluster_id, alert_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     # NS: delete directly from DB for efficiency
     try:
@@ -393,6 +402,9 @@ def ack_active_alert(cluster_id, fired_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     user = getattr(request, 'username', None) or (request.session.get('user', 'unknown') if hasattr(request, 'session') else 'unknown')
     try:
         db = get_db()
@@ -580,6 +592,9 @@ def delete_cluster_affinity_rule(cluster_id, rule_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     # NS: Delete directly from DB instead of load/filter/save
     try:

@@ -228,3 +228,55 @@ def test_backup_secret_sweep_strips_the_cluster_password():
     _strip_secret_fields(c)
     assert 'pass' not in c and 'ssh_key' not in c and 'api_token_secret' not in c, c
     assert c['api_token_name'] == 'keep-me' and c['host'] == 'h'
+
+
+# ── the same guard applied across the remaining infrastructure families ──────
+def _infra_user(seed, name, perms):
+    seed.tenant('tenant_x', clusters=['cluster_1'])
+    u = seed.user(name, role='viewer', tenant_id='tenant_x', permissions=perms)
+    seed.pool('cluster_1', 'pool_1', name, ['pool.view', 'vm.view'])
+    _seed_pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    return u
+
+
+def test_scoped_caller_cannot_destroy_a_ceph_pool(api, seed):
+    u = _infra_user(seed, 'cephmal', ['ceph.manage', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).delete('/api/clusters/cluster_1/nodes/n1/ceph/pool/rbd')
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+
+def test_scoped_caller_cannot_apply_sdn_config(api, seed):
+    u = _infra_user(seed, 'sdnmal', ['sdn.manage', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).post('/api/clusters/cluster_1/datacenter/sdn/apply', json={})
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+
+def test_scoped_caller_cannot_run_a_custom_script(api, seed):
+    u = _infra_user(seed, 'scriptmal', ['admin.scripts', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).post('/api/clusters/cluster_1/scripts/s1/run', json={})
+    assert r.status_code in (403, 404), r.get_data(as_text=True)
+
+
+def test_scoped_caller_cannot_start_a_rolling_update(api, seed):
+    u = _infra_user(seed, 'updmal', ['node.update', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).post('/api/clusters/cluster_1/updates/rolling', json={})
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+
+def test_scoped_caller_cannot_reset_the_drift_baseline(api, seed):
+    u = _infra_user(seed, 'driftmal', ['admin.audit', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).post('/api/clusters/cluster_1/drift/baseline/reset', json={})
+    assert r.status_code in (403, 404), r.get_data(as_text=True)
+
+
+def test_scoped_caller_cannot_write_a_cluster_alert(api, seed):
+    u = _infra_user(seed, 'alertmal', ['cluster.config', 'cluster.view'])
+    _cluster(api)
+    r = api.as_user(u).post('/api/clusters/cluster_1/alerts',
+                            json={'name': 'x', 'metric': 'cpu', 'threshold': 90})
+    assert r.status_code == 403, r.get_data(as_text=True)

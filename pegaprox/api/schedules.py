@@ -17,7 +17,7 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.rbac import has_permission
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import check_cluster_access, safe_error
+from pegaprox.api.helpers import check_cluster_access, safe_error, require_unconfined
 from pegaprox.api.nodes import cleanup_deleted_scripts, cleanup_orphaned_excluded_vms
 
 bp = Blueprint('schedules', __name__)
@@ -1003,6 +1003,9 @@ def delete_update_schedule(cluster_id):
     """Delete/disable the scheduled update for a cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

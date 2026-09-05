@@ -505,6 +505,9 @@ def repin_cluster_host_keys(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     mgr = cluster_managers[cluster_id]
     try:
@@ -545,6 +548,9 @@ def delete_cluster(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     mgr = cluster_managers[cluster_id]
     cluster_name = mgr.config.name
@@ -708,6 +714,9 @@ def update_cluster_location(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1335,6 +1344,9 @@ def set_excluded_nodes(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1380,6 +1392,9 @@ def add_excluded_node(cluster_id, node):
     """Add a single node to the exclusion list"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1420,6 +1435,9 @@ def remove_excluded_node(cluster_id, node):
     """Remove a node from the exclusion list"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1611,6 +1629,9 @@ def get_excluded_pools(cluster_id):
 def exclude_pool(cluster_id, pool_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     mgr = cluster_managers.get(cluster_id)
     if not mgr: return jsonify({'error': 'Cluster not found'}), 404
     data = request.json or {}
@@ -1627,6 +1648,9 @@ def exclude_pool(cluster_id, pool_name):
 def include_pool(cluster_id, pool_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     mgr = cluster_managers.get(cluster_id)
     if not mgr: return jsonify({'error': 'Cluster not found'}), 404
     user = getattr(request, 'session', {}).get('user', 'system')
@@ -1930,6 +1954,9 @@ def set_backup_sla_config(cluster_id):
     """Update the cluster-level Backup SLA target. Body: {max_age_hours: int}."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     data = request.get_json(silent=True) or {}
@@ -2482,6 +2509,9 @@ def get_proxmox_ha_groups(cluster_id):
 def create_proxmox_ha_group(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2550,6 +2580,9 @@ def create_proxmox_ha_group(cluster_id):
 def delete_proxmox_ha_group(cluster_id, group_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
