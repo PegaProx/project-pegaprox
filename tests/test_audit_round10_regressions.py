@@ -525,3 +525,34 @@ def test_vmware_watch_registry_is_bounded(api, seed):
     finally:
         g.vmware_managers.pop('esxi-w', None)
         broadcast_resources_loop._vmw_watched = {}
+
+
+# ── the audit trail read as tampered after a key rotation ──────────────────
+def test_audit_trail_survives_key_rotation(db):
+    """_generate_audit_hmac signs with self.aes_key, so after a rotation every historical row
+    verified against a key that no longer exists — on a feature offered FOR compliance, where
+    an intact audit trail is the other half of the requirement. Rotation now verifies each row
+    with the old key and re-signs with the new one, so a row that was ALREADY tampered stays
+    unverifiable and is counted rather than laundered."""
+    db.add_audit_entry('alice', 'user.login', 'logged in', '10.0.0.5', 'cluster_1', 'info')
+    db.add_audit_entry('bob', 'vm.start', 'started 100', '10.0.0.6', 'cluster_1', 'info')
+    rows = db.query('SELECT * FROM audit_log') or []
+    assert rows and all(db._verify_audit_hmac(dict(r)) for r in rows), "baseline must verify"
+    res = db.rotate_encryption_key()
+    assert not res.get('errors'), res
+    after = db.query('SELECT * FROM audit_log') or []
+    bad = [dict(r)['action'] for r in after if not db._verify_audit_hmac(dict(r))]
+    assert not bad, f"audit history reads as tampered after rotation: {bad}"
+    assert res.get('audit_resigned', 0) >= 2, res
+
+
+def test_a_tampered_audit_row_is_not_laundered_by_rotation(db):
+    db.add_audit_entry('carol', 'vm.delete', 'deleted 999', '10.0.0.7', 'cluster_1', 'warning')
+    row = (db.query('SELECT * FROM audit_log') or [])[0]
+    db.conn.execute("UPDATE audit_log SET details = 'nothing happened' WHERE id = ?",
+                    (dict(row)['id'],))
+    db.conn.commit()
+    res = db.rotate_encryption_key()
+    assert res.get('audit_unverifiable', 0) >= 1, res
+    after = (db.query('SELECT * FROM audit_log') or [])[0]
+    assert not db._verify_audit_hmac(dict(after)), "a tampered row must stay detectable"

@@ -4141,8 +4141,47 @@ class PegaProxDB:
             # because clusters failed first). stats['sessions_rotated'] stays
             # at 0 for backwards-compat with the UI counter.
             
+            # 3b. Re-sign the audit log.
+            # sec (audit): _audit_hmac signs with self.aes_key, so after a rotation every
+            # historical row verifies against a key that no longer exists and the whole trail
+            # reads as tampered — on a feature offered FOR compliance, where an intact audit
+            # trail is the other half of the requirement. Verify each row with the OLD key
+            # first: anything that already failed stays failed and is counted, so rotation
+            # cannot be used to launder a tampered entry.
+            stats['audit_resigned'] = 0
+            stats['audit_unverifiable'] = 0
+            try:
+                _saved_key = self.aes_key
+                cursor.execute('SELECT id, timestamp, user, action, details, ip_address, '
+                               'cluster, severity, hmac_signature FROM audit_log '
+                               'WHERE hmac_signature IS NOT NULL AND hmac_signature != ""')
+                _rows = cursor.fetchall()
+                for _r in _rows:
+                    _entry = {
+                        'timestamp': _r['timestamp'], 'user': _r['user'], 'action': _r['action'],
+                        'details': _r['details'], 'ip_address': _r['ip_address'],
+                        'cluster': _r['cluster'], 'severity': _r['severity'],
+                        'hmac_signature': _r['hmac_signature'],
+                    }
+                    self.aes_key = old_key
+                    _ok = self._verify_audit_hmac(_entry)
+                    if not _ok:
+                        stats['audit_unverifiable'] += 1
+                        continue                     # leave it as-is; it was already broken
+                    self.aes_key = new_key
+                    _new_sig = self._generate_audit_hmac(
+                        _r['timestamp'], _r['user'], _r['action'], _r['details'],
+                        _r['ip_address'], _r['cluster'], _r['severity'])
+                    cursor.execute('UPDATE audit_log SET hmac_signature = ? WHERE id = ?',
+                                   (_new_sig, _r['id']))
+                    stats['audit_resigned'] += 1
+                self.aes_key = _saved_key
+            except Exception as e:
+                self.aes_key = _saved_key
+                stats['errors'].append(f"Audit re-sign: {e}")
+
             self.conn.commit()
-            
+
             # 4. Save new key (backup old key first)
             backup_file = aes_key_file + f'.backup.{datetime.now().strftime("%Y%m%d_%H%M%S")}'
             with open(backup_file, 'wb') as f:
