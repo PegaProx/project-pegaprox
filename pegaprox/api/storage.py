@@ -2578,11 +2578,26 @@ def delete_backup_job(cluster_id, job_id):
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+
     try:
         host, port = manager.host, manager.api_port
         url = f"https://{host}:{port}/api2/json/cluster/backup/{job_id}"
-        
+
+        # sec (audit): create/update authorize the job's targets, delete did not — so a scoped
+        # backup.delete holder could drop ANY job on the cluster, including an admin's cluster-wide
+        # one. Read the job first and put it through the same gate. Fail closed for a scoped caller
+        # if we can't read it back; an admin short-circuits inside _authz_backup_targets.
+        _job = {}
+        try:
+            _jr = manager._create_session().get(url, timeout=10)
+            if _jr.status_code == 200:
+                _job = _jr.json().get('data') or {}
+        except Exception:
+            _job = {}
+        _aerr = _authz_backup_targets(cluster_id, _job)
+        if _aerr:
+            return _aerr
+
         response = manager._create_session().delete(url, timeout=10)
         
         if response.status_code == 200:

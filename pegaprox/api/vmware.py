@@ -1182,7 +1182,19 @@ def _migration_reachable(t):
     # NS Jul 2026 (CodeAnt IDOR) — a caller may see a migration only if they can reach one of the
     # clusters it touches (source or target). Tasks with no determinable cluster are shown.
     cids = [c for c in (getattr(t, 'target_cluster', None), getattr(t, 'source_cluster', None)) if c]
-    return (not cids) or any(check_cluster_access(c)[0] for c in cids)
+    if cids and not any(check_cluster_access(c)[0] for c in cids):
+        return False
+    # sec (audit): reaching the TARGET cluster was the whole gate, so anyone who could migrate
+    # into a shared target could read another tenant's V2P run — and drive its cutover. The XHM
+    # twin (_xhm_reachable) already checks the source VM; mirror it on the ESXi source here.
+    vmw, vid = getattr(t, 'vmware_id', None), getattr(t, 'vm_id', None)
+    if vmw and vid:
+        try:
+            _u = build_authz_user(request.session.get('user', ''), request.session)
+            return user_can_access_vmware_vm(_u, vmw, str(vid), 'vmware.vm.migrate')
+        except Exception:
+            return False
+    return True
 
 
 # NS Aug 2026 (#654) — the route + auth decorators were stuck on the _migration_reachable helper

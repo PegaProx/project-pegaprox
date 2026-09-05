@@ -82,7 +82,10 @@ def test_metrics_rejects_non_admin_token(api, monkeypatch):
     assert r.status_code == 401, r.get_data(as_text=True)
 
 
-def test_metrics_allows_admin_token(api, monkeypatch):
+def test_metrics_allows_admin_token(api, seed, monkeypatch):
+    # the token's owner has to actually exist and still be an enabled admin — the route has no
+    # @require_auth, so it re-checks that itself (audit)
+    seed.user('svc', role='admin', tenant_id='default')
     import pegaprox.api.metrics_exporter as mx
     monkeypatch.setattr(mx, 'validate_api_token', lambda tok: {'user': 'svc', 'role': 'admin'})
     r = api.anon().get('/api/metrics', headers={'Authorization': 'Bearer pgx_dummy'})

@@ -521,16 +521,18 @@ def get_schedules():
     schedules = load_schedules()
     
     user = request.session.get('user', '')
-    users_db = load_users()
-    user_data = users_db.get(user, {})
-    is_admin = user_data.get('role') == ROLE_ADMIN
+    from pegaprox.utils.auth import build_authz_user
+    # sec (audit): the raw stored record skips API-token effective_role flooring, so an
+    # admin-owned viewer token hit the all-clusters early return below and read every
+    # scheduled action in the install.
+    user_data = build_authz_user(user, request.session)
+    is_admin = user_data.get('effective_role', user_data.get('role')) == ROLE_ADMIN
 
     # NS Jul 2026 (CodeAnt IDOR) — use the real access model. The old filter read the raw
     # user_data['clusters'] field and FELL OPEN (`if not user_clusters` -> returned every tenant's
     # schedules) when it was empty. get_user_clusters returns None only for a genuine admin/
     # default-tenant all-cluster user; otherwise it's the caller's reachable cluster set.
     from pegaprox.utils.rbac import get_user_clusters, user_can_access_vm
-    from pegaprox.utils.auth import build_authz_user
     _ud = dict(user_data)
     _ud['username'] = user
     allowed = get_user_clusters(_ud)
@@ -541,7 +543,7 @@ def get_schedules():
     # caller read per-VM schedule rows (incl. other users' created_by) for every VM on a reachable
     # cluster. The create/update paths already gate per-VM via user_can_access_vm; gate the LIST too.
     # Plain operators keep every action on their clusters (user_can_access_vm returns True for them).
-    authz = build_authz_user(user, request.session)
+    authz = _ud
     out = []
     for a in schedules.get('actions', []):
         if a.get('cluster_id') not in allowed:
@@ -695,8 +697,20 @@ def update_schedule(schedule_id):
         return jsonify({'error': 'vmid must be a number'}), 400
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.utils.rbac import user_can_access_vm
-    if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
-                              schedule.get('cluster_id', ''), _uv,
+    _authz = build_authz_user(request.session.get('user', ''), request.session)
+    _cid = schedule.get('cluster_id', '')
+    # sec (audit): only the NEW target was authorized, so a caller who owns ANY VM on the cluster
+    # could point someone else's schedule at their own VM — silently destroying the stored action
+    # while the row kept the victim's created_by. Authorize the STORED target first.
+    try:
+        _stored_vmid = int(schedule.get('vmid'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Schedule has no valid target'}), 403
+    if not user_can_access_vm(_authz, _cid, _stored_vmid,
+                              _perm_for_action(schedule.get('action', 'start')),
+                              schedule.get('vm_type', 'qemu')):
+        return jsonify({'error': 'Permission denied for this VM'}), 403
+    if not user_can_access_vm(_authz, _cid, _uv,
                               _perm_for_action(data.get('action', schedule.get('action', 'start'))),
                               data.get('vm_type', schedule.get('vm_type', 'qemu'))):
         return jsonify({'error': 'Permission denied for this VM'}), 403
@@ -939,7 +953,11 @@ def get_update_schedule(cluster_id):
 
 
 @bp.route('/api/clusters/<cluster_id>/updates/schedule', methods=['POST'])
-@require_auth(perms=['backup.schedule'])
+# sec (audit): was backup.schedule — but this schedules a ROLLING NODE UPDATE (evacuate every VM,
+# apt upgrade, reboot each node), not a backup. node.update is the perm the manual rolling-update
+# routes already use (settings.py). A role delegated "may schedule backups" must not also be able
+# to schedule a cluster-wide reboot.
+@require_auth(perms=['node.update'])
 def set_update_schedule(cluster_id):
     """Set the scheduled update configuration for a cluster"""
     ok, err = check_cluster_access(cluster_id)
@@ -980,7 +998,7 @@ def set_update_schedule(cluster_id):
 
 
 @bp.route('/api/clusters/<cluster_id>/updates/schedule', methods=['DELETE'])
-@require_auth(perms=['backup.schedule'])
+@require_auth(perms=['node.update'])
 def delete_update_schedule(cluster_id):
     """Delete/disable the scheduled update for a cluster"""
     ok, err = check_cluster_access(cluster_id)

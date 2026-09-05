@@ -19,6 +19,7 @@ from pegaprox.utils.auth import (
     hash_password, verify_password, validate_password_policy,
     load_users, save_users, require_auth, ARGON2_AVAILABLE,
     mark_admin_initialized, invalidate_all_user_sessions, revoke_user_api_tokens,
+    build_authz_user,
 )
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import (
@@ -1353,10 +1354,9 @@ def list_all_roles():
     custom = get_custom_roles()
     
     # Get user's tenant for filtering
-    users = load_users()
-    user = users.get(request.session['user'], {})
+    user = build_authz_user(request.session.get('user', ''), request.session)
     user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
-    is_admin = user.get('role') == ROLE_ADMIN
+    is_admin = user.get('effective_role', user.get('role')) == ROLE_ADMIN
     
     roles = []
     # builtins
@@ -1427,9 +1427,8 @@ def create_custom_role():
             return jsonify({'error': f'Invalid permission: {p}'}), 400
     
     # Tenant validation: non-admins can only create roles for their own tenant
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    if user.get('role') != ROLE_ADMIN:
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
         if tenant_id and tenant_id != user_tenant:
             log_audit(request.session['user'], 'role.create_denied',
@@ -1496,9 +1495,8 @@ def update_custom_role(role_id):
     tenant_id = data.get('tenant_id')  # which tenant's role to update
     
     # Tenant validation: non-admins can only update roles in their own tenant
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    if user.get('role') != ROLE_ADMIN:
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
         # Check if trying to update a role in a different tenant
         if tenant_id and tenant_id != user_tenant:
@@ -1562,9 +1560,8 @@ def delete_custom_role(role_id):
     tenant_id = request.args.get('tenant_id')
     
     # Tenant validation: non-admins can only delete roles in their own tenant
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    if user.get('role') != ROLE_ADMIN:
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
         # Check if trying to delete a role in a different tenant
         if tenant_id and tenant_id != user_tenant:

@@ -111,6 +111,7 @@ def list_plans():
     # allowed=None = all, unchanged (same pattern as the replication-jobs fix).
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.api.helpers import caller_is_scoped
     _user = build_authz_user(request.session.get('user', ''), request.session)
     _allowed = get_user_clusters(_user)
     rows = db.query('SELECT * FROM site_recovery_plans ORDER BY created_at DESC')
@@ -119,6 +120,18 @@ def list_plans():
         p = dict(row)
         if _allowed is not None and p.get('source_cluster') not in _allowed and p.get('target_cluster') not in _allowed:
             continue
+        # sec (audit): the cluster filter alone left two holes. get_user_clusters returns None
+        # (= all) for a default-tenant VM-ACL user, so they saw every plan in the install; and a
+        # pool-scoped caller saw plans the detail route (_authz_plan_vms) refuses to open. Confine
+        # a genuinely scoped caller to the plans whose VMs they may all view.
+        if caller_is_scoped(_user, p.get('source_cluster') or ''):
+            _ok, _ = _authz_plan_vms(p)
+            if not _ok:
+                continue
+        # a list view has no use for the failover webhooks, and those URLs are bearer secrets —
+        # get_plan_detail (properly gated) still serves them.
+        p.pop('pre_failover_webhook', None)
+        p.pop('post_failover_webhook', None)
         for k in ('network_mappings', 'storage_mappings'):
             try:
                 p[k] = json.loads(p[k] or '{}')
@@ -334,6 +347,12 @@ def add_plan_vm(plan_id):
     if not ok:
         return err
     ok, err = check_cluster_access(plan['target_cluster'])
+    if not ok:
+        return err
+    # sec (audit): every other plan-mutating route gates the plan itself; this one only gated the
+    # VM being added, so a scoped caller could inject their VM into another tenant's DR plan and
+    # have it dragged along on the next failover.
+    ok, err = _authz_plan_vms(plan)
     if not ok:
         return err
 

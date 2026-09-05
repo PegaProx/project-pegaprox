@@ -302,6 +302,25 @@ def _sse_user_can_view_vm(username, cluster_id, vmid):
         return False
 
 
+def _sse_user_has_perm(username, permission):
+    """sec (audit): the SSE stream carried the ESXi inventory ('vmware_*' frames) to every client,
+    while the REST twin gates on a vmware.* permission — so a custom role built to hide ESXi still
+    saw it over the stream. Same single-user fetch as _sse_user_can_view_vm."""
+    if not username:
+        return False
+    from pegaprox.core.db import get_db
+    from pegaprox.utils.rbac import has_permission
+    try:
+        stored = get_db().get_user(username)
+    except Exception:
+        stored = None
+    if not stored:
+        return False
+    user = dict(stored)
+    user['username'] = username
+    return has_permission(user, permission)
+
+
 def _filtered_tasks_frame(tasks, cluster_id, username, timestamp):
     """Per-VM-authorized 'tasks' frame for a non-admin client: keep only rows whose vmid the caller
     may view (task rows without a resolvable vmid — node/cluster tasks — are dropped for a scoped
@@ -397,6 +416,7 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         _res_frame_cache = {}
         _cfg_access_cache = {}    # uname -> bool: may this user view THIS vm_config frame's vmid (audit M1)
         _tasks_frame_cache = {}   # uname -> per-VM-filtered 'tasks' frame (audit M1)
+        _vmw_perm_cache = {}      # uname -> bool: holds the vmware.* perm the REST twin requires
         with sse_clients_lock:
             for client_id, client_info in list(sse_clients.items()):
                 try:
@@ -456,6 +476,18 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                             if client_message is _SSE_FILTER_MISSING:
                                 client_message = _filtered_tasks_frame(data, cluster_id, uname, timestamp)
                                 _tasks_frame_cache[uname] = client_message
+                        elif update_type.startswith('vmware_') and not client_info.get('is_admin', False):
+                            # audit — mirror the REST perm gate (vmware.vm.view / vmware.view) that
+                            # the stream skipped entirely. Both are default viewer perms, so this
+                            # only bites a custom role that deliberately withholds them.
+                            uname = client_info.get('user')
+                            _need = 'vmware.view' if update_type == 'vmware_servers' else 'vmware.vm.view'
+                            _ok_vmw = _vmw_perm_cache.get((uname, _need), _SSE_FILTER_MISSING)
+                            if _ok_vmw is _SSE_FILTER_MISSING:
+                                _ok_vmw = _sse_user_has_perm(uname, _need)
+                                _vmw_perm_cache[uname, _need] = _ok_vmw
+                            if not _ok_vmw:
+                                continue
                         if client_message is None:
                             continue  # unknown user -> fail closed, send nothing
                         if len(client_message) > _MAX_BROADCAST_BYTES:

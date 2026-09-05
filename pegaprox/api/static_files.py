@@ -622,13 +622,18 @@ def remove_user_tenant_perms(username, tenant_id):
 @require_auth()
 def get_my_permissions():
     """Get current user's permissions"""
-    users = load_users()
-    user = users.get(request.session['user'], {})
+    from pegaprox.utils.auth import build_authz_user
+    # sec (audit): was the raw stored record, so an admin-owned viewer token was told it had
+    # the owner's role and the UI offered actions the backend then refused.
+    user = build_authz_user(request.session.get('user', ''), request.session)
     tenant_id = request.args.get('tenant_id', user.get('tenant_id', DEFAULT_TENANT_ID))
-    
+    # For an API-token session, report the TOKEN's role everywhere: get_user_effective_role reads
+    # user['role'], which is still the owner's, so hand it a record already floored to the token.
+    scoped = dict(user, role=user.get('effective_role', user.get('role')))
+
     return jsonify({
-        'role': user.get('role'),
-        'effective_role': get_user_effective_role(user, tenant_id),
+        'role': scoped.get('role'),
+        'effective_role': get_user_effective_role(scoped, tenant_id),
         'tenant_id': tenant_id,
         'tenant_permissions': user.get('tenant_permissions', {}),
         'permissions': get_user_permissions(user, tenant_id)

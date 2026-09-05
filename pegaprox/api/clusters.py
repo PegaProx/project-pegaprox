@@ -13,7 +13,7 @@ from pegaprox.models.permissions import *
 from pegaprox.models.tasks import PegaProxConfig
 from pegaprox.core.db import get_db
 
-from pegaprox.utils.auth import require_auth, load_users
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117
 from pegaprox.utils.rbac import (
@@ -38,9 +38,7 @@ def get_clusters():
     LW: Apr 2026 - users with VM ACLs can see their clusters without cluster.view (#248)
     """
     # get user's allowed clusters
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     allowed = get_user_clusters(user)
     has_cluster_view = has_permission(user, 'cluster.view')
 

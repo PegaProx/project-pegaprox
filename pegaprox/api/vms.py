@@ -1557,9 +1557,7 @@ def create_vm_backup(cluster_id, node, vm_type, vmid):
         return error
     
     # MK: Check pool permission for vm.backup
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.backup', vm_type):
         return jsonify({'error': 'Permission denied: vm.backup'}), 403
     
@@ -1616,9 +1614,7 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
         return error
     
     # MK: Check pool permission for vm.backup
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.backup', vm_type):
         return jsonify({'error': 'Permission denied: vm.backup'}), 403
     
@@ -1697,9 +1693,7 @@ def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):
     if not ok:
         return err
     # LW Feb 2026 - check VM-level backup permission
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.backup', vm_type):
         return jsonify({'error': 'Permission denied: vm.backup'}), 403
     # sec (private disclosure Sep 2026 — audit): authorize the SOURCE backup, not only the URL vmid —
@@ -3529,9 +3523,7 @@ def vm_action_api(cluster_id, node, vm_type, vmid, action):
         return jsonify({'error': f'Invalid action. Valid actions: {valid_actions}'}), 400
     
     # check permission for action - now uses VM ACLs
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']  # MK: make sure username is set
+    user = build_authz_user(request.session.get('user', ''), request.session)
     
     # NS: xapi.vm.power covers all power actions for XCP-ng clusters
     manager = cluster_managers[cluster_id]
@@ -3630,9 +3622,7 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Cluster not found'}), 404
     
     # MK: Check pool permission for vm.clone
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.clone', vm_type):
         return jsonify({'error': 'Permission denied: vm.clone'}), 403
     
@@ -3711,9 +3701,7 @@ def get_console_ticket(cluster_id, node, vm_type, vmid):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
 
     mgr = cluster_managers[cluster_id]
     console_perm = 'xapi.vm.view' if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng' else 'vm.console'
@@ -3773,9 +3761,7 @@ def get_spice_console(cluster_id, node, vm_type, vmid):
     if vm_type != 'qemu':
         return jsonify({'error': 'SPICE is only available for QEMU VMs'}), 400
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     mgr = cluster_managers[cluster_id]
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.console', vm_type):
         return jsonify({'error': 'Permission denied: vm.console'}), 403
@@ -3921,9 +3907,7 @@ def get_vm_screenshot(cluster_id, node, vm_type, vmid):
         # LXC consoles are a terminal, not a framebuffer — nothing to screenshot
         return jsonify({'error': 'screenshot only available for qemu'}), 400
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     mgr = cluster_managers[cluster_id]
     if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
         return jsonify({'error': 'screenshot only available on proxmox'}), 400
@@ -3998,9 +3982,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     mgr = cluster_managers[cluster_id]
     console_perm = 'xapi.vm.view' if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng' else 'vm.console'
     if not user_can_access_vm(user, cluster_id, vmid, console_perm, vm_type):
@@ -4695,9 +4677,7 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
     manager = cluster_managers[cluster_id]
 
     # MK: Check pool permission for vm.config (+ xapi.vm.config for XCP-ng)
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
 
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
         from pegaprox.utils.rbac import has_permission
@@ -4747,9 +4727,7 @@ def sanitize_boot_order_api(cluster_id, node, vm_type, vmid):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.config', vm_type):
         return jsonify({'error': 'Permission denied: vm.config'}), 403
     
@@ -5576,9 +5554,7 @@ def create_snapshot_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Cluster not found'}), 404
     
     # MK: Check pool permission for vm.snapshot
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
     
@@ -5609,9 +5585,7 @@ def delete_snapshot_api(cluster_id, node, vm_type, vmid, snapname):
         return jsonify({'error': 'Cluster not found'}), 404
     
     # MK: Check pool permission for vm.snapshot
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
     
@@ -5636,9 +5610,7 @@ def rollback_snapshot_api(cluster_id, node, vm_type, vmid, snapname):
         return jsonify({'error': 'Cluster not found'}), 404
     
     # MK: Check pool permission for vm.snapshot
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
     
@@ -5764,9 +5736,7 @@ def get_efficient_snapshots_api(cluster_id, node, vm_type, vmid):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
 
@@ -5785,9 +5755,7 @@ def create_efficient_snapshot_api(cluster_id, node, vm_type, vmid):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
 
@@ -5826,9 +5794,7 @@ def delete_efficient_snapshot_api(cluster_id, node, vm_type, vmid, snap_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
 
@@ -5854,9 +5820,7 @@ def rollback_efficient_snapshot_api(cluster_id, node, vm_type, vmid, snap_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
 
@@ -10231,9 +10195,7 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Cluster not found'}), 404
 
     # MK: Check pool permission for vm.migrate
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.migrate', vm_type):
         return jsonify({'error': 'Permission denied: vm.migrate'}), 403
 
@@ -10312,9 +10274,7 @@ def delete_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Cluster not found'}), 404
     
     # MK: Check pool permission for vm.delete
-    users = load_users()
-    user = users.get(request.session['user'], {})
-    user['username'] = request.session['user']
+    user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.delete', vm_type):
         return jsonify({'error': 'Permission denied: vm.delete'}), 403
     
@@ -10843,9 +10803,7 @@ def get_templates_api(cluster_id, node):
     # LW: XCP-ng templates need xapi.template.view permission
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
         from pegaprox.utils.rbac import has_permission
-        users = load_users()
-        u = users.get(request.session['user'], {})
-        u['username'] = request.session['user']
+        u = build_authz_user(request.session.get('user', ''), request.session)
         if not has_permission(u, 'xapi.template.view'):
             return jsonify({'error': 'Permission denied: xapi.template.view'}), 403
 
@@ -10882,9 +10840,7 @@ def create_vm_api(cluster_id, node):
 
     # NS Mar 2026: XCP-ng clusters need xapi.vm.create permission
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
-        users = load_users()
-        u = users.get(request.session['user'], {})
-        u['username'] = request.session['user']
+        u = build_authz_user(request.session.get('user', ''), request.session)
         from pegaprox.utils.rbac import has_permission
         if not has_permission(u, 'xapi.vm.create'):
             return jsonify({'error': 'Permission denied: xapi.vm.create'}), 403

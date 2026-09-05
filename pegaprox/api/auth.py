@@ -1711,7 +1711,10 @@ def list_api_tokens():
     
     # MK 2026-06-10 (RBAC): the admin.api perm (not the admin role) sees all tokens — admin holds it via all-perms.
     from pegaprox.utils.rbac import has_permission as _has_perm
-    if _has_perm(load_users().get(username, {}), 'admin.api') and request.args.get('all') == 'true':
+    from pegaprox.utils.auth import build_authz_user
+    # sec (audit): the raw record kept the OWNER's admin role, so an admin-owned viewer token
+    # could enumerate every user's tokens here (and revoke any of them below).
+    if _has_perm(build_authz_user(username, request.session), 'admin.api') and request.args.get('all') == 'true':
         try:
             db = get_db()
             cursor = db.conn.cursor()
@@ -1785,7 +1788,8 @@ def revoke_api_token_endpoint(token_id):
     
     # MK 2026-06-10 (RBAC): the admin.api perm can revoke any token (admin holds it via all-perms).
     from pegaprox.utils.rbac import has_permission as _has_perm
-    if _has_perm(load_users().get(username, {}), 'admin.api'):
+    from pegaprox.utils.auth import build_authz_user
+    if _has_perm(build_authz_user(username, request.session), 'admin.api'):
         try:
             db = get_db()
             cursor = db.conn.cursor()
