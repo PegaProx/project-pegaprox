@@ -460,6 +460,21 @@ def sse_updates():
                     message = message_queue.get(timeout=30)
                     yield f"data: {message}\n\n"
                 except queue_module.Empty:
+                    # sec (audit): an SSE stream lives for hours and its identity was captured
+                    # once, at connect. Revoking the TOKEN (added earlier this campaign) does
+                    # nothing for a stream that is already open, so disabling, deleting or
+                    # demoting an account left it receiving frames until the client hung up.
+                    # The keepalive tick is the natural place to re-check: one indexed read per
+                    # client per 30s. Also refresh is_admin, so a demotion starts filtering.
+                    _acct = _stream_identity(user)
+                    if _acct is None or not _acct.get('enabled', True):
+                        logging.info(f"[SSE] closing stream for '{_sl(user)}' — account gone or disabled")
+                        return
+                    with sse_clients_lock:
+                        _ci = sse_clients.get(client_id)
+                        if _ci is not None:
+                            _ci['is_admin'] = (_acct.get('effective_role', _acct.get('role'))
+                                               == ROLE_ADMIN and _token_role in (None, ROLE_ADMIN))
                     # Send keepalive
                     yield f": keepalive\n\n"
         except GeneratorExit:

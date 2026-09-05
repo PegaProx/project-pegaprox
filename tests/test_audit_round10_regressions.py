@@ -651,3 +651,56 @@ def test_parse_pve_error_is_imported_where_it_is_used():
     NameError and the caller fell through to the destructive delete+recreate path."""
     import pegaprox.api.clusters as c
     assert hasattr(c, 'parse_pve_error')
+
+
+# ── an already-open SSE stream outlived the account behind it ──────────────
+def test_open_sse_stream_closes_when_the_account_is_disabled(api, seed, monkeypatch):
+    """The stream captures its identity at connect and lives for hours. Revoking the TOKEN —
+    which this campaign added — does nothing for a stream that is already open, so disabling or
+    deleting an account left it receiving frames until the client hung up. The re-check rides
+    on the keepalive tick; force that branch immediately rather than waiting 30s for it."""
+    import queue as queue_module
+    import pegaprox.api.realtime as rt
+
+    seed.tenant('acme', clusters=['cluster_1'])
+    admin = seed.user('rootsse2', role='admin', tenant_id='acme')
+    u = seed.user('streamer', role='user', tenant_id='acme', permissions=['cluster.view'])
+    tok = api.as_user(u).post('/api/sse/token').get_json()['token']
+
+    class _AlwaysEmpty(queue_module.Queue):
+        def get(self, *a, **kw):
+            raise queue_module.Empty()
+
+    monkeypatch.setattr(rt.queue_module, 'Queue', _AlwaysEmpty)
+    with api.app.test_request_context(f'/api/sse/updates?token={tok}'):
+        gen = iter(rt.sse_updates().response)
+        assert 'connected' in next(gen)
+        assert next(gen).startswith(':'), "a live account should get a keepalive"
+        api.as_user(admin).put('/api/users/streamer', json={'enabled': False})
+        try:
+            next(gen)
+            raise AssertionError("the stream kept running after the account was disabled")
+        except StopIteration:
+            pass
+
+
+def test_sse_broadcast_does_not_hold_the_global_lock_across_authz():
+    """The per-client filters do uncached DB work and this loop runs about once a second;
+    holding sse_clients_lock across it serialises every connect and disconnect behind the
+    slowest lookup. broadcast_update already snapshots-then-sends for the WebSocket path."""
+    src = open('pegaprox/utils/realtime.py').read()
+    i = src.index('def broadcast_sse(')
+    _next = src.find('\ndef ', i + 10)
+    body = src[i:_next if _next != -1 else len(src)]
+    assert '_clients_snapshot = list(sse_clients.items())' in body
+    # the lock block itself must contain nothing but the snapshot
+    lines = body.split('\n')
+    li = next(k for k, l in enumerate(lines) if 'with sse_clients_lock:' in l)
+    indent = len(lines[li]) - len(lines[li].lstrip())
+    block = []
+    for l in lines[li + 1:]:
+        if l.strip() and (len(l) - len(l.lstrip())) <= indent:
+            break
+        if l.strip():
+            block.append(l.strip())
+    assert block == ['_clients_snapshot = list(sse_clients.items())'], block

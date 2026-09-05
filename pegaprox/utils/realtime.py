@@ -536,102 +536,109 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         _tasks_frame_cache = {}   # uname -> per-VM-filtered 'tasks' frame (audit M1)
         _vmw_perm_cache = {}      # uname -> bool: holds the vmware.* perm the REST twin requires
         _obj_frame_cache = {}     # uname -> bool: may see THIS migration/DR-plan frame (audit)
+        # sec/scale (audit): the per-client filtering below does uncached DB work — a single
+        # user fetch plus the VM-ACL and pool lookups inside user_can_access_vm — and this loop
+        # runs about once a second. Holding the GLOBAL sse_clients lock across that serialises
+        # every connect and disconnect behind the slowest authz lookup, and under gevent each
+        # of those reads is a yield point. Snapshot the registry under the lock and do the work
+        # outside it, which is what broadcast_update already does for the WebSocket path.
         with sse_clients_lock:
-            for client_id, client_info in list(sse_clients.items()):
-                try:
-                    q = client_info.get('queue')
-                    subscribed = client_info.get('clusters')
+            _clients_snapshot = list(sse_clients.items())
+        for client_id, client_info in _clients_snapshot:
+            try:
+                q = client_info.get('queue')
+                subscribed = client_info.get('clusters')
 
-                    should_send = False
-                    if target_clusters is not None:
-                        # NS Aug 2026 (Aikido pentest) — multi-cluster-scoped event (VMware
-                        # linked_clusters). Empty → unlinked server → global (matches REST).
-                        if not target_clusters:
-                            should_send = True
-                        elif subscribed is None:
-                            should_send = True   # admin / all-access
-                        elif subscribed and any(c in subscribed for c in target_clusters):
-                            should_send = True
-                    elif not is_cluster_specific:
-                        # Global event - send to everyone
+                should_send = False
+                if target_clusters is not None:
+                    # NS Aug 2026 (Aikido pentest) — multi-cluster-scoped event (VMware
+                    # linked_clusters). Empty → unlinked server → global (matches REST).
+                    if not target_clusters:
                         should_send = True
-                    elif cluster_id and subscribed is None:
-                        # NS: subscribed=None means admin/all-access -> send everything
-                        # Was previously blocking ALL SSE events for admin users!
+                    elif subscribed is None:
+                        should_send = True   # admin / all-access
+                    elif subscribed and any(c in subscribed for c in target_clusters):
                         should_send = True
-                    elif cluster_id and subscribed and cluster_id in subscribed:
-                        # Cluster-specific event and client is subscribed
-                        should_send = True
+                elif not is_cluster_specific:
+                    # Global event - send to everyone
+                    should_send = True
+                elif cluster_id and subscribed is None:
+                    # NS: subscribed=None means admin/all-access -> send everything
+                    # Was previously blocking ALL SSE events for admin users!
+                    should_send = True
+                elif cluster_id and subscribed and cluster_id in subscribed:
+                    # Cluster-specific event and client is subscribed
+                    should_send = True
 
-                    if q and should_send:
-                        client_message = message
-                        # #736 — a scoped (non-admin) client must not receive VMs it can't view over
-                        # the 'resources' stream. Gate on the REAL admin role, NOT `subscribed is None`:
-                        # get_user_clusters() returns None for a default-tenant scoped user too
-                        # (rbac.py:347), so the old `subscribed is not None` check silently leaked the
-                        # full inventory to them. Every non-admin (list-scoped OR default-tenant) gets a
-                        # per-VM-authorized frame (cached per distinct user above). Fail-closed: a client
-                        # registered without the is_admin flag is treated as non-admin and filtered.
-                        if update_type == 'resources' and cluster_id is not None and not client_info.get('is_admin', False):
-                            uname = client_info.get('user')
-                            client_message = _res_frame_cache.get(uname, _SSE_FILTER_MISSING)
-                            if client_message is _SSE_FILTER_MISSING:
-                                client_message = _filtered_resources_frame(data, cluster_id, uname, timestamp)
-                                _res_frame_cache[uname] = client_message
-                        elif update_type == 'vm_config' and cluster_id is not None and not client_info.get('is_admin', False):
-                            # audit M1 — vm_config carries the full VM config (disks/net/cloud-init);
-                            # deliver only to a scoped client that may view this vmid.
-                            uname = client_info.get('user')
-                            _ok_cfg = _cfg_access_cache.get(uname, _SSE_FILTER_MISSING)
-                            if _ok_cfg is _SSE_FILTER_MISSING:
-                                _ok_cfg = _sse_user_can_view_vm(uname, cluster_id, (data or {}).get('vmid'))
-                                _cfg_access_cache[uname] = _ok_cfg
-                            if not _ok_cfg:
-                                continue  # foreign VM's config → not for this scoped client
-                        elif update_type == 'tasks' and cluster_id is not None and not client_info.get('is_admin', False):
-                            # audit M1 — filter per-VM task rows to the ones this client may view.
-                            uname = client_info.get('user')
-                            client_message = _tasks_frame_cache.get(uname, _SSE_FILTER_MISSING)
-                            if client_message is _SSE_FILTER_MISSING:
-                                client_message = _filtered_tasks_frame(data, cluster_id, uname, timestamp)
-                                _tasks_frame_cache[uname] = client_message
-                        elif (update_type.startswith('vmware_')
-                              and update_type not in _SSE_OBJECT_FRAMES
-                              and not client_info.get('is_admin', False)):
-                            # audit — mirror the REST perm gate (vmware.vm.view / vmware.view) that
-                            # the stream skipped entirely. Both are default viewer perms, so this
-                            # only bites a custom role that deliberately withholds them.
-                            uname = client_info.get('user')
-                            _need = 'vmware.view' if update_type == 'vmware_servers' else 'vmware.vm.view'
-                            _ok_vmw = _vmw_perm_cache.get((uname, _need), _SSE_FILTER_MISSING)
-                            if _ok_vmw is _SSE_FILTER_MISSING:
-                                _ok_vmw = _sse_user_has_perm(uname, _need)
-                                _vmw_perm_cache[uname, _need] = _ok_vmw
-                            if not _ok_vmw:
-                                continue
-                        elif update_type in _SSE_OBJECT_FRAMES and not client_info.get('is_admin', False):
-                            uname = client_info.get('user')
-                            _ok_obj = _obj_frame_cache.get(uname, _SSE_FILTER_MISSING)
-                            if _ok_obj is _SSE_FILTER_MISSING:
-                                _ok_obj = _sse_may_see_object_frame(uname, update_type, data)
-                                _obj_frame_cache[uname] = _ok_obj
-                            if not _ok_obj:
-                                continue
-                        if client_message is None:
-                            continue  # unknown user -> fail closed, send nothing
-                        if len(client_message) > _MAX_BROADCAST_BYTES:
-                            logging.warning(f"SSE message too large ({len(client_message)} bytes), skipping")
+                if q and should_send:
+                    client_message = message
+                    # #736 — a scoped (non-admin) client must not receive VMs it can't view over
+                    # the 'resources' stream. Gate on the REAL admin role, NOT `subscribed is None`:
+                    # get_user_clusters() returns None for a default-tenant scoped user too
+                    # (rbac.py:347), so the old `subscribed is not None` check silently leaked the
+                    # full inventory to them. Every non-admin (list-scoped OR default-tenant) gets a
+                    # per-VM-authorized frame (cached per distinct user above). Fail-closed: a client
+                    # registered without the is_admin flag is treated as non-admin and filtered.
+                    if update_type == 'resources' and cluster_id is not None and not client_info.get('is_admin', False):
+                        uname = client_info.get('user')
+                        client_message = _res_frame_cache.get(uname, _SSE_FILTER_MISSING)
+                        if client_message is _SSE_FILTER_MISSING:
+                            client_message = _filtered_resources_frame(data, cluster_id, uname, timestamp)
+                            _res_frame_cache[uname] = client_message
+                    elif update_type == 'vm_config' and cluster_id is not None and not client_info.get('is_admin', False):
+                        # audit M1 — vm_config carries the full VM config (disks/net/cloud-init);
+                        # deliver only to a scoped client that may view this vmid.
+                        uname = client_info.get('user')
+                        _ok_cfg = _cfg_access_cache.get(uname, _SSE_FILTER_MISSING)
+                        if _ok_cfg is _SSE_FILTER_MISSING:
+                            _ok_cfg = _sse_user_can_view_vm(uname, cluster_id, (data or {}).get('vmid'))
+                            _cfg_access_cache[uname] = _ok_cfg
+                        if not _ok_cfg:
+                            continue  # foreign VM's config → not for this scoped client
+                    elif update_type == 'tasks' and cluster_id is not None and not client_info.get('is_admin', False):
+                        # audit M1 — filter per-VM task rows to the ones this client may view.
+                        uname = client_info.get('user')
+                        client_message = _tasks_frame_cache.get(uname, _SSE_FILTER_MISSING)
+                        if client_message is _SSE_FILTER_MISSING:
+                            client_message = _filtered_tasks_frame(data, cluster_id, uname, timestamp)
+                            _tasks_frame_cache[uname] = client_message
+                    elif (update_type.startswith('vmware_')
+                          and update_type not in _SSE_OBJECT_FRAMES
+                          and not client_info.get('is_admin', False)):
+                        # audit — mirror the REST perm gate (vmware.vm.view / vmware.view) that
+                        # the stream skipped entirely. Both are default viewer perms, so this
+                        # only bites a custom role that deliberately withholds them.
+                        uname = client_info.get('user')
+                        _need = 'vmware.view' if update_type == 'vmware_servers' else 'vmware.vm.view'
+                        _ok_vmw = _vmw_perm_cache.get((uname, _need), _SSE_FILTER_MISSING)
+                        if _ok_vmw is _SSE_FILTER_MISSING:
+                            _ok_vmw = _sse_user_has_perm(uname, _need)
+                            _vmw_perm_cache[uname, _need] = _ok_vmw
+                        if not _ok_vmw:
                             continue
-                        try:
-                            q.put_nowait(client_message)
-                        except Exception:
-                            # R3 (regression scan): a slow client's queue is full, so
-                            # this frame is dropped — make it OBSERVABLE instead of
-                            # silent (its VM grid goes stale otherwise with no signal).
-                            n = client_info['dropped'] = client_info.get('dropped', 0) + 1
-                            if n == 1 or n % 100 == 0:
-                                logging.warning(f"[SSE] client {client_id} queue full — dropped {n} frames (slow consumer)")
-                except:
-                    pass
+                    elif update_type in _SSE_OBJECT_FRAMES and not client_info.get('is_admin', False):
+                        uname = client_info.get('user')
+                        _ok_obj = _obj_frame_cache.get(uname, _SSE_FILTER_MISSING)
+                        if _ok_obj is _SSE_FILTER_MISSING:
+                            _ok_obj = _sse_may_see_object_frame(uname, update_type, data)
+                            _obj_frame_cache[uname] = _ok_obj
+                        if not _ok_obj:
+                            continue
+                    if client_message is None:
+                        continue  # unknown user -> fail closed, send nothing
+                    if len(client_message) > _MAX_BROADCAST_BYTES:
+                        logging.warning(f"SSE message too large ({len(client_message)} bytes), skipping")
+                        continue
+                    try:
+                        q.put_nowait(client_message)
+                    except Exception:
+                        # R3 (regression scan): a slow client's queue is full, so
+                        # this frame is dropped — make it OBSERVABLE instead of
+                        # silent (its VM grid goes stale otherwise with no signal).
+                        n = client_info['dropped'] = client_info.get('dropped', 0) + 1
+                        if n == 1 or n % 100 == 0:
+                            logging.warning(f"[SSE] client {client_id} queue full — dropped {n} frames (slow consumer)")
+            except:
+                pass
     except Exception as e:
         logging.error(f"SSE broadcast error: {e}")
