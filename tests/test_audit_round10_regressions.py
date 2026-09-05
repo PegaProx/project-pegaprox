@@ -378,3 +378,21 @@ def test_legacy_scheduled_rows_still_load(db):
     assert row['action'] == 'stop', "the legacy action must be recovered from task_type"
     assert row['schedule_time'] == '05:00'
     assert row['config'] == {'foo': 'bar'}
+
+
+# ── key rotation is a compliance feature that bricked the install ────────────
+def test_key_rotation_keeps_ha_settings_readable(db):
+    """clusters.ha_settings has no _encrypted suffix but IS encrypted (save_cluster stores
+    _encrypt(json.dumps(...)) and both read paths _decrypt it). The rotation loop keyed on the
+    suffix and missed it, and _decrypt RAISES on a key mismatch — so rotating the key made
+    get_all_clusters throw and every cluster vanish."""
+    db.save_cluster('c-rot', {
+        'name': 'rot', 'host': '10.0.0.1', 'user': 'root@pam', 'pass': 'pw',
+        'ha_settings': {'storage_heartbeat_enabled': True, 'pegaprox_vmid': '101'},
+    })
+    assert db.get_cluster('c-rot')['ha_settings']['pegaprox_vmid'] == '101'
+    res = db.rotate_encryption_key()
+    assert not res.get('errors'), res
+    after = db.get_cluster('c-rot')          # raises if ha_settings kept the old key
+    assert after['ha_settings']['pegaprox_vmid'] == '101', after['ha_settings']
+    assert after['pass'] == 'pw', "the other secrets must still round-trip too"

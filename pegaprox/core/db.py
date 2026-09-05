@@ -4064,11 +4064,23 @@ class PegaProxDB:
                     stats['errors'].append(f"Cluster {row['id']}: {str(e)}")
 
             # Also rotate SSH keys and API token secrets if present.
-            cursor.execute('SELECT id, ssh_key_encrypted, api_token_secret_encrypted FROM clusters')
+            # NOTE: ha_settings has no _encrypted suffix but IS encrypted (save_cluster stores
+            # _encrypt(json.dumps(...)) and both read paths _decrypt it). It was missed here, and
+            # _decrypt RAISES on a key mismatch — so rotating the key, a compliance feature, made
+            # get_all_clusters throw and every cluster vanish from the UI. Rotate it too.
+            cursor.execute('SELECT id, ssh_key_encrypted, api_token_secret_encrypted, ha_settings '
+                           'FROM clusters')
             for row in cursor.fetchall():
                 try:
                     ssh_key = row['ssh_key_encrypted']
                     api_token = row['api_token_secret_encrypted']
+                    ha_settings = row['ha_settings']
+
+                    if ha_settings and str(ha_settings).startswith('aes256:'):
+                        decrypted = self._decrypt_with_key(ha_settings, old_aesgcm)
+                        new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                        cursor.execute('UPDATE clusters SET ha_settings = ? WHERE id = ?',
+                                     (new_encrypted, row['id']))
 
                     if ssh_key and ssh_key.startswith('aes256:'):
                         decrypted = self._decrypt_with_key(ssh_key, old_aesgcm)
