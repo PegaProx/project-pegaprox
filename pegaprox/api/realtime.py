@@ -84,12 +84,19 @@ def ws_live_updates(ws):
         _allowed = get_user_clusters(_user_data or {})  # None = admin (all clusters)
         subscribed_clusters = _scope_ws_clusters(_allowed, auth_data.get('clusters', None))
 
+        # sec (audit): the delivery loop now filters per-VM 'action' frames for non-admins, and
+        # `subscribed is None` does NOT mean admin (get_user_clusters returns None for a
+        # default-tenant scoped user too) — capture the real role once, like the SSE path does.
+        # Fail closed: an unresolvable identity is treated as non-admin and gets filtered.
+        _is_admin = (_user_data or {}).get('role') == ROLE_ADMIN
+
         with ws_clients_lock:
             ws_clients[client_id] = {
                 'ws': ws,
                 'lock': client_lock,
                 'user': username,
                 'clusters': subscribed_clusters,
+                'is_admin': _is_admin,
                 'connected_at': datetime.now().isoformat()
             }
 

@@ -105,6 +105,38 @@ def _caller_can_grant_perms(permissions):
     return all(has_permission(caller, p) for p in (permissions or []))
 
 
+def _authz_object_write(cluster_id, subjects=(), permissions=()):
+    """sec (audit): vm-acls and pool-permissions are the authorization objects the per-VM gate
+    consults — writing them IS granting access, so cluster reach is nowhere near enough. Every
+    other grant path in this file already asks these questions; these routes asked none of them.
+    Returns an error response, or None when the write is allowed.
+
+    Global admins pass. Otherwise the caller must not be confined on this cluster (a pool-/ACL-
+    scoped caller has no business authoring grants at all), the subjects must be inside their
+    tenant, and they may not hand out permissions they do not hold themselves."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import caller_is_scoped
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    if caller.get('effective_role', caller.get('role')) == ROLE_ADMIN:
+        return None
+    if caller_is_scoped(caller, cluster_id):
+        return jsonify({'error': 'Access denied: you cannot manage access rules on this cluster'}), 403
+    _ct = _caller_tenant_or_none()
+    if _ct is not None:
+        _users = load_users()
+        for s in subjects:
+            if not s or s == '*':
+                # a wildcard grant reaches every account, including other tenants'
+                return jsonify({'error': 'Access denied: wildcard grants require a global admin'}), 403
+            _t = (_users.get(s) or {}).get('tenant_id', DEFAULT_TENANT_ID)
+            if _t != _ct:
+                return jsonify({'error': f'Access denied: {s} is not in your tenant'}), 403
+    _over = [p for p in (permissions or []) if not has_permission(caller, p)]
+    if _over:
+        return jsonify({'error': 'Cannot grant permissions you do not hold: ' + ', '.join(_over)}), 403
+    return None
+
+
 def _caller_can_manage_user(target_user):
     # NS Aug 2026 (audit re-verify) — for account-takeover-capable ops (password reset, 2FA clear) the
     # guard must weigh the target's EFFECTIVE permissions (role + direct permissions +
@@ -394,6 +426,8 @@ def admin_change_password(username):
     # Invalidate ALL sessions for this user (security: force re-login)
     sessions_removed = invalidate_all_user_sessions(username)
     tokens_revoked = revoke_user_api_tokens(username)  # sec (audit): revoke API tokens too, not just sessions
+    from pegaprox.utils.realtime import invalidate_user_sse_tokens
+    invalidate_user_sse_tokens(username)               # ...and the SSE stream token
 
     admin_username = request.session['user']
     logging.info(f"Admin '{admin_username}' changed password for user '{username}' — {tokens_revoked} token(s) revoked")
@@ -963,6 +997,10 @@ def update_user(username):
     
     _disabled = False
     if 'enabled' in data:
+        # sec (audit): same tier guard as the password/2FA paths — disabling is an availability
+        # attack a delegate must not be able to run against a peer who outranks them.
+        if not _caller_can_manage_user(user):
+            return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
         # Prevent disabling last admin
         if user['role'] == ROLE_ADMIN and not data['enabled']:
             admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
@@ -1024,6 +1062,8 @@ def update_user(username):
         # sec (audit): the dedicated reset route revokes API tokens too; this one didn't, so an
         # exfiltrated pgx_ token survived the standard "lock the intruder out" action for up to a year.
         _revoked = revoke_user_api_tokens(username)
+        from pegaprox.utils.realtime import invalidate_user_sse_tokens
+        invalidate_user_sse_tokens(username)
         log_audit(request.session['user'], 'user.sessions_invalidated',
                   f"Invalidated sessions after password change for {username} "
                   f"({_revoked} API token(s) revoked)")
@@ -1033,9 +1073,10 @@ def update_user(username):
     # endpoints is the defence-in-depth backstop.
     if _disabled:
         from pegaprox.utils.auth import invalidate_all_user_sessions
-        from pegaprox.utils.realtime import invalidate_user_ws_tokens
+        from pegaprox.utils.realtime import invalidate_user_ws_tokens, invalidate_user_sse_tokens
         invalidate_all_user_sessions(username)
         invalidate_user_ws_tokens(username)   # a pre-minted ws_token must not outlive the disable
+        invalidate_user_sse_tokens(username)  # ...nor a pre-minted SSE token (audit)
         log_audit(request.session['user'], 'user.sessions_invalidated',
                   f"Invalidated sessions after disabling {username}")
 
@@ -1065,6 +1106,10 @@ def delete_user(username):
     _ct = _caller_tenant_or_none()
     if _ct is not None and user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
         return jsonify({'error': 'Access denied: cannot delete users in other tenants'}), 403
+    # sec (audit): same tier guard the password-reset and 2FA-clear paths use — a delegate must
+    # not be able to remove a same-tenant peer whose grants exceed their own.
+    if not _caller_can_manage_user(user):
+        return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
     if user['role'] == ROLE_ADMIN:
         admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN)
         if admin_count <= 1:
@@ -1094,9 +1139,10 @@ def delete_user(username):
     # LIVE store and persists. Also revoke the user's API tokens so a long-lived pgx_ token
     # can't outlive the account.
     from pegaprox.utils.auth import invalidate_all_user_sessions
-    from pegaprox.utils.realtime import invalidate_user_ws_tokens
+    from pegaprox.utils.realtime import invalidate_user_ws_tokens, invalidate_user_sse_tokens
     invalidate_all_user_sessions(username)
     invalidate_user_ws_tokens(username)   # drop any pre-minted console/shell ws_token too
+    invalidate_user_sse_tokens(username)  # and the SSE stream token (audit)
     try:
         db.execute('UPDATE api_tokens SET revoked = 1 WHERE username = ?', (username,))
     except Exception as e:
@@ -1246,6 +1292,11 @@ def update_tenant(tenant_id):
     if 'name' in data:
         tenants_db[tenant_id]['name'] = data['name']
     if 'clusters' in data:
+        # sec (audit): tenant['clusters'] IS the list get_user_clusters reads, so a non-global
+        # admin.tenants holder could append arbitrary cluster ids to their own tenant and become
+        # a cluster-wide operator there. Only a global admin may change the cluster set.
+        if request.session.get('effective_role', request.session.get('role')) != ROLE_ADMIN:
+            return jsonify({'error': 'Only a global admin can change a tenant\'s clusters'}), 403
         tenants_db[tenant_id]['clusters'] = data['clusters']
     # NS #502 — quota fields
     for _qk in ('quota_max_vms', 'quota_max_cores', 'quota_max_memory_gb'):
@@ -1744,7 +1795,17 @@ def set_vm_acl(cluster_id, vmid):
     for p in permissions:
         if p not in PERMISSIONS:
             return jsonify({'error': f'Invalid permission: {p}'}), 400
-    
+
+    _err = _authz_object_write(cluster_id, subjects=users, permissions=permissions)
+    if _err:
+        return _err
+    # and the caller must actually control the VM they are writing a rule for
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _caller = _bau(request.session.get('user', ''), request.session)
+    if not _ucav(_caller, cluster_id, vmid, 'vm.config'):
+        return jsonify({'error': 'Access denied to this VM'}), 403
+
     acls = get_vm_acls()
     if cluster_id not in acls:
         acls[cluster_id] = {}
@@ -1772,6 +1833,9 @@ def set_vm_acl(cluster_id, vmid):
 @require_auth(perms=['admin.users'])
 def delete_vm_acl(cluster_id, vmid):
     """Remove VM-specific ACL (use default permissions)"""
+    _err = _authz_object_write(cluster_id)
+    if _err:
+        return _err
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     
@@ -1936,7 +2000,20 @@ def add_pool_permission_api(cluster_id, pool_id):
     invalid_perms = [p for p in permissions if p not in POOL_PERMISSIONS]
     if invalid_perms:
         return jsonify({'error': f'Invalid permissions: {invalid_perms}'}), 400
-    
+
+    # sec (audit): pool_id and subject_id are attacker-chosen and POOL_PERMISSIONS includes
+    # pool.admin, which short-circuits the per-VM gate for every VM in the pool — this is the
+    # strongest grant primitive in the product and it had no object gate. _pool_visibility (the
+    # H3 fix, ~100 lines up) gates pool READS; apply the same confinement to the write.
+    _err = _authz_object_write(cluster_id,
+                               subjects=[subject_id] if subject_type == 'user' else [],
+                               permissions=[])
+    if _err:
+        return _err
+    _confined, _granted = _pool_visibility(cluster_id)
+    if _confined and pool_id not in _granted:
+        return jsonify({'error': 'Access denied to this pool'}), 403
+
     db = get_db()
     success = db.save_pool_permission(cluster_id, pool_id, subject_type, subject_id, permissions)
     
@@ -1956,7 +2033,13 @@ def delete_pool_permission_api(cluster_id, pool_id, subject_type, subject_id):
     """Delete pool permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    _err = _authz_object_write(cluster_id)
+    if _err:
+        return _err
+    _confined, _granted = _pool_visibility(cluster_id)
+    if _confined and pool_id not in _granted:
+        return jsonify({'error': 'Access denied to this pool'}), 403
+
     db = get_db()
     deleted = db.delete_pool_permission(cluster_id, pool_id, subject_type, subject_id)
     

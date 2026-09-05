@@ -2,6 +2,7 @@
 """auth routes (login, logout, 2FA, OIDC, API tokens) - split from monolith dec 2025, NS"""
 
 import time
+import threading
 import logging
 import secrets
 import base64
@@ -487,6 +488,24 @@ def auth_setup():
     })
 
 
+_totp_used = {}
+_totp_used_lock = threading.Lock()
+
+
+def _totp_replayed(username, code):
+    """True if this (user, code) pair was already accepted inside the current acceptance
+    window. valid_window=1 spans ~90s, so remember for a little longer than that."""
+    now = time.time()
+    key = (username or '', str(code or ''))
+    with _totp_used_lock:
+        for k, t in [(k, t) for k, t in _totp_used.items() if now - t > 120]:
+            _totp_used.pop(k, None)
+        if key in _totp_used:
+            return True
+        _totp_used[key] = now
+    return False
+
+
 @bp.route('/api/auth/login', methods=['POST'])
 def auth_login():
     """login endpoint - MK"""
@@ -580,6 +599,16 @@ def auth_login():
         locked = False
         log_audit(target_username or 'unknown', 'auth.login_failed',
                   f"Failed login from {client_ip}" + (f" for user '{target_username}'" if target_username else ""))
+
+        # sec (audit): entries were removed only on a successful login from the same IP, so a
+        # rotating source (an IPv6 /64 is free) grew these dicts without bound. Sweep anything
+        # whose newest attempt is outside the window and whose lockout has expired.
+        _cutoff = current_time - attempt_window
+        for _store in (login_attempts_by_ip, login_attempts_by_user):
+            for _k in [k for k, v in list(_store.items())
+                       if v.get('locked_until', 0) < current_time
+                       and max((v.get('attempts') or [0])) < _cutoff]:
+                _store.pop(_k, None)
 
         # Track by IP
         if client_ip not in login_attempts_by_ip:
@@ -754,6 +783,12 @@ def auth_login():
         elif totp_code and has_totp:
             if TOTP_AVAILABLE:
                 totp = pyotp.TOTP(user['totp_secret'])
+                # sec (audit): RFC 6238 5.2 — a code must be accepted once. valid_window=1
+                # gives a ~90s window in which an intercepted code was replayable.
+                if _totp_replayed(username, totp_code):
+                    logging.warning(f"Replayed 2FA code for user: {username} from {client_ip}")
+                    record_failed_attempt(username)
+                    return jsonify({'error': 'Invalid 2FA code'}), 401
                 if not totp.verify(totp_code, valid_window=1):
                     logging.warning(f"Invalid 2FA code for user: {username} from {client_ip}")
                     locked = record_failed_attempt(username)
@@ -965,6 +1000,14 @@ def auth_logout():
         if session:
             logging.info(f"User '{session['user']}' logged out")
             log_audit(session['user'], 'user.logout', f"User logged out")
+        # sec (audit): logout dropped the session but left a live SSE token (and its already-open
+        # stream) behind for up to its full 10-minute TTL.
+        try:
+            from pegaprox.utils.realtime import invalidate_user_sse_tokens, invalidate_user_ws_tokens
+            invalidate_user_sse_tokens(session['user'])
+            invalidate_user_ws_tokens(session['user'])
+        except Exception:
+            pass
         invalidate_session(session_id)
     
     response = jsonify({'success': True})
@@ -1498,6 +1541,8 @@ def auth_change_password():
     current_session_id = request.cookies.get('session_id') or request.headers.get('X-Session-ID')
     sessions_removed = invalidate_all_user_sessions(username)  # no except_session — all go
     tokens_revoked = revoke_user_api_tokens(username)  # sec (audit): tokens survived a password change
+    from pegaprox.utils.realtime import invalidate_user_sse_tokens
+    invalidate_user_sse_tokens(username)               # ...as did the SSE stream token
 
     logging.info(f"User '{username}' changed their password — all sessions invalidated, {tokens_revoked} token(s) revoked")
     log_audit(username, 'user.password_changed', f"Password changed, {sessions_removed} session(s) invalidated (incl. current), {tokens_revoked} API token(s) revoked")

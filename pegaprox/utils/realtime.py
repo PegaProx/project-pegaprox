@@ -113,8 +113,19 @@ def broadcast_update(update_type: str, data: dict, cluster_id: str = None):
 
                 # Only send if client is subscribed to this cluster or all clusters
                 subscribed = client_info.get('clusters')
-                if cluster_id is None or subscribed is None or cluster_id in subscribed:
-                    clients_to_send.append((client_id, ws, client_lock))
+                if not (cluster_id is None or subscribed is None or cluster_id in subscribed):
+                    continue
+                # sec (audit): the WS path had cluster-level scoping only, while its SSE twin
+                # filters per VM. 'action' frames name the vmid, the VM's NAME and the operator
+                # (create/delete/migrate/power), so a pool-/ACL-scoped client watching a cluster
+                # saw every guest's activity. Same per-VM question as the SSE 'tasks' frame.
+                if (update_type == 'action' and cluster_id is not None
+                        and not client_info.get('is_admin', False)):
+                    _rid = (data or {}).get('resource_id')
+                    if (data or {}).get('resource_type') in ('vm', 'qemu', 'lxc', 'ct'):
+                        if not _sse_user_can_view_vm(client_info.get('user'), cluster_id, _rid):
+                            continue
+                clients_to_send.append((client_id, ws, client_lock))
 
         # Send to clients outside the main lock
         for client_id, ws, client_lock in clients_to_send:
@@ -188,7 +199,20 @@ def validate_sse_token(token: str) -> dict:
             del sse_tokens[token]
             return None
 
-        return token_data
+    # sec (audit): the ws-token twin rechecks the account on every consume; this one checked
+    # nothing, so a token minted before a disable kept opening streams for its full TTL.
+    # Outside the lock — this touches the DB. Tolerant of a transient miss (revocation covers
+    # deletion), strict about an explicitly disabled account.
+    try:
+        from pegaprox.core.db import get_db
+        _acct = get_db().get_user(token_data.get('user'))
+    except Exception:
+        _acct = None
+    if _acct is not None and not _acct.get('enabled', True):
+        with sse_tokens_lock:
+            sse_tokens.pop(token, None)
+        return None
+    return token_data
 
 
 # MK: Mar 2026 - WS tokens for VNC/SSH, avoids putting session_id in WebSocket URLs
@@ -240,6 +264,18 @@ def invalidate_user_ws_tokens(username: str) -> int:
         gone = [t for t, d in ws_tokens.items() if d.get('user') == username]
         for t in gone:
             del ws_tokens[t]
+    return len(gone)
+
+
+def invalidate_user_sse_tokens(username: str) -> int:
+    """sec (audit): SSE tokens had NO revocation path at all — logout, password change, account
+    disable and account delete each dropped sessions (and ws tokens, and API tokens) but left a
+    working 10-minute SSE token behind. Twin of invalidate_user_ws_tokens; called from the same
+    sites."""
+    with sse_tokens_lock:
+        gone = [t for t, d in sse_tokens.items() if d.get('user') == username]
+        for t in gone:
+            del sse_tokens[t]
     return len(gone)
 
 
