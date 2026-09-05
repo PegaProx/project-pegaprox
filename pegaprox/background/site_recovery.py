@@ -232,7 +232,13 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
             target_bridge = ','.join(f"{s}:{t}" for s, t in net_map.items())
 
         # create temp token on target for migration auth
-        token_result = tgt_mgr.create_api_token('pegaprox-sr')
+        # fix (audit): the name used to be the fixed string 'pegaprox-sr', and the cleanup below
+        # deletes BY NAME after a one-hour grace. Two failovers running at once — or one
+        # starting while an earlier grace is still pending — meant the first cleanup revoked the
+        # token the second migration was still authenticating with. The xclb path already mints
+        # per-job names for the same reason; do the same here.
+        _sr_token_name = f"pegaprox-sr-{uuid.uuid4().hex[:8]}"
+        token_result = tgt_mgr.create_api_token(_sr_token_name)
         if not token_result.get('success'):
             return False, f"Failed to create API token on target: {token_result.get('error', 'unknown')}"
 
@@ -242,7 +248,7 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         # get target fingerprint
         fp_result = tgt_mgr.get_cluster_fingerprint()
         if not fp_result.get('success'):
-            tgt_mgr.delete_api_token('pegaprox-sr')
+            tgt_mgr.delete_api_token(_sr_token_name)
             return False, f"Failed to get target fingerprint: {fp_result.get('error', '')}"
 
         fingerprint = fp_result['fingerprint']
@@ -264,7 +270,7 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         def _delayed_cleanup():
             time.sleep(3600)  # 1h grace - large disks (1TB+) need time
             try:
-                tgt_mgr.delete_api_token('pegaprox-sr')
+                tgt_mgr.delete_api_token(_sr_token_name)
             except Exception:
                 pass
 

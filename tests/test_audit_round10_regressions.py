@@ -861,3 +861,32 @@ def test_api_rate_limit_map_is_pruned():
     i = src.index('with g.api_rate_limit_lock:')
     assert 'g.api_request_counts.pop(' in src[i:i + 1200], \
         "the rate-limit map is still never pruned"
+
+
+def test_scheduler_touches_only_the_task_it_ran(db):
+    """The tick wrote the whole config back from a snapshot taken before it started, and
+    execute_scheduled_task starts and stops VMs — so a task an admin deleted mid-tick came
+    back, and an edit made mid-tick was reverted."""
+    from pegaprox.background.scheduler import save_scheduled_tasks, load_scheduled_tasks, _touch_last_run
+    save_scheduled_tasks({'tasks': [
+        {'id': 'keep', 'cluster_id': 'c1', 'name': 'a', 'action': 'stop', 'target_id': '1',
+         'schedule_type': 'daily', 'schedule_time': '02:00', 'enabled': True},
+        {'id': 'doomed', 'cluster_id': 'c1', 'name': 'b', 'action': 'stop', 'target_id': '2',
+         'schedule_type': 'daily', 'schedule_time': '03:00', 'enabled': True},
+    ]})
+    # an admin deletes one while the tick is mid-execution
+    db.conn.execute("DELETE FROM scheduled_tasks WHERE id = 'doomed'")
+    db.conn.commit()
+    _touch_last_run('keep', '2026-01-01T00:00:00')
+    ids = {t['id'] for t in load_scheduled_tasks()['tasks']}
+    assert ids == {'keep'}, f"the deleted task was resurrected: {ids}"
+    kept = [t for t in load_scheduled_tasks()['tasks'] if t['id'] == 'keep'][0]
+    assert kept['last_run'] == '2026-01-01T00:00:00'
+
+
+def test_site_recovery_tokens_are_per_migration():
+    """The token was created and deleted BY a fixed name, with a one-hour cleanup grace — so
+    two overlapping failovers revoked each other's credential mid-migration."""
+    src = open('pegaprox/background/site_recovery.py').read()
+    assert "create_api_token('pegaprox-sr')" not in src, "still a fixed token name"
+    assert '_sr_token_name' in src and 'uuid.uuid4()' in src

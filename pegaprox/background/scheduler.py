@@ -184,9 +184,24 @@ def run_scheduled_tasks():
         
         if should_run:
             execute_scheduled_task(task)
-            # Update last_run
+            # fix (audit): this used to write the WHOLE config back — a snapshot taken before
+            # the tick began. execute_scheduled_task starts and stops VMs, so it can run for a
+            # while, and any task an admin deleted or edited in that window was resurrected or
+            # reverted by this save. Touch just this task's last_run instead.
             task['last_run'] = current_time.isoformat()
-            save_scheduled_tasks(config)
+            _touch_last_run(task.get('id'), task['last_run'])
+
+def _touch_last_run(task_id, when):
+    """Record a single task's last_run without rewriting the table around it."""
+    if not task_id:
+        return
+    try:
+        db = get_db()
+        db.conn.execute('UPDATE scheduled_tasks SET last_run = ? WHERE id = ?', (when, task_id))
+        db.conn.commit()
+    except Exception as e:
+        logging.error(f"Failed to record last_run for scheduled task {task_id}: {e}")
+
 
 def execute_scheduled_task(task):
     """Execute a scheduled task"""
