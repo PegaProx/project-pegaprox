@@ -422,6 +422,23 @@ def get_affinity_rules(cluster_id=None):
         if not ok:
             return err
         config['rules'] = [r for r in config['rules'] if r.get('cluster_id') == cluster_id]
+        # sec (audit): a rule names every VM it groups, so this listed guests the caller cannot
+        # see. Show a confined caller only the rules whose members they may all view.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import user_can_access_vm
+        from pegaprox.api.helpers import caller_is_scoped
+        _au = build_authz_user(request.session.get('user', ''), request.session)
+        if caller_is_scoped(_au, cluster_id):
+            def _visible(rule):
+                members = rule.get('vm_ids') or rule.get('vms') or []
+                if not members:
+                    return False
+                try:
+                    return all(user_can_access_vm(_au, cluster_id, int(v), 'vm.view') for v in members)
+                except (TypeError, ValueError):
+                    return False
+            config = dict(config)
+            config['rules'] = [r for r in config['rules'] if _visible(r)]
     else:
         # NS Jul 2026 (CodeAnt IDOR) — scope the unfiltered list to reachable clusters.
         from pegaprox.utils.rbac import get_user_clusters

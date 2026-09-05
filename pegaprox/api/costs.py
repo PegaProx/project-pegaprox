@@ -408,7 +408,7 @@ def tenant_chargeback(tenant_id):
         # MK Jun 2026 (sec-review) — admin.tenants can be a tenant-scoped custom role;
         # scope to the caller's own tenant unless a real admin, else one tenant could
         # read another tenant's full VM inventory + per-VM cost breakdown (BOLA).
-        if request.session.get('role') != _rbac.ROLE_ADMIN:
+        if request.session.get('effective_role', request.session.get('role')) != _rbac.ROLE_ADMIN:
             _caller = get_db().get_user(request.session.get('user', '')) or {}
             if tenant_id != _caller.get('tenant_id', _rbac.DEFAULT_TENANT_ID):
                 return jsonify({'error': 'Access denied to this tenant'}), 403

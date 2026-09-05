@@ -21,7 +21,7 @@ from pegaprox.models.permissions import *
 
 from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.rbac import get_user_clusters
-from pegaprox.api.helpers import check_cluster_access, load_server_settings, scope_vm_rows
+from pegaprox.api.helpers import check_cluster_access, load_server_settings, scope_vm_rows, require_unconfined
 from pegaprox.background.metrics import load_metrics_history, start_metrics_collector
 from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP
 from pegaprox.api.schedules import start_scheduler
@@ -750,6 +750,9 @@ def apply_hardening(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -802,6 +805,9 @@ def rollback_hardening(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]

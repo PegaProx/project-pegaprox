@@ -24,7 +24,7 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immedi
 from pegaprox.core.config import load_config, save_config
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
-from pegaprox.api.helpers import load_server_settings, get_connected_manager, check_cluster_access, safe_error, scope_vm_rows
+from pegaprox.api.helpers import load_server_settings, get_connected_manager, check_cluster_access, safe_error, scope_vm_rows, require_unconfined
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
@@ -254,6 +254,9 @@ def rotate_cluster_api_token(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -329,6 +332,9 @@ def reconfigure_cluster(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1204,6 +1210,9 @@ def update_cluster_config(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1233,6 +1242,9 @@ def update_cluster_config_live(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1509,6 +1521,18 @@ def get_excluded_vms(cluster_id):
         return jsonify({'error': safe_error(e, 'Operation failed')}), 500
 
 
+def _excluded_vm_authorized(cluster_id, vmid):
+    """Per-VM gate for the balancing-exclusion writes (the read side uses scope_vm_rows)."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    try:
+        return user_can_access_vm(
+            build_authz_user(request.session.get('user', ''), request.session),
+            cluster_id, int(vmid), 'vm.config')
+    except (TypeError, ValueError):
+        return False
+
+
 @bp.route('/api/clusters/<cluster_id>/excluded-vms/<int:vmid>', methods=['POST'])
 @require_auth(perms=['cluster.config'])
 def add_excluded_vm(cluster_id, vmid):
@@ -1519,11 +1543,15 @@ def add_excluded_vm(cluster_id, vmid):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    # sec (audit): the GET sibling was scoped; these writes took the URL vmid on trust
+    if not _excluded_vm_authorized(cluster_id, vmid):
+        return jsonify({'error': 'Access denied to this VM'}), 403
+
     mgr = cluster_managers[cluster_id]
     data = request.json or {}
     reason = data.get('reason', 'Manually excluded')
     user = request.session.get('user', 'system')
-    
+
     if mgr.set_vm_balancing_excluded(vmid, True, reason, user):
         log_audit(user, 'cluster.vm_excluded', 
                   f"VM {vmid} excluded from balancing for cluster {mgr.config.name} (reason: {reason})")
@@ -1545,6 +1573,8 @@ def remove_excluded_vm(cluster_id, vmid):
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    if not _excluded_vm_authorized(cluster_id, vmid):
+        return jsonify({'error': 'Access denied to this VM'}), 403
     
     mgr = cluster_managers[cluster_id]
     user = request.session.get('user', 'system')
@@ -1634,6 +1664,9 @@ def set_fallback_hosts(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1999,6 +2032,9 @@ def get_ha_status_detailed(cluster_id):
 def enable_ha(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2034,6 +2070,9 @@ def disable_ha(cluster_id):
     # storage-heartbeat dir on every reachable node before flipping the flag.
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2104,6 +2143,9 @@ def update_ha_config(cluster_id):
     """Update HA configuration including split-brain prevention settings"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2268,6 +2310,9 @@ def install_self_fence_agent(cluster_id):
     """Install self-fence agent on all cluster nodes"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2310,6 +2355,9 @@ def uninstall_self_fence_agent(cluster_id):
     """Uninstall self-fence agent from all cluster nodes"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2384,6 +2432,22 @@ def set_ha_status(cluster_id):
         })
 
 
+def _ha_sid_authorized(cluster_id, sid, perm='vm.config'):
+    """sec (audit): the HA routes take a caller-supplied guest and had cluster-level gating only.
+    ha.view and ha.config are BOTH granted by the shipped tenant_admin template, so a caller
+    admitted by the #248/#555 fallbacks could enumerate every guest's HA state and add/remove
+    foreign guests from HA (an availability lever). The plugin twin already filters its listing;
+    this is the same question for the core routes."""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _kind, _, _num = str(sid or '').partition(':')
+    if _kind not in ('vm', 'ct') or not _num.isdigit():
+        return False
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    return user_can_access_vm(_u, cluster_id, int(_num), perm,
+                              'lxc' if _kind == 'ct' else 'qemu')
+
+
 # Proxmox Native HA API Routes
 @bp.route('/api/clusters/<cluster_id>/proxmox-ha/resources', methods=['GET'])
 @require_auth(perms=['ha.view'])
@@ -2394,7 +2458,10 @@ def get_proxmox_ha_resources(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    return jsonify(cluster_managers[cluster_id].get_proxmox_ha_resources())
+    _res = cluster_managers[cluster_id].get_proxmox_ha_resources()
+    if isinstance(_res, list):
+        _res = [r for r in _res if _ha_sid_authorized(cluster_id, r.get('sid'), 'vm.view')]
+    return jsonify(_res)
 
 
 @bp.route('/api/clusters/<cluster_id>/proxmox-ha/groups', methods=['GET'])
@@ -2545,6 +2612,8 @@ def add_to_proxmox_ha(cluster_id):
     if not vmid:
         logging.warning(f"[HA] Add resource failed: no vmid/sid in request data: {_sl(data)}")
         return jsonify({'error': 'vmid or sid required (format: vm:100 or ct:101)'}), 400
+    if not _ha_sid_authorized(cluster_id, f"{vm_type}:{vmid}"):
+        return jsonify({'error': 'Access denied to this VM'}), 403
 
     result = mgr.add_vm_to_proxmox_ha(vmid, vm_type, group, max_restart, max_relocate, state, comment,
                                        auto_rebalance=auto_rebalance)
@@ -2566,6 +2635,9 @@ def remove_from_proxmox_ha(cluster_id, vm_type, vmid):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    if not _ha_sid_authorized(cluster_id, f"{vm_type}:{vmid}"):
+        return jsonify({'error': 'Access denied to this VM'}), 403
+
     mgr = cluster_managers[cluster_id]
     result = mgr.remove_vm_from_proxmox_ha(vmid, vm_type)
     
@@ -2599,6 +2671,9 @@ def remove_from_proxmox_ha_by_sid(cluster_id, sid):
     else:
         return jsonify({'error': f'Invalid sid format: {sid}. Expected vm:VMID or ct:VMID'}), 400
 
+    if not _ha_sid_authorized(cluster_id, f"{vm_type}:{vmid}"):
+        return jsonify({'error': 'Access denied to this VM'}), 403
+
     result = mgr.remove_vm_from_proxmox_ha(vmid, vm_type)
 
     if result['success']:
@@ -2623,14 +2698,15 @@ def trigger_balance_now(cluster_id):
     # the cluster-group balance guard in groups.py.
     _sess = getattr(request, 'session', {})
     _usr = _sess.get('user', 'system')
-    # #491 — resolve the token-scoped identity (build_authz_user floors an admin-owned scoped
-    # token to its effective_role) so a scoped token that only reached this cluster via the
-    # #248/#555 ACL/pool fallbacks in check_cluster_access can't slip past the raw admin role.
-    from pegaprox.utils.auth import build_authz_user
-    _allowed = get_user_clusters(build_authz_user(_usr, _sess))
-    if _allowed is not None and cluster_id not in _allowed:
-        log_audit(_usr, 'balance.manual_denied', f"Denied balance-now on {cluster_id} (not tenant-owned)")
-        return jsonify({'error': 'Access denied'}), 403
+    # sec (audit): the open-coded form here did NOT do what the comment above says. get_user_clusters
+    # defaults to include_pools=True, so a pool-scoped caller's cluster IS in _allowed and the check
+    # passed — the #555 fallback it was meant to close walked straight through it, and a VM-ACL
+    # caller inside an owning tenant did too. caller_is_scoped is the predicate that asks the
+    # question correctly.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        log_audit(_usr, 'balance.manual_denied', f"Denied balance-now on {cluster_id} (caller is confined)")
+        return _cerr
 
     mgr = cluster_managers.get(cluster_id)
     if not mgr:

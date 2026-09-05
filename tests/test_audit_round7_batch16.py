@@ -318,9 +318,13 @@ def test_alert_channel_update_does_not_echo_the_secret(api, seed, monkeypatch):
 # ── config backup labelled "no secrets" still shipped two of them ─────────────
 def test_secret_field_sweep_catches_the_missed_names():
     from pegaprox.api.settings import _strip_secret_fields
-    cluster = {'id': 'c1', 'name': 'prod', 'pass': 'p', 'ssh_key': 'k',
+    cluster = {'id': 'c1', 'name': 'prod', 'pass': 'ROOTPASSWORD', 'ssh_key': 'k',
                'api_token_secret': 'SECRET', 'api_token_name': 'keep-me', 'host': 'h'}
     _strip_secret_fields(cluster)
+    # 'pass' is the key get_all_clusters decrypts the cluster ROOT PASSWORD into, and
+    # 'password' is not a substring of it — the first version of this sweep missed it
+    assert 'pass' not in cluster, cluster
+    assert 'ssh_key' not in cluster, cluster
     assert 'api_token_secret' not in cluster, cluster
     assert cluster['api_token_name'] == 'keep-me', "non-secret metadata must survive"
     assert cluster['host'] == 'h'

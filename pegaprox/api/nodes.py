@@ -19,7 +19,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped
+from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined
 
 bp = Blueprint('nodes', __name__)
 
@@ -711,6 +711,9 @@ def install_ipmitool_api(cluster_id):
 def update_node_network_api(cluster_id, node, iface):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -729,6 +732,9 @@ def create_node_network_api(cluster_id, node):
     """Create a new network interface"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -754,6 +760,9 @@ def create_node_network_api(cluster_id, node):
 def delete_node_network_api(cluster_id, node, iface):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -771,6 +780,9 @@ def delete_node_network_api(cluster_id, node, iface):
 def apply_node_network_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -788,6 +800,9 @@ def apply_node_network_api(cluster_id, node):
 def revert_node_network_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -832,6 +847,9 @@ def get_node_dns_api(cluster_id, node):
 def update_node_dns_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -861,6 +879,9 @@ def get_node_hosts_api(cluster_id, node):
 def update_node_hosts_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -892,6 +913,9 @@ def update_node_time_api(cluster_id, node):
     """Update node timezone"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -941,6 +965,9 @@ def renew_node_certificate_api(cluster_id, node):
     """Renew node certificate"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -960,6 +987,9 @@ def upload_node_certificate_api(cluster_id, node):
     """Upload custom certificate to node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -988,6 +1018,9 @@ def delete_node_certificate_api(cluster_id, node):
     """Delete custom certificate from node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

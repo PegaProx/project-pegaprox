@@ -2174,6 +2174,11 @@ def complete_acme_dns_challenge():
 # in a backup the operator believes carries no secrets.
 _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'private_key',
                          'api_key', 'apikey', 'credential')
+# Exact names that carry a secret but match no marker. `pass` is the important one: it is the
+# key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
+# is not a substring of it — the substring sweep alone shipped every cluster's root password
+# in an archive labelled "secrets excluded".
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
                       'password_changed_at', 'token_id')
@@ -2187,7 +2192,8 @@ def _strip_secret_fields(d):
         lk = str(k).lower()
         if lk in _SECRET_FIELD_KEEP:
             continue
-        if lk.endswith('_encrypted') or any(m in lk for m in _SECRET_FIELD_MARKERS):
+        if (lk in _SECRET_FIELD_NAMES or lk.endswith('_encrypted')
+                or any(m in lk for m in _SECRET_FIELD_MARKERS)):
             d.pop(k, None)
     return d
 
@@ -2323,7 +2329,7 @@ def backup_config():
             users_data = database.get_all_users()
             if not include_secrets:
                 # users_data is a dict: {'username': {data}}
-                for username, user_data in users_data.items():
+                for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
                         # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
@@ -2670,8 +2676,15 @@ def restore_config():
                     
                     if existing and mode == 'merge':
                         # Keep existing passwords if not in backup
-                        if not cluster.get('password_encrypted') and existing.get('password_encrypted'):
-                            cluster['password_encrypted'] = existing['password_encrypted']
+                        # sec (audit): this keyed off 'password_encrypted', which neither the
+                        # backup nor get_cluster() ever emits — the credential lives under 'pass'
+                        # (db.py:2884/2971) and save_cluster reads data.get('pass'). Dead as
+                        # written, and load-bearing now that a "secrets excluded" backup really
+                        # does omit them: without this a merge-restore encrypts '' over every
+                        # cluster password and SSH key.
+                        for _sk in ('pass', 'ssh_key', 'api_token_secret'):
+                            if not cluster.get(_sk) and existing.get(_sk):
+                                cluster[_sk] = existing[_sk]
                         if not cluster.get('ssh_key_encrypted') and existing.get('ssh_key_encrypted'):
                             cluster['ssh_key_encrypted'] = existing['ssh_key_encrypted']
                     
@@ -4124,6 +4137,17 @@ def get_cluster_update_status(cluster_id):
             mgr._rolling_update = None
             rolling_update = None
     
+    # sec (audit): the evacuation log names each VM that failed to migrate ("✗ Failed: <name>
+    # (VMID: n)"), and node.view is a default viewer perm reached through the pool/ACL fallbacks.
+    # A confined caller gets the progress but not the per-guest lines.
+    if rolling_update:
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.api.helpers import caller_is_scoped
+        if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session),
+                            cluster_id):
+            rolling_update = {k: v for k, v in rolling_update.items()
+                              if k not in ('logs', 'paused_details')}
+
     return jsonify({
         'success': True,
         'rolling_update': rolling_update,

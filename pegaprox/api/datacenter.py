@@ -16,7 +16,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, require_unconfined
 
 bp = Blueprint('datacenter', __name__)
 
@@ -320,6 +320,9 @@ def setup_multipath(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -636,6 +639,9 @@ def reconfigure_multipath(cluster_id, node):
     """Reconfigure multipath on a specific node (rescan devices)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -766,6 +772,9 @@ def login_iscsi_target(cluster_id, node):
     """Login to an iSCSI target - creates persistent connection"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2028,6 +2037,9 @@ def create_node_lvm_api(cluster_id, node):
     """Create LVM volume group"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2069,6 +2081,9 @@ def create_node_lvmthin_api(cluster_id, node):
     """Create LVM-Thin pool"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2110,6 +2125,9 @@ def create_node_zfs_api(cluster_id, node):
     """Create ZFS pool"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2140,6 +2158,9 @@ def create_node_directory_api(cluster_id, node):
     """Create directory storage"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2168,6 +2189,9 @@ def init_node_disk_gpt_api(cluster_id, node):
     """Initialize disk with GPT partition table"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2194,6 +2218,9 @@ def wipe_node_disk_api(cluster_id, node):
     """Wipe disk (delete partition table)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2224,6 +2251,9 @@ def create_sr_api(cluster_id, node):
     LW: type-specific dispatch to NFS, iSCSI, LVM, EXT creation methods."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

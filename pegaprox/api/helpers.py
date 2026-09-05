@@ -531,6 +531,24 @@ def check_pbs_access(pbs_id):
     return False, (jsonify({'error': 'Access denied to this PBS server'}), 403)
 
 
+def require_unconfined(cluster_id):
+    """sec (audit): guard for a WHOLE-CLUSTER operation — one with no per-object notion, so
+    user_can_access_vm has nothing to ask about: rebooting a node, draining it, rewriting the
+    cluster's credentials or network, arming fencing, wiping a disk.
+
+    check_cluster_access gates reachability and its #248/#555 fallbacks deliberately admit a
+    pool-/ACL-scoped caller, deferring the real decision downstream. For these routes downstream
+    is where the decision has to happen, and the only correct answer for a confined caller is no.
+
+    Returns an error response to `return`, or None when the caller may proceed."""
+    from flask import request, jsonify
+    from pegaprox.utils.auth import build_authz_user
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, cluster_id):
+        return jsonify({'error': 'Access denied: this action affects the whole cluster'}), 403
+    return None
+
+
 def check_vmware_access(vmware_id):
     """NS Jul 2026 (CodeAnt re-scan IDOR) — tenant gate for a VMware/ESXi server, mirroring
     check_pbs_access. Most vmware.py routes only had a role perm and never scoped to tenant, so

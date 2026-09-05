@@ -41,7 +41,7 @@ def _require_vm_access(cluster_id, vmid, perm, vm_type=None):
     return None
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update
 from pegaprox.core.config import save_config
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
 from pegaprox.utils.ssh import get_paramiko
 from pegaprox.utils.sanitization import sanitize_int
 from urllib.parse import urlencode, quote as url_quote
@@ -511,6 +511,9 @@ def set_datacenter_options(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -2461,6 +2464,9 @@ def maintenance_capacity_preview_api(cluster_id, node_name):
 def set_maintenance_mode(cluster_id, node_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -3329,6 +3335,9 @@ def node_action_api(cluster_id, node_name, action):
     """Perform action on node (reboot, shutdown) - requires maintenance mode"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -6046,7 +6055,16 @@ def create_replication_job_api(cluster_id):
     
     if not vmid or not target_node:
         return jsonify({'error': 'vmid and target are required'}), 400
-    
+    # sec (audit): the GET sibling was scoped this round (scope_vm_rows, vmid_key='guest') but the
+    # write took the vmid on trust — a scoped caller could replicate a co-tenant's disks to a node
+    # of their choosing. There IS a per-object notion here, so gate on the VM, not confinement.
+    _rauth = build_authz_user(request.session.get('user', ''), request.session)
+    try:
+        if not user_can_access_vm(_rauth, cluster_id, int(vmid), 'vm.config'):
+            return jsonify({'error': 'Access denied to this VM'}), 403
+    except (TypeError, ValueError):
+        return jsonify({'error': 'vmid must be a number'}), 400
+
     result = manager.create_replication_job(vmid, target_node, schedule, rate, comment)
     
     if result['success']:
