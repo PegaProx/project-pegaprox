@@ -2179,7 +2179,8 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
 _SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
-_SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'has_password',
+_SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
+                      'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
                       'password_changed_at', 'token_id')
 

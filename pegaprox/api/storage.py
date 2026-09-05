@@ -2617,18 +2617,32 @@ def delete_backup_job(cluster_id, job_id):
 
         # sec (audit): create/update authorize the job's targets, delete did not — so a scoped
         # backup.delete holder could drop ANY job on the cluster, including an admin's cluster-wide
-        # one. Read the job first and put it through the same gate. Fail closed for a scoped caller
-        # if we can't read it back; an admin short-circuits inside _authz_backup_targets.
-        _job = {}
-        try:
-            _jr = manager._create_session().get(url, timeout=10)
-            if _jr.status_code == 200:
-                _job = _jr.json().get('data') or {}
-        except Exception:
-            _job = {}
-        _aerr = _authz_backup_targets(cluster_id, _job)
-        if _aerr:
-            return _aerr
+        # one.
+        #
+        # ...but _authz_backup_targets is the WRITE gate: it short-circuits only on admin and then
+        # rejects every all=1/pool/exclude job. Applied unconditionally it 403s an unconfined
+        # tenant_admin deleting the cluster-wide job PVE creates by default, and locks out
+        # backup_operator entirely (that template has backup.delete but not vm.backup). The read
+        # sibling above hit this exact wall and narrowed to caller_is_scoped; do the same here
+        # instead of repeating it. An unconfined owning-tenant caller keeps the route.
+        from pegaprox.api.helpers import caller_is_scoped as _cis
+        from pegaprox.utils.auth import build_authz_user as _bau
+        _dbu = _bau(request.session.get('user', ''), request.session)
+        if _cis(_dbu, cluster_id):
+            _read_ok, _job = False, {}
+            try:
+                _jr = manager._create_session().get(url, timeout=10)
+                if _jr.status_code == 200:
+                    _read_ok, _job = True, (_jr.json().get('data') or {})
+            except Exception:
+                _read_ok = False
+            if not _read_ok:
+                # can't see what we'd be deleting — fail closed, but say so rather than
+                # reporting it as a permission problem
+                return jsonify({'error': 'Cannot verify backup job ownership right now'}), 503
+            _aerr = _authz_backup_targets(cluster_id, _job)
+            if _aerr:
+                return _aerr
 
         response = manager._create_session().delete(url, timeout=10)
         

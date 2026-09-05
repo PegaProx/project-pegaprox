@@ -1028,7 +1028,16 @@ def require_auth(roles: list = None, perms: list = None):
             # is deliberately left at the token's declared value (audit/logging), so without this
             # every one of those guards read a stale role and silently did nothing. fresh_role is
             # already min(token, owner) for tokens and the DB-refreshed role for sessions.
-            session = {**session, 'effective_role': fresh_role}
+            # A non-builtin (custom) token role keeps its NAME here, matching build_authz_user
+            # (auth.py:334) — collapsing it to a builtin level would make the two disagree about
+            # the same request, and it is the name that lets get_user_clusters do the
+            # custom-role -> tenant remap.
+            _eff_pub = fresh_role
+            if session.get('api_token'):
+                _tr = session.get('role')
+                if _tr and _tr not in (ROLE_ADMIN, ROLE_USER, ROLE_VIEWER):
+                    _eff_pub = _tr
+            session = {**session, 'effective_role': _eff_pub}
             request.session = session
             
             return f(*args, **kwargs)

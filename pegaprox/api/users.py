@@ -1295,9 +1295,14 @@ def update_tenant(tenant_id):
         # sec (audit): tenant['clusters'] IS the list get_user_clusters reads, so a non-global
         # admin.tenants holder could append arbitrary cluster ids to their own tenant and become
         # a cluster-wide operator there. Only a global admin may change the cluster set.
-        if request.session.get('effective_role', request.session.get('role')) != ROLE_ADMIN:
-            return jsonify({'error': 'Only a global admin can change a tenant\'s clusters'}), 403
-        tenants_db[tenant_id]['clusters'] = data['clusters']
+        # Compare VALUES, not key presence — the tenant edit form posts the whole object every
+        # time, so keying on presence 403'd a group_manager renaming a tenant or editing a quota.
+        _cur = list(tenants_db[tenant_id].get('clusters') or [])
+        _new = list(data['clusters'] or [])
+        if sorted(map(str, _cur)) != sorted(map(str, _new)):
+            if request.session.get('effective_role', request.session.get('role')) != ROLE_ADMIN:
+                return jsonify({'error': 'Only a global admin can change a tenant\'s clusters'}), 403
+            tenants_db[tenant_id]['clusters'] = _new
     # NS #502 — quota fields
     for _qk in ('quota_max_vms', 'quota_max_cores', 'quota_max_memory_gb'):
         if _qk in data:

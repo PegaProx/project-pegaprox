@@ -5741,7 +5741,10 @@ done
             agent_script = self._SELF_FENCE_AGENT_SCRIPT
             agent_script = agent_script.replace('__MANAGER_IP__', manager_ip)
             agent_script = agent_script.replace('__OTHER_NODES__', other_nodes_str)
-            agent_script = agent_script.replace('__PEGAPROX_VMID__', str(self.ha_config.get('pegaprox_vmid', '')))
+            # sec (audit): substituted into a root-run agent script, so coerce rather than trust
+            # whatever landed in ha_config — a vmid is a number or nothing.
+            _pvmid = str(self.ha_config.get('pegaprox_vmid', '') or '')
+            agent_script = agent_script.replace('__PEGAPROX_VMID__', _pvmid if _pvmid.isdigit() else '')
             # MK 2026-06-03: bake the fence-strategy decision in at install
             # time. Default to 'quorum' if detection fails; 'wait' is only
             # selected for confirmed 2-node-no-qdevice topology so admins
@@ -8426,6 +8429,30 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"Error removing from Proxmox HA: {e}")
             return {'success': False, 'error': str(e)}
     
+    def member_node_ip(self, node_name: str) -> Optional[str]:
+        """Resolve a node NAME to its management IP, but only for an actual cluster member.
+
+        sec (audit): several routes take <node> straight from the URL or the request body and
+        hand the result to _ssh_connect, which presents this cluster's STORED credentials. The
+        old idiom was `_get_node_ip(node) or node` — so an unresolvable name fell through to the
+        caller's own string and PegaProx dialled it, leaking the cluster root password/key to a
+        host of the caller's choosing. Reachable at node.view and storage.upload, both builtin
+        ROLE_USER permissions.
+
+        Returns None when the name is not a member or cannot be resolved. Callers must treat
+        None as "refuse", never as "use the name".
+        """
+        if not node_name or not isinstance(node_name, str):
+            return None
+        try:
+            members = self.nodes or {}
+        except Exception:
+            members = {}
+        if members and node_name not in members:
+            self.logger.warning(f"[NodeIP] refusing non-member node name '{node_name}'")
+            return None
+        return self._get_node_ip(node_name)
+
     def _get_node_ip(self, node_name: str) -> Optional[str]:
         """Thin wrapper around _get_node_ip_impl that gates on the per-node
         circuit breaker (skip lookups for known-dead nodes) and feeds the
@@ -12729,7 +12756,9 @@ echo "AGENT_INSTALLED_OK"
         if not online_nodes:
             return [{'error': 'No target nodes available'}]
 
-        src_ip = self._get_node_ip(source_node) or source_node
+        src_ip = self.member_node_ip(source_node)
+        if not src_ip:
+            return [{'error': f'Unknown or unreachable source node {source_node!r}'}]
         src_path = self._resolve_storage_path(source_node, storage, content_type)
         if not src_path:
             return [{'error': f'Cannot resolve storage path on {source_node}'}]
@@ -12740,7 +12769,13 @@ echo "AGENT_INSTALLED_OK"
         ssh_pass = getattr(self.config, 'ssh_password', None) or self.config.pass_
 
         for tgt_node in online_nodes:
-            tgt_ip = self._get_node_ip(tgt_node) or tgt_node
+            # already an intersection with the live online-node list, but resolve it the same
+            # way as everything else so no path can regrow the caller-string fallback
+            tgt_ip = self.member_node_ip(tgt_node)
+            if not tgt_ip:
+                results.append({'node': tgt_node, 'success': False,
+                                'error': f'Unknown or unreachable node {tgt_node!r}'})
+                continue
             _, err = self._get_syncable_storage(tgt_node, storage, content_type)
             if err:
                 results.append({'node': tgt_node, 'success': False, 'error': err})
@@ -12862,7 +12897,9 @@ echo "AGENT_INSTALLED_OK"
     def _resolve_storage_path(self, node, storage, content_type='iso'):
         """Get filesystem path for a storage's ISO/template directory on a node"""
         try:
-            node_ip = self._get_node_ip(node) or node
+            node_ip = self.member_node_ip(node)
+            if not node_ip:
+                return None
             ssh = self._ssh_connect(node_ip)
             # use pvesm to get the base path
             subdir = 'template/iso' if content_type == 'iso' else 'template/cache'

@@ -898,7 +898,11 @@ def alerts_force_check():
         _allowed = get_user_clusters(build_authz_user(request.session.get('user', ''), request.session))
         _ev = A._last_eval
         if _allowed is not None:
-            _ev = {k: v for k, v in _ev.items() if (v or {}).get('cluster') in _allowed}
+            # _record_eval snapshots ts/alert_id/reason/triggered/current_value — no cluster —
+            # so resolve each rule's cluster from the config rather than from the snapshot.
+            _rule_cluster = {a.get('id'): a.get('cluster_id')
+                             for a in (A.load_alerts_config().get('alerts') or [])}
+            _ev = {k: v for k, v in _ev.items() if _rule_cluster.get(k) in _allowed}
         return jsonify({'ok': True, 'evaluations': _ev})
     except Exception as e:
         return jsonify({'ok': False, 'error': safe_error(e)}), 500

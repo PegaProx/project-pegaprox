@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 import threading
 import uuid
 from flask import Blueprint, jsonify, request
@@ -2211,7 +2212,15 @@ def update_ha_config(cluster_id):
         manager.ha_config['storage_heartbeat_enabled'] = data['storage_heartbeat_enabled']
     
     if 'storage_heartbeat_path' in data:
-        manager.ha_config['storage_heartbeat_path'] = data['storage_heartbeat_path']
+        # sec (audit): this string is substituted into the node-agent script as
+        # STORAGE_PATH="<value>" and that script runs as root on every node, so a quote in the
+        # value breaks out of the assignment. Config is not code — constrain it to a plain
+        # absolute path before it can reach the splice in manager._NODE_AGENT_SCRIPT.
+        _shp = str(data['storage_heartbeat_path'] or '')
+        if _shp and not re.fullmatch(r'/[A-Za-z0-9._@/+-]{0,255}', _shp):
+            return jsonify({'error': 'storage_heartbeat_path must be an absolute path '
+                                     '(letters, digits and . _ @ + - / only)'}), 400
+        manager.ha_config['storage_heartbeat_path'] = _shp
         
         # Auto-enable storage heartbeat when path is provided
         if data['storage_heartbeat_path']:

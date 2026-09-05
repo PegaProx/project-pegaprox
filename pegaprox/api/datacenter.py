@@ -113,7 +113,10 @@ def _get_node_multipath_data(manager, node):
     ssh = None
     try:
         # Resolve node IP from Proxmox API (node name might not be in DNS)
-        node_ip = manager._get_node_ip(node) or node
+        node_ip = manager.member_node_ip(node)
+        if not node_ip:
+            result['error'] = f'Unknown or unreachable node {node!r}'
+            return result
         logging.debug(f"[Multipath] Resolved {node} → {node_ip}")
 
         # Connect via paramiko (handles SSH key + password auth correctly)
@@ -367,7 +370,12 @@ def setup_multipath(cluster_id):
             ssh = None
 
             # Resolve node IP
-            node_ip = manager._get_node_ip(node) or node
+            node_ip = manager.member_node_ip(node)
+            if not node_ip:
+                node_result['success'] = False
+                node_result['error'] = f'Unknown or unreachable node {node!r}'
+                results.append(node_result)
+                continue
 
             try:
                 # Connect via paramiko (handles SSH key + password auth correctly)
@@ -655,7 +663,9 @@ def reconfigure_multipath(cluster_id, node):
         if node not in set(_list_cluster_node_names(manager)):
             return jsonify({'error': f'Unknown cluster node: {node}'}), 400
         # Resolve node IP
-        node_ip = manager._get_node_ip(node) or node
+        node_ip = manager.member_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Unknown or unreachable node {node!r}'}), 400
 
         # Connect via paramiko
         ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0)
@@ -814,7 +824,9 @@ def login_iscsi_target(cluster_id, node):
         if node not in set(_list_cluster_node_names(manager)):
             return jsonify({'error': f'Unknown cluster node: {node}'}), 400
         # Resolve node IP
-        node_ip = manager._get_node_ip(node) or node
+        node_ip = manager.member_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Unknown or unreachable node {node!r}'}), 400
 
         # Connect via paramiko
         ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0)
