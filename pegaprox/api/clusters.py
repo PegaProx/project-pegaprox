@@ -1763,7 +1763,11 @@ def get_backup_sla(cluster_id):
 
     # 1) gather VMs from cluster
     try:
-        vms = mgr.get_vm_resources() or []
+        # sec (private disclosure Sep 2026 — audit HIGH): this report emitted a per-VM row for
+        # every guest (vmid, name, node, status, backup age) to any backup.view holder admitted by
+        # the pool/ACL fallback — the most complete inventory of the report family, and it flags the
+        # unbacked guests. Scope it per-VM like its costs/power/top-vms siblings.
+        vms = scope_vm_rows(cluster_id, mgr.get_vm_resources() or [])
     except Exception as e:
         return jsonify({'error': f'failed to enumerate VMs: {e}'}), 502
 

@@ -966,6 +966,15 @@ def get_datastore_content(cluster_id, storage_name):
             for item in content:
                 item['size_human'] = _fmt_size_human(item.get('size') or 0)
 
+            # sec (private disclosure Sep 2026 — audit): twin of the node-storage content route.
+            # images/rootdir/backup rows carry a vmid + volid (vm-<id>-disk, vzdump-<type>-<id>-...),
+            # so an unscoped listing handed every VM's disks and backup archives to any pool-/ACL-
+            # scoped storage.view holder — and left the sibling's fix trivially bypassable by URL.
+            # Scope vmid-carrying rows; ISO/vztmpl rows have no vmid (shared content) and stay.
+            _ok_vmids = {r.get('vmid') for r in scope_vm_rows(cluster_id, [r for r in content
+                         if isinstance(r, dict) and r.get('vmid') is not None])}
+            content = [r for r in content if not (isinstance(r, dict) and r.get('vmid') is not None)
+                       or r.get('vmid') in _ok_vmids]
             return jsonify(content)
         return jsonify([])
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
@@ -1753,7 +1762,8 @@ def get_replication_jobs(cluster_id):
     # only returns config so the datacenter view used to show "Last sync = Never"
     # for jobs that were running fine.
     try:
-        return jsonify(manager.get_replication_jobs())
+        # sec (audit): twin of the per-cluster /replication fix — jobs key the guest as 'guest'
+        return jsonify(scope_vm_rows(cluster_id, manager.get_replication_jobs(), vmid_key='guest'))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get replication jobs')}), 500
 
@@ -7812,7 +7822,8 @@ def get_snapshot_replications_for_cluster(cluster_id):
         'SELECT * FROM cross_cluster_replications WHERE source_cluster = ? OR target_cluster = ?',
         (cluster_id, cluster_id)
     )
-    return jsonify([dict(r) for r in rows])
+    # sec (audit): cross-cluster replication rows carry a vmid — scope them per-VM
+    return jsonify(scope_vm_rows(cluster_id, [dict(r) for r in rows]))
 
 
 @bp.route('/api/hardware-options', methods=['GET'])
@@ -10839,7 +10850,8 @@ def get_templates_api(cluster_id, node):
             return jsonify({'error': 'Permission denied: xapi.template.view'}), 403
 
     templates = manager.get_templates(node)
-    return jsonify(templates)
+    # sec (audit): template rows carry a vmid — twin of the scoped templates/existing route
+    return jsonify(scope_vm_rows(cluster_id, templates or []))
 
 
 @bp.route('/api/clusters/<cluster_id>/xcp/os-types', methods=['GET'])

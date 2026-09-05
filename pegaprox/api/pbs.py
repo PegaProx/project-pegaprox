@@ -2052,6 +2052,14 @@ def get_pbs_reports_protected_vms(pbs_id):
     cluster_id = request.args.get('cluster_id', '')
     if not cluster_id:
         return jsonify({'error': 'cluster_id query param required'}), 400
+    # sec (private disclosure Sep 2026 — audit HIGH): cluster_id comes straight from the query
+    # string and was never authorized — check_pbs_access only vets the PBS server (and passes
+    # unconditionally for a PBS with no linked_clusters). A pbs.view holder could therefore name ANY
+    # cluster and read its complete guest inventory plus which guests are unprotected. Gate the named
+    # cluster, then scope the rows per-VM exactly like /vms-backup-status does.
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
     pve_mgr = cluster_managers.get(cluster_id)
     if not pve_mgr:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2064,7 +2072,7 @@ def get_pbs_reports_protected_vms(pbs_id):
     cutoff = int(time.time()) - days * 86400
 
     try:
-        resources = pve_mgr.get_vm_resources() or []
+        resources = scope_vm_rows(cluster_id, pve_mgr.get_vm_resources() or [])
     except Exception as e:
         return jsonify({'error': f'Could not load cluster resources: {e}'}), 502
 

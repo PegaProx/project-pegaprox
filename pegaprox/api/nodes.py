@@ -19,7 +19,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import check_cluster_access, safe_error
+from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped
 
 bp = Blueprint('nodes', __name__)
 
@@ -1012,7 +1012,8 @@ def get_node_replication_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_replication(node))
+    # sec (audit): node-level twin of the scoped cluster replication list ('guest' keys the VM)
+    return jsonify(scope_vm_rows(cluster_id, manager.get_node_replication(node), vmid_key='guest'))
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/tasks', methods=['GET'])
@@ -1032,7 +1033,28 @@ def get_node_tasks_api(cluster_id, node):
     vmid = request.args.get('vmid', None, type=int)
     
     tasks = manager.get_node_tasks(node, start, limit * 3 if vmid else limit, errors)  # Get more if filtering
-    
+
+    # sec (private disclosure Sep 2026 — audit): node-level twin of the confined cluster task log —
+    # a scoped caller could read every VM's task history here instead. Confine the same way; admins
+    # and plain cluster-wide operators keep the full history.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _au = _bau(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        def _task_vmid(t):
+            for k in ('vmid', 'id'):
+                try:
+                    return int(t.get(k))
+                except (TypeError, ValueError):
+                    continue
+            return None
+        _scoped = []
+        for t in (tasks or []):
+            _v = _task_vmid(t)
+            if _v is not None and _ucav(_au, cluster_id, _v, 'vm.view'):
+                _scoped.append(t)
+        tasks = _scoped
+
     # Filter by vmid if specified
     if vmid and tasks:
         filtered = [t for t in tasks if t.get('id') == str(vmid) or str(vmid) in str(t.get('upid', ''))]
@@ -1055,9 +1077,22 @@ def get_node_task_log_api(cluster_id, node, upid):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
+
+    # sec (private disclosure Sep 2026 — audit): the UPID names a guest (PVE field 6). A scoped
+    # caller must not read the task log of a VM outside their grant — the DELETE/cancel sibling
+    # already gates on exactly this. Non-guest (node-level) logs are not for a scoped caller.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _au = _bau(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        _p = str(upid).split(':')
+        _tvmid = _p[6] if len(_p) > 6 and _p[6].isdigit() else None
+        if _tvmid is None or not _ucav(_au, cluster_id, int(_tvmid), 'vm.view'):
+            return jsonify({'error': 'Access denied to this task'}), 403
+
     start = request.args.get('start', 0, type=int)
     limit = request.args.get('limit', 500, type=int)
-    
+
     log_lines = manager.get_node_task_log(node, upid, start, limit)
     # Join lines into a single string for display
     log_text = '\n'.join(log_lines) if log_lines else ''

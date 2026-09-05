@@ -788,6 +788,32 @@ def run_policy_now(cluster_id, pid):
     return jsonify({'ok': True, 'message': 'policy run started'})
 
 
+def _policy_targets_authorized(cluster_id, policy, perm='vm.snapshot'):
+    """sec (private disclosure Sep 2026 — audit): may the caller see/act on this policy's target
+    VMs? Admins and plain cluster-wide operators always may; a scoped caller must be able to reach
+    every target. snapshot_runs rows carry no vmid (the VM identities are in the free-text log and
+    summary), so the run history has to be gated on the POLICY, the way update/delete already are.
+    Offline cluster: a direct-VM target is authorized by its vmid, anything we cannot expand fails
+    closed for a scoped caller."""
+    from pegaprox.api.helpers import caller_is_scoped
+    creator = build_authz_user(request.session.get('user', ''), request.session)
+    if not caller_is_scoped(creator, cluster_id):
+        return True
+    mgr = cluster_managers.get(cluster_id)
+    if mgr:
+        try:
+            for _n, _v, _t in _resolve_targets(mgr, policy):
+                if not user_can_access_vm(creator, cluster_id, _v, perm, _t):
+                    return False
+            return True
+        except Exception:
+            return False
+    _tv = str(policy.get('target_value') or '').strip()
+    if str(policy.get('target_type') or '').lower() in ('vm', 'vmid') and _tv.lstrip('-').isdigit():
+        return user_can_access_vm(creator, cluster_id, int(_tv), perm)
+    return False
+
+
 @bp.route('/api/clusters/<cluster_id>/snapshot-policies/<pid>/runs', methods=['GET'])
 @require_auth(perms=['vm.snapshot'])
 def list_runs(cluster_id, pid):
@@ -795,9 +821,12 @@ def list_runs(cluster_id, pid):
     if not ok: return err
     try:
         c = get_db().conn.cursor()
-        c.execute('SELECT id FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
-        if not c.fetchone():
+        c.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+        _prow = c.fetchone()
+        if not _prow:
             return jsonify({'error': 'not found'}), 404
+        if not _policy_targets_authorized(cluster_id, _row_to_policy(_prow)):
+            return jsonify({'error': "Permission denied: this policy's target VMs are outside your scope"}), 403
         c.execute('''SELECT * FROM snapshot_runs WHERE policy_id=?
                      ORDER BY started_at DESC LIMIT 50''', (pid,))
         return jsonify({'runs': [dict(r) for r in c.fetchall()]})

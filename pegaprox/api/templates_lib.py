@@ -592,7 +592,8 @@ def deployments(cluster_id):
             ORDER BY started_at DESC LIMIT 50
         ''', (cluster_id,))
         rows = [dict(r) for r in c.fetchall()]
-        return jsonify({'deployments': rows})
+        # sec (audit): deployment rows carry vmid + started_by — scope per-VM like templates/existing
+        return jsonify({'deployments': scope_vm_rows(cluster_id, rows)})
     except Exception as e:
         logging.exception('handler error in templates_lib.py'); return jsonify({'error': 'internal error'}), 500
 
