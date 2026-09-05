@@ -342,6 +342,11 @@ def _tcp_listener(host, port):
         return
 
     def handle_client(client_sock, addr):
+        # sec (audit): the accumulator had no bound, so a peer that sends bytes and never a
+        # newline grows it forever — and this listener takes unauthenticated connections off
+        # the network. RFC 5424 allows long messages but nothing near this; past the cap the
+        # peer is not speaking syslog, so drop it rather than keep buying memory.
+        _MAX_LINE = 64 * 1024
         try:
             buf = b""
             while True:
@@ -349,6 +354,10 @@ def _tcp_listener(host, port):
                 if not data:
                     break
                 buf += data
+                if len(buf) > _MAX_LINE and b"\n" not in buf:
+                    logging.warning(f"[Syslog] {addr[0]} sent {len(buf)} bytes with no line "
+                                    f"terminator — dropping the connection")
+                    break
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     message = line.decode(errors="ignore").strip()

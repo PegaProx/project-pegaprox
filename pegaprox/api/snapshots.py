@@ -535,7 +535,16 @@ def list_policies(cluster_id):
     try:
         c = get_db().conn.cursor()
         c.execute('SELECT * FROM snapshot_policies WHERE cluster_id=? ORDER BY created_at DESC', (cluster_id,))
-        return jsonify({'policies': [_row_to_policy(r) for r in c.fetchall()]})
+        _pols = [_row_to_policy(r) for r in c.fetchall()]
+        # sec (audit): a policy names the guests it snapshots, and every other route on this
+        # object is per-target gated — the listing was not, so a scoped caller read the whole
+        # cluster's policies. Same predicate the run-log route already uses.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.api.helpers import caller_is_scoped
+        if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session),
+                            cluster_id):
+            _pols = [p for p in _pols if _policy_targets_authorized(cluster_id, p, 'vm.view')]
+        return jsonify({'policies': _pols})
     except Exception:
         logging.exception('snapshot policies list failed')
         return jsonify({'error': 'internal error'}), 500

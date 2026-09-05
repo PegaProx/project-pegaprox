@@ -395,6 +395,15 @@ def _check_api_rate_limit(client_ip: str) -> bool:
     current_time = time.time()
 
     with g.api_rate_limit_lock:
+        # sec (audit): this map is keyed by an unauthenticated remote IP and entries were only
+        # ever added — a rotating source (an IPv6 /64 costs nothing) grew it without bound.
+        # Sweep windows that have already expired; the check below resets a live one anyway.
+        if len(g.api_request_counts) > 1024:
+            _stale = [ip for ip, i in g.api_request_counts.items()
+                      if current_time - i.get('window_start', 0) > API_RATE_WINDOW]
+            for _ip in _stale:
+                g.api_request_counts.pop(_ip, None)
+
         if client_ip not in g.api_request_counts:
             g.api_request_counts[client_ip] = {'count': 1, 'window_start': current_time}
             return True

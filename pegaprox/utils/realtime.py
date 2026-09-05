@@ -101,40 +101,51 @@ def broadcast_update(update_type: str, data: dict, cluster_id: str = None):
 
         disconnected = []
 
-        # Get clients list under lock, then send outside lock
-        clients_to_send = []
+        # Snapshot the registry under the lock, then filter and send outside it. The per-VM
+        # check below does DB work (a user fetch plus the ACL and pool lookups inside
+        # user_can_access_vm), so running it while holding the global registry lock would put
+        # every WS connect and disconnect behind it — the same reason broadcast_sse snapshots.
+        candidates = []
         with ws_clients_lock:
             for client_id, client_info in list(ws_clients.items()):
-                ws = client_info.get('ws')
-                client_lock = client_info.get('lock')
-                if ws is None or client_lock is None:
+                if client_info.get('ws') is None or client_info.get('lock') is None:
                     disconnected.append(client_id)
                     continue
+                candidates.append((client_id, client_info))
 
-                # Only send if client is subscribed to this cluster or all clusters
-                subscribed = client_info.get('clusters')
-                if not (cluster_id is None or subscribed is None or cluster_id in subscribed):
-                    continue
-                # sec (audit): the WS path had cluster-level scoping only, while its SSE twin
-                # filters per VM. 'action' frames name the vmid, the VM's NAME and the operator
-                # (create/delete/migrate/power), so a pool-/ACL-scoped client watching a cluster
-                # saw every guest's activity. Same per-VM question as the SSE 'tasks' frame.
-                if (update_type == 'action' and cluster_id is not None
-                        and not client_info.get('is_admin', False)):
-                    _rid = (data or {}).get('resource_id')
-                    if (data or {}).get('resource_type') in ('vm', 'qemu', 'lxc', 'ct'):
-                        if not _sse_user_can_view_vm(client_info.get('user'), cluster_id, _rid):
-                            continue
-                clients_to_send.append((client_id, ws, client_lock))
+        clients_to_send = []
+        for client_id, client_info in candidates:
+            # Only send if client is subscribed to this cluster or all clusters
+            subscribed = client_info.get('clusters')
+            if not (cluster_id is None or subscribed is None or cluster_id in subscribed):
+                continue
+            # sec (audit): the WS path had cluster-level scoping only, while its SSE twin
+            # filters per VM. 'action' frames name the vmid, the VM's NAME and the operator
+            # (create/delete/migrate/power), so a pool-/ACL-scoped client watching a cluster
+            # saw every guest's activity. Same per-VM question as the SSE 'tasks' frame.
+            if (update_type == 'action' and cluster_id is not None
+                    and not client_info.get('is_admin', False)):
+                _rid = (data or {}).get('resource_id')
+                if (data or {}).get('resource_type') in ('vm', 'qemu', 'lxc', 'ct'):
+                    if not _sse_user_can_view_vm(client_info.get('user'), cluster_id, _rid):
+                        continue
+            clients_to_send.append((client_id, client_info['ws'], client_info['lock']))
 
-        # Send to clients outside the main lock
+        # Send to clients outside the main lock.
+        # A client already mid-send holds its own lock, and blocking on it here let one slow or
+        # wedged consumer delay the frame for everyone after it in the list. Skip it for this
+        # frame instead; the next broadcast reaches it once it has caught up.
         for client_id, ws, client_lock in clients_to_send:
+            if not client_lock.acquire(blocking=False):
+                logging.debug(f"[WS] client {client_id} still sending — skipped this frame")
+                continue
             try:
-                with client_lock:
-                    ws.send(message)
+                ws.send(message)
             except Exception as e:
                 logging.debug(f"Failed to send to client {client_id}: {e}")
                 disconnected.append(client_id)
+            finally:
+                client_lock.release()
 
         # Remove disconnected clients
         if disconnected:

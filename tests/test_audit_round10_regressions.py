@@ -804,3 +804,60 @@ def test_v2p_key_cleanup_can_actually_authenticate():
     body = src[i:i + 1500]
     assert 'PreferredAuthentications=publickey' in body, \
         "the key-based cleanup still cannot offer publickey"
+
+
+# ── round 11 backlog ───────────────────────────────────────────────────────
+def test_backup_job_update_authorizes_the_stored_job_too():
+    """Checking only the submitted payload assumed the client round-trips the whole job back;
+    a crafted PUT naming nothing but the caller's own vmid passed and still landed on a job
+    targeting someone else's guests."""
+    src = open('pegaprox/api/storage.py').read()
+    i = src.index('def update_backup_job(')
+    body = src[i:i + 3000]
+    assert '_authz_backup_targets(cluster_id, _stored)' in body, \
+        "the PUT still authorizes only the submitted payload"
+
+
+def test_snapshot_policy_listing_is_scoped():
+    src = open('pegaprox/api/snapshots.py').read()
+    i = src.index('def list_policies(')
+    body = src[i:i + 1500]
+    assert '_policy_targets_authorized' in body, "the policy listing is still unscoped"
+
+
+def test_ws_broadcast_filters_outside_the_registry_lock():
+    """The per-VM check I added to the WS path in this campaign did DB work while holding the
+    global ws_clients lock — the same mistake the SSE side had."""
+    src = open('pegaprox/utils/realtime.py').read()
+    i = src.index('def broadcast_update(')
+    body = src[i:src.index('\ndef ', i + 10)]
+    lines = body.split('\n')
+    li = next(k for k, l in enumerate(lines) if 'with ws_clients_lock:' in l)
+    indent = len(lines[li]) - len(lines[li].lstrip())
+    block = []
+    for l in lines[li + 1:]:
+        if l.strip() and (len(l) - len(l.lstrip())) <= indent:
+            break
+        if l.strip():
+            block.append(l.strip())
+    assert not any('_sse_user_can_view_vm' in b for b in block), \
+        "per-VM authz still runs inside the global WS lock"
+
+
+def test_ws_send_does_not_block_on_a_stuck_client():
+    src = open('pegaprox/utils/realtime.py').read()
+    assert 'client_lock.acquire(blocking=False)' in src, \
+        "a wedged client can still delay the frame for everyone after it"
+
+
+def test_syslog_tcp_buffer_is_bounded():
+    """The accumulator had no bound and this listener takes unauthenticated connections."""
+    src = open('pegaprox/background/syslog_server.py').read()
+    assert '_MAX_LINE' in src and 'no line ' in src
+
+
+def test_api_rate_limit_map_is_pruned():
+    src = open('pegaprox/app.py').read()
+    i = src.index('with g.api_rate_limit_lock:')
+    assert 'g.api_request_counts.pop(' in src[i:i + 1200], \
+        "the rate-limit map is still never pruned"

@@ -2545,9 +2545,30 @@ def update_backup_job(cluster_id, job_id):
         host, port = manager.host, manager.api_port
         url = f"https://{host}:{port}/api2/json/cluster/backup/{job_id}"
         data = dict(request.json or {})
+        # What is being ASKED for — cheap, no I/O, so an obviously-bad payload is refused here.
         _aerr = _authz_backup_targets(cluster_id, data)
         if _aerr:
             return _aerr
+        # sec (audit): ...and then what is being TOUCHED. Checking only `data` assumed the
+        # client round-trips the whole job back; a crafted PUT naming nothing but the caller's
+        # own vmid passed and still landed on a job targeting someone else's guests. Same shape
+        # as the schedule-PUT hijack, same narrowing as delete_backup_job — only a confined
+        # caller pays for the read-back.
+        from pegaprox.api.helpers import caller_is_scoped as _cis
+        from pegaprox.utils.auth import build_authz_user as _bau
+        if _cis(_bau(request.session.get('user', ''), request.session), cluster_id):
+            _read_ok, _stored = False, {}
+            try:
+                _sr = manager._create_session().get(url, timeout=10)
+                if _sr.status_code == 200:
+                    _read_ok, _stored = True, (_sr.json().get('data') or {})
+            except Exception:
+                _read_ok = False
+            if not _read_ok:
+                return jsonify({'error': 'Cannot verify backup job ownership right now'}), 503
+            _serr = _authz_backup_targets(cluster_id, _stored)
+            if _serr:
+                return _serr
 
         # MK Apr 2026 (#338) — sanitise the payload before bouncing back to PVE.
         # When a job was created in PVE itself, GETing it returns fields that
