@@ -3844,7 +3844,7 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     ssh_config_path = f"/tmp/v2p-sshcfg-{key_id}"
     
     ESXI_SSH_OPTS = (
-        "-o StrictHostKeyChecking=accept-new"
+        "-o StrictHostKeyChecking=accept-new "
         "-o LogLevel=ERROR "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
         "-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -4007,14 +4007,14 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     )
     if key_path:
         ssh_base = (
-            f"-i {key_path} -o StrictHostKeyChecking=accept-new"
+            f"-i {key_path} -o StrictHostKeyChecking=accept-new "
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
         SSH_PREFIX = "ssh"
     else:
         ssh_base = (
-            f"-o StrictHostKeyChecking=accept-new"
+            f"-o StrictHostKeyChecking=accept-new "
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
@@ -4171,7 +4171,7 @@ wait $RECV 2>/dev/null; R=$?
 exit $((S + R))
 """
             _pve_node_exec(pve_mgr, task.target_node,
-                f"cat > {script} << 'NCEOF'\n{nc_script}\nNCEOF\nchmod +x {script}", timeout=10)
+                f"( umask 077; cat > {script} << 'NCEOF'\n{nc_script}\nNCEOF\n ); chmod 700 {script}", timeout=10)
             
             start_time = time.time()
             rc_nc_r, _, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -4201,9 +4201,16 @@ exit $((S + R))
             script = f"/tmp/v2p-ssh-{task.id[:8]}-d{di}.sh"
             lines = [
                 "#!/bin/bash",
+                # sec/correctness (audit): each stream below is a PIPELINE (ssh | dd), so
+                # without pipefail the shell reports only the local dd's status and a failed
+                # remote read looks like success. And the bare `wait` this used to end with
+                # always returns 0 — so a disk that copied nothing at all was reported as a
+                # completed migration. Track each job and propagate a real exit status.
+                "set -o pipefail",
                 f"{CG_EXEC}",
                 "echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true",
-                "ulimit -p 1048576 2>/dev/null || true"
+                "ulimit -p 1048576 2>/dev/null || true",
+                "pids=''",
             ]
             for s in range(NUM_STREAMS):
                 skip = s * bps
@@ -4216,17 +4223,21 @@ exit $((S + R))
                         f'| {pve_decompress} '
                         f'| {NICE} {DD_WRITE_SEEK} of={dev_path} seek={skip} 2>/dev/null &'
                     )
+                    lines.append('pids="$pids $!"')
                 else:
                     lines.append(
                         f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
                         f'"{NICE} {DD_READ} if={esxi_path} skip={skip} count={count} 2>/dev/null" '
                         f'| {NICE} {DD_WRITE_SEEK} of={dev_path} seek={skip} 2>/dev/null &'
                     )
-            lines.append("wait")
+                    lines.append('pids="$pids $!"')
+            lines.append('rc=0')
+            lines.append('for p in $pids; do wait "$p" || rc=1; done')
+            lines.append('exit $rc')
             
             _pve_node_exec(pve_mgr, task.target_node,
-                f"cat > {script} << 'SSHEOF'\n" + "\n".join(lines) + "\nSSHEOF\n"
-                f"chmod +x {script}", timeout=10)
+                f"( umask 077; cat > {script} << 'SSHEOF'\n" + "\n".join(lines) + "\nSSHEOF\n"
+                f" ); chmod 700 {script}", timeout=10)
             
             start_time = time.time()
             rc_ssh, _, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -4260,9 +4271,9 @@ exit $((S + R))
                     f'| {NICE} {DD_WRITE_SPARSE} of={dev_path} 2>/dev/null'
                 )
             _pve_node_exec(pve_mgr, task.target_node,
-                f"cat > {script} << 'SEOF'\n#!/bin/bash\n{CG_EXEC}\n"
+                f"( umask 077; cat > {script} << 'SEOF'\n#!/bin/bash\n{CG_EXEC}\n"
                 f"echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true\n"
-                f"{pipe}\nSEOF\nchmod +x {script}",
+                f"{pipe}\nSEOF\n ); chmod 700 {script}",
                 timeout=10)
             
             start_time = time.time()
@@ -4870,6 +4881,11 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             # NBD bridge uses Unix sockets -- no AppArmor issues
         
         # Ensure key file is readable by QEMU process
+        # NOTE (audit 2026-09): this leaves a passphrase-less private key world-readable on the
+        # Proxmox node for the life of the migration. The right fix is to chown it to the user
+        # QEMU actually runs as and keep 0600, but that is on the VM-start path and cannot be
+        # verified without a real migration, so it is deliberately left alone rather than
+        # changed blind. Raised with the maintainer.
         _pve_node_exec(pve_mgr, task.target_node, f"chmod 644 {key_path} 2>/dev/null", timeout=5)
         
         task.log(f"Starting Proxmox VM ({boot_method} backend + cache=writeback)...")
@@ -5021,7 +5037,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     BS = BS_MB * 1024 * 1024
     
     bg_ssh_base = (
-        f"-i {key_path} -o StrictHostKeyChecking=accept-new"
+        f"-i {key_path} -o StrictHostKeyChecking=accept-new "
         f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
         f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
         f"-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -6719,7 +6735,7 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     xfer_lines = ['#!/bin/bash', 'ERRORS=0']
     for i in diff_blocks:
         xfer_lines.append(
-            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking=accept-new"
+            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking=accept-new "
             f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
             f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
             f"{esxi_user}@{esxi_host} "

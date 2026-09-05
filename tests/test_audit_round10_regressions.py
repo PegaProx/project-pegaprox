@@ -266,3 +266,50 @@ def test_cross_cluster_replication_gates_the_source_guest(api, seed):
                             json={'source_cluster': 'cluster_1', 'target_cluster': 'cluster_2',
                                   'vmid': 300, 'target_node': 'n1'})
     assert r.status_code == 403, r.get_data(as_text=True)
+
+
+# ── V2P: the copy reported success after copying nothing ────────────────────
+def test_v2p_parallel_copy_script_propagates_failure():
+    """Each stream is a pipeline (ssh | dd) backgrounded with &, and the script used to end in
+    a bare `wait` — which returns 0 no matter how the children exited. A disk that copied zero
+    bytes was therefore reported as a completed migration. Assert the generated shape, and
+    prove the shape itself by running it."""
+    import subprocess
+    src = open('pegaprox/core/v2p.py').read()
+    assert '"set -o pipefail",' in src, "pipeline status is still masked"
+    assert 'for p in $pids; do wait "$p" || rc=1; done' in src, "still waiting without status"
+    assert "lines.append('exit $rc')" in src, "the script still cannot fail"
+
+    # the old shape, for contrast
+    old = subprocess.run(['bash', '-c', '( false | cat ) & ( false | cat ) & wait'],
+                         capture_output=True)
+    assert old.returncode == 0, "sanity: the old shape really did mask failure"
+
+    new_fail = subprocess.run(['bash', '-c',
+        'set -o pipefail; pids=""; ( false | cat ) & pids="$pids $!"; '
+        '( false | cat ) & pids="$pids $!"; rc=0; '
+        'for p in $pids; do wait "$p" || rc=1; done; exit $rc'], capture_output=True)
+    assert new_fail.returncode == 1, "a failed stream must fail the script"
+
+    new_ok = subprocess.run(['bash', '-c',
+        'set -o pipefail; pids=""; ( true | cat ) & pids="$pids $!"; rc=0; '
+        'for p in $pids; do wait "$p" || rc=1; done; exit $rc'], capture_output=True)
+    assert new_ok.returncode == 0, "a clean run must still succeed"
+
+
+def test_v2p_ssh_options_have_a_separator():
+    """`"-o StrictHostKeyChecking=accept-new"` implicitly concatenated with the next line's
+    `"-o ServerAliveInterval=..."` produced the literal option value `accept-new-o`, which ssh
+    rejects with exit 255 — so these transfer paths could not connect at all."""
+    src = open('pegaprox/core/v2p.py').read()
+    assert 'accept-new"\n' not in src, "an ssh option string is still missing its separator"
+    assert 'accept-new-o' not in src
+
+
+def test_v2p_helper_scripts_are_not_world_readable():
+    """The generated scripts embed SSHPASS=<esxi root password> and were created with the
+    default umask, so the credential sat world-readable in /tmp on the Proxmox node for the
+    whole transfer."""
+    src = open('pegaprox/core/v2p.py').read()
+    assert 'chmod +x {script}' not in src, "a helper script is still created world-readable"
+    assert src.count('umask 077') >= 3
