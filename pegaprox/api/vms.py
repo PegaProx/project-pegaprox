@@ -10053,9 +10053,11 @@ if __name__ == '__main__':
         output_thread.start()
         
         print(f"SSH WebSocket server subprocess started (PID: {proc.pid})", flush=True)
+        return proc
 
     except Exception as e:
         print(f"Failed to start SSH WebSocket server: {e}", flush=True)
+        return None
 
 
 # Terminal/Shell WebSocket proxy (legacy - flask-sock version, kept for non-gevent setups)
