@@ -11782,11 +11782,13 @@
                         setShowAddVMware(false);
                         setVmwareForm({ name: '', host: '', port: 443, username: 'root', password: '', ssl_verify: false, notes: '' });
                         fetchVMwareServers();
+                        return { success: true };
                     } else {
                         const err = resp ? await resp.json().catch(() => ({})) : {};
                         addToast(`${t('esxiServerAddFailed')}: ${err.error || t('unknown')}`, 'error');
+                        return { success: false, error: err.error || t('unknown') };
                     }
-                } catch (e) { addToast(t('error') + ': ' + e.message, 'error'); }
+                } catch (e) { addToast(t('error') + ': ' + e.message, 'error'); return { success: false, error: e.message }; }
             };
             
             const handleUpdateVMware = async (vmwId, config) => {
@@ -24223,11 +24225,13 @@
                         } : handleAddCluster}
                         onAddPBS={async (config) => {
                             const result = await handleAddPBS(config);
-                            if (result !== false) { setShowAddModal(false); setError(null); }
+                            if (result?.success) { setShowAddModal(false); setError(null); }
+                            else setError(result?.error || 'Failed to add PBS server');
                         }}
                         onAddVMware={async (config) => {
                             const result = await handleAddVMware(config);
-                            if (result !== false) { setShowAddModal(false); setError(null); }
+                            if (result?.success) { setShowAddModal(false); setError(null); }
+                            else setError(result?.error || t('esxiServerAddFailed'));
                         }}
                         loading={loading}
                         error={error}

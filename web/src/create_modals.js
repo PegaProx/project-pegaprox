@@ -1932,6 +1932,33 @@
         // Add Cluster Modal
         // LW: Wizard for adding new Proxmox clusters
         // Defaults are pretty sensible, most users just need host + credentials
+        // Fresh Add Cluster form values, one factory per connection type. The modal stays
+        // mounted while closed and resets every field (including credentials) from these.
+        const emptyProxmoxConfig = () => ({
+            name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
+            ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
+            auto_migrate: false, balance_containers: false, balance_local_disks: false,
+            dry_run: false, ssh_key: '', ha_enabled: false, proxlb_tags_enabled: false,
+            predictive_balancing: false, predictive_threshold: 75,
+            balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
+            cpu_baseline: null,
+        });
+        const emptyXcpConfig = () => ({
+            name: '', host: '', user: 'root', pass: '',
+            ssl_verification: false, migration_threshold: 20, check_interval: 300,
+            auto_migrate: false, dry_run: false, cluster_type: 'xcpng',
+        });
+        const emptyPbsConfig = () => ({
+            name: '', host: '', port: 8007, user: 'root@pam', password: '',
+            api_token_id: '', api_token_secret: '', fingerprint: '',
+            ssl_verify: false, linked_clusters: [], notes: '',
+            ssh_user: '', ssh_port: 22, ssh_key: '',
+        });
+        const emptyVmwareConfig = () => ({
+            name: '', host: '', port: 443, username: 'root', password: '',
+            ssl_verify: false, notes: '',
+        });
+
         function AddClusterModal({ isOpen, onClose, onSubmit, onAddPBS, onAddVMware, loading, error, initialType = 'proxmox', reconfigureConfig = null }) {
             const { t } = useTranslation();
             const { isCorporate } = useLayout();
@@ -1956,33 +1983,6 @@
                 }
             }, [isOpen, initialType, reconfigureConfig]);
             
-            // Fresh form values. The modal stays mounted while closed, so every
-            // field (including credentials) is reset from these when it closes.
-            const emptyProxmoxConfig = () => ({
-                name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
-                ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
-                auto_migrate: false, balance_containers: false, balance_local_disks: false,
-                dry_run: false, ssh_key: '',
-                predictive_balancing: false, predictive_threshold: 75,
-                balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
-                cpu_baseline: null,
-            });
-            const emptyXcpConfig = () => ({
-                name: '', host: '', user: 'root', pass: '',
-                ssl_verification: false, migration_threshold: 20, check_interval: 300,
-                auto_migrate: false, dry_run: false, cluster_type: 'xcpng',
-            });
-            const emptyPbsConfig = () => ({
-                name: '', host: '', port: 8007, user: 'root@pam', password: '',
-                api_token_id: '', api_token_secret: '', fingerprint: '',
-                ssl_verify: false, linked_clusters: [], notes: '',
-                ssh_user: '', ssh_port: 22, ssh_key: '',
-            });
-            const emptyVmwareConfig = () => ({
-                name: '', host: '', port: 443, username: 'root', password: '',
-                ssl_verify: false, notes: '',
-            });
-
             // Proxmox config
             const [config, setConfig] = useState(emptyProxmoxConfig);
             const [showSshSettings, setShowSshSettings] = useState(false);
