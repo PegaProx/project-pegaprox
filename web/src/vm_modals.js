@@ -3512,7 +3512,7 @@
                                     <div>
                                         <div className="font-medium text-white">{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</div>
                                         <div className="text-xs text-gray-400">
-                                            ID {vm.vmid} · {vm.node} · {sourceCluster.name}
+                                            ID {vm.vmid} · {vm.node} · {clusterLabel(sourceCluster)}
                                         </div>
                                     </div>
                                 </div>
@@ -3600,7 +3600,7 @@
                                 >
                                     <option value="">{t('selectCluster')}</option>
                                     {availableClusters.map(c => (
-                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                     ))}
                                 </select>
                             </div>
@@ -3949,7 +3949,7 @@
                 };
                 return map[s] || 'bg-gray-500/20 text-gray-400';
             };
-            const clusterName = (cid) => (clusters.find(c => c.id === cid) || {}).name || (clusters.find(c => c.id === cid) || {}).display_name || cid;
+            const clusterName = (cid) => clusterLabel(clusters.find(c => c.id === cid)) || cid;
 
             const load = async () => {
                 setLoading(true);
@@ -4187,7 +4187,7 @@
                                                         <span className="text-[11px] text-gray-500">{t('mcevpnAddMember') || 'Add cluster to span'}:</span>
                                                         <select disabled={busy} value="" onChange={e => { if (e.target.value) addMember(v.id, e.target.value); }} className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs">
                                                             <option value="">{t('mcevpnPickCluster') || '— pick a cluster —'}</option>
-                                                            {nonMembers.map(c => <option key={c.id} value={c.id}>{c.name || c.display_name || c.id}</option>)}
+                                                            {nonMembers.map(c => <option key={c.id} value={c.id}>{clusterLabel(c)}</option>)}
                                                         </select>
                                                     </div>
                                                 ) : null;
@@ -4246,7 +4246,7 @@
                                             {evpnClusters.map(c => (
                                                 <label key={c.id} className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-lg border cursor-pointer ${form.cluster_ids.includes(c.id) ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'bg-proxmox-dark border-proxmox-border text-gray-300'}`}>
                                                     <input type="checkbox" checked={form.cluster_ids.includes(c.id)} onChange={() => toggleMember(c.id)} className="rounded" />
-                                                    <span className="truncate">{c.name || c.display_name || c.id}</span>
+                                                    <span className="truncate">{clusterLabel(c)}</span>
                                                 </label>
                                             ))}
                                         </div>
@@ -6732,7 +6732,7 @@
                                                                     >
                                                                         <div className="flex items-center gap-2">
                                                                             <Icons.Server className="w-3.5 h-3.5 text-proxmox-orange" />
-                                                                            <span className="text-sm text-white">{cluster.name}</span>
+                                                                            <span className="text-sm text-white">{clusterLabel(cluster)}</span>
                                                                             {excluded.length > 0 && (
                                                                                 <span className="text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">{excluded.length}</span>
                                                                             )}
@@ -6905,7 +6905,7 @@
                                                     >
                                                         <option value="">{t('selectCluster') || 'Select cluster...'}</option>
                                                         {groupClusters.filter(c => c.connected).map(c => (
-                                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                                            <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                         ))}
                                                     </select>
                                                 </div>
@@ -6950,7 +6950,7 @@
                                                     >
                                                         <option value="">{t('selectCluster') || 'Select cluster...'}</option>
                                                         {groupClusters.filter(c => c.connected && c.id !== xReplForm.source_cluster).map(c => (
-                                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                                            <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                         ))}
                                                     </select>
                                                 </div>

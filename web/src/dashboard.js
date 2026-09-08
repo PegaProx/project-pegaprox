@@ -7132,7 +7132,7 @@
                 testing: 'bg-yellow-500/20 text-yellow-400', failed: 'bg-red-500/20 text-red-400',
                 completed: 'bg-purple-500/20 text-purple-400',
             };
-            const getClusterName = (id) => { const c = clusters.find(cl => cl.id === id); return c ? c.name : id; };
+            const getClusterName = (id) => clusterLabel(clusters.find(cl => cl.id === id)) || id;
             const rpoColor = (vm) => {
                 if (!vm.last_replication) return 'text-gray-500';
                 const hrs = (Date.now() - new Date(vm.last_replication).getTime()) / 3600000;
@@ -7819,8 +7819,8 @@
                             <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 w-full max-w-md space-y-4" onClick={e => e.stopPropagation()}>
                                 <h3 className="font-semibold">{t('createPlan')}</h3>
                                 <input value={createForm.name} onChange={e => setCreateForm(f => ({...f, name: e.target.value}))} placeholder={t('planName')} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm" />
-                                <select value={createForm.source_cluster} onChange={e => setCreateForm(f => ({...f, source_cluster: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm"><option value="">{t('sourceCluster')}</option>{clusters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
-                                <select value={createForm.target_cluster} onChange={e => setCreateForm(f => ({...f, target_cluster: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm"><option value="">{t('targetCluster')}</option>{clusters.filter(c => c.id !== createForm.source_cluster).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+                                <select value={createForm.source_cluster} onChange={e => setCreateForm(f => ({...f, source_cluster: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm"><option value="">{t('sourceCluster')}</option>{clusters.map(c => <option key={c.id} value={c.id}>{clusterLabel(c)}</option>)}</select>
+                                <select value={createForm.target_cluster} onChange={e => setCreateForm(f => ({...f, target_cluster: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm"><option value="">{t('targetCluster')}</option>{clusters.filter(c => c.id !== createForm.source_cluster).map(c => <option key={c.id} value={c.id}>{clusterLabel(c)}</option>)}</select>
                                 <div className="flex justify-end gap-2"><button onClick={() => setShowCreateModal(false)} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button><button onClick={handleCreatePlan} className="px-4 py-1.5 text-sm rounded-lg bg-proxmox-orange text-white hover:bg-proxmox-orange/80">{t('createPlan')}</button></div>
                             </div>
                         </div>
@@ -19686,10 +19686,10 @@
                                                         >
                                                             <option value="">{t('selectCluster') || 'Select cluster...'}</option>
                                                             {(clusters || []).filter(c => (selectedPBS?.linked_clusters || []).includes(c.id)).map(c => (
-                                                                <option key={c.id} value={c.id}>{c.name}</option>
+                                                                <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                             ))}
                                                             {(selectedPBS?.linked_clusters || []).length === 0 && (clusters || []).map(c => (
-                                                                <option key={c.id} value={c.id}>{c.name}</option>
+                                                                <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                             ))}
                                                         </select>
                                                     )}

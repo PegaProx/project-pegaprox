@@ -3196,7 +3196,7 @@
                                                                     }}
                                                                     className="rounded"
                                                                 />
-                                                                <span className="text-sm text-white">{c.name}</span>
+                                                                <span className="text-sm text-white">{clusterLabel(c)}</span>
                                                             </label>
                                                         ))}
                                                     </div>
@@ -3369,7 +3369,7 @@
                                                                         }}
                                                                         className="rounded border-gray-600"
                                                                     />
-                                                                    <span className="text-sm text-white">{c.name}</span>
+                                                                    <span className="text-sm text-white">{clusterLabel(c)}</span>
                                                                 </label>
                                                             ))}
                                                         </div>
@@ -4018,7 +4018,7 @@
                                                 >
                                                     <option value="">{t('select') || '-- Select --'}</option>
                                                     {clusters.map(c => (
-                                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                     ))}
                                                 </select>
                                                 
@@ -4239,7 +4239,7 @@
                                                 >
                                                     <option value="">{t('select') || '-- Select --'}</option>
                                                     {clusters.map(c => (
-                                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                     ))}
                                                 </select>
                                                 {selectedPoolCluster && (

@@ -3514,7 +3514,7 @@
                                                                 >
                                                                     <option value="">{t('selectCluster') || 'Select cluster...'}</option>
                                                                     {allClusters.filter(c => c.id !== clusterId && c.connected).map(c => (
-                                                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                                     ))}
                                                                 </select>
                                                             </div>

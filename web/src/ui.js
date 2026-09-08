@@ -1312,7 +1312,7 @@
                                                 >
                                                     <span className="flex items-center gap-2">
                                                         <Icons.Server className="w-4 h-4" />
-                                                        {c.name}
+                                                        {clusterLabel(c)}
                                                     </span>
                                                     {targetCluster?.id === c.id && <Icons.CheckCircle className="w-4 h-4 text-blue-400" />}
                                                 </button>
