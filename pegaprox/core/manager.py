@@ -2222,6 +2222,162 @@ class PegaProxManager:
         self._proxlb_derived_cache = (now, result)
         return result
 
+    def get_pin_violations(self, vms=None):
+        """Guests running on a node their plb_pin_<node> tag does not allow.
+
+        The pin has only ever been a veto on moves the balancer itself proposed
+        (the candidate filter and get_best_target_node), and nothing in the
+        cycle ever proposes a move *towards* a pin. A guest that was already off
+        its pinned node therefore stayed there forever — whatever put it there:
+        a hand migration in the PVE UI, an HA failover, an evacuation while the
+        pinned node was down, or simply the tag being added after the fact.
+
+        Read-only. The plb_pin counterpart to the affinity-violation scan.
+        """
+        derived = self._derive_proxlb_tag_rules(vms=vms)
+        pins = derived['pins']
+        if not pins:
+            return []  # feature off, or no guest carries a resolvable pin
+
+        if vms is None:
+            try:
+                vms = self.get_vm_resources()
+            except Exception as e:
+                self.logger.error(f"[PROXLB] pin scan could not list guests: {e}")
+                return []
+
+        cfg_excl = getattr(self.config, 'excluded_nodes', []) or []
+        available = {n for n, d in (self.get_node_status() or {}).items()
+                     if d.get('status') == 'online'
+                     and not d.get('maintenance_mode', False)
+                     and n not in cfg_excl}
+
+        violations = []
+        for vm in (vms or []):
+            if vm.get('type') not in ('qemu', 'lxc'):
+                continue
+            try:
+                vmid = int(vm.get('vmid'))
+            except (TypeError, ValueError):
+                continue
+            allowed = pins.get(vmid)
+            if not allowed:
+                continue
+            node = vm.get('node')
+            if node in allowed:
+                continue
+            # 'unavailable' means no pinned node is up: the guest is off its
+            # pin because there is nowhere else for it to be, not because
+            # anyone ignored the pin, and there is nothing to move it back to.
+            violations.append({
+                'vmid': vmid,
+                'name': vm.get('name', 'unnamed'),
+                'type': vm.get('type'),
+                'status': vm.get('status'),
+                'node': node,
+                'pinned_nodes': sorted(allowed),
+                'reason': 'drift' if (allowed & available) else 'unavailable',
+                'ignored': vmid in derived['ignored'],
+            })
+        return violations
+
+    def reconcile_proxlb_pins(self, vms=None, force=False):
+        """Report guests sitting outside their plb_pin_ set, and migrate them
+        back only when config.proxlb_pins_auto_migrate is on (or force=True).
+
+        Report-only by default on purpose: turning the ProxLB tag feature on is
+        a statement about placement rules, not consent to move running
+        workloads, and a guest may be off its pin deliberately.
+        """
+        if vms is None:
+            try:
+                vms = self.get_vm_resources()
+            except Exception as e:
+                self.logger.error(f"[PROXLB] pin reconcile could not list guests: {e}")
+                return {'violations': [], 'migrated': [], 'failed': [], 'auto_migrate': False}
+
+        violations = self.get_pin_violations(vms=vms)
+        auto = force or bool(getattr(self.config, 'proxlb_pins_auto_migrate', False))
+        # auto_migrate stays the master switch for anything PegaProx does on its
+        # own; an opt-in here does not get to route around it. The manual
+        # "reconcile now" call is a deliberate operator action and does.
+        held_back = auto and not force and not getattr(self.config, 'auto_migrate', False)
+        if held_back:
+            auto = False
+        result = {'violations': violations, 'migrated': [], 'failed': [], 'auto_migrate': auto}
+        if not violations:
+            return result
+
+        for v in violations:
+            if v['reason'] == 'unavailable':
+                self.logger.info(
+                    f"[PROXLB] {v['name']} ({v['vmid']}) is on {v['node']}, off its pin "
+                    f"({', '.join(v['pinned_nodes'])}) — no pinned node is available, so this "
+                    "is expected; it returns when one comes back")
+            else:
+                self.logger.warning(
+                    f"[PROXLB] {v['name']} ({v['vmid']}) is on {v['node']} but pinned to "
+                    f"{', '.join(v['pinned_nodes'])}")
+
+        if held_back:
+            self.logger.warning(
+                "[PROXLB] pin reconciliation is enabled but this cluster's auto_migrate is "
+                "off — reporting only")
+
+        if not auto:
+            self.logger.info(
+                f"[PROXLB] {len(violations)} guest(s) off their pinned node — reporting only "
+                "(enable proxlb_pins_auto_migrate to have these migrated back)")
+            return result
+
+        if getattr(self.config, 'dry_run', False):
+            self.logger.info("[PROXLB] dry_run is on — not migrating off-pin guests")
+            return result
+
+        excluded = set(self.get_balancing_excluded_vms() or [])
+        for v in violations:
+            if v['reason'] == 'unavailable':
+                continue  # nothing to return it to yet
+            if v.get('status') != 'running':
+                # A stopped guest is not costing the pinned node anything, and
+                # an offline move of a local-disk guest copies its disks rather
+                # than migrating them. Not worth doing behind the operator's back.
+                continue
+            if v.get('ignored'):
+                # Same guest also carries plb_ignore. Both tags are the
+                # operator's; "never migrate this" beats "belongs over there".
+                self.logger.info(
+                    f"[PROXLB] {v['name']} ({v['vmid']}) is off its pin but also tagged "
+                    "plb_ignore — leaving it alone")
+                continue
+            if v['vmid'] in excluded:
+                self.logger.info(
+                    f"[PROXLB] {v['name']} ({v['vmid']}) is off its pin but excluded from "
+                    "balancing — leaving it alone")
+                continue
+            # vmid= restricts the target set to the pin itself, so this can only
+            # ever land the guest on a node the tag allows.
+            target = self.get_best_target_node(exclude_nodes=[v['node']], vmid=v['vmid'])
+            if not target:
+                self.logger.error(
+                    f"[PROXLB] no available pinned node for {v['name']} ({v['vmid']}) "
+                    f"({', '.join(v['pinned_nodes'])})")
+                result['failed'].append({**v, 'error': 'no pinned target node available'})
+                continue
+            vm = next((x for x in vms if x.get('vmid') == v['vmid']), None)
+            if not vm:
+                result['failed'].append({**v, 'error': 'guest disappeared'})
+                continue
+            self.logger.info(
+                f"[PROXLB] returning {v['name']} ({v['vmid']}) to its pin: "
+                f"{v['node']} -> {target}")
+            if self.migrate_vm(vm, target, dry_run=False, wait_timeout=1800):
+                result['migrated'].append({**v, 'target': target})
+                self._vm_migration_cooldown[v['vmid']] = time.time()
+            else:
+                result['failed'].append({**v, 'error': 'migration failed'})
+        return result
+
     def _check_affinity_violation(self, vmid, target_node, vm_nodes=None):
         """Check if moving a VM/CT would violate affinity rules
 
@@ -15226,6 +15382,16 @@ echo "AGENT_INSTALLED_OK"
                     migrations_done += affinity_migrations
                 except Exception as e:
                     self.logger.error(f"Error in affinity enforcement: {e}")
+
+            # Sep 2026 — a plb_pin_ tag only ever vetoed moves this cycle
+            # proposed; nothing here ever proposes a move towards a pin, so a
+            # guest already sitting off its pinned node was never brought back.
+            # Audit that. Report-only unless proxlb_pins_auto_migrate is set.
+            try:
+                pin_result = self.reconcile_proxlb_pins()
+                migrations_done += len(pin_result['migrated'])
+            except Exception as e:
+                self.logger.error(f"[PROXLB] pin reconciliation failed: {e}")
 
             self.last_run = datetime.now()
             self.logger.info(f"Balance check completed at {self.last_run}")

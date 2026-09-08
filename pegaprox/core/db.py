@@ -227,6 +227,7 @@ class PegaProxDB:
                 balance_containers INTEGER DEFAULT 0,
                 balance_local_disks INTEGER DEFAULT 0,
                 proxlb_tags_enabled INTEGER DEFAULT 0,
+                proxlb_pins_auto_migrate INTEGER DEFAULT 0,
                 dry_run INTEGER DEFAULT 1,
                 enabled INTEGER DEFAULT 1,
                 ha_enabled INTEGER DEFAULT 0,
@@ -1068,6 +1069,17 @@ class PegaProxDB:
                     logging.info("Added proxlb_tags_enabled column to clusters table")
                 except Exception as e:
                     logging.error(f"Failed to add proxlb_tags_enabled column: {e}")
+
+            # A plb_pin_ tag is only a veto on proposed moves — it never pulls a
+            # guest back to its pinned node. Reconciliation does, and like every
+            # other autonomous move it stays off until the operator asks for it.
+            if 'proxlb_pins_auto_migrate' not in cluster_columns:
+                logging.info("Adding proxlb_pins_auto_migrate column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN proxlb_pins_auto_migrate INTEGER DEFAULT 0")
+                    logging.info("Added proxlb_pins_auto_migrate column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add proxlb_pins_auto_migrate column: {e}")
 
             # MK Feb 2026: Add smbios_autoconfig for per-cluster SMBIOS settings
             if 'smbios_autoconfig' not in cluster_columns:
@@ -2922,6 +2934,7 @@ class PegaProxDB:
                 'balance_containers': bool(row['balance_containers']),
                 'balance_local_disks': bool(row['balance_local_disks']),
                 'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
+                'proxlb_pins_auto_migrate': bool(row['proxlb_pins_auto_migrate']) if 'proxlb_pins_auto_migrate' in row.keys() else False,
                 'dry_run': bool(row['dry_run']),
                 'enabled': bool(row['enabled']),
                 'ha_enabled': bool(row['ha_enabled']),
@@ -3009,6 +3022,7 @@ class PegaProxDB:
             'balance_containers': bool(row['balance_containers']),
             'balance_local_disks': bool(row['balance_local_disks']),
             'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
+            'proxlb_pins_auto_migrate': bool(row['proxlb_pins_auto_migrate']) if 'proxlb_pins_auto_migrate' in row.keys() else False,
             'dry_run': bool(row['dry_run']),
             'enabled': bool(row['enabled']),
             'ha_enabled': bool(row['ha_enabled']),
@@ -3082,10 +3096,10 @@ class PegaProxDB:
              api_port,
              latitude, longitude, location_label,
              node_ui_suffix,
-             proxlb_tags_enabled,
+             proxlb_tags_enabled, proxlb_pins_auto_migrate,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -3129,6 +3143,7 @@ class PegaProxDB:
             data.get('location_label', existing_loc_label) or '',
             (data.get('node_ui_suffix', existing_node_ui_suffix) or '').strip().lstrip('.'),
             1 if data.get('proxlb_tags_enabled', False) else 0,
+            1 if data.get('proxlb_pins_auto_migrate', False) else 0,
             existing['created_at'] if existing else now,
             now
         ))
