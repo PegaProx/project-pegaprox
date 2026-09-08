@@ -246,12 +246,8 @@ def oidc_callback():
     # Management however often it signed in — misleading when reviewing dormant accounts.
     # Placed after create_session and after the disabled-account gate above, so a rejected
     # attempt is not recorded as a login.
-    try:
-        if username in users:
-            users[username]['last_login'] = datetime.now().isoformat()
-            save_users(users)
-    except Exception as _ll_err:
-        logging.warning(f"[OIDC] could not update last_login for '{username}': {_ll_err}")
+    user['last_login'] = datetime.now().isoformat()
+    save_single_user(username, user)
 
     log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {client_ip}")
     
