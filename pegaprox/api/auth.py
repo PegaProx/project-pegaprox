@@ -240,7 +240,15 @@ def oidc_callback():
     # Step 6: Create session via create_session() for proper session rotation + limits
     # MK: create_session() handles max 3 sessions per user, session rotation, save_sessions()
     session_token = create_session(username, user.get('role', ROLE_VIEWER))
-    
+
+    # KG Aug 2026 — stamp last_login here, mirroring auth_login(). Only the password/LDAP
+    # handler ever wrote this field, so every OIDC/Entra account showed "Never" in User
+    # Management however often it signed in — misleading when reviewing dormant accounts.
+    # Placed after create_session and after the disabled-account gate above, so a rejected
+    # attempt is not recorded as a login.
+    user['last_login'] = datetime.now().isoformat()
+    save_single_user(username, user)
+
     log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {client_ip}")
     
     # NS: Apr 2026 - include portal_only so client portal can validate OIDC users
