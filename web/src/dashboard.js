@@ -586,7 +586,7 @@
                     out.push({
                         kind: 'node', id: `node-${n}`,
                         title: n,
-                        subtitle: selectedCluster ? `${t('node') || 'Node'} · ${selectedCluster.name}` : (t('node') || 'Node'),
+                        subtitle: selectedCluster ? `${t('node') || 'Node'} · ${clusterLabel(selectedCluster)}` : (t('node') || 'Node'),
                         icon: 'Server',
                         score: 0,
                         pick: () => { onPickCluster(selectedCluster || clusters[0]); },
@@ -6947,7 +6947,7 @@
                             <p className="text-xs text-gray-500 mb-1">{t('overallScore') || 'Overall score'}</p>
                             <p className={`text-3xl font-bold ${scoreColor(overallScore)}`}>{overallScore == null ? '—' : `${overallScore}%`}</p>
                             <p className="text-xs text-gray-500 mt-1 truncate">
-                                {selectedCluster ? (selectedCluster.name || selectedCluster.id) : (t('noClusterSelected') || 'No cluster selected')}
+                                {selectedCluster ? clusterLabel(selectedCluster) : (t('noClusterSelected') || 'No cluster selected')}
                             </p>
                         </div>
                     </div>

@@ -6853,9 +6853,9 @@
                                                         <div className="flex-1 min-w-0">
                                                             <div className="flex items-center gap-2 flex-wrap">
                                                                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${job.enabled ? 'bg-green-500' : 'bg-gray-500'}`} />
-                                                                <span className="text-sm text-white truncate">{srcCluster?.name || job.source_cluster}</span>
+                                                                <span className="text-sm text-white truncate">{clusterLabel(srcCluster) || job.source_cluster}</span>
                                                                 <Icons.ArrowRight className="w-3.5 h-3.5 text-gray-500 flex-shrink-0" />
-                                                                <span className="text-sm text-white truncate">{tgtCluster?.name || job.target_cluster}</span>
+                                                                <span className="text-sm text-white truncate">{clusterLabel(tgtCluster) || job.target_cluster}</span>
                                                                 <span className="text-xs bg-proxmox-dark px-1.5 py-0.5 rounded text-gray-400 border border-proxmox-border">
                                                                     {job.vm_type === 'lxc' ? 'CT' : 'VM'} {job.vmid}
                                                                 </span>
@@ -7082,7 +7082,7 @@
                                                     return (
                                                         <div key={cid} className="bg-proxmox-dark rounded-lg border border-proxmox-border overflow-hidden">
                                                             <div className="px-3 py-2 border-b border-proxmox-border bg-purple-500/5">
-                                                                <span className="text-xs font-medium text-purple-300">{cluster?.name || cid}</span>
+                                                                <span className="text-xs font-medium text-purple-300">{clusterLabel(cluster) || cid}</span>
                                                             </div>
                                                             {jobs.map((job, idx) => {
                                                                 const hasErr = job.fail_count > 0 || job.error;

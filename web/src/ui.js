@@ -1197,7 +1197,7 @@
                     setProgress(prev => [
                         ...prev.slice(0, -1),
                         { text: 'Removed from current cluster' + (cleanupOk ? ' (config cleaned)' : ''), status: 'done' },
-                        { text: `Getting join info from ${targetCluster.name}...`, status: 'running' }
+                        { text: `Getting join info from ${clusterLabel(targetCluster)}...`, status: 'running' }
                     ]);
                     
                     // Get join info from target cluster
@@ -1213,8 +1213,8 @@
                     
                     setProgress(prev => [
                         ...prev.slice(0, -1),
-                        { text: `Got join info from ${targetCluster.name}`, status: 'done' },
-                        { text: `Joining node to ${targetCluster.name}...`, status: 'running' }
+                        { text: `Got join info from ${clusterLabel(targetCluster)}`, status: 'done' },
+                        { text: `Joining node to ${clusterLabel(targetCluster)}...`, status: 'running' }
                     ]);
                     
                     // Resolve node IP from current cluster knowledge
@@ -1251,9 +1251,9 @@
                     if (joinData.success) {
                         setProgress(prev => [
                             ...prev.slice(0, -1),
-                            { text: `Successfully joined ${targetCluster.name}!`, status: 'done' }
+                            { text: `Successfully joined ${clusterLabel(targetCluster)}!`, status: 'done' }
                         ]);
-                        if (addToast) addToast(`Node ${nodeName} moved to ${targetCluster.name}`, 'success');
+                        if (addToast) addToast(`Node ${nodeName} moved to ${clusterLabel(targetCluster)}`, 'success');
                         setTimeout(() => { if (onSuccess) onSuccess(); onClose(); }, 2000);
                     } else {
                         setProgress(prev => [
