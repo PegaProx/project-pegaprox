@@ -98,6 +98,9 @@ class PegaProxConfig:
         # MK Jul 2026 (#426) — opt-in: derive affinity/anti-affinity/ignore/pin
         # placement rules from ProxLB-convention VM tags. Off = zero change.
         self.proxlb_tags_enabled = cluster_data.get('proxlb_tags_enabled', False)
+        # Pin reconciliation migrates a guest back onto its plb_pin_ node only
+        # when this is on; otherwise off-pin guests are only reported.
+        self.proxlb_pins_auto_migrate = cluster_data.get('proxlb_pins_auto_migrate', False)
         self.dry_run = cluster_data.get('dry_run', False)
         self.enabled = cluster_data.get('enabled', True)
         self.ha_enabled = cluster_data.get('ha_enabled', False)
