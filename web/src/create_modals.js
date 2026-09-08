@@ -1956,8 +1956,9 @@
                 }
             }, [isOpen, initialType, reconfigureConfig]);
             
-            // Proxmox config
-            const [config, setConfig] = useState({
+            // Fresh form values. The modal stays mounted while closed, so every
+            // field (including credentials) is reset from these when it closes.
+            const emptyProxmoxConfig = () => ({
                 name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
                 ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
                 auto_migrate: false, balance_containers: false, balance_local_disks: false,
@@ -1966,29 +1967,47 @@
                 balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
                 cpu_baseline: null,
             });
-            const [showSshSettings, setShowSshSettings] = useState(false);
-
-            // XCP-ng config
-            const [xcpConfig, setXcpConfig] = useState({
+            const emptyXcpConfig = () => ({
                 name: '', host: '', user: 'root', pass: '',
                 ssl_verification: false, migration_threshold: 20, check_interval: 300,
                 auto_migrate: false, dry_run: false, cluster_type: 'xcpng',
             });
-
-            // PBS config
-            const [pbsConfig, setPbsConfig] = useState({
+            const emptyPbsConfig = () => ({
                 name: '', host: '', port: 8007, user: 'root@pam', password: '',
                 api_token_id: '', api_token_secret: '', fingerprint: '',
                 ssl_verify: false, linked_clusters: [], notes: '',
                 ssh_user: '', ssh_port: 22, ssh_key: '',
             });
-            const [showPbsSshSettings, setShowPbsSshSettings] = useState(false);
-
-            // VMware config
-            const [vmwConfig, setVmwConfig] = useState({
+            const emptyVmwareConfig = () => ({
                 name: '', host: '', port: 443, username: 'root', password: '',
                 ssl_verify: false, notes: '',
             });
+
+            // Proxmox config
+            const [config, setConfig] = useState(emptyProxmoxConfig);
+            const [showSshSettings, setShowSshSettings] = useState(false);
+
+            // XCP-ng config
+            const [xcpConfig, setXcpConfig] = useState(emptyXcpConfig);
+
+            // PBS config
+            const [pbsConfig, setPbsConfig] = useState(emptyPbsConfig);
+            const [showPbsSshSettings, setShowPbsSshSettings] = useState(false);
+
+            // VMware config
+            const [vmwConfig, setVmwConfig] = useState(emptyVmwareConfig);
+
+            // Clear every form on close so a later Add does not inherit the previous
+            // cluster's name, host or password, and no credential lingers in state.
+            useEffect(() => {
+                if (isOpen) return;
+                setConfig(emptyProxmoxConfig());
+                setXcpConfig(emptyXcpConfig());
+                setPbsConfig(emptyPbsConfig());
+                setVmwConfig(emptyVmwareConfig());
+                setShowSshSettings(false);
+                setShowPbsSshSettings(false);
+            }, [isOpen]);
 
             if (!isOpen) return null;
 
