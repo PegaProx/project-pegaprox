@@ -10981,9 +10981,15 @@ def get_templates_api(cluster_id, node):
         if not has_permission(u, 'xapi.template.view'):
             return jsonify({'error': 'Permission denied: xapi.template.view'}), 403
 
-    templates = manager.get_templates(node)
-    # sec (audit): template rows carry a vmid — twin of the scoped templates/existing route
-    return jsonify(scope_vm_rows(cluster_id, templates or []))
+    templates = manager.get_templates(node) or []
+    # Same as datastore content: qemu template VMs carry a vmid and stay scoped;
+    # LXC vztmpl / XCP template rows have no vmid (shared content) and must stay.
+    # Blind scope_vm_rows dropped every CT template (int(None) → skip).
+    _ok_vmids = {r.get('vmid') for r in scope_vm_rows(cluster_id, [r for r in templates
+                 if isinstance(r, dict) and r.get('vmid') is not None])}
+    templates = [r for r in templates if not (isinstance(r, dict) and r.get('vmid') is not None)
+                 or r.get('vmid') in _ok_vmids]
+    return jsonify(templates)
 
 
 @bp.route('/api/clusters/<cluster_id>/xcp/os-types', methods=['GET'])

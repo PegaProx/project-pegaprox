@@ -136,6 +136,42 @@ def test_node_templates_scoped(api, seed):
     assert sorted(t['vmid'] for t in body) == [100]
 
 
+def test_node_templates_keeps_vztmpl(api, seed):
+    """LXC vztmpl rows have no vmid. Blind scope_vm_rows drops them, so the
+    create-CT wizard is empty even though Datastores still lists the files."""
+    u = _pool_user(seed)
+    m = api.make_fake_manager(cluster_id='cluster_1')
+    m.is_connected = True
+    m.cluster_type = 'proxmox'
+    m.get_templates.return_value = [
+        {'type': 'qemu', 'vmid': 100, 'name': 't100'},
+        {'type': 'qemu', 'vmid': 101, 'name': 't101'},
+        {'type': 'lxc', 'volid': 'local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst',
+         'name': 'debian-12-standard_12.2-1_amd64.tar.zst'},
+    ]
+    api.set_manager('cluster_1', m)
+    body = api.as_user(u).get('/api/clusters/cluster_1/nodes/n1/templates').get_json()
+    assert sorted(t.get('vmid') for t in body if t.get('vmid') is not None) == [100]
+    volids = [t.get('volid') for t in body]
+    assert 'local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst' in volids
+
+
+def test_node_templates_admin_sees_vztmpl(api, seed):
+    admin = seed.user('root', role='admin')
+    m = api.make_fake_manager(cluster_id='cluster_1')
+    m.is_connected = True
+    m.cluster_type = 'proxmox'
+    m.get_templates.return_value = [
+        {'type': 'lxc', 'volid': 'local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst',
+         'name': 'ubuntu-24.04-standard_24.04-2_amd64.tar.zst'},
+    ]
+    api.set_manager('cluster_1', m)
+    body = api.as_user(admin).get('/api/clusters/cluster_1/nodes/n1/templates').get_json()
+    assert [t.get('volid') for t in body] == [
+        'local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst',
+    ]
+
+
 # ── cloud-init deployments ────────────────────────────────────────────────────
 def test_deployments_scoped(api, seed, db):
     u = _pool_user(seed)
