@@ -16,15 +16,15 @@ def test_720_node_maintenance_db_roundtrip(db):
     db.save_node_maintenance('cl1', 'pve1')
     db.save_node_maintenance('cl1', 'pve2')
     db.save_node_maintenance('cl2', 'other')          # different cluster, must not bleed
-    nodes = sorted(n for n, _ in db.get_node_maintenance('cl1'))
+    nodes = sorted(n for n, _, _ in db.get_node_maintenance('cl1'))
     assert nodes == ['pve1', 'pve2']
     # idempotent save keeps the original entered_at
-    first_ts = dict(db.get_node_maintenance('cl1'))['pve1']
+    first_ts = {n: ts for n, ts, _ in db.get_node_maintenance('cl1')}['pve1']
     db.save_node_maintenance('cl1', 'pve1')
-    assert dict(db.get_node_maintenance('cl1'))['pve1'] == first_ts
+    assert {n: ts for n, ts, _ in db.get_node_maintenance('cl1')}['pve1'] == first_ts
     db.remove_node_maintenance('cl1', 'pve1')
-    assert sorted(n for n, _ in db.get_node_maintenance('cl1')) == ['pve2']
-    assert [n for n, _ in db.get_node_maintenance('cl2')] == ['other']
+    assert sorted(n for n, _, _ in db.get_node_maintenance('cl1')) == ['pve2']
+    assert [n for n, _, _ in db.get_node_maintenance('cl2')] == ['other']
 
 
 # ---------------------------------------------------------------------------

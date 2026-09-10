@@ -1777,12 +1777,15 @@ class PegaProxManager:
                         native_ha_nodes.add(node['node'])
 
                 # Method 2: HA status endpoint (catches cases where /nodes still says "online"
-                # during early maintenance transition) - may fail with 401 on limited tokens
+                # during maintenance — on PVE 9 that is ALWAYS, /nodes never reports
+                # "maintenance") - may fail with 401 on limited tokens
+                ha_poll_ok = True
                 try:
                     ha_nodes = self._get_native_ha_maintenance_nodes()
                     native_ha_nodes.update(ha_nodes)
+                    ha_poll_ok = getattr(self, '_ha_maint_poll_ok', True)
                 except Exception:
-                    pass
+                    ha_poll_ok = False
 
                 for nm in native_ha_nodes:
                     if nm not in self.nodes_in_maintenance:
@@ -1795,11 +1798,15 @@ class PegaProxManager:
                         self.nodes_in_maintenance[nm] = t
                         self.logger.info(f"[MAINT] Detected native HA maintenance on {nm} (set externally)")
 
-                # cleanup stale entries — only ones discovered externally, not ones we set
-                for nm in [n for n, tsk in self.nodes_in_maintenance.items()
-                           if getattr(tsk, '_discovered_by_refresh', False) and n not in native_ha_nodes]:
-                    del self.nodes_in_maintenance[nm]
-                    self.logger.info(f"[MAINT] {nm} left native HA maintenance")
+                # cleanup stale entries — only ones discovered externally, not ones we set or
+                # restored from the DB. Skipped entirely when the HA poll could not be read:
+                # an unreadable poll looks exactly like an empty one, and acting on it would
+                # drop a node that is still draining.
+                if ha_poll_ok:
+                    for nm in [n for n, tsk in self.nodes_in_maintenance.items()
+                               if getattr(tsk, '_discovered_by_refresh', False) and n not in native_ha_nodes]:
+                        del self.nodes_in_maintenance[nm]
+                        self.logger.info(f"[MAINT] {nm} left native HA maintenance")
 
                 # Process results
                 for result in results:
@@ -3512,13 +3519,21 @@ class PegaProxManager:
             t.daemon = True
             t.start()
 
-        # #720 — persist SOFT (non-HA) maintenance so it survives a PegaProx restart. Native HA
-        # maintenance is re-derived from PVE on each poll (#78), so we don't store that here.
-        if not getattr(task, 'native_ha', False):
-            try:
-                get_db().save_node_maintenance(self.id, node_name)
-            except Exception as _e:
-                self.logger.debug(f"[MAINT] persist failed for {node_name}: {_e}")
+        # #720 — persist maintenance so it survives a PegaProx restart.
+        # This used to skip native-HA nodes on the theory that #78 re-derives them from PVE on
+        # every poll. It does not: on PVE 9 the HA flag surfaces only as a type=lrm entry whose
+        # status is free text ("<node> (maintenance mode, watchdog standby, ...)"), which no
+        # branch of _get_native_ha_maintenance_nodes matched, and /nodes still says "online".
+        # So a restart silently dropped exactly the nodes PVE had accepted into maintenance, and
+        # the balancer then scored those freshly-drained nodes as the emptiest targets in the
+        # cluster and migrated guests back onto them. The parser is fixed below, but correctness
+        # must not hinge on it: persist both kinds, and carry native_ha so a restored entry can
+        # still clear the upstream flag on exit.
+        try:
+            get_db().save_node_maintenance(self.id, node_name,
+                                           native_ha=bool(getattr(task, 'native_ha', False)))
+        except Exception as _e:
+            self.logger.debug(f"[MAINT] persist failed for {node_name}: {_e}")
 
         return task
 
@@ -3675,9 +3690,10 @@ class PegaProxManager:
         """Force-refresh native HA maintenance state from PVE. Call before rolling update checks. (#141)"""
         try:
             native_ha_nodes = set()
-            # re-poll /cluster/ha/status/current
+            # re-poll PVE's HA maintenance view
             ha_nodes = self._get_native_ha_maintenance_nodes()
             native_ha_nodes.update(ha_nodes)
+            ha_poll_ok = getattr(self, '_ha_maint_poll_ok', True)
 
             # also check /nodes status
             host = self.host
@@ -3699,54 +3715,158 @@ class PegaProxManager:
                     self.nodes_in_maintenance[nm] = t
                     self.logger.info(f"[MAINT] refresh: detected maintenance on {nm}")
 
-            # NS Mar 2026 - only clean up nodes that were DISCOVERED by refresh (not ones we put there).
-            # PVE drops the HA maintenance flag fast, but we want to keep tracking until user exits.
-            for nm in [n for n, tsk in self.nodes_in_maintenance.items()
-                       if getattr(tsk, '_discovered_by_refresh', False) and n not in native_ha_nodes]:
-                del self.nodes_in_maintenance[nm]
-                self.logger.info(f"[MAINT] refresh: {nm} no longer in maintenance")
+            # NS Mar 2026 - only clean up nodes that were DISCOVERED by refresh (not ones we put
+            # there, and not ones restored from the DB). PVE drops the HA maintenance flag fast,
+            # but we want to keep tracking until user exits. Skipped when the HA poll was
+            # unreadable — see the same gate in the daemon poll loop.
+            if ha_poll_ok:
+                for nm in [n for n, tsk in self.nodes_in_maintenance.items()
+                           if getattr(tsk, '_discovered_by_refresh', False) and n not in native_ha_nodes]:
+                    del self.nodes_in_maintenance[nm]
+                    self.logger.info(f"[MAINT] refresh: {nm} no longer in maintenance")
 
             return native_ha_nodes
         except Exception as e:
             self.logger.debug(f"[MAINT] refresh failed: {e}")
             return set()
 
-    def _get_native_ha_maintenance_nodes(self):
-        # MK Mar 2026 - polls /cluster/ha/status/current for nodes in native maintenance (#78)
-        # The HA status response has two relevant entry types:
-        #   type=node with status="maintenance"
-        #   id=manager_status with multi-line text "node1 master\nnode2 maintenance\n..."
-        # We check both because single-node clusters only have manager_status
-        try:
-            host = self.host
-            resp = self._api_get(f"https://{host}:{self.api_port}/api2/json/cluster/ha/status/current")
-            if resp.status_code != 200:
-                self.logger.debug(f"[MAINT] HA status endpoint returned {resp.status_code}")
-                return set()
+    @staticmethod
+    def _ha_lrm_mode_from_status(text):
+        """Pull the LRM mode word out of a /cluster/ha/status/current lrm entry.
 
-            data = resp.json().get('data', [])
-            result = set()
-            for entry in data:
-                # type=node entries (PVE 8.x with HA resources)
-                if entry.get('type') == 'node' and entry.get('status') == 'maintenance':
-                    result.add(entry.get('node', ''))
-                # manager_status entry (always present when HA is active)
-                elif entry.get('id') == 'manager_status':
-                    # "pve1 master\npve2 maintenance\npve3 online\n"
-                    for line in entry.get('status', '').split('\n'):
-                        parts = line.strip().split()
-                        if len(parts) >= 2 and parts[1] == 'maintenance':
-                            result.add(parts[0])
-                # NS: some PVE versions use quorum/manager with "node" field
-                elif entry.get('status') == 'maintenance' and entry.get('node'):
+        PVE renders these as "<node> (<mode>, <watchdog>, <timestamp>)", e.g.
+        "pve1 (maintenance mode, watchdog standby, Thu Sep 10 19:48:45 2026)". Returns the
+        lower-cased mode field ("maintenance mode", "active", "idle") or '' if unparseable.
+        """
+        if not isinstance(text, str) or '(' not in text:
+            return ''
+        return text.split('(', 1)[1].split(',', 1)[0].strip().rstrip(')').lower()
+
+    def _ha_maintenance_from_manager_status(self):
+        """Structured read of /cluster/ha/status/manager_status. Returns a set, or None if the
+        endpoint gave us nothing usable (old PVE, restricted token, HA never configured)."""
+        host = self.host
+        resp = self._api_get(
+            f"https://{host}:{self.api_port}/api2/json/cluster/ha/status/manager_status")
+        if resp is None or resp.status_code != 200:
+            code = getattr(resp, 'status_code', 'no response')
+            self.logger.debug(f"[MAINT] HA manager_status endpoint returned {code}")
+            return None
+        data = resp.json().get('data') or {}
+        if not isinstance(data, dict):
+            return None
+
+        ms = data.get('manager_status') or {}
+        lrm = data.get('lrm_status') or {}
+        if not isinstance(ms, dict) or not isinstance(lrm, dict):
+            return None
+        # node_status is the CRM's own view; node_request carries a pending
+        # {"maintenance": 1} before the CRM has applied it; lrm_status[n].mode is what the
+        # node itself reports. Any of the three counts — we want the node off the target list
+        # from the moment maintenance is requested.
+        if not ms and not lrm:
+            return None
+
+        result = set()
+        for node, state in (ms.get('node_status') or {}).items():
+            if str(state).lower() == 'maintenance':
+                result.add(node)
+        for node, req in (ms.get('node_request') or {}).items():
+            if isinstance(req, dict) and req.get('maintenance'):
+                result.add(node)
+        for node, info in lrm.items():
+            if isinstance(info, dict) and str(info.get('mode', '')).lower().startswith('maintenance'):
+                result.add(node)
+        return result
+
+    def _ha_maintenance_from_status_current(self):
+        """Fallback read of /cluster/ha/status/current. Returns a set, or None if the poll
+        itself failed (so callers can tell "nothing in maintenance" from "we couldn't look")."""
+        host = self.host
+        resp = self._api_get(f"https://{host}:{self.api_port}/api2/json/cluster/ha/status/current")
+        if resp is None or resp.status_code != 200:
+            code = getattr(resp, 'status_code', 'no response')
+            self.logger.debug(f"[MAINT] HA status endpoint returned {code}")
+            return None
+
+        data = resp.json().get('data', [])
+        result = set()
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            # type=node entries (some PVE 8.x builds with HA resources)
+            if entry.get('type') == 'node' and entry.get('status') == 'maintenance':
+                result.add(entry.get('node', ''))
+            # PVE 9: the flag surfaces ONLY here, as a type=lrm entry whose status is free text
+            # "<node> (maintenance mode, watchdog standby, <ts>)". The old parser had no branch
+            # for this shape, so it returned an empty set on a cluster with two drained nodes.
+            elif entry.get('type') == 'lrm':
+                mode = entry.get('mode') or self._ha_lrm_mode_from_status(entry.get('status', ''))
+                if str(mode).lower().startswith('maintenance') and entry.get('node'):
                     result.add(entry['node'])
+            # manager_status entry (older PVE embedded a multi-line node/state blob here)
+            elif entry.get('id') == 'manager_status':
+                # "pve1 master\npve2 maintenance\npve3 online\n"
+                for line in entry.get('status', '').split('\n'):
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == 'maintenance':
+                        result.add(parts[0])
+            # NS: some PVE versions use quorum/manager with "node" field
+            elif entry.get('status') == 'maintenance' and entry.get('node'):
+                result.add(entry['node'])
+        result.discard('')
+        return result
 
-            if result:
-                self.logger.debug(f"[MAINT] HA poll found maintenance nodes: {result}")
-            return result
+    def _get_native_ha_maintenance_nodes(self):
+        """Nodes PVE currently holds in native HA maintenance (#78).
+
+        Prefers the structured /cluster/ha/status/manager_status map and falls back to parsing
+        /cluster/ha/status/current. Sets self._ha_maint_poll_ok so callers can distinguish
+        "PVE reports nobody in maintenance" from "we could not ask" — those two used to look
+        identical, and the cleanup pass below acts on the difference.
+        """
+        result = None
+        source = 'manager_status'
+        try:
+            result = self._ha_maintenance_from_manager_status()
         except Exception as e:
-            self.logger.debug(f"[MAINT] HA status poll failed: {e}")
-            return set()
+            self.logger.debug(f"[MAINT] HA manager_status poll failed: {e}")
+        if result is None:
+            source = 'status/current'
+            try:
+                result = self._ha_maintenance_from_status_current()
+            except Exception as e:
+                self.logger.debug(f"[MAINT] HA status poll failed: {e}")
+
+        self._ha_maint_poll_ok = result is not None
+        self._log_ha_maintenance_poll(result, source)
+        return result if result is not None else set()
+
+    def _log_ha_maintenance_poll(self, result, source):
+        """Say something whenever the HA maintenance picture changes.
+
+        An empty result is a real answer and used to be logged as nothing at all, which is how
+        two drained nodes stayed invisible across hundreds of polls. Log every transition —
+        including "-> none" and "-> unreadable" — exactly once, at INFO.
+        """
+        prev = getattr(self, '_ha_maint_last', '__unset__')
+        if result is None:
+            current = None
+        else:
+            current = frozenset(result)
+        if prev != '__unset__' and prev == current:
+            return
+        self._ha_maint_last = current
+        if current is None:
+            self.logger.warning(
+                "[MAINT] HA maintenance state is UNREADABLE (both manager_status and "
+                "status/current failed) — treating as 'no change'; externally-detected "
+                "maintenance nodes will NOT be cleaned up while this persists.")
+        elif current:
+            self.logger.info(f"[MAINT] HA poll ({source}): nodes in native maintenance: "
+                             f"{', '.join(sorted(current))}")
+        else:
+            self.logger.info(f"[MAINT] HA poll ({source}): no nodes in native maintenance")
 
     # NS feb 2026 - try ha-manager crm-command node-maintenance enable (#78)
     # returns True if proxmox takes over, False = we do our own evacuation
@@ -17144,22 +17264,31 @@ echo DONE""",
             self.stop_event.wait(30 + random.uniform(0, 10))
 
     def _restore_persisted_maintenance(self):
-        """#720 — repopulate SOFT (non-HA) node maintenance from the DB after a restart, so a node
-        left in maintenance still shows as such. Native HA maintenance is re-derived from PVE on the
-        first poll (#78), so only the soft entries we persisted are restored here."""
+        """#720 — repopulate node maintenance from the DB after a restart, so a node left in
+        maintenance still shows as such (and stays off the balancer's target list).
+
+        Restores native-HA entries too: re-deriving those from PVE was unreliable (see
+        _get_native_ha_maintenance_nodes), and dropping them silently re-armed the node as the
+        emptiest migration target. native_ha is carried through so exit_maintenance_mode still
+        clears the upstream `ha-manager node-maintenance` flag on a restored entry.
+
+        Restored entries are deliberately NOT marked _discovered_by_refresh, so the poll's
+        cleanup pass (which only drops externally-discovered nodes) cannot remove them — only an
+        explicit exit_maintenance_mode does."""
         try:
             from pegaprox.models.tasks import MaintenanceTask
-            for node_name, _entered_at in get_db().get_node_maintenance(self.id):
+            for node_name, _entered_at, native_ha in get_db().get_node_maintenance(self.id):
                 with self.maintenance_lock:
                     if node_name in self.nodes_in_maintenance:
                         continue
                     t = MaintenanceTask(node_name)
-                    t.native_ha = False
+                    t.native_ha = bool(native_ha)
                     t.status = 'completed'
                     t.total_vms = 0
                     t._restored = True
                     self.nodes_in_maintenance[node_name] = t
-                self.logger.info(f"[MAINT] Restored soft maintenance for {node_name} after restart (#720)")
+                self.logger.info(f"[MAINT] Restored {'native HA' if native_ha else 'soft'} "
+                                 f"maintenance for {node_name} after restart (#720)")
         except Exception as e:
             self.logger.debug(f"[MAINT] maintenance restore failed: {e}")
 
