@@ -127,6 +127,7 @@ def get_clusters():
                 'balance_local_disks': getattr(mgr.config, 'balance_local_disks', False),
                 'proxlb_tags_enabled': getattr(mgr.config, 'proxlb_tags_enabled', False),  # #628 — was missing from GET, made the UI toggle revert on refresh
                 'proxlb_pins_auto_migrate': bool(getattr(mgr.config, 'proxlb_pins_auto_migrate', False)),
+                'proxlb_pins_strict': bool(getattr(mgr.config, 'proxlb_pins_strict', False)),
                 'dry_run': mgr.config.dry_run,
                 'predictive_balancing': getattr(mgr.config, 'predictive_balancing', False),
                 'predictive_threshold': getattr(mgr.config, 'predictive_threshold', 75),
@@ -241,6 +242,7 @@ def export_cluster_config(cluster_id):
         'balance_local_disks': getattr(c, 'balance_local_disks', False),
         'proxlb_tags_enabled': getattr(c, 'proxlb_tags_enabled', False),  # #628
         'proxlb_pins_auto_migrate': bool(getattr(c, 'proxlb_pins_auto_migrate', False)),
+        'proxlb_pins_strict': bool(getattr(c, 'proxlb_pins_strict', False)),
         'dry_run': c.dry_run,
         'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
         'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
@@ -1241,6 +1243,7 @@ ALLOWED_CONFIG_FIELDS = {
     'vnc_tunnel',  # MK Apr 2026 — SSH-tunnel-mode for VNC console
     'proxlb_tags_enabled',  # MK Jul 2026 (#426) — derive placement from ProxLB VM tags
     'proxlb_pins_auto_migrate',  # opt-in: migrate guests back onto their plb_pin_ node
+    'proxlb_pins_strict',  # opt-in: a pin also vetoes a maintenance evacuation
     'node_ui_suffix',  # MK Aug 2026 (#689) — FQDN suffix for "Open in Proxmox" node links
 }
 
@@ -2822,6 +2825,9 @@ def get_proxlb_pin_violations(cluster_id):
             'enabled': bool(getattr(mgr.config, 'proxlb_tags_enabled', False)),
             'auto_migrate': bool(getattr(mgr.config, 'proxlb_pins_auto_migrate', False)),
             'violations': mgr.get_pin_violations(),
+            # a pin naming a node this cluster does not have is the most common
+            # reason a pin looks like it does nothing at all
+            'unresolved': mgr.get_unresolved_pins(),
         })
     except Exception as e:
         logging.error(f"proxlb pin scan failed: {_sl(str(e))}")

@@ -16,7 +16,7 @@ import logging
 import types
 
 from pegaprox.core.manager import PegaProxManager
-from pegaprox.models.tasks import PegaProxConfig
+from pegaprox.models.tasks import MaintenanceTask, PegaProxConfig
 
 A1, A2 = 'pve-dmz-node01-th-A', 'pve-dmz-node02-th-A'
 I1 = 'pve-dmz-node11-th-I'
@@ -25,13 +25,14 @@ ALL_NODES = [A1, A2, I1]
 PIN_A1 = 'plb_pin_pve-dmz-node01-th-a'
 
 
-def _guest(vmid=30021, node=I1, tags=PIN_A1, status='running'):
+def _guest(vmid=30021, node=I1, tags=PIN_A1, status='running', mem=1024):
     return {'vmid': vmid, 'node': node, 'name': f'guest{vmid}', 'status': status,
-            'type': 'qemu', 'mem': 1024, 'tags': tags}
+            'type': 'qemu', 'mem': mem, 'tags': tags}
 
 
 def _manager(guests, tags_enabled=True, pins_auto=False, auto_migrate=True,
-             dry_run=False, down=(), scores=None, excluded_vms=()):
+             dry_run=False, down=(), scores=None, excluded_vms=(),
+             maintenance=(), pins_strict=False):
     """A real PegaProxManager with only the PVE-facing calls stubbed, so the
     logic under test is the production code path."""
     mgr = object.__new__(PegaProxManager)
@@ -42,13 +43,15 @@ def _manager(guests, tags_enabled=True, pins_auto=False, auto_migrate=True,
         'name': 'test', 'host': 'h', 'user': 'u',
         'proxlb_tags_enabled': tags_enabled,
         'proxlb_pins_auto_migrate': pins_auto,
+        'proxlb_pins_strict': pins_strict,
         'auto_migrate': auto_migrate, 'dry_run': dry_run,
         'migration_threshold': 10, 'migration_tolerance': 0,
     })
     scores = scores or {}
     mgr.get_node_status = lambda: {
         n: {'status': 'offline' if n in down else 'online',
-            'maintenance_mode': False, 'score': scores.get(n, 50.0)}
+            'maintenance_mode': n in maintenance, 'score': scores.get(n, 50.0),
+            'mem_used': 100 * 1024 ** 3, 'mem_total': 1000 * 1024 ** 3, 'mem_percent': 10.0}
         for n in ALL_NODES}
     mgr.get_vm_resources = lambda: list(guests)
     mgr.get_balancing_excluded_vms = lambda: list(excluded_vms)
@@ -56,6 +59,9 @@ def _manager(guests, tags_enabled=True, pins_auto=False, auto_migrate=True,
     mgr.get_proxmox_ha_resources = lambda: []
     mgr._api_get = lambda *a, **k: None
     mgr.check_vm_storage_type = lambda *a, **k: 'shared'
+    # The evacuator waits up to 5 min for stragglers; nothing in these tests is
+    # asynchronous, so report the node empty and skip the sleep loop.
+    mgr._count_vms_on_node = lambda node: 0
     mgr.migrated = []
 
     def _migrate(vm, target, dry_run=False, wait_timeout=None):
@@ -96,6 +102,28 @@ def test_a_typo_in_the_tag_is_not_a_violation(db):
     # An unresolvable node name never becomes a pin, so it must not turn into a
     # "this guest is in the wrong place" report either.
     assert _manager([_guest(tags='plb_pin_pve-dmz-node01-th-x')]).get_pin_violations() == []
+
+
+def test_a_pin_naming_no_node_is_reported_as_unresolved(db):
+    # The failure mode this exists for: the tag is there, the guest never moves,
+    # and nothing anywhere says the node name does not exist.
+    mgr = _manager([_guest(tags='plb_pin_pve-dmz-node21-th-d')])
+    assert mgr.get_unresolved_pins() == [{'vmid': 30021, 'node': 'pve-dmz-node21-th-d'}]
+    assert mgr.get_pin_violations() == []
+
+
+def test_an_unresolved_pin_is_logged_once_not_every_cycle(db, caplog):
+    mgr = _manager([_guest(tags='plb_pin_pve-dmz-node21-th-d')])
+    with caplog.at_level(logging.WARNING, logger='test.proxlb_pins'):
+        mgr._derive_proxlb_tag_rules()
+        mgr._proxlb_derived_cache = None  # next cycle, cache expired
+        mgr._derive_proxlb_tag_rules()
+    hits = [r for r in caplog.records if 'no node of that name' in r.getMessage()]
+    assert len(hits) == 1
+
+
+def test_a_resolvable_pin_is_not_reported_as_unresolved(db):
+    assert _manager([_guest(node=A1)]).get_unresolved_pins() == []
 
 
 def test_untagged_guests_are_ignored(db):
@@ -182,6 +210,30 @@ def test_plb_ignore_beats_the_pin(db):
     assert mgr.migrated == []
 
 
+def test_a_local_disk_guest_is_not_dragged_back_onto_its_pin(db):
+    # PVE refuses a live migration of a local disk without --with-local-disks, so
+    # this would fail on every cycle forever. The balancer skips these guests too.
+    mgr = _manager([_guest()], pins_auto=True)
+    mgr.check_vm_storage_type = lambda *a, **k: 'local'
+    mgr.reconcile_proxlb_pins()
+    assert mgr.migrated == []
+
+
+def test_a_local_disk_guest_moves_when_the_operator_opted_in(db):
+    mgr = _manager([_guest()], pins_auto=True)
+    mgr.config.balance_local_disks = True
+    mgr.check_vm_storage_type = lambda *a, **k: 'local'
+    mgr.reconcile_proxlb_pins()
+    assert mgr.migrated == [(30021, A1)]
+
+
+def test_an_unknown_storage_type_is_left_alone(db):
+    mgr = _manager([_guest()], pins_auto=True)
+    mgr.check_vm_storage_type = lambda *a, **k: 'unknown'
+    mgr.reconcile_proxlb_pins()
+    assert mgr.migrated == []
+
+
 def test_a_guest_excluded_from_balancing_is_left_alone(db):
     mgr = _manager([_guest()], pins_auto=True, excluded_vms=[30021])
     mgr.reconcile_proxlb_pins()
@@ -205,7 +257,8 @@ def test_a_returned_guest_gets_a_cooldown(db):
 def test_nothing_to_do_is_cheap_and_silent(db):
     mgr = _manager([_guest(node=A1)], pins_auto=True)
     r = mgr.reconcile_proxlb_pins()
-    assert r == {'violations': [], 'migrated': [], 'failed': [], 'auto_migrate': True}
+    assert r == {'violations': [], 'migrated': [], 'failed': [], 'deferred': [],
+                 'auto_migrate': True}
 
 
 # --------------------------------------------------------------------------
@@ -223,6 +276,145 @@ def test_a_move_onto_the_pin_is_still_offered(db):
     mgr = _manager([_guest(node=I1)])
     c = mgr.find_migration_candidate(I1, A1)
     assert c is not None and c['vmid'] == 30021
+
+
+def test_reconcile_does_not_start_every_migration_at_once(db):
+    # Switching the feature on for a cluster where a lot of guests had drifted
+    # must not kick off one migration per guest in a single cycle — the balancer
+    # caps itself the same way, and on a stretched cluster these cross sites.
+    guests = [_guest(vmid=30000 + i) for i in range(6)]
+    mgr = _manager(guests, pins_auto=True)
+    r = mgr.reconcile_proxlb_pins()
+    assert len(mgr.migrated) == 1  # 3 nodes online -> same cap the balancer uses
+    assert len(r['deferred']) == 5
+
+
+def test_the_deferred_guests_come_back_next_cycle(db):
+    guests = [_guest(vmid=30000 + i) for i in range(6)]
+    mgr = _manager(guests, pins_auto=True)
+    mgr.reconcile_proxlb_pins()
+    first = len(mgr.migrated)
+    mgr._proxlb_derived_cache = None
+    mgr._vm_migration_cooldown = {}
+    mgr.reconcile_proxlb_pins()
+    assert len(mgr.migrated) > first
+
+
+# --------------------------------------------------------------------------
+# draining a node — a pin ranks the targets, it does not veto the drain
+# --------------------------------------------------------------------------
+
+def _drain(mgr, node):
+    task = MaintenanceTask(node)
+    mgr._evacuate_node(node, task)
+    return task
+
+
+def test_a_drain_sends_the_guest_to_its_other_pinned_node(db):
+    # Two pins, one of them being drained: the guest belongs on the other one,
+    # even though I1 is the cheapest node in the cluster by a mile.
+    guests = [_guest(node=A1, tags=f'{PIN_A1};plb_pin_pve-dmz-node02-th-a')]
+    mgr = _manager(guests, maintenance=[A1], scores={A2: 80.0, I1: 1.0})
+    task = _drain(mgr, A1)
+    assert mgr.migrated == [(30021, A2)]
+    assert task.failed_vms == [] and task.off_pin_vms == []
+
+
+def test_a_drain_falls_back_off_pin_when_no_pinned_node_can_take_it(db):
+    # The single pinned node IS the node being drained. Leaving the guest on a
+    # node that is about to reboot is the worse outcome, so it goes elsewhere.
+    mgr = _manager([_guest(node=A1)], maintenance=[A1], scores={I1: 1.0})
+    task = _drain(mgr, A1)
+    assert mgr.migrated == [(30021, I1)]
+    assert task.migrated_vms == 1 and task.failed_vms == []
+
+
+def test_an_off_pin_evacuation_is_reported_on_the_task(db):
+    # The operator has to be able to see which guests are now in the wrong
+    # place without going through the log.
+    mgr = _manager([_guest(node=A1)], maintenance=[A1], scores={I1: 1.0})
+    task = _drain(mgr, A1)
+    assert task.off_pin_vms == [{'vmid': 30021, 'name': 'guest30021',
+                                 'target': I1, 'pinned_nodes': [A1]}]
+    assert 'plb_pin_' in (task.note or '')
+    assert task.to_dict()['off_pin_vms'][0]['vmid'] == 30021
+
+
+def test_a_failed_off_pin_migration_is_not_reported_as_moved(db):
+    # off_pin_vms is a record of where guests ended up, not of what was planned.
+    mgr = _manager([_guest(node=A1)], maintenance=[A1])
+    mgr.migrate_vm = lambda vm, target, dry_run=False, wait_timeout=None: False
+    task = _drain(mgr, A1)
+    assert task.off_pin_vms == [] and len(task.failed_vms) == 1
+
+
+def test_strict_pins_keep_the_old_veto_and_fail_the_drain(db):
+    # For pins that are hard constraints (licensing, passthrough, local disks)
+    # a stranded guest is the correct outcome and the drain must say so.
+    mgr = _manager([_guest(node=A1)], maintenance=[A1], pins_strict=True)
+    task = _drain(mgr, A1)
+    assert mgr.migrated == []
+    assert len(task.failed_vms) == 1
+    assert 'pinned to' in task.failed_vms[0]['error']
+
+
+def test_strict_pins_still_use_a_second_pinned_node(db):
+    # Strict is about never going off-pin, not about refusing to move at all.
+    guests = [_guest(node=A1, tags=f'{PIN_A1};plb_pin_pve-dmz-node02-th-a')]
+    mgr = _manager(guests, maintenance=[A1], pins_strict=True)
+    _drain(mgr, A1)
+    assert mgr.migrated == [(30021, A2)]
+
+
+def test_an_untagged_guest_drains_exactly_as_before(db):
+    mgr = _manager([_guest(node=A1, tags='production')], maintenance=[A1],
+                   scores={A2: 80.0, I1: 1.0})
+    task = _drain(mgr, A1)
+    assert mgr.migrated == [(30021, I1)] and task.off_pin_vms == []
+
+
+def test_the_balancer_target_pick_is_still_strict_by_default(db):
+    # get_best_target_node has to keep vetoing for every caller that did not ask
+    # for the drain behaviour — the balancer would otherwise quietly break pins.
+    mgr = _manager([_guest(node=A1)], maintenance=[A1])
+    assert mgr.get_best_target_node(exclude_nodes=[A1], vmid=30021) is None
+
+
+def test_a_drained_guest_goes_home_when_the_node_comes_back(db):
+    # The two halves have to meet: the drain puts the guest off-pin, and once
+    # the node is out of maintenance reconciliation is what brings it back.
+    guests = [_guest(node=A1)]
+    mgr = _manager(guests, maintenance=[A1], pins_auto=True, scores={I1: 1.0})
+    _drain(mgr, A1)
+    assert guests[0]['node'] == I1
+    # still off-pin, but not drift — there is nowhere to return it to yet
+    assert mgr.get_pin_violations()[0]['reason'] == 'unavailable'
+    assert mgr.reconcile_proxlb_pins()['migrated'] == []
+
+    back = _manager(guests, pins_auto=True)  # A1 out of maintenance
+    back.reconcile_proxlb_pins()
+    assert back.migrated == [(30021, A1)]
+
+
+# --------------------------------------------------------------------------
+# the pre-flight has to simulate the placement the drain actually performs
+# --------------------------------------------------------------------------
+
+def test_the_capacity_preview_places_a_pinned_guest_on_its_pin(db):
+    # Without this the preview projects the guest's memory onto the cheapest
+    # node in the cluster, which is not where the evacuator will put it.
+    guests = [_guest(node=A1, tags='plb_pin_pve-dmz-node02-th-a', mem=100 * 1024 ** 3)]
+    mgr = _manager(guests, maintenance=[A1], scores={I1: 1.0})
+    preview = mgr.maintenance_capacity_preview(A1)
+    projected = {n['node']: n['projected_pct'] for n in preview['nodes']}
+    assert projected[A2] > projected[I1]
+
+
+def test_the_capacity_preview_skips_a_guest_a_strict_pin_will_strand(db):
+    # Strict + nowhere to go = the evacuator leaves it, so it adds no load.
+    mgr = _manager([_guest(node=A1, mem=100 * 1024 ** 3)], maintenance=[A1], pins_strict=True)
+    preview = mgr.maintenance_capacity_preview(A1)
+    assert all(n['projected_pct'] == n['current_pct'] for n in preview['nodes'])
 
 
 # --------------------------------------------------------------------------
@@ -247,10 +439,19 @@ def test_violations_route_rejects_anon(api, seed):
 
 def test_a_viewer_may_read_the_violations(api, seed):
     viewer = seed.user('vicky', role='viewer', tenant_id='default')
-    _api_manager(api, get_pin_violations=[])
+    _api_manager(api, get_pin_violations=[], get_unresolved_pins=[])
     resp = api.as_user(viewer).get(VIOLATIONS_ROUTE)
     assert resp.status_code == 200, resp.get_data(as_text=True)
     assert resp.get_json()['violations'] == []
+
+
+def test_the_violations_route_also_reports_unresolvable_pins(db, api, seed):
+    admin = seed.user('root', role='admin', tenant_id='default')
+    dangling = [{'vmid': 30021, 'node': 'pve-dmz-node21-th-d'}]
+    _api_manager(api, get_pin_violations=[], get_unresolved_pins=dangling)
+    resp = api.as_user(admin).get(VIOLATIONS_ROUTE)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.get_json()['unresolved'] == dangling
 
 
 def test_a_viewer_may_not_reconcile(api, seed):
