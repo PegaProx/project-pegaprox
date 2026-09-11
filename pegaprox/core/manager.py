@@ -15037,12 +15037,31 @@ echo "AGENT_INSTALLED_OK"
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 raise ConnectionError(f"Not connected to cluster")
-        
+
+        host = self.host
+        url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/apt/update"
+
+        # Proxmox's apt/update is a 2-step operation: POST (`update_database`) runs
+        # `apt-get update` as a background task and returns a UPID (task_id); it
+        # does NOT return the package list. GET (`list_updates`) reads the CURRENT
+        # apt cache and returns the updatable package list; it does NOT run apt
+        # update. A GET alone reads a stale/uncached list, so we must refresh
+        # (POST), wait for the task to finish, then read (GET), otherwise we report
+        # updates before apt update finishes.
+        task_id = None
         try:
-            host = self.host
-            url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/apt/update"
+            refresh = self._create_session().post(url, timeout=15)
+            if refresh.status_code == 200:
+                task_id = refresh.json().get('data')
+        except Exception as e:
+            self.logger.warning(f"apt update refresh request failed for {node}: {e}")
+
+        if isinstance(task_id, str) and task_id:
+            self.logger.info(f"[apt] {node}: refreshing package cache via task {task_id}")
+            self._wait_for_task(node, task_id, timeout=600)
+
+        try:
             response = self._create_session().get(url, timeout=15)
-            
             if response.status_code == 200:
                 return response.json().get('data', [])
             # NS: Don't silently return [] - let the caller know it failed
