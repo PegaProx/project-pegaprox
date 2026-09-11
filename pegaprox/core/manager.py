@@ -2402,9 +2402,6 @@ class PegaProxManager:
                     f"[PROXLB] {v['name']} ({v['vmid']}) is off its pin but excluded from "
                     "balancing — leaving it alone")
                 continue
-            if migrated_now >= max_moves:
-                result['deferred'].append(v)
-                continue
             # Sep 2026 — a pin does not make a local disk shared. The balancer
             # skips local-storage guests unless balance_local_disks is on
             # (find_migration_candidate), and a reconcile that ignores that just
@@ -2431,6 +2428,13 @@ class PegaProxManager:
                     continue
                 vm['_has_local_disks'] = True
 
+            # Cap only the guests that are actually going to move. Checked here,
+            # after the skips above, so 'deferred' means "eligible, not this
+            # cycle" rather than "we never looked at it".
+            if migrated_now >= max_moves:
+                result['deferred'].append(v)
+                continue
+
             # vmid= restricts the target set to the pin itself, so this can only
             # ever land the guest on a node the tag allows.
             target = self.get_best_target_node(exclude_nodes=[v['node']], vmid=v['vmid'])
@@ -2443,10 +2447,14 @@ class PegaProxManager:
             self.logger.info(
                 f"[PROXLB] returning {v['name']} ({v['vmid']}) to its pin: "
                 f"{v['node']} -> {target}")
+            # Counted before the call, not after a successful one: each attempt
+            # blocks for up to wait_timeout, so a cluster where every pinned
+            # target refuses would otherwise hold the balance cycle for hours
+            # instead of stopping at max_moves.
+            migrated_now += 1
             if self.migrate_vm(vm, target, dry_run=False, wait_timeout=1800):
                 result['migrated'].append({**v, 'target': target})
                 self._vm_migration_cooldown[v['vmid']] = time.time()
-                migrated_now += 1
             else:
                 result['failed'].append({**v, 'error': 'migration failed'})
 

@@ -13,7 +13,10 @@
 # tag can never spell -th-A and the pin has to resolve case-insensitively.
 
 import logging
+import time
 import types
+
+from pegaprox.utils import rbac
 
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.models.tasks import MaintenanceTask, PegaProxConfig
@@ -289,6 +292,30 @@ def test_reconcile_does_not_start_every_migration_at_once(db):
     assert len(r['deferred']) == 5
 
 
+def test_a_refused_migration_still_counts_against_the_cap(db):
+    # Every attempt blocks for up to wait_timeout. Counting successes only would
+    # let one cycle keep trying guest after guest for hours.
+    guests = [_guest(vmid=30000 + i) for i in range(6)]
+    mgr = _manager(guests, pins_auto=True)
+    mgr.migrate_vm = lambda vm, target, dry_run=False, wait_timeout=None: False
+    r = mgr.reconcile_proxlb_pins()
+    assert len(r['failed']) == 1
+    assert len(r['deferred']) == 5
+
+
+def test_a_skipped_guest_does_not_use_up_the_cap(db):
+    # A local-storage guest was never going to move, so it must not eat the one
+    # slot this cycle has, and it is not "deferred" either.
+    # The local guest comes second, after the cycle's one slot is already spent:
+    # the old gate ran before the storage check and filed it as deferred.
+    guests = [_guest(vmid=30000), _guest(vmid=30001)]
+    mgr = _manager(guests, pins_auto=True)
+    mgr.check_vm_storage_type = lambda node, vmid, vtype: 'local' if vmid == 30001 else 'shared'
+    r = mgr.reconcile_proxlb_pins()
+    assert mgr.migrated == [(30000, A1)]
+    assert r['deferred'] == []
+
+
 def test_the_deferred_guests_come_back_next_cycle(db):
     guests = [_guest(vmid=30000 + i) for i in range(6)]
     mgr = _manager(guests, pins_auto=True)
@@ -481,6 +508,47 @@ def test_reconcile_is_denied_when_the_cluster_is_only_reachable_via_an_acl(api, 
     r = api.as_user(bob).post(RECONCILE_ROUTE, json={'force': True})
     assert r.status_code == 403, r.get_data(as_text=True)
     mgr.reconcile_proxlb_pins.assert_not_called()
+
+
+def _seed_pool_membership(cluster_id, mapping):
+    data = {f"{vmid}:{vtype}": pool for vmid, (vtype, pool) in mapping.items()}
+    with rbac._pool_cache_lock:
+        rbac._pool_membership_cache[cluster_id] = {
+            'data': data, 'timestamp': time.time(), 'refreshing': False,
+        }
+
+
+def test_reconcile_is_denied_for_a_pool_scoped_caller(db, api, seed):
+    # get_user_clusters() counts a pool grant as access, so the open-coded form
+    # of this gate let a pool-scoped operator reconcile the entire cluster even
+    # though their grant is one pool. require_unconfined is the correct question.
+    seed.tenant('acme', clusters=['cluster_1'])
+    mallory = seed.user('mallory', role='user', tenant_id='acme')
+    seed.pool('cluster_1', 'pool_1', 'mallory', ['pool.view', 'vm.view'])
+    mgr = _api_manager(api)
+    r = api.as_user(mallory).post(RECONCILE_ROUTE, json={'force': True})
+    assert r.status_code == 403, r.get_data(as_text=True)
+    mgr.reconcile_proxlb_pins.assert_not_called()
+
+
+def test_the_violations_route_confines_a_pool_scoped_caller(db, api, seed):
+    # The rows carry vmid, name, node and pinned nodes for every guest on the
+    # cluster. A caller whose grant is one pool must not read the rest.
+    seed.tenant('acme', clusters=['cluster_1'])
+    mallory = seed.user('mallory', role='viewer', tenant_id='acme')
+    seed.pool('cluster_1', 'pool_1', 'mallory', ['pool.view', 'vm.view'])
+    _seed_pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    rows = [{'vmid': 100, 'name': 'mine', 'type': 'qemu', 'node': I1,
+             'pinned_nodes': [A1], 'reason': 'drift'},
+            {'vmid': 200, 'name': 'someone-elses', 'type': 'qemu', 'node': I1,
+             'pinned_nodes': [A1], 'reason': 'drift'}]
+    _api_manager(api, get_pin_violations=rows,
+                 get_unresolved_pins=[{'vmid': 200, 'node': 'pve-dmz-node99-th-x'}])
+    resp = api.as_user(mallory).get(VIOLATIONS_ROUTE)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    body = resp.get_json()
+    assert [v['vmid'] for v in body['violations']] == [100]
+    assert body['unresolved'] == []
 
 
 def test_reconcile_is_allowed_for_a_tenant_owned_cluster(api, seed):
