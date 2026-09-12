@@ -1672,32 +1672,44 @@
                         body: JSON.stringify({ snapname: snapName, description: snapDesc, vmstate: snapRam ? 1 : 0 })
                     });
                     if (r?.ok) { addToast?.(t('snapshotCreated') || 'Snapshot created'); setShowCreateSnap(false); setSnapName(''); setSnapDesc(''); setSnapRam(false); fetchSnapshots(); }
-                    else addToast?.('Snapshot failed', 'error');
-                } catch(e) { addToast?.(e.message, 'error'); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('snapshotFailed')), 'error');
+                } catch { addToast?.(t('snapshotFailed'), 'error'); }
             };
 
             const handleDeleteSnap = async (name) => {
                 if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}`, { method: 'DELETE' });
-                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('deleteFailed')), 'error');
+                } catch { addToast?.(t('deleteFailed'), 'error'); }
             };
 
             const handleRollbackSnap = async (name) => {
                 if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}/rollback`, { method: 'POST' });
-                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}/rollback`, { method: 'POST' });
+                    if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                    else addToast?.(await PegaProxApiErrors.message(r, t('rollbackFailed')), 'error');
+                } catch { addToast?.(t('rollbackFailed'), 'error'); }
             };
 
             const handleDeleteEfficientSnap = async (id, name) => {
                 if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}`, { method: 'DELETE' });
-                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('deleteFailed')), 'error');
+                } catch { addToast?.(t('deleteFailed'), 'error'); }
             };
 
             const handleRollbackEfficientSnap = async (id, name) => {
                 if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}/rollback`, { method: 'POST' });
-                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}/rollback`, { method: 'POST' });
+                    if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                    else addToast?.(await PegaProxApiErrors.message(r, t('rollbackFailed')), 'error');
+                } catch { addToast?.(t('rollbackFailed'), 'error'); }
             };
 
             const formatBytes = b => {

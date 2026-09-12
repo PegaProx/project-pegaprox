@@ -45,6 +45,7 @@ echo ""
 # Source files in dependency order
 SRC_FILES=(
     constants.js
+    api_errors.js
     translations.js
     contexts.js
     auth.js
