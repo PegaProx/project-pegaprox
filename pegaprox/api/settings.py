@@ -4014,7 +4014,7 @@ def check_cluster_updates(cluster_id):
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                updates = mgr.get_node_apt_updates(node_name)
+                updates = mgr.get_node_apt_updates(node_name, refresh=True)
                 
                 if isinstance(updates, list):
                     update_list = updates
@@ -4066,7 +4066,7 @@ def check_cluster_updates(cluster_id):
             if linked and cluster_id not in linked:
                 continue
             try:
-                pbs_upd = pmgr.get_apt_updates()
+                pbs_upd = pmgr.get_apt_updates(refresh=True)
                 upd_list = pbs_upd.get('data', []) if 'error' not in pbs_upd else []
                 pbs_results[pmgr.name or pid] = {
                     'success': 'error' not in pbs_upd,

@@ -271,8 +271,25 @@ class PBSManager:
         """Get PBS version info"""
         return self.api_get('/version')
     
-    def get_apt_updates(self) -> dict:
-        """List available APT updates on PBS host"""
+    def get_apt_updates(self, refresh: bool = False) -> dict:
+        """List available APT updates on PBS host.
+
+        refresh=False (default) is a pure read: GET the current list of updatable
+        packages from the apt cache WITHOUT running `apt update`. This is the
+        default for every caller (UI polls, exporter, compliance) so none of them
+        trigger an apt-get update. Set refresh=True only on the explicit "check for
+        updates" action, the one place that actually needs to refresh the cache
+        first.
+        """
+        if refresh:
+            # PBS's apt/update is a 2-step operation like PVE: POST runs
+            # `apt-get update` as a background task and returns a UPID; it does not
+            # return the list. GET reads the current apt cache. So refresh (POST),
+            # wait for the task to finish, then read (GET), otherwise we read a
+            # stale list captured before apt update completes.
+            task_id = self.refresh_apt().get('data')
+            if isinstance(task_id, str) and task_id:
+                self._wait_for_apt_task(task_id)
         return self.api_get('/nodes/localhost/apt/update')
 
     def refresh_apt(self) -> dict:
@@ -588,6 +605,21 @@ class PBSManager:
     def get_task_status(self, upid: str) -> dict:
         """Get status of a specific task"""
         return self.api_get(f'/nodes/localhost/tasks/{upid}/status')
+
+    def _wait_for_apt_task(self, upid: str, timeout: int = 600, poll: int = 2) -> bool:
+        """Poll a PBS task until it stops (or times out).
+
+        Used after `apt update` (POST) so the following read sees the refreshed
+        cache instead of a list captured mid-update. Returns True if the task
+        finished, False if it timed out.
+        """
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            status = self.get_task_status(upid)
+            if isinstance(status, dict) and status.get('data', {}).get('status') == 'stopped':
+                return True
+            time.sleep(poll)
+        return False
     
     def get_task_log(self, upid: str) -> dict:
         """Get log output of a task"""

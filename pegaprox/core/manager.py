@@ -15094,21 +15094,47 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def get_node_apt_updates(self, node: str) -> List[Dict]:
+    def get_node_apt_updates(self, node: str, refresh: bool = False) -> List[Dict]:
         """Get available APT updates
-        
+
         MK: Feb 2026 - Raises exception on failure instead of returning []
         so the caller can distinguish 'no updates' from 'check failed'
+
+        NS Sep 2026 - refresh=False (default) is a pure read: GET the current list
+        of updatable packages from the apt cache WITHOUT running `apt update`. This
+        is the default for every caller (exporter, compliance report, UI polls,
+        rolling/scheduled updates) so none of them trigger an apt-get update. The
+        rolling update and scheduled update paths refresh separately via
+        refresh_node_apt(); set refresh=True only on the explicit "check for
+        updates" action, the one place that actually needs to refresh first.
         """
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 raise ConnectionError(f"Not connected to cluster")
-        
+
+        host = self.host
+        url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/apt/update"
+
+        if refresh:
+            # Proxmox's apt/update is a 2-step operation: POST (`update_database`)
+            # runs `apt-get update` as a background task and returns a UPID (task_id);
+            # it does NOT return the package list. GET (`list_updates`) reads the
+            # current apt cache and returns the updatable package list. So we must
+            # refresh (POST), wait for the task to finish, then read (GET), otherwise
+            # we report updates before apt update completes.
+            task_id = None
+            try:
+                refresh_resp = self._create_session().post(url, timeout=20)
+                if refresh_resp.status_code == 200:
+                    task_id = refresh_resp.json().get('data')
+            except Exception as e:
+                self.logger.warning(f"apt update refresh request failed for {node}: {e}")
+            if isinstance(task_id, str) and task_id:
+                self.logger.info(f"[apt] {node}: refreshing package cache via task {task_id}")
+                self._wait_for_task(node, task_id, timeout=600)
+
         try:
-            host = self.host
-            url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/apt/update"
-            response = self._create_session().get(url, timeout=15)
-            
+            response = self._create_session().get(url, timeout=20)
             if response.status_code == 200:
                 return response.json().get('data', [])
             # NS: Don't silently return [] - let the caller know it failed
