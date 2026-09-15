@@ -126,6 +126,8 @@ def get_clusters():
                 'balance_containers': getattr(mgr.config, 'balance_containers', False),
                 'balance_local_disks': getattr(mgr.config, 'balance_local_disks', False),
                 'proxlb_tags_enabled': getattr(mgr.config, 'proxlb_tags_enabled', False),  # #628 — was missing from GET, made the UI toggle revert on refresh
+                'proxlb_pins_auto_migrate': bool(getattr(mgr.config, 'proxlb_pins_auto_migrate', False)),
+                'proxlb_pins_strict': bool(getattr(mgr.config, 'proxlb_pins_strict', False)),
                 'dry_run': mgr.config.dry_run,
                 'predictive_balancing': getattr(mgr.config, 'predictive_balancing', False),
                 'predictive_threshold': getattr(mgr.config, 'predictive_threshold', 75),
@@ -239,6 +241,8 @@ def export_cluster_config(cluster_id):
         'balance_containers': getattr(c, 'balance_containers', False),
         'balance_local_disks': getattr(c, 'balance_local_disks', False),
         'proxlb_tags_enabled': getattr(c, 'proxlb_tags_enabled', False),  # #628
+        'proxlb_pins_auto_migrate': bool(getattr(c, 'proxlb_pins_auto_migrate', False)),
+        'proxlb_pins_strict': bool(getattr(c, 'proxlb_pins_strict', False)),
         'dry_run': c.dry_run,
         'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
         'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
@@ -1238,6 +1242,8 @@ ALLOWED_CONFIG_FIELDS = {
     'cpu_baseline',
     'vnc_tunnel',  # MK Apr 2026 — SSH-tunnel-mode for VNC console
     'proxlb_tags_enabled',  # MK Jul 2026 (#426) — derive placement from ProxLB VM tags
+    'proxlb_pins_auto_migrate',  # opt-in: migrate guests back onto their plb_pin_ node
+    'proxlb_pins_strict',  # opt-in: a pin also vetoes a maintenance evacuation
     'node_ui_suffix',  # MK Aug 2026 (#689) — FQDN suffix for "Open in Proxmox" node links
 }
 
@@ -2798,3 +2804,81 @@ def trigger_balance_now(cluster_id):
     log_audit(usr, 'balance.manual', f"Manual balance check triggered for {mgr.config.name}", cluster=mgr.config.name)
 
     return jsonify({'message': 'Balance check started'})
+
+
+@bp.route('/api/clusters/<cluster_id>/proxlb-pins/violations', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_proxlb_pin_violations(cluster_id):
+    """Guests running somewhere their plb_pin_<node> tag does not allow.
+
+    Read-only. A pin only vetoes moves the balancer proposes, so this is the
+    only way to see a guest that ended up off its pinned node and stayed there.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    try:
+        return jsonify({
+            'enabled': bool(getattr(mgr.config, 'proxlb_tags_enabled', False)),
+            'auto_migrate': bool(getattr(mgr.config, 'proxlb_pins_auto_migrate', False)),
+            # Both lists are per-VM rows (vmid / name / node / pinned nodes) for
+            # every guest on the cluster, and check_cluster_access only gates
+            # cluster REACHABILITY — its pool/ACL fallbacks admit a caller who may
+            # see one VM. Same #773 class of leak as the other per-VM reads, so
+            # the same filter: admins and cluster-wide operators keep every row.
+            'violations': scope_vm_rows(cluster_id, mgr.get_pin_violations()),
+            # a pin naming a node this cluster does not have is the most common
+            # reason a pin looks like it does nothing at all
+            'unresolved': scope_vm_rows(cluster_id, mgr.get_unresolved_pins()),
+        })
+    except Exception as e:
+        logging.error(f"proxlb pin scan failed: {_sl(str(e))}")
+        return jsonify({'error': 'Failed to scan pins'}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/proxlb-pins/reconcile', methods=['POST'])
+@require_auth(perms=['vm.migrate'])
+def reconcile_proxlb_pins_api(cluster_id):
+    """Migrate guests that drifted off their pinned node back onto it.
+
+    Honours config.proxlb_pins_auto_migrate unless the body sets force=true,
+    which is the manual "do it now" button — it still refuses under dry_run.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+
+    # Same gate as /balance-now (Aikido 469089250): this migrates guests across the
+    # whole cluster, so a caller who reached it through a single VM-ACL / pool grant
+    # (the #248/#555 fallbacks in check_cluster_access) must not be able to move
+    # other guests. require_unconfined is the predicate that asks that correctly —
+    # the open-coded get_user_clusters form does NOT, because it defaults to
+    # include_pools=True and a pool-scoped caller's cluster is in the result.
+    _sess = getattr(request, 'session', {})
+    _usr = _sess.get('user', 'system')
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        log_audit(_usr, 'balance.pin_reconcile_denied',
+                  f"Denied pin reconcile on {cluster_id} (caller is confined)")
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    force = bool((request.json or {}).get('force', False))
+    try:
+        result = mgr.reconcile_proxlb_pins(force=force)
+    except Exception as e:
+        logging.error(f"proxlb pin reconcile failed: {_sl(str(e))}")
+        return jsonify({'error': 'Reconciliation failed'}), 500
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'balance.pin_reconcile',
+              f"Cluster {mgr.config.name}: {len(result['migrated'])} guest(s) returned to their "
+              f"pinned node, {len(result['failed'])} failed"
+              + (' (forced)' if force else ''),
+              cluster=mgr.config.name)
+    return jsonify(result)
