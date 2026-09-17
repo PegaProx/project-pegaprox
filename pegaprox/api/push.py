@@ -197,10 +197,12 @@ def _ensure_inbox_table():
                 url TEXT DEFAULT '',
                 tag TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
-                read_at TEXT
+                read_at TEXT,
+                effective_role TEXT DEFAULT NULL
             )
         ''')
         c.execute('CREATE INDEX IF NOT EXISTS idx_push_inbox_user ON push_inbox(username, created_at DESC)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_push_inbox_user_role ON push_inbox(username, effective_role, created_at DESC)')
         get_db().conn.commit()
     except Exception as e:
         logging.warning(f"[push] inbox table ensure failed: {e}")
@@ -209,13 +211,13 @@ def _ensure_inbox_table():
 _ensure_inbox_table()
 
 
-def _push_to_inbox(username, title, body='', severity='info', url='', tag=''):
+def _push_to_inbox(username, title, body='', severity='info', url='', tag='', effective_role=None):
     try:
         c = get_db().conn.cursor()
         c.execute('''
-            INSERT INTO push_inbox (username, title, body, severity, url, tag, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (username, title, body, severity, url, tag, datetime.now().isoformat()))
+            INSERT INTO push_inbox (username, title, body, severity, url, tag, created_at, effective_role)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (username, title, body, severity, url, tag, datetime.now().isoformat(), effective_role))
         get_db().conn.commit()
     except Exception as e:
         logging.warning(f"[push] inbox insert failed: {e}")
@@ -337,8 +339,7 @@ def _wake_all():
 
 def _alert_handler(alert_data: dict):
     """Receives every alert from background/alerts.py. Stores in inbox per
-    *all* admin users (since alerts aren't user-scoped today) and sends
-    a wake-up push to every registered subscription."""
+    subscription (respecting token-scoped effective_role) and sends wake-up pushes."""
     try:
         title = alert_data.get('alert_name') or 'PegaProx Alert'
         body = alert_data.get('message') or ''
@@ -347,13 +348,15 @@ def _alert_handler(alert_data: dict):
         url = f"/?cluster={cid}#alerts" if cid else '/'
         tag = f"alert-{alert_data.get('alert_name','')}"
 
-        # fan out to any user that has a subscription
+        # Security fix: Iterate over subscriptions (not just usernames) to respect
+        # token-scoped effective_role. Each subscription carries the authorization
+        # context from when it was created.
         try:
             c = get_db().conn.cursor()
-            c.execute('SELECT DISTINCT username FROM push_subscriptions')
-            users = [r['username'] for r in c.fetchall()]
+            c.execute('SELECT DISTINCT username, effective_role FROM push_subscriptions')
+            subscriptions = [(r['username'], r['effective_role']) for r in c.fetchall()]
         except Exception:
-            users = []
+            subscriptions = []
 
         # NS Jul 2026 (CodeAnt exploitation — cross-tenant alert leak) — a cluster-scoped alert
         # must only reach subscribers who can actually reach that cluster. The old unconditional
@@ -362,10 +365,11 @@ def _alert_handler(alert_data: dict):
         # boundary and is always present in the reconstructed user, so cross-tenant is closed;
         # admins / default-tenant users (get_user_clusters -> None) still receive everything;
         # cluster-less system alerts (no cid) go to all. Fail CLOSED on a lookup error.
+        # Security fix: Use the stored effective_role to reconstruct the authorization context.
         from pegaprox.utils.rbac import get_user_clusters
         from pegaprox.utils.auth import load_users
         _all_users = load_users()
-        for u in users:
+        for username, effective_role in subscriptions:
             if cid:
                 # NS Jul 2026 (CodeAnt re-scan — fail-open fix) — a subscriber whose user record
                 # is MISSING/DELETED (still has a push_subscription row) previously reconstructed
@@ -373,19 +377,22 @@ def _alert_handler(alert_data: dict):
                 # EVERY tenant's alerts. Fail CLOSED: an unknown/deleted/tenant-less subscriber gets
                 # no cluster-scoped alert. (get_user_clusters returns None only for a *real* admin/
                 # default-tenant record, not for a missing one.)
-                urec = _all_users.get(u)
+                urec = _all_users.get(username)
                 if not urec:
                     continue
                 try:
                     udict = dict(urec)
-                    udict['username'] = u
+                    udict['username'] = username
+                    # Security fix: Apply the stored effective_role to honor token scope
+                    if effective_role:
+                        udict['effective_role'] = effective_role
                     allowed = get_user_clusters(udict)   # None => all clusters (real admin/default-tenant)
                 except Exception:
                     continue                              # fail closed — never leak on error
                 if allowed is not None and cid not in allowed:
                     continue
-            _push_to_inbox(u, title, body, sev, url, tag)
-            _wake_user(u)
+            _push_to_inbox(username, title, body, sev, url, tag, effective_role)
+            _wake_user(username)
     except Exception as e:
         logging.debug(f"[push] alert_handler swallowed: {e}")
 
@@ -465,21 +472,26 @@ def subscribe():
     if not user:
         return jsonify({'error': 'session missing'}), 401
 
+    # Capture the effective_role from the session for token-scoped authorization
+    effective_role = request.session.get('effective_role') if hasattr(request, 'session') else None
+
     try:
         # sec (audit): the upsert used to overwrite `username` too, so anyone who knew a victim's
         # endpoint could re-point it at their own account — the victim then received the
         # attacker's alerts and stopped receiving their own. Only the owner may refresh a row.
+        # Security fix: Store effective_role so async alert delivery respects token scope.
         c = get_db().conn.cursor()
         c.execute('''
-            INSERT INTO push_subscriptions (username, endpoint, p256dh, auth, user_agent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO push_subscriptions (username, endpoint, p256dh, auth, user_agent, created_at, effective_role)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(endpoint) DO UPDATE SET
                 p256dh=excluded.p256dh,
                 auth=excluded.auth,
                 user_agent=excluded.user_agent,
+                effective_role=excluded.effective_role,
                 failures=0
             WHERE push_subscriptions.username = excluded.username
-        ''', (user, endpoint, p256dh, auth, ua, datetime.now().isoformat()))
+        ''', (user, endpoint, p256dh, auth, ua, datetime.now().isoformat(), effective_role))
         get_db().conn.commit()
         return jsonify({'ok': True})
     except Exception as e:
@@ -531,10 +543,14 @@ def send_test():
     user = _current_user()
     if not user:
         return jsonify({'error': 'session missing'}), 401
+    
+    # Security fix: Store test alerts with the current effective_role
+    effective_role = request.session.get('effective_role') if hasattr(request, 'session') else None
+    
     _push_to_inbox(user,
                    'PegaProx — Test Push',
                    'If you see this, browser notifications are working.',
-                   'info', '/', 'test-push')
+                   'info', '/', 'test-push', effective_role)
     _wake_user(user)
     return jsonify({'ok': True})
 
@@ -548,10 +564,24 @@ def inbox():
     _trim_inbox()
     since = request.args.get('since', '')  # iso timestamp
     only_unread = request.args.get('unread', '').lower() in ('1', 'true', 'yes')
+    
+    # Security fix: Filter by both username AND effective_role to prevent
+    # a restricted token from reading alerts delivered to broader scopes
+    effective_role = request.session.get('effective_role') if hasattr(request, 'session') else None
+    
     try:
         c = get_db().conn.cursor()
         q = 'SELECT * FROM push_inbox WHERE username = ?'
         params = [user]
+        
+        # Security fix: Only return inbox items that match the current effective_role.
+        # NULL effective_role in inbox means it was created before this fix or by a session
+        # (not a token), so it's visible to all auth contexts for that user.
+        # A token with effective_role X can only see items with effective_role X or NULL.
+        if effective_role:
+            q += ' AND (effective_role = ? OR effective_role IS NULL)'
+            params.append(effective_role)
+        
         if since:
             q += ' AND created_at > ?'
             params.append(since)
@@ -569,10 +599,21 @@ def inbox():
 @require_auth()
 def inbox_clear():
     user = _current_user()
+    
+    # Security fix: Only clear inbox items that match the current effective_role
+    effective_role = request.session.get('effective_role') if hasattr(request, 'session') else None
+    
     try:
         c = get_db().conn.cursor()
-        c.execute('UPDATE push_inbox SET read_at = ? WHERE username = ? AND read_at IS NULL',
-                  (datetime.now().isoformat(), user))
+        q = 'UPDATE push_inbox SET read_at = ? WHERE username = ? AND read_at IS NULL'
+        params = [datetime.now().isoformat(), user]
+        
+        # Security fix: Only clear items visible to this auth context
+        if effective_role:
+            q += ' AND (effective_role = ? OR effective_role IS NULL)'
+            params.append(effective_role)
+        
+        c.execute(q, params)
         get_db().conn.commit()
         return jsonify({'ok': True})
     except Exception as e:

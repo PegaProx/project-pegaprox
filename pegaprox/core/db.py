@@ -1697,6 +1697,15 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating siem_targets table: {e}")
 
+        # Security fix: Add effective_role column to push_subscriptions for token-scoped authorization
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(push_subscriptions)").fetchall()]
+            if 'effective_role' not in cols:
+                cursor.execute("ALTER TABLE push_subscriptions ADD COLUMN effective_role TEXT DEFAULT NULL")
+                logging.info("Added effective_role column to push_subscriptions table")
+        except Exception as e:
+            logging.debug(f"push_subscriptions effective_role migration skipped: {e}")
+
         # NS May 2026 — DR Drill: structured dry-run of a Site Recovery plan,
         # produces compliance-ready evidence.
         try:
