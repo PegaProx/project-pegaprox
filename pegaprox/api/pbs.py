@@ -721,13 +721,37 @@ def _scope_pbs_rows(mgr, rows, type_key='backup-type', id_key='backup-id',
     scoped = _caller_is_scoped_here(mgr, user)
     if not scoped:
         return rows                      # plain cluster-wide operator — unchanged
+    
+    # sec (pentest Dec 2026): build a VM-to-cluster map once for all rows to avoid
+    # O(clusters×VMs×rows) cost. Each _authz_pbs_backup call used to query every cluster's
+    # get_vm_resources(); with 10k VMs and 300k snapshots that's billions of lookups.
+    cluster_ids = list(mgr.linked_clusters or []) or list(cluster_managers.keys())
+    vm_cluster_map = {}  # {(vm_type, vmid): [cluster_ids]}
+    for cid in cluster_ids:
+        cm = cluster_managers.get(cid)
+        if not cm or not getattr(cm, 'is_connected', False):
+            continue
+        try:
+            resources = cm.get_vm_resources() or []
+            for r in resources:
+                vmid = r.get('vmid')
+                vm_type = r.get('type')
+                if vmid is not None and vm_type:
+                    key = (vm_type, vmid)
+                    if key not in vm_cluster_map:
+                        vm_cluster_map[key] = []
+                    vm_cluster_map[key].append(cid)
+        except Exception:
+            continue
+    
     out = []
     for r in rows or []:
         bt, bid = key_fn(r) if key_fn else (r.get(type_key), r.get(id_key))
         # hand down both the identity and the confinement answer — a datastore listing is the
         # whole install's inventory, and each of those costs a users-table read or a pool and
-        # ACL enumeration per row otherwise
-        ok, _ = _authz_pbs_backup(mgr, bt, bid, permission, user=user, scoped=scoped)
+        # ACL enumeration per row otherwise. Also pass the vm_cluster_map to avoid redundant
+        # cluster queries.
+        ok, _ = _authz_pbs_backup(mgr, bt, bid, permission, user=user, scoped=scoped, vm_cluster_map=vm_cluster_map)
         if ok:
             out.append(r)
     return out
@@ -766,7 +790,7 @@ def _caller_is_scoped_here(mgr, user):
     return any(caller_is_scoped(user, c) for c in _cids)
 
 
-def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=None, scoped=None):
+def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=None, scoped=None, vm_cluster_map=None):
     """NS Aug 2026 (sec-report, BOLA/CWE-639) — object-level scope for PBS backup ops.
 
     check_pbs_access only proves the caller reaches ONE of the PBS's linked clusters; it
@@ -790,7 +814,11 @@ def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=
     build_authz_user reads the whole users table and decrypts two TOTP columns per account, and
     caller_is_scoped enumerates pool grants and VM ACLs per linked cluster — _scope_pbs_rows
     runs this once per snapshot, so at 10k guests both are the difference between one lookup
-    and hundreds of thousands, on a greenlet that yields to nobody while it runs."""
+    and hundreds of thousands, on a greenlet that yields to nobody while it runs.
+    
+    `vm_cluster_map` is an optional dict {(vm_type, vmid): [cluster_ids]} that caches which
+    clusters own which VMs, avoiding redundant get_vm_resources() calls when processing many
+    rows. _scope_pbs_rows builds and passes this map to avoid O(clusters×VMs×rows) cost."""
     from pegaprox.utils.rbac import user_can_access_vm
     if user is None:
         from pegaprox.utils.auth import build_authz_user
@@ -817,7 +845,39 @@ def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=
     # no explicit linking (mirrors _pbs_vm_name_lookup). user_can_access_vm still enforces
     # per-cluster ACL/pool scope, so an empty-scope user gets no free pass here.
     cluster_ids = list(mgr.linked_clusters or []) or list(cluster_managers.keys())
-    for cid in cluster_ids:
+    
+    # sec (pentest Dec 2026): the original loop authorized if the user had access to the VMID
+    # on ANY linked cluster, but did not verify that the backup actually belongs to a cluster
+    # where the user has permission. A user with access to VMID 100 on cluster A could access
+    # backups for VMID 100 on cluster B. Fix: only authorize if the VMID exists on a cluster
+    # where the user has permission. Check which clusters actually have this VM, then verify
+    # the user has access on at least one of those clusters.
+    
+    # Use cached map if provided (bulk operations), otherwise build on demand
+    if vm_cluster_map is not None:
+        clusters_with_vm = vm_cluster_map.get((vm_type, vmid), [])
+    else:
+        clusters_with_vm = []
+        for cid in cluster_ids:
+            cm = cluster_managers.get(cid)
+            if not cm or not getattr(cm, 'is_connected', False):
+                continue
+            try:
+                resources = cm.get_vm_resources() or []
+                for r in resources:
+                    if r.get('vmid') == vmid and r.get('type') == vm_type:
+                        clusters_with_vm.append(cid)
+                        break
+            except Exception:
+                # If we can't query a cluster, skip it but continue checking others
+                continue
+    
+    # If the VM doesn't exist on any linked cluster, deny access
+    if not clusters_with_vm:
+        return _deny()
+    
+    # Now check if the user has access to the VM on any cluster where it actually exists
+    for cid in clusters_with_vm:
         if user_can_access_vm(user, cid, vmid, permission, vm_type):
             return True, None
     return _deny()
