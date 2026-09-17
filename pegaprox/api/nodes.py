@@ -605,13 +605,18 @@ def get_cluster_hardware_health_api(cluster_id):
 IPMITOOL_INSTALL_SCRIPT = """#!/usr/bin/env bash
 # PegaProx (#609) — install ipmitool for in-band hardware monitoring on this node.
 set -uo pipefail
+
+# NS 2026-05: randomized log path to prevent symlink attacks in /tmp
+APTLOG="/tmp/pp_ipmitool_apt.$$.$(date +%s).log"
+trap "rm -f '$APTLOG'" EXIT
+
 if command -v ipmitool >/dev/null 2>&1; then
     ver="$(ipmitool -V 2>/dev/null | head -1 || echo ipmitool)"
     echo "PP_OK already_installed $ver"; exit 0
 fi
 if ! command -v apt-get >/dev/null 2>&1; then echo 'PP_ERR no-apt-get'; exit 3; fi
-apt-get update -o Acquire::Retries=2 >/tmp/pp_ipmitool_apt.log 2>&1 || true
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ipmitool >>/tmp/pp_ipmitool_apt.log 2>&1; then
+apt-get update -o Acquire::Retries=2 >"$APTLOG" 2>&1 || true
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ipmitool >>"$APTLOG" 2>&1; then
     echo 'PP_ERR apt-install-failed'; exit 5
 fi
 command -v ipmitool >/dev/null 2>&1 || { echo 'PP_ERR not-installed-after-apt'; exit 6; }
@@ -677,10 +682,16 @@ def install_ipmitool_api(cluster_id):
                     time.sleep(1.5)
             if not ssh:
                 return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
-            _ssh_write_file(ssh, '/tmp/pegaprox-ipmitool-install.sh', IPMITOOL_INSTALL_SCRIPT, 0o755)
-            out, _e = _ssh_run_checked(ssh, 'bash /tmp/pegaprox-ipmitool-install.sh', timeout=180)
+            
+            # NS 2026-05: randomized installer path to prevent symlink attacks
+            import uuid as _uuid
+            installer_path = f'/tmp/pegaprox-ipmitool-install-{_uuid.uuid4().hex[:16]}.sh'
+            q_installer = shlex.quote(installer_path)
+            
+            _ssh_write_file(ssh, installer_path, IPMITOOL_INSTALL_SCRIPT, 0o755)
+            out, _e = _ssh_run_checked(ssh, f'bash {q_installer}', timeout=180)
             try:
-                ssh.exec_command('rm -f /tmp/pegaprox-ipmitool-install.sh')
+                ssh.exec_command(f'rm -f {q_installer}')
             except Exception:
                 pass
             last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
@@ -1278,13 +1289,15 @@ def _ssh_write_file(ssh, path, content, mode=None):
     """Write file via SSH. Works for both root and non-root (pegaprox@pam + sudo) logins.
 
     Strategy:
-      - root login: SFTP direct (fastest), fall back to `cat >`
+      - root login: stage in randomized /tmp with O_EXCL, then mv into place
       - non-root login: upload to /tmp first (no sudo needed), then `sudo mv` into place.
         SFTP-writing to /etc via sudo is a mess because paramiko's SFTP runs as the
         login user — we bypass by staging in /tmp.
     NS 2026-04-24 — pegaprox@pam + NOPASSWD sudo deployments
+    NS 2026-05 — symlink-safe: randomized staging + shell O_EXCL for all paths
     """
     import os
+    import uuid as _uuid
     prefix = _ssh_sudo_prefix(ssh)
     parent = os.path.dirname(path)
     q_parent = shlex.quote(parent)
@@ -1297,55 +1310,49 @@ def _ssh_write_file(ssh, path, content, mode=None):
         err = stderr.read().decode('utf-8', errors='replace').strip()
         raise RuntimeError(f"mkdir -p {parent} failed (rc={rc}): {err or 'permission denied?'}")
 
-    if not prefix:
-        # root login — original simple SFTP path
-        try:
-            sftp = ssh.open_sftp()
-            with sftp.file(path, 'w') as f:
-                f.write(content)
-            if mode is not None:
-                sftp.chmod(path, mode)
-            sftp.close()
-        except (IOError, OSError) as e:
-            logging.warning(f"SFTP write to {path} failed ({e}), falling back to exec_command")
-            stdin, stdout, stderr = ssh.exec_command(f"cat > {q_path}")
-            stdin.write(content)
-            stdin.channel.shutdown_write()
-            rc = stdout.channel.recv_exit_status()
-            if rc != 0:
-                err = stderr.read().decode('utf-8', errors='replace').strip()
-                raise RuntimeError(f"write {path} failed (rc={rc}): {err or 'unknown'}")
-            if mode is not None:
-                _ssh_run_checked(ssh, f"chmod {oct(mode)[2:]} {q_path}")
-    else:
-        # non-root — stage in /tmp, then sudo-mv into place
-        import uuid as _uuid
-        tmp_path = f"/tmp/pegaprox-stage-{_uuid.uuid4().hex[:12]}"
-        q_tmp = shlex.quote(tmp_path)
-        try:
-            sftp = ssh.open_sftp()
-            with sftp.file(tmp_path, 'w') as f:
-                f.write(content)
-            sftp.close()
-        except (IOError, OSError) as e:
-            logging.warning(f"SFTP stage to {tmp_path} failed ({e}), using stdin pipe")
-            stdin, stdout, stderr = ssh.exec_command(f"cat > {q_tmp}")
-            stdin.write(content); stdin.channel.shutdown_write()
-            rc = stdout.channel.recv_exit_status()
-            if rc != 0:
-                raise RuntimeError(f"staging {tmp_path} failed (rc={rc})")
-        # Move to final location as root, set mode if requested
-        mv_cmd = f"sudo -n mv {q_tmp} {q_path}"
-        if mode is not None:
-            mv_cmd += f" && sudo -n chmod {oct(mode)[2:]} {q_path}"
-        stdin, stdout, stderr = ssh.exec_command(mv_cmd)
-        rc = stdout.channel.recv_exit_status()
-        if rc != 0:
-            err = stderr.read().decode('utf-8', errors='replace').strip()
-            # best-effort cleanup so /tmp doesn't stay littered on failure
+    # Always stage in randomized /tmp first (symlink-safe), then atomically move to final location.
+    # This prevents TOCTOU races and symlink attacks on both the staging path and final path.
+    tmp_path = f"/tmp/pegaprox-stage-{_uuid.uuid4().hex[:16]}"
+    q_tmp = shlex.quote(tmp_path)
+    
+    # Write to staging path with O_EXCL semantics (fails if file exists, won't follow symlinks)
+    # Use shell noclobber (set -C) as a portable O_EXCL equivalent
+    write_cmd = f"set -C; cat > {q_tmp}"
+    stdin, stdout, stderr = ssh.exec_command(write_cmd)
+    stdin.write(content)
+    stdin.channel.shutdown_write()
+    rc = stdout.channel.recv_exit_status()
+    if rc != 0:
+        err = stderr.read().decode('utf-8', errors='replace').strip()
+        raise RuntimeError(f"exclusive write to {tmp_path} failed (rc={rc}): {err or 'file exists or symlink?'}")
+    
+    # Set mode on staging file before moving (safer than after)
+    if mode is not None:
+        chmod_cmd = f"{prefix}chmod {oct(mode)[2:]} {q_tmp}"
+        stdin, stdout, stderr = ssh.exec_command(chmod_cmd)
+        if stdout.channel.recv_exit_status() != 0:
+            # cleanup on failure
             try: ssh.exec_command(f"rm -f {q_tmp}")
             except Exception: pass
-            raise RuntimeError(f"sudo mv → {path} failed (rc={rc}): {err or 'permission denied?'}")
+            raise RuntimeError(f"chmod on staging file failed")
+    
+    # Atomically move to final location (mv is atomic within same filesystem)
+    # For root, remove any pre-existing target first to prevent symlink following
+    if not prefix:
+        # root: unlink target first (safe because we control the parent dir), then mv
+        mv_cmd = f"rm -f {q_path}; mv {q_tmp} {q_path}"
+    else:
+        # non-root: sudo mv (sudo handles the unlink implicitly via mv's overwrite)
+        mv_cmd = f"sudo -n sh -c 'rm -f {q_path}; mv {q_tmp} {q_path}'"
+    
+    stdin, stdout, stderr = ssh.exec_command(mv_cmd)
+    rc = stdout.channel.recv_exit_status()
+    if rc != 0:
+        err = stderr.read().decode('utf-8', errors='replace').strip()
+        # best-effort cleanup so /tmp doesn't stay littered on failure
+        try: ssh.exec_command(f"rm -f {q_tmp}")
+        except Exception: pass
+        raise RuntimeError(f"mv → {path} failed (rc={rc}): {err or 'permission denied?'}")
 
     # Verify — file actually on disk with non-zero size
     stdin, stdout, stderr = ssh.exec_command(f"{prefix}test -s {q_path}")
@@ -2107,6 +2114,10 @@ FORCE='__FORCE__'
 KEYRING='/usr/share/keyrings/starwind-proxmox.gpg'
 SRC='/etc/apt/sources.list.d/starwind-proxmox.sources'
 
+# NS 2026-05: randomized log path to prevent symlink attacks in /tmp
+APTLOG="/tmp/pp_starlvm_apt.$$.$(date +%s).log"
+trap "rm -f '$APTLOG'" EXIT
+
 pv="$(pveversion 2>/dev/null | grep -oE 'pve-manager/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
 if [ -z "${pv:-}" ]; then echo 'PP_ERR not-a-proxmox-node'; exit 3; fi
 if [ "$pv" -ge 9 ]; then PKG='starwind-proxmox-plugin-pve9'; SUITE='trixie'; else PKG='starwind-proxmox-plugin'; SUITE='master'; fi
@@ -2138,12 +2149,12 @@ EOF
 # scrub any legacy unsigned config a previous StarWind install may have left
 rm -f /etc/apt/sources.list.d/starwind-proxmox.list /etc/apt/trusted.gpg.d/starwind-proxmox.gpg 2>/dev/null || true
 
-apt-get update -o Acquire::Retries=2 >/tmp/pp_starlvm_apt.log 2>&1 || true
+apt-get update -o Acquire::Retries=2 >"$APTLOG" 2>&1 || true
 # on PVE9 drop the old bookworm package (StarWind's documented 8->9 upgrade step)
 if [ "$pv" -ge 9 ]; then DEBIAN_FRONTEND=noninteractive apt-get remove -y starwind-proxmox-plugin >/dev/null 2>&1 || true; fi
 
 # apt refuses an unverifiable Signed-By source, so this is the real security gate
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$PKG" >>/tmp/pp_starlvm_apt.log 2>&1; then
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$PKG" >>"$APTLOG" 2>&1; then
     echo 'PP_ERR apt-install-failed'; exit 5
 fi
 
@@ -2234,10 +2245,16 @@ def install_starlvm_plugin(cluster_id):
                     time.sleep(1.5)
             if not ssh:
                 return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
-            _ssh_write_file(ssh, '/tmp/pegaprox-starlvm-install.sh', script, 0o755)
-            out, _e = _ssh_run_checked(ssh, 'bash /tmp/pegaprox-starlvm-install.sh', timeout=200)
+            
+            # NS 2026-05: randomized installer path to prevent symlink attacks
+            import uuid as _uuid
+            installer_path = f'/tmp/pegaprox-starlvm-install-{_uuid.uuid4().hex[:16]}.sh'
+            q_installer = shlex.quote(installer_path)
+            
+            _ssh_write_file(ssh, installer_path, script, 0o755)
+            out, _e = _ssh_run_checked(ssh, f'bash {q_installer}', timeout=200)
             try:
-                ssh.exec_command('rm -f /tmp/pegaprox-starlvm-install.sh')
+                ssh.exec_command(f'rm -f {q_installer}')
             except Exception:
                 pass
             last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
