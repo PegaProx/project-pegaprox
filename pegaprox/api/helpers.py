@@ -444,7 +444,7 @@ def caller_is_scoped(user, cluster_id):
     username = user.get('username', '')
     try:
         for _vmid, acl in (get_vm_acls().get(cluster_id, {}) or {}).items():
-            if username in (acl.get('users') or []):
+            if username in (acl.get('users') or []) or '*' in (acl.get('users') or []):
                 return True
     except Exception:
         return True
