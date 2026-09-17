@@ -32,7 +32,7 @@ def test_pbs_protected_vms_foreign_cluster_denied(api, seed):
     u = _pool_user(seed)
     pm = MagicMock()
     pm.connected = True
-    pm.linked_clusters = []          # unlinked PBS → check_pbs_access passes (backward compat)
+    pm.linked_clusters = ['cluster_1']  # linked to cluster_1 so check_pbs_access passes
     ppglobals.pbs_managers['pbs1'] = pm
     api.set_manager('cluster_2', api.make_fake_manager(cluster_id='cluster_2'))
     try:

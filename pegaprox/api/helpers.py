@@ -486,8 +486,9 @@ def check_pbs_access(pbs_id):
     
     A PBS server is accessible if:
     - User is admin (full access), OR
-    - PBS has no linked_clusters (backward compatibility - accessible to all), OR
     - User has access to at least one of the PBS's linked clusters
+    
+    Empty linked_clusters is treated as restricted (fail closed) for non-admin users.
     """
     from flask import request, jsonify
     from pegaprox.utils.auth import build_authz_user
@@ -512,9 +513,9 @@ def check_pbs_access(pbs_id):
     # Get PBS linked clusters
     pbs_linked = pbs_mgr.linked_clusters or []
     
-    # If PBS has no linked clusters, allow access (backward compatibility)
+    # Fail closed: empty linked_clusters means no access for non-admin users
     if not pbs_linked:
-        return True, None
+        return False, (jsonify({'error': 'Access denied to this PBS server'}), 403)
     
     # Get user's allowed clusters
     user_clusters = get_user_clusters(user)

@@ -64,7 +64,10 @@ def list_pbs_servers():
         if _lu.get('effective_role', _lu.get('role')) == _RA or _uc is None:
             return True
         linked = linked or []
-        return (not linked) or any(c in _uc for c in linked)
+        # Fail closed: empty linked_clusters means no access for non-admin scoped users
+        if not linked:
+            return False
+        return any(c in _uc for c in linked)
     result = []
     for pbs_id, mgr in pbs_managers.items():
         if not _pbs_visible(getattr(mgr, 'linked_clusters', None)):
@@ -115,6 +118,10 @@ def list_pbs_servers():
 @require_auth(perms=['pbs.config'])
 def add_pbs_server():
     """Add a new PBS server"""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.models.permissions import ROLE_ADMIN
+    
     data = request.json or {}
     
     if not data.get('name') or not data.get('host'):
@@ -122,6 +129,21 @@ def add_pbs_server():
     
     if not data.get('user'):
         return jsonify({'error': 'Username or API token is required'}), 400
+    
+    # Validate linked_clusters against caller's effective scope
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    user_clusters = get_user_clusters(user)
+    submitted_clusters = data.get('linked_clusters', [])
+    
+    # Non-admin users must scope the PBS to clusters they can access
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN and user_clusters is not None:
+        if not submitted_clusters:
+            # Fail closed: non-admin must explicitly scope the PBS
+            return jsonify({'error': 'You must link this PBS to at least one cluster you can access'}), 403
+        # Verify all submitted cluster IDs are within caller's scope
+        for cluster_id in submitted_clusters:
+            if cluster_id not in user_clusters:
+                return jsonify({'error': f'Access denied to cluster {cluster_id}'}), 403
     
     pbs_id = str(uuid.uuid4())[:8]
     
@@ -148,17 +170,23 @@ def add_pbs_server():
 @require_auth(perms=['pbs.config'])
 def update_pbs_server(pbs_id):
     """Update a PBS server config"""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.models.permissions import ROLE_ADMIN
+    
     ok, err = check_pbs_access(pbs_id)  # NS Aug 2026 (Aikido) — object-level authz on write
     if not ok:
         return err
     data = request.json or {}
 
     # Resolve the CURRENT stored config (in-memory manager preferred, else DB row) so we can detect
-    # a host/port change BEFORE persisting anything.
+    # a host/port change BEFORE persisting anything, AND to preserve linked_clusters when omitted.
     old_mgr = pbs_managers.get(pbs_id)
     old_host, old_port = None, None
+    old_linked_clusters = []
     if old_mgr is not None:
         old_host, old_port = old_mgr.host, old_mgr.port
+        old_linked_clusters = getattr(old_mgr, 'linked_clusters', [])
     else:
         db = get_db()
         row = db.conn.cursor().execute("SELECT * FROM pbs_servers WHERE id = ?", (pbs_id,)).fetchone()
@@ -168,8 +196,31 @@ def update_pbs_server(pbs_id):
             _rk = row.keys()
             old_host = row['host'] if 'host' in _rk else None
             old_port = row['port'] if 'port' in _rk else None
+            if 'linked_clusters' in _rk:
+                import json
+                old_linked_clusters = json.loads(row['linked_clusters'] or '[]')
         except Exception:
             old_host, old_port = None, None
+            old_linked_clusters = []
+    
+    # Preserve existing linked_clusters if not explicitly provided in the update
+    if 'linked_clusters' not in data:
+        data['linked_clusters'] = old_linked_clusters
+    
+    # Validate linked_clusters against caller's effective scope
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    user_clusters = get_user_clusters(user)
+    submitted_clusters = data.get('linked_clusters', [])
+    
+    # Non-admin users must keep the PBS scoped to clusters they can access
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN and user_clusters is not None:
+        if not submitted_clusters:
+            # Fail closed: non-admin cannot clear linked_clusters
+            return jsonify({'error': 'You must link this PBS to at least one cluster you can access'}), 403
+        # Verify all submitted cluster IDs are within caller's scope
+        for cluster_id in submitted_clusters:
+            if cluster_id not in user_clusters:
+                return jsonify({'error': f'Access denied to cluster {cluster_id}'}), 403
 
     # NS Aug 2026 (CodeAnt) — a non-numeric submitted port must not blow up change-detection with an
     # unhandled ValueError (500). Reject it up front; everything below assumes a parseable port.
