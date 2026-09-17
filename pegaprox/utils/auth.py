@@ -970,12 +970,6 @@ def require_auth(roles: list = None, perms: list = None):
             # since both resolve the acting user here.
             if user is None:
                 return jsonify({'error': 'Account no longer exists', 'code': 'ACCOUNT_DELETED'}), 401
-            # stash for check_cluster_access et al. so cluster-scoped routes don't refetch
-            try:
-                from flask import g as _g
-                _g.current_user = user
-            except Exception:
-                pass
             if not user.get('enabled', True):
                 return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
             
@@ -1063,6 +1057,22 @@ def require_auth(roles: list = None, perms: list = None):
                     _eff_pub = _tr
             session = {**session, 'effective_role': _eff_pub}
             request.session = session
+            
+            # sec (pentest Dec 2026 — token scope bypass): stash the user record with the
+            # effective_role field so downstream handlers that pass g.current_user to
+            # get_user_clusters() see the floored role. Without this, an admin-owned viewer
+            # token stored the raw owner (role=admin, no effective_role) in g.current_user,
+            # and get_user_clusters(g.current_user) returned None (unrestricted) because it
+            # saw only the admin role. Alerts, scheduled-tasks, and affinity-rule listing
+            # handlers all derive their cluster allowlists from g.current_user, so a
+            # restricted token bypassed its authorization boundary and read out-of-scope
+            # cluster records. Set g.current_user AFTER computing effective_role so the
+            # stashed dict includes it.
+            try:
+                from flask import g as _g
+                _g.current_user = dict(user, effective_role=_eff_pub)
+            except Exception:
+                pass
             
             return f(*args, **kwargs)
         return decorated_function
