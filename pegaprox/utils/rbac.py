@@ -344,6 +344,9 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     
     NS: Dec 2025 - Also checks role's tenant for tenant-specific roles
     NS: Jan 2026 - Added group-based access (tenant can be assigned to groups)
+    
+    Returns None ONLY for true admins; default-tenant non-admins return an explicit
+    list (possibly empty) to prevent wildcard authorization bypass.
     """
     global tenants_db
     if not tenants_db:
@@ -360,16 +363,16 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     # Shared with get_user_permissions — the two answered this differently for years, and the
     # permission side silently fell back to the viewer defaults because of it.
     role = user.get('effective_role', user.get('role', ROLE_VIEWER))
-    tenant_id = _tenant_defining_role(role, tenant_id)
+    resolved_tenant_id = _tenant_defining_role(role, tenant_id)
     
-    tenant = tenants_db.get(tenant_id, {})
+    tenant = tenants_db.get(resolved_tenant_id, {})
     clusters = tenant.get('clusters', [])
     
     # NS Jan 2026: Also include clusters from groups assigned to this tenant
     try:
         db = get_db()
         # Get groups assigned to this tenant
-        groups = db.query('SELECT id FROM cluster_groups WHERE tenant_id = ?', (tenant_id,))
+        groups = db.query('SELECT id FROM cluster_groups WHERE tenant_id = ?', (resolved_tenant_id,))
         if groups:
             group_ids = [g['id'] for g in groups]
             # Get clusters in those groups
@@ -379,16 +382,20 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
             if group_clusters:
                 clusters = list(set(clusters + [c['id'] for c in group_clusters]))
     except Exception as e:
-        logging.error(f"Error getting group clusters for tenant {tenant_id}: {e}")
+        logging.error(f"Error getting group clusters for tenant {resolved_tenant_id}: {e}")
     
-    # empty list means all clusters (backwards compat) - but only for default tenant
-    # LW: Changed this - non-default tenants with empty clusters should see nothing, not everything
-    # was confusing before when new tenants could suddenly see everything
+    # sec (pentest): the default tenant's empty cluster list was treated as a wildcard (None),
+    # preserving legacy all-cluster behavior for admins. However, that wildcard was also applied
+    # to non-admin users and to accounts whose effective custom role resolved to a tenant different
+    # from the stored `default` tenant. Downstream code (chargeback, check_cluster_access, SSE
+    # delivery, group-list) interprets None as unrestricted access, enabling cross-tenant disclosure.
+    # Return None ONLY for true admins (already handled above); default-tenant non-admins with no
+    # explicit cluster assignments now receive an empty list, which downstream code correctly treats
+    # as "no access" rather than "all access". A custom role that remaps a default-stored user to a
+    # tenant-specific scope already resolves to that tenant's cluster list above (resolved_tenant_id).
     if not clusters:
-        if tenant_id == DEFAULT_TENANT_ID:
-            return None  # default tenant can see all
-        else:
-            return []  # other tenants with no clusters assigned see nothing
+        # Non-default tenants with no clusters see nothing (existing behavior, correct)
+        return []
 
     # #555: a pool-only user (tenant+group gave them this list) must also reach
     # clusters where they hold pool perms. Only widen the non-None list — the None

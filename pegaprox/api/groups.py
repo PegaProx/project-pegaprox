@@ -26,19 +26,33 @@ bp = Blueprint('groups', __name__)
 # =============================================================================
 
 def _user_tenant(user: dict):
-    """Scoping tenant for `user`, or None for unscoped (admin / default tenant).
+    """Scoping tenant for `user`, or None for unscoped (admin only).
 
     NS 2026-06-05 (audit M-3): the whole file used to read user.get('tenant'),
     but db.get_user()/get_all_users() map the SQLite `tenant` column to the dict
     key `tenant_id` (never `tenant`), so that was ALWAYS None — every tenant user
     fell into the admin branch and saw every other tenant's groups/metrics.
-    Admin + the implicit 'default' tenant stay unscoped (None = see all) so
-    single-tenant installs are unaffected; a real tenant gets scoped.
+    
+    sec (pentest): default-tenant users were treated as unscoped (None = see all),
+    but a default-stored user with a tenant-specific custom role should be scoped to
+    that role's tenant. Use the same tenant resolution logic as get_user_clusters to
+    prevent cross-tenant group/metric disclosure. Only true admins remain unscoped.
     """
-    tid = (user or {}).get('tenant_id') or DEFAULT_TENANT_ID
-    if (user or {}).get('role') == ROLE_ADMIN or tid == DEFAULT_TENANT_ID:
+    # Only true admins are unscoped
+    if (user or {}).get('effective_role', (user or {}).get('role')) == ROLE_ADMIN:
         return None
-    return tid
+    
+    # Resolve the effective tenant, considering custom role tenant mapping
+    from pegaprox.utils.rbac import _tenant_defining_role
+    tid = (user or {}).get('tenant_id') or DEFAULT_TENANT_ID
+    role = (user or {}).get('effective_role', (user or {}).get('role', ROLE_VIEWER))
+    resolved_tid = _tenant_defining_role(role, tid)
+    
+    # sec (pentest): return the resolved tenant for all non-admin users, including
+    # default-tenant users. This prevents cross-tenant disclosure via group queries.
+    # Default-tenant users will see groups assigned to the default tenant plus global
+    # groups (tenant_id IS NULL), which is the correct scoping.
+    return resolved_tid
 
 def get_user_tenant(username: str) -> str:
     """Get scoping tenant_id for a username, None for admins/default/no tenant"""
