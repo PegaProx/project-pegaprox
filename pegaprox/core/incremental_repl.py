@@ -25,12 +25,18 @@ guest, the replica VM config) lives in the replication engine that calls this.
 import os
 import time
 import logging
+import shlex
 
 logger = logging.getLogger(__name__)
 
 # rbd/zfs progress goes to stderr; suppress it so a long transfer can't dead-
 # lock the relay by filling an undrained stderr buffer.
 _RBD = "rbd --no-progress"
+
+
+def _q(s):
+    """shell-quote a single token (pool / image / snapshot / dataset name)."""
+    return shlex.quote(str(s))
 
 
 def _relay_pipe(src_ssh, src_cmd, tgt_ssh, tgt_cmd, chunk=4 * 1024 * 1024,
@@ -53,9 +59,31 @@ def _relay_pipe(src_ssh, src_cmd, tgt_ssh, tgt_cmd, chunk=4 * 1024 * 1024,
     # and the importer's stdout+stderr would otherwise fill their SSH-channel
     # windows, block the remote process, and deadlock the pipe. Park those
     # streams in files on the respective node and slurp them back at the end.
-    tok = f"/tmp/pegaprox-repl-{os.getpid()}-{int(time.time() * 1000) % 100000}"
-    full_src = f"{src_cmd} 2>{tok}.serr"
-    full_tgt = f"{tgt_cmd} >{tok}.tout 2>{tok}.terr"
+    #
+    # Use mktemp for secure temporary file creation with O_EXCL to prevent
+    # symlink/FIFO attacks. The template must end in XXXXXX for mktemp.
+    def _mktemp(ssh, prefix):
+        """Create a secure temporary file and return its path."""
+        try:
+            _i, o, _e = ssh.exec_command(
+                f"mktemp /tmp/{_q(prefix)}.XXXXXX 2>/dev/null", timeout=10)
+            path = o.read().decode('utf-8', 'replace').strip()
+            if path and path.startswith('/tmp/'):
+                return path
+        except Exception:
+            pass
+        return None
+
+    src_err_file = _mktemp(src_ssh, 'pegaprox-repl-serr')
+    tgt_out_file = _mktemp(tgt_ssh, 'pegaprox-repl-tout')
+    tgt_err_file = _mktemp(tgt_ssh, 'pegaprox-repl-terr')
+    
+    if not src_err_file or not tgt_out_file or not tgt_err_file:
+        return {'ok': False, 'bytes': 0, 'src_rc': -1, 'tgt_rc': -1,
+                'error': 'failed to create secure temporary files on remote nodes'}
+    
+    full_src = f"{src_cmd} 2>{src_err_file}"
+    full_tgt = f"{tgt_cmd} >{tgt_out_file} 2>{tgt_err_file}"
     _emit(f"exec[src]: {src_cmd}")
     _si, _so, _se = src_ssh.exec_command(full_src, timeout=timeout)
     _emit(f"exec[tgt]: {tgt_cmd}")
@@ -86,14 +114,38 @@ def _relay_pipe(src_ssh, src_cmd, tgt_ssh, tgt_cmd, chunk=4 * 1024 * 1024,
     tgt_rc = tgt_chan.recv_exit_status()
 
     def _slurp(ssh, path):
+        """Read and remove a temporary file, with validation against symlink attacks.
+        
+        Validates that the path is a regular file owned by the SSH user before reading,
+        preventing symlink-based disclosure of files readable by the SSH account.
+        """
         try:
-            _i, o, _e = ssh.exec_command(f"cat {path} 2>/dev/null; rm -f {path}", timeout=20)
+            # Validate file type and ownership before reading. Use stat -L to follow
+            # symlinks for the check, then refuse if it's not a regular file we own.
+            # This prevents reading through attacker-controlled symlinks.
+            validate_cmd = (
+                f"[ -f {_q(path)} ] && [ ! -L {_q(path)} ] && "
+                f"[ -O {_q(path)} ] && echo OK || echo FAIL"
+            )
+            _i, o, _e = ssh.exec_command(validate_cmd, timeout=10)
+            validation = o.read().decode('utf-8', 'replace').strip()
+            if validation != 'OK':
+                # File is a symlink, not a regular file, not owned by us, or doesn't exist.
+                # Clean up if it exists and is safe to remove (not a symlink).
+                ssh.exec_command(
+                    f"[ -f {_q(path)} ] && [ ! -L {_q(path)} ] && rm -f {_q(path)}",
+                    timeout=10)
+                return ''
+            
+            # File validated as regular file owned by us - safe to read
+            _i, o, _e = ssh.exec_command(f"cat {_q(path)}; rm -f {_q(path)}", timeout=20)
             return o.read().decode('utf-8', 'replace').strip()
         except Exception:
             return ''
-    src_err = _slurp(src_ssh, f"{tok}.serr")
-    tgt_err = _slurp(tgt_ssh, f"{tok}.terr")
-    _slurp(tgt_ssh, f"{tok}.tout")   # importer stdout — discard, just clean up
+    
+    src_err = _slurp(src_ssh, src_err_file)
+    tgt_err = _slurp(tgt_ssh, tgt_err_file)
+    _slurp(tgt_ssh, tgt_out_file)   # importer stdout — discard, just clean up
 
     parts = [p for p in (relay_err, src_err and f"src: {src_err}",
                          tgt_err and f"tgt: {tgt_err}") if p]
@@ -252,12 +304,6 @@ def zfs_prune_snapshots(ssh, dataset, keep_snaps, prefix, timeout=60, log=None):
 
 
 # ---------------------------------------------------------------- helpers ---
-
-def _q(s):
-    """shell-quote a single token (pool / image / snapshot / dataset name)."""
-    import shlex
-    return shlex.quote(str(s))
-
 
 def _ssh_run(ssh, cmd, timeout=60):
     """Run a command over ssh, return combined stdout+stderr (best-effort)."""
