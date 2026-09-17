@@ -572,11 +572,37 @@ def sse_updates():
                     # gates whether the filters RUN; effective_role is what they decide with.
                     _acct_role = _acct.get('effective_role') or _acct.get('role')
                     _token_restricts = _token_role not in (None, ROLE_ADMIN)
+                    # sec (pentest): recalculate cluster authorization on every reauth tick.
+                    # The token's allowed_clusters was snapshotted at mint time; a demotion or
+                    # cluster/tenant/group/pool/ACL removal must narrow the LIVE subscription
+                    # too, not just future tokens. Mirror the WebSocket twin's _scope_ws_clusters
+                    # logic: the token's stored scope is the ceiling (a scoped token must not
+                    # widen because its owner was promoted), the live account's scope is the
+                    # floor (the stream must not stay wide after a revocation). Intersection of
+                    # both, falling back to the live account's scope if the intersection is empty.
+                    _live_allowed = get_user_clusters(_acct)  # None = admin (all clusters)
                     with sse_clients_lock:
                         _ci = sse_clients.get(client_id)
                         if _ci is not None:
                             _ci['effective_role'] = _token_role if _token_restricts else _acct_role
                             _ci['is_admin'] = (_acct_role == ROLE_ADMIN) and not _token_restricts
+                            # Narrow the subscription: if the token was scoped, the live subscription
+                            # cannot exceed it; if the account is now scoped, the subscription must
+                            # respect that. Both None → None (admin all-access). Token scoped + account
+                            # now scoped → intersection. Token scoped + account admin → token scope.
+                            # Account scoped + token was admin → account scope.
+                            _old_sub = _ci.get('clusters')
+                            if allowed_clusters is None and _live_allowed is None:
+                                _new_sub = None  # both admin → all-access
+                            elif allowed_clusters is None:
+                                _new_sub = list(_live_allowed) if _live_allowed else []  # token was admin, account now scoped
+                            elif _live_allowed is None:
+                                _new_sub = list(allowed_clusters)  # token scoped, account admin → token ceiling
+                            else:
+                                # both scoped → intersection, fallback to live account's scope if empty
+                                _intersection = [c for c in allowed_clusters if c in _live_allowed]
+                                _new_sub = _intersection if _intersection else list(_live_allowed)
+                            _ci['clusters'] = _new_sub
         except GeneratorExit:
             pass
         finally:

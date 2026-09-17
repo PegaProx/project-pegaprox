@@ -224,6 +224,40 @@ def validate_sse_token(token: str) -> dict:
         with sse_tokens_lock:
             sse_tokens.pop(token, None)
         return None
+    
+    # sec (pentest): recalculate cluster authorization from current RBAC state. The token's
+    # stored allowed_clusters was snapshotted at mint time; a demotion or cluster/tenant/group/
+    # pool/ACL removal between mint and consume must not let the token open a new stream with
+    # stale all-cluster access. Intersection of token scope (ceiling) and live account scope
+    # (floor), falling back to the live scope if the intersection is empty (a complete revocation
+    # of the token's clusters still leaves the user with their current clusters, which may be
+    # none). This mirrors the periodic reauthorization logic for already-open streams.
+    if _acct is not None:
+        from pegaprox.utils.rbac import get_user_clusters
+        _token_clusters = token_data.get('allowed_clusters')
+        _live_clusters = get_user_clusters(_acct)  # None = admin (all clusters)
+        
+        # Compute the intersection: both None → None (admin all-access). Token scoped + account
+        # now scoped → intersection. Token scoped + account admin → token scope (ceiling).
+        # Account scoped + token was admin → account scope (floor).
+        if _token_clusters is None and _live_clusters is None:
+            _current_clusters = None  # both admin → all-access
+        elif _token_clusters is None:
+            _current_clusters = list(_live_clusters) if _live_clusters else []  # token was admin, account now scoped
+        elif _live_clusters is None:
+            _current_clusters = list(_token_clusters)  # token scoped, account admin → token ceiling
+        else:
+            # both scoped → intersection, fallback to live account's scope if empty
+            _intersection = [c for c in _token_clusters if c in _live_clusters]
+            _current_clusters = _intersection if _intersection else list(_live_clusters)
+        
+        # Return a copy of token_data with the recalculated cluster scope
+        return {
+            'user': token_data['user'],
+            'allowed_clusters': _current_clusters,
+            'effective_role': token_data.get('effective_role'),
+        }
+    
     return token_data
 
 
