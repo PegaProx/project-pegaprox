@@ -815,7 +815,7 @@ def get_vmware_content_libraries(vmware_id):
 
 
 @bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/console', methods=['POST'])
-@require_auth(perms=['vmware.vm.view'])
+@require_auth(perms=['vmware.vm.console'])
 def get_vmware_console(vmware_id, vm_id):
     """get console ticket -- tries WebMKS, MKS, direct URL"""
     if vmware_id not in vmware_managers:
@@ -827,7 +827,7 @@ def get_vmware_console(vmware_id, vm_id):
     # outside its token scope (user_can_access_vmware_vm honors effective_role).
     user = build_authz_user(request.session.get('user', ''), request.session)
 
-    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.console'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
 
     mgr = vmware_managers[vmware_id]
