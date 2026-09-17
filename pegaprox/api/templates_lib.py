@@ -265,8 +265,17 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
                     finished_at=_now_iso())
         return
 
+    # NS Dec 2026 (Aikido #469089271) — the path was deterministic (template_id + URL basename),
+    # shared in /tmp, and used in a privileged wget -O without exclusive creation or symlink
+    # protection. A local unprivileged user on the managed node could pre-create that name as a
+    # symlink; when the default SSH account (root) performed the download, the write was directed
+    # to the symlink target, giving the local user a root-file overwrite primitive. The same
+    # shared path also permitted concurrent jobs for the same template to interfere with one another.
+    # Fix: include the unique deployment ID in the path so each job is isolated and the name is
+    # unpredictable. The remote check (test -L / test -e) gates the wget so a pre-placed symlink
+    # or file is detected and rejected before the privileged write.
     img_basename = tpl['image_url'].rsplit('/', 1)[-1]
-    img_path = f"/tmp/pegaprox-ci-{template_id}-{img_basename}"
+    img_path = f"/tmp/pegaprox-ci-{dep_id}-{img_basename}"
 
     # use management IP if we have one, otherwise cluster host
     try:
@@ -326,6 +335,14 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
         q_storage = shlex.quote(storage)
 
         # 1. download
+        # NS Dec 2026 (Aikido #469089271) — gate the privileged write: reject if the path already
+        # exists (as a symlink, regular file, or anything else). The deployment ID in the name makes
+        # pre-placement unlikely, but an attacker with local access and knowledge of the deployment
+        # schedule could still race it. The check is not atomic with the wget, but it closes the
+        # window to the sub-second interval between the test and the write, and the unpredictable
+        # name makes timing that race infeasible. -L follows symlinks (so `test -L` is true for a
+        # symlink even if the target is missing), and -e catches regular files or directories.
+        run(f"test ! -L {q_img_path} && test ! -e {q_img_path}", 'pre-download path check')
         # MK: -nc skip if exists, -q quiet output. show-progress would flood log
         run(f"wget -q -O {q_img_path} {q_url}", 'download')
         _update_dep(dep_id, progress=35, log_append='download done')
