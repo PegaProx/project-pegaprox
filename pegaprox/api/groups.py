@@ -11,7 +11,7 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
-from pegaprox.utils.auth import require_auth, load_users
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 # MK 2026-06-04 (CWE-117): group_id from URL path goes into the logger below.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
@@ -34,9 +34,24 @@ def _user_tenant(user: dict):
     fell into the admin branch and saw every other tenant's groups/metrics.
     Admin + the implicit 'default' tenant stay unscoped (None = see all) so
     single-tenant installs are unaffected; a real tenant gets scoped.
+    
+    sec (pentest): check effective_role (API-token scoping) not the stored role.
+    An admin-owned token restricted to a tenant custom role must scope to that
+    role's tenant, not inherit the owner's global access. Mirrors get_user_clusters'
+    custom-role→tenant remap via _tenant_defining_role.
     """
+    from pegaprox.utils.rbac import _tenant_defining_role
+    
+    role = (user or {}).get('effective_role', (user or {}).get('role'))
+    if role == ROLE_ADMIN:
+        return None
+    
     tid = (user or {}).get('tenant_id') or DEFAULT_TENANT_ID
-    if (user or {}).get('role') == ROLE_ADMIN or tid == DEFAULT_TENANT_ID:
+    # Remap: a user in the default tenant carrying a tenant-scoped custom role
+    # should scope to that role's defining tenant, matching get_user_clusters.
+    tid = _tenant_defining_role(role, tid)
+    
+    if tid == DEFAULT_TENANT_ID:
         return None
     return tid
 
@@ -52,12 +67,11 @@ def get_cluster_groups():
     try:
         db = get_db()
         usr = getattr(request, 'session', {}).get('user', 'system')
-        users = load_users()
-        user = users.get(usr, {})
+        user = build_authz_user(usr, getattr(request, 'session', {}) or {})
         tenant_id = _user_tenant(user)
 
         # Admins see all groups, tenant users only see their tenant's groups + global groups
-        if user.get('role') == ROLE_ADMIN or not tenant_id:
+        if user.get('effective_role', user.get('role')) == ROLE_ADMIN or not tenant_id:
             groups = db.query('SELECT * FROM cluster_groups ORDER BY sort_order, name')
         else:
             # Tenant users see: their tenant's groups + groups without tenant (global)
@@ -82,13 +96,12 @@ def create_cluster_group():
         return jsonify({'error': 'Name required'}), 400
     
     usr = getattr(request, 'session', {}).get('user', 'system')
-    users = load_users()
-    user = users.get(usr, {})
+    user = build_authz_user(usr, getattr(request, 'session', {}) or {})
     ip = request.remote_addr
     
     # Non-admins can only create groups for their own tenant
     tenant_id = data.get('tenant_id')
-    if user.get('role') != ROLE_ADMIN:
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         tenant_id = _user_tenant(user)  # Force to user's tenant
     
     db = get_db()
@@ -127,12 +140,11 @@ def update_cluster_group(group_id):
     group = dict(row)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
-    users = load_users()
-    user = users.get(usr, {})
+    user = build_authz_user(usr, getattr(request, 'session', {}) or {})
     ip = request.remote_addr
 
     # Check tenant access - non-admins can only edit their tenant's groups
-    if user.get('role') != ROLE_ADMIN:
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         user_tenant = _user_tenant(user)
         # NS Aug 2026 (Aikido pentest) — a global (tenant_id NULL) group is admin-only for writes;
         # the old `group['tenant_id'] and ...` let any admin.groups holder edit a global group
@@ -143,7 +155,7 @@ def update_cluster_group(group_id):
     
     # Non-admins cannot change tenant_id
     tenant_id = data.get('tenant_id', group['tenant_id'])
-    if user.get('role') != ROLE_ADMIN:
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         tenant_id = group['tenant_id']  # Keep original tenant
     
     # NS: Feb 2026 - added cross-cluster LB fields to group update
@@ -200,12 +212,11 @@ def delete_cluster_group(group_id):
         return jsonify({'error': 'Group not found'}), 404
     
     usr = getattr(request, 'session', {}).get('user', 'system')
-    users = load_users()
-    user = users.get(usr, {})
+    user = build_authz_user(usr, getattr(request, 'session', {}) or {})
     ip = request.remote_addr
     
     # Check tenant access
-    if user.get('role') != ROLE_ADMIN:
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
         user_tenant = _user_tenant(user)
         # NS Aug 2026 (Aikido pentest) — a global (tenant_id NULL) group is admin-only for
         # writes; the old `group['tenant_id'] and ...` let any admin.groups holder delete a
@@ -256,7 +267,7 @@ def rename_cluster(cluster_id):
     # as assign_cluster_to_group. Lower impact (display-name only) but the same permissive
     # check_cluster_access gate, so a VM-ACL-reach actor with admin.groups shouldn't rename a
     # cluster they don't tenant-own.
-    _owned = get_user_clusters(load_users().get(usr, {}), include_pools=False)
+    _owned = get_user_clusters(build_authz_user(usr, getattr(request, 'session', {}) or {}), include_pools=False)
     if _owned is not None and cluster_id not in _owned:
         log_audit(usr, 'cluster.rename_denied', f"Access denied to rename cluster {cluster_id} — not tenant-owned", ip_address=ip)
         return jsonify({'error': 'Access denied - you do not own this cluster'}), 403
@@ -294,8 +305,7 @@ def assign_cluster_to_group(cluster_id):
     
     db = get_db()
     usr = getattr(request, 'session', {}).get('user', 'system')
-    users = load_users()
-    user = users.get(usr, {})
+    user = build_authz_user(usr, getattr(request, 'session', {}) or {})
     ip = request.remote_addr
 
     # NS Jul 2026 (CodeAnt exploitation — cross-tenant cluster hijack) — check_cluster_access
@@ -317,7 +327,7 @@ def assign_cluster_to_group(cluster_id):
             return jsonify({'error': 'Group not found'}), 404
         
         # Check tenant access to target group
-        if user.get('role') != ROLE_ADMIN:
+        if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
             user_tenant = _user_tenant(user)
             if group['tenant_id'] and group['tenant_id'] != user_tenant:
                 log_audit(usr, 'cluster.group_assign_denied', f"Access denied to assign cluster {cluster_id} to group '{group['name']}' - tenant mismatch", ip_address=ip)
@@ -548,7 +558,7 @@ def trigger_xclb_balance_now(group_id):
     # ownership, not just the cluster.config perm. A tenant user must not trigger
     # rebalancing on another tenant's group. Admins/default tenant unscoped.
     usr = getattr(request, 'session', {}).get('user', 'system')
-    _ut = _user_tenant(load_users().get(usr, {}))
+    _ut = _user_tenant(build_authz_user(usr, getattr(request, 'session', {}) or {}))
     # NS Aug 2026 (Aikido pentest) — a tenant-scoped user (_ut set) must not trigger balancing
     # on a global (tenant_id NULL) group either; treat NULL-tenant as admin-only for this write.
     if _ut and (group.get('tenant_id') is None or group.get('tenant_id') != _ut):
