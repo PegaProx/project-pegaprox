@@ -432,10 +432,11 @@ def _disconnect_test_nics(tgt_mgr, node, vmid, vm_type='qemu'):
     return n
 
 
-def execute_failover(plan_id, failover_type='planned'):
+def execute_failover(plan_id, failover_type='planned', authorized_vmids=None):
     """Main failover orchestrator. Runs in greenlet.
 
     failover_type: 'planned', 'emergency', 'failback'
+    authorized_vmids: set of vmids authorized at request time (TOCTOU mitigation)
     """
     plan = _get_plan(plan_id)
     if not plan:
@@ -444,6 +445,15 @@ def execute_failover(plan_id, failover_type='planned'):
 
     event_id = _create_event(plan_id, failover_type)
     vms = _get_plan_vms(plan_id)
+    
+    # TOCTOU mitigation: if authorized_vmids is provided, filter to only those VMs
+    if authorized_vmids is not None:
+        original_count = len(vms)
+        vms = [vm for vm in vms if vm.get('vmid') in authorized_vmids]
+        filtered_count = original_count - len(vms)
+        if filtered_count > 0:
+            logger.warning(f"[SR] Plan {plan_id}: filtered {filtered_count} VM(s) added after authorization")
+    
     boot_groups = _group_vms_by_boot(vms)
     results = {}
     failed = False
@@ -568,15 +578,27 @@ def execute_failover(plan_id, failover_type='planned'):
     logger.info(f"[SR] Failover {final_status} for '{_sl(plan['name'])}': {sum(1 for r in results.values() if r['success'])}/{total_vms} succeeded")
 
 
-def execute_test_failover(plan_id):
+def execute_test_failover(plan_id, authorized_vmids=None):
     """Clone replicated VMs on target, start in test mode.
-    VMs stay running until user triggers cleanup."""
+    VMs stay running until user triggers cleanup.
+    
+    authorized_vmids: set of vmids authorized at request time (TOCTOU mitigation)
+    """
     plan = _get_plan(plan_id)
     if not plan:
         return
 
     event_id = _create_event(plan_id, 'test')
     vms = _get_plan_vms(plan_id)
+    
+    # TOCTOU mitigation: if authorized_vmids is provided, filter to only those VMs
+    if authorized_vmids is not None:
+        original_count = len(vms)
+        vms = [vm for vm in vms if vm.get('vmid') in authorized_vmids]
+        filtered_count = original_count - len(vms)
+        if filtered_count > 0:
+            logger.warning(f"[SR] Plan {plan_id}: filtered {filtered_count} VM(s) added after authorization")
+    
     tgt_mgr = cluster_managers.get(plan['target_cluster'])
     results = {}
     test_vmids = []
@@ -908,9 +930,11 @@ def _heartbeat_check():
                 if cur.rowcount != 1:
                     logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' skipped — status changed concurrently")
                     continue
+                # Capture VM set at trigger time for TOCTOU mitigation
+                authorized_vmids = {vm['vmid'] for vm in vms}
                 # NS: use crash-safe wrapper so a greenlet crash sets status to 'failed'
                 from pegaprox.api.site_recovery import _safe_spawn_failover
-                _safe_spawn_failover(execute_failover, plan_id, 'emergency')
+                _safe_spawn_failover(execute_failover, plan_id, 'emergency', authorized_vmids=authorized_vmids)
                 log_audit('system', 'site_recovery.auto_failover',
                           f"Auto-failover triggered for '{_sl(plan['name'])}' - source unreachable for {int(elapsed)}s")
             except Exception as e:

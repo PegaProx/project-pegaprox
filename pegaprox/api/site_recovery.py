@@ -23,11 +23,11 @@ bp = Blueprint('site_recovery', __name__)
 
 
 # #225: wrap greenlet spawns so a crash sets plan status to 'failed' instead of stuck 'running'
-def _safe_spawn_failover(func, plan_id, *args):
+def _safe_spawn_failover(func, plan_id, *args, **kwargs):
     import gevent
     def _wrapper():
         try:
-            func(plan_id, *args)
+            func(plan_id, *args, **kwargs)
         except Exception as e:
             logging.error(f"[SR] Background task crashed for plan {plan_id}: {e}")
             try:
@@ -354,6 +354,10 @@ def add_plan_vm(plan_id):
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
 
+    # Prevent VM additions to running/testing plans to close TOCTOU authorization bypass
+    if plan['status'] in ('running', 'testing'):
+        return jsonify({'error': 'Cannot add VMs to a plan while it is running or testing'}), 409
+
     # Enforce cluster-level authorization for both source and target
     ok, err = check_cluster_access(plan['source_cluster'])
     if not ok:
@@ -459,6 +463,10 @@ def remove_plan_vm(plan_id, vm_id):
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
+
+    # Prevent VM removals from running/testing plans to close TOCTOU authorization bypass
+    if plan['status'] in ('running', 'testing'):
+        return jsonify({'error': 'Cannot remove VMs from a plan while it is running or testing'}), 409
 
     # Enforce cluster-level authorization for both source and target
     ok, err = check_cluster_access(plan['source_cluster'])
@@ -623,6 +631,9 @@ def execute_planned_failover(plan_id):
     if not vms:
         return jsonify({'error': 'No VMs in plan'}), 400
 
+    # Capture authorized VM set for TOCTOU mitigation
+    authorized_vmids = {vm['vmid'] for vm in vms}
+
     # MK May 2026 (#413 layer 5) - was `WHERE status = 'ready'` which broke the moment
     # a plan had been failed-over once before: a successful run sets status='completed',
     # which is non-'ready', so the next click rowcount=0 → 409 "concurrent failover".
@@ -644,7 +655,7 @@ def execute_planned_failover(plan_id):
         return jsonify({'error': f"Cannot start failover — plan is in state '{actual}' (need ready/completed/failed)"}), 409
 
     from pegaprox.background.site_recovery import execute_failover
-    _safe_spawn_failover(execute_failover, plan_id, 'planned')
+    _safe_spawn_failover(execute_failover, plan_id, 'planned', authorized_vmids=authorized_vmids)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'site_recovery.failover', f"Planned failover started: {plan['name']}")
@@ -684,6 +695,9 @@ def execute_emergency_failover(plan_id):
     if not vms:
         return jsonify({'error': 'No VMs in plan'}), 400
 
+    # Capture authorized VM set for TOCTOU mitigation
+    authorized_vmids = {vm['vmid'] for vm in vms}
+
     # MK May 2026 (#413 layer 5) - mirror the planned-failover relaxation: a successful
     # prior emergency leaves status='completed', which `WHERE status='ready'` rejected.
     db = get_db()
@@ -701,7 +715,7 @@ def execute_emergency_failover(plan_id):
         return jsonify({'error': f"Cannot start emergency failover — plan is in state '{actual}' (need ready/completed/failed)"}), 409
 
     from pegaprox.background.site_recovery import execute_failover
-    _safe_spawn_failover(execute_failover, plan_id, 'emergency')
+    _safe_spawn_failover(execute_failover, plan_id, 'emergency', authorized_vmids=authorized_vmids)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'site_recovery.emergency', f"Emergency failover started: {plan['name']}")
@@ -736,12 +750,19 @@ def execute_test_failover(plan_id):
     if not tgt_mgr or not tgt_mgr.is_connected:
         return jsonify({'error': 'Target cluster not reachable'}), 503
 
+    vms = _get_plan_vms(plan_id)
+    if not vms:
+        return jsonify({'error': 'No VMs in plan'}), 400
+
+    # Capture authorized VM set for TOCTOU mitigation
+    authorized_vmids = {vm['vmid'] for vm in vms}
+
     db = get_db()
     now = datetime.utcnow().isoformat()
     db.execute("UPDATE site_recovery_plans SET status = 'testing', updated_at = ? WHERE id = ?", (now, plan_id))
 
     from pegaprox.background.site_recovery import execute_test_failover
-    _safe_spawn_failover(execute_test_failover, plan_id)
+    _safe_spawn_failover(execute_test_failover, plan_id, authorized_vmids=authorized_vmids)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'site_recovery.test', f"Test failover started: {plan['name']}")
@@ -808,12 +829,19 @@ def execute_failback(plan_id):
     if not original_tgt or not original_tgt.is_connected:
         return jsonify({'error': 'Current cluster (original target) not reachable'}), 503
 
+    vms = _get_plan_vms(plan_id)
+    if not vms:
+        return jsonify({'error': 'No VMs in plan'}), 400
+
+    # Capture authorized VM set for TOCTOU mitigation
+    authorized_vmids = {vm['vmid'] for vm in vms}
+
     db = get_db()
     now = datetime.utcnow().isoformat()
     db.execute("UPDATE site_recovery_plans SET status = 'running', updated_at = ? WHERE id = ?", (now, plan_id))
 
     from pegaprox.background.site_recovery import execute_failover
-    _safe_spawn_failover(execute_failover, plan_id, 'failback')
+    _safe_spawn_failover(execute_failover, plan_id, 'failback', authorized_vmids=authorized_vmids)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'site_recovery.failback', f"Failback started: {plan['name']}")
