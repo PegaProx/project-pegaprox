@@ -336,13 +336,72 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         return False, str(e)
 
 
-def _start_replicated_vm(tgt_mgr, vmid, vm_type='qemu'):
+def _verify_source_vm_stopped(src_mgr, vmid, vm_name=''):
+    """Verify that a source VM is actually stopped before starting its replica.
+    
+    This is a critical safety check for emergency failover to prevent split-brain
+    scenarios where both source and target VMs run simultaneously.
+    
+    Returns (verified_stopped, error_message):
+        - (True, '') if VM is confirmed stopped
+        - (False, 'reason') if VM is running or state cannot be verified
+    """
+    if not src_mgr:
+        return False, "Source cluster manager not available"
+    
+    # If management plane is down, we cannot verify state
+    if not src_mgr.is_connected:
+        return False, "Source management plane unreachable - cannot verify VM is stopped"
+    
+    try:
+        # Try to get VM status from cluster resources
+        vms = src_mgr.get_vms() if hasattr(src_mgr, 'get_vms') else []
+        for vm in vms:
+            if int(vm.get('vmid', 0)) == int(vmid):
+                status = vm.get('status', 'unknown')
+                if status == 'running':
+                    return False, f"VM {vmid} ({vm_name}) is still RUNNING on source"
+                elif status in ('stopped', 'halted'):
+                    return True, ''
+                else:
+                    return False, f"VM {vmid} ({vm_name}) has ambiguous state '{status}' on source"
+        
+        # VM not found in resources list - could be deleted or API issue
+        return False, f"VM {vmid} ({vm_name}) not found in source cluster resources"
+    
+    except Exception as e:
+        return False, f"Failed to verify source VM state: {e}"
+
+
+def _start_replicated_vm(tgt_mgr, vmid, vm_type='qemu', src_mgr=None, vm_name='', require_source_stopped=True):
     """Start a replicated VM on target (emergency failover).
     The VM should already exist on target from replication.
+    
+    Args:
+        tgt_mgr: Target cluster manager
+        vmid: VM ID to start
+        vm_type: VM type ('qemu' or 'lxc')
+        src_mgr: Source cluster manager (for safety verification)
+        vm_name: VM name (for logging)
+        require_source_stopped: If True, verify source VM is stopped before starting replica
+    
     Returns (success, error)
     NS Apr 2026: was calling non-existent start_vm() — use vm_action('start')
-    Also check cluster/resources directly instead of per-node get_vms (faster + reliable)"""
+    Also check cluster/resources directly instead of per-node get_vms (faster + reliable)
+    
+    SECURITY: Emergency failover safety check added to prevent split-brain scenarios.
+    Before starting a replica, we verify the source VM is actually stopped when possible.
+    """
     try:
+        # CRITICAL SAFETY CHECK: Verify source VM is stopped before starting replica
+        # This prevents split-brain where both source and target VMs serve traffic
+        if require_source_stopped and src_mgr:
+            verified, verify_err = _verify_source_vm_stopped(src_mgr, vmid, vm_name)
+            if not verified:
+                logger.error(f"[SR] BLOCKING emergency start of VM {vmid} ({vm_name}): {verify_err}")
+                return False, f"Source VM safety check failed: {verify_err}"
+            logger.info(f"[SR] Source VM {vmid} ({vm_name}) verified stopped - safe to start replica")
+        
         # find target node for the VM via cluster resources (one call vs N)
         try:
             res = tgt_mgr._api_get(
@@ -508,9 +567,10 @@ def execute_failover(plan_id, failover_type='planned'):
 
             if failover_type == 'emergency':
                 # source is down - start replicated VM on target
+                # SECURITY: Pass source manager for safety verification
                 logger.info(f"[SR] Emergency: starting {_sl(vm_name)} ({vmid}) on target")
                 _broadcast_progress(plan_id, f"Starting {_sl(vm_name)} on target...", int(completed / total_vms * 100))
-                ok, err = _start_replicated_vm(tgt_mgr, vmid, vm_type)
+                ok, err = _start_replicated_vm(tgt_mgr, vmid, vm_type, src_mgr=src_mgr, vm_name=vm_name, require_source_stopped=True)
             else:
                 # planned or failback - live migrate
                 if not src_mgr or not src_mgr.is_connected:
@@ -889,6 +949,33 @@ def _heartbeat_check():
                 _last_fail_times.pop(plan_id, None)
                 _cooldowns[plan_id] = now + 600  # shorter cooldown — admin may fix replication
                 continue
+            
+            # SECURITY: Additional safety check - if source management plane is still reachable
+            # (e.g., transient network partition), verify VMs are actually stopped before
+            # triggering automatic failover. This prevents split-brain scenarios.
+            # Note: This check happens here in the heartbeat because if management comes back
+            # during the timeout window, we want to verify state before triggering failover.
+            if src_mgr and src_mgr.is_connected:
+                logger.warning(f"[SR] Source management plane for '{_sl(plan['name'])}' is now reachable - "
+                              f"verifying VMs are stopped before auto-failover")
+                vm_state_blockers = []
+                for vm_row in vms:
+                    vm = dict(vm_row)
+                    vmid = vm['vmid']
+                    vm_name = vm.get('vm_name', f'VM {vmid}')
+                    verified, verify_err = _verify_source_vm_stopped(src_mgr, vmid, vm_name)
+                    if not verified:
+                        vm_state_blockers.append(f"VM {vmid} ({vm_name}): {verify_err}")
+                
+                if vm_state_blockers:
+                    logger.error(f"[SR] BLOCKING auto-failover for '{_sl(plan['name'])}' — "
+                                f"source VMs not confirmed stopped: {'; '.join(vm_state_blockers[:3])}")
+                    log_audit('system', 'site_recovery.auto_failover_blocked',
+                             f"Auto-failover BLOCKED for '{_sl(plan['name'])}' - source VMs still running or state ambiguous: "
+                             f"{'; '.join(vm_state_blockers[:3])}")
+                    _last_fail_times.pop(plan_id, None)
+                    _cooldowns[plan_id] = now + 600  # shorter cooldown
+                    continue
 
             logger.error(f"[SR] AUTO-FAILOVER triggered for '{_sl(plan['name'])}' after {int(elapsed)}s")
             _last_fail_times.pop(plan_id, None)
