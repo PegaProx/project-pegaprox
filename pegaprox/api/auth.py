@@ -770,8 +770,12 @@ def auth_login():
             'SELECT COUNT(*) AS n FROM webauthn_credentials WHERE username = ?', (username,)
         )
         has_webauthn = bool(_cnt_row and _cnt_row['n'] > 0)
-    except Exception:
-        has_webauthn = False
+    except Exception as e:
+        # sec (audit): fail-closed on database errors — treating a query failure as
+        # "no WebAuthn enrolled" would bypass MFA for WebAuthn-only accounts during
+        # transient database unavailability. Log the error and deny access.
+        logging.error(f"WebAuthn enrollment check failed for user '{username}': {e}")
+        return jsonify({'error': 'Authentication service temporarily unavailable'}), 503
 
     if has_totp or has_webauthn:
         # Path A: caller submitted a WebAuthn proof (from /api/webauthn/auth/finish)
@@ -1437,8 +1441,12 @@ def verify_password_api():
             db = get_db()
             wa_row = db.query('SELECT COUNT(*) AS n FROM webauthn_credentials WHERE username = ?', (username,))
             has_webauthn = bool(wa_row and wa_row[0]['n'] > 0)
-        except Exception:
-            has_webauthn = False
+        except Exception as e:
+            # sec (audit): fail-closed on database errors — treating a query failure as
+            # "no WebAuthn enrolled" would bypass re-authentication for WebAuthn-enrolled
+            # OIDC admins during transient database unavailability. Log and deny access.
+            logging.error(f"WebAuthn enrollment check failed for user '{username}' during re-auth: {e}")
+            return jsonify({'error': 'Authentication service temporarily unavailable'}), 503
 
         if has_webauthn:
             if not webauthn_proof:
