@@ -210,8 +210,9 @@ def test_the_four_vm_starting_failover_routes_ask_for_start():
     routes deliberately stay on vm.view."""
     src = open('pegaprox/api/site_recovery.py').read()
 
-    assert src.count('_authz_plan_vms(plan, starts_vms=True)') == 4
-    assert 'def _authz_plan_vms(plan, starts_vms=False)' in src
+    # SECURITY FIX: All VM-starting routes now also check target cluster authorization
+    assert src.count('_authz_plan_vms(plan, starts_vms=True, check_target=True)') == 4
+    assert 'def _authz_plan_vms(plan, starts_vms=False, check_target=False)' in src
 
 
 def test_an_unconfined_dr_operator_is_not_asked_for_vm_start():
