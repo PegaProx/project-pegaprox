@@ -83,6 +83,7 @@ def _row_to_policy(r):
         'last_run_status': r['last_run_status'] or '',
         'notes': r['notes'] or '',
         'created_by': r['created_by'] or '',
+        'creator_effective_role': (r['creator_effective_role'] or '') if 'creator_effective_role' in r.keys() else '',
         'created_at': r['created_at'],
     }
 
@@ -383,6 +384,11 @@ def _execute_policy(policy_id, force=False):
     # can actually touch — otherwise a vm.snapshot holder could tag-target VMs they can't
     # see. Resolve the creator once; legacy policies with no recorded creator keep running
     # unfiltered (don't break existing automation), we just can't scope them.
+    # NS (sec-fix): restore the creator's effective_role from the stored policy so an
+    # admin-owned but resource-restricted API token doesn't regain full admin privileges
+    # during asynchronous execution. The stored effective_role is the token's role at
+    # policy creation time, floored to the owner's role then; if the owner was later
+    # demoted, the token can't outrank them now either (we re-floor below).
     policy_creator = None
     creator_name = policy.get('created_by', '')
     if creator_name:
@@ -390,6 +396,26 @@ def _execute_policy(policy_id, force=False):
             policy_creator = load_users().get(creator_name)
             if policy_creator:
                 policy_creator['username'] = creator_name
+                # Restore the effective_role that was active at policy creation time
+                stored_eff_role = policy.get('creator_effective_role', '')
+                if stored_eff_role:
+                    # Re-floor to the owner's CURRENT role so a demoted owner can't
+                    # keep executing with their old elevated privileges
+                    from pegaprox.models.permissions import ROLE_ADMIN, ROLE_USER, ROLE_VIEWER
+                    _h = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
+                    owner_current_role = policy_creator.get('role', ROLE_VIEWER)
+                    # If stored_eff_role is a custom role (not in _h), keep it as-is but
+                    # only if the owner still has at least that level; otherwise floor to
+                    # the owner's current builtin level. For builtin roles, re-floor numerically.
+                    if stored_eff_role in _h:
+                        eff_lvl = min(_h.get(stored_eff_role, 1), _h.get(owner_current_role, 1))
+                        policy_creator['effective_role'] = next((r for r, lvl in _h.items() if lvl == eff_lvl), ROLE_VIEWER)
+                    else:
+                        # Custom role: keep it if owner is still admin/user level, else floor to viewer
+                        if _h.get(owner_current_role, 1) >= 2:
+                            policy_creator['effective_role'] = stored_eff_role
+                        else:
+                            policy_creator['effective_role'] = ROLE_VIEWER
             else:
                 log_lines.append(f"creator '{creator_name}' no longer exists — per-VM authz not applied")
         except Exception as e:
@@ -606,18 +632,22 @@ def create_policy(cluster_id):
         return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
 
     pid = uuid.uuid4().hex[:12]
+    # NS (sec-fix): capture the creator's effective_role at policy creation time so
+    # an admin-owned but resource-restricted API token doesn't regain full admin
+    # privileges during asynchronous execution. This preserves the token's scope.
+    creator_effective_role = creator.get('effective_role', '')
     try:
         c = get_db().conn.cursor()
         c.execute('''INSERT INTO snapshot_policies
             (id, cluster_id, name, target_type, target_value, schedule, schedule_at,
              schedule_cron, schedule_day, run_once_at, prune_only,
              retention_count, retention_days, include_ram, enabled, notes,
-             created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             created_by, creator_effective_role, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (pid, cluster_id, name, target_type, target_value, schedule, schedule_at,
              schedule_cron, schedule_day, run_once_at, 1 if prune_only else 0,
              retention_count, retention_days, 1 if include_ram else 0, 1 if enabled else 0,
-             notes, _current_user(), datetime.now().isoformat()))
+             notes, _current_user(), creator_effective_role, datetime.now().isoformat()))
         get_db().conn.commit()
         c.execute('SELECT * FROM snapshot_policies WHERE id=?', (pid,))
         return jsonify({'policy': _row_to_policy(c.fetchone())})
