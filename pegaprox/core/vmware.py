@@ -22,6 +22,61 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from pegaprox.core.db import get_db
 from pegaprox.globals import vmware_managers
 
+
+def _validate_vmware_host_and_port(host: str, port: int) -> tuple:
+    """Validate VMware host and port to prevent SSRF attacks.
+    
+    Returns:
+        tuple: (validated_host, validated_port) on success
+    
+    Raises:
+        ValueError: If validation fails
+    """
+    try:
+        # Validate port is a valid integer in reasonable range
+        port_int = int(port)
+        if not (1 <= port_int <= 65535):
+            raise ValueError("Invalid configuration")
+        
+        # Validate host is not empty
+        if not host or not isinstance(host, str):
+            raise ValueError("Invalid configuration")
+        
+        host = host.strip()
+        if not host:
+            raise ValueError("Invalid configuration")
+        
+        # Parse the host to extract domain/hostname
+        # Handle cases where host might include protocol or path
+        if '://' in host:
+            parsed = urlparse(host)
+            hostname = parsed.hostname
+            if not hostname:
+                raise ValueError("Invalid configuration")
+        else:
+            # Parse as URL with dummy scheme to extract hostname
+            # This handles cases like "host:port" or "host/path"
+            parsed = urlparse(f'https://{host}')
+            hostname = parsed.hostname
+            if not hostname:
+                # Fallback: extract hostname manually
+                hostname = host.split(':')[0].split('/')[0].strip()
+        
+        if not hostname:
+            raise ValueError("Invalid configuration")
+        
+        # Domain allowlist - only allow requests to explicitly permitted domains
+        allowed_domains = ['example.com']  # add your allowed domains here
+        
+        # Check if hostname matches any allowed domain (exact match only, no subdomains)
+        if hostname not in allowed_domains:
+            raise ValueError("Invalid configuration")
+        
+        return (hostname, port_int)
+        
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError("Invalid configuration")
+
 class VMwareManager:
     """Manages connection to a vCenter Server or standalone ESXi host.
     
@@ -33,8 +88,42 @@ class VMwareManager:
     def __init__(self, vmware_id: str, config: dict):
         self.id = vmware_id
         self.name = config.get('name', 'vCenter')
-        self.host = config.get('host', '')
-        self.port = int(config.get('port', 443))
+        
+        # Validate host and port to prevent SSRF
+        raw_host = config.get('host', '')
+        raw_port = config.get('port', 443)
+        try:
+            validated_host, validated_port = _validate_vmware_host_and_port(raw_host, raw_port)
+            self.host = validated_host
+            self.port = validated_port
+        except ValueError as e:
+            # Set invalid values that will cause connection to fail with clear error
+            self.host = ''
+            self.port = 443
+            self.connected = False
+            self.last_error = str(e)
+            # Initialize remaining attributes with safe defaults
+            self.username = config.get('username', 'administrator@vsphere.local')
+            self.password = config.get('password', '')
+            self.server_type = config.get('server_type', 'vcenter')
+            self.ssl_verify = config.get('ssl_verify', False)
+            self.enabled = config.get('enabled', True)
+            self.linked_clusters = config.get('linked_clusters', [])
+            self.notes = config.get('notes', '')
+            self.session_id = None
+            self.api_version = None
+            self.server_info = {}
+            self._api_style = 'modern'
+            self._connection_type = 'rest'
+            self._si = None
+            self._soap_content = None
+            self._base_url = ''
+            self._connect_lock = threading.Lock()
+            self._connect_fail_count = 0
+            self._last_ping = 0.0
+            self._last_ping_ok = 0.0
+            return
+        
         self.username = config.get('username', 'administrator@vsphere.local')
         self.password = config.get('password', '')
         self.server_type = config.get('server_type', 'vcenter')  # 'vcenter' or 'esxi'
