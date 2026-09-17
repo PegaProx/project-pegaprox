@@ -337,9 +337,14 @@ def ldap_provision_user(ldap_result: dict) -> dict:
         user['ldap_dn'] = ldap_result.get('user_dn', '')
         user['last_ldap_sync'] = datetime.now().isoformat()
         
-        # MK: Sync tenant assignment from LDAP group mapping
-        if ldap_result.get('tenant'):
-            user['tenant_id'] = ldap_result['tenant']  # NS: Must be tenant_id (not tenant) for code compatibility
+        # NS Sep 2026 (Aikido pentest) — LDAP is authoritative on tenant assignment. The old code
+        # only updated tenant_id when the LDAP result contained a truthy tenant, so removing a user
+        # from the tenant-granting group (tenant → None) left the persisted tenant_id unchanged.
+        # The user then retained authorization for the former tenant's clusters after group removal.
+        # Unconditionally sync the tenant (even when None/'') to revoke stale tenant membership.
+        # Fall back to DEFAULT_TENANT_ID when LDAP provides no tenant (built-in group mappings).
+        from pegaprox.utils.rbac import DEFAULT_TENANT_ID
+        user['tenant_id'] = ldap_result.get('tenant') or DEFAULT_TENANT_ID
         
         # NS Aug 2026 (Aikido pentest) — LDAP is authoritative on each sync. The old code only
         # ever UNIONED group perms in, so dropping a user from a mapped group never revoked the
@@ -379,7 +384,7 @@ def ldap_provision_user(ldap_result: dict) -> dict:
             # authoritatively revoke it if the group mapping later changes (see the update path).
             'ldap_permissions': list(ldap_result.get('permissions', []) or []),
             'ldap_tenant_permissions': dict(ldap_result.get('tenant_permissions', {}) or {}),
-            'tenant_id': ldap_result.get('tenant', ''),  # NS: Must be tenant_id
+            'tenant_id': ldap_result.get('tenant') or DEFAULT_TENANT_ID,  # NS: Fall back to default tenant
             'tenant_permissions': ldap_result.get('tenant_permissions', {}),
             'theme': '',
             'language': '',
