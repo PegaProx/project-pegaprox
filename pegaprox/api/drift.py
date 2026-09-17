@@ -436,25 +436,65 @@ def drift_status(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     try:
+        from pegaprox.api.helpers import caller_is_scoped
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import user_can_access_vm
+        
+        # Build the acting user for scope checks (honors token-floored effective_role)
+        user = build_authz_user(request.session.get('user', ''), request.session)
+        is_scoped = caller_is_scoped(user, cluster_id)
+        
         c = get_db().conn.cursor()
         c.execute('''
-            SELECT kind, severity, COUNT(*) AS n
+            SELECT kind, scope, severity, COUNT(*) AS n
             FROM drift_events
             WHERE cluster_id = ? AND status = 'open'
-            GROUP BY kind, severity
+            GROUP BY kind, scope, severity
         ''', (cluster_id,))
         by_kind = {}
         total = 0
         sev_total = {'critical': 0, 'warning': 0, 'info': 0}
         for r in c.fetchall():
-            d = by_kind.setdefault(r['kind'], {'critical': 0, 'warning': 0, 'info': 0})
-            d[r['severity']] = r['n']
+            kind = r['kind']
+            scope = r['scope']
+            
+            # Apply the same scope filtering as list_events
+            if is_scoped:
+                if kind == 'vm_config':
+                    try:
+                        vm_type, vmid_str = scope.split('/', 1)
+                        vmid = int(vmid_str)
+                        if not user_can_access_vm(user, cluster_id, vmid, 'vm.view', vm_type):
+                            continue  # Skip this event
+                    except (ValueError, AttributeError):
+                        continue
+                else:
+                    # Non-VM events are cluster-wide data that scoped callers must not see
+                    continue
+            
+            d = by_kind.setdefault(kind, {'critical': 0, 'warning': 0, 'info': 0})
+            d[r['severity']] += r['n']
             sev_total[r['severity']] = sev_total.get(r['severity'], 0) + r['n']
             total += r['n']
 
-        # baseline count
-        c.execute("SELECT COUNT(*) AS n FROM drift_baselines WHERE cluster_id=?", (cluster_id,))
-        baseline_count = c.fetchone()['n']
+        # baseline count - scoped users only see vm_config baselines for their VMs
+        if is_scoped:
+            c.execute('''
+                SELECT kind, scope FROM drift_baselines WHERE cluster_id=?
+            ''', (cluster_id,))
+            baseline_count = 0
+            for br in c.fetchall():
+                if br['kind'] == 'vm_config':
+                    try:
+                        vm_type, vmid_str = br['scope'].split('/', 1)
+                        vmid = int(vmid_str)
+                        if user_can_access_vm(user, cluster_id, vmid, 'vm.view', vm_type):
+                            baseline_count += 1
+                    except (ValueError, AttributeError):
+                        pass
+        else:
+            c.execute("SELECT COUNT(*) AS n FROM drift_baselines WHERE cluster_id=?", (cluster_id,))
+            baseline_count = c.fetchone()['n']
 
         # last scan: pick max(detected_at) from events, fallback to baseline created_at
         c.execute("SELECT MAX(detected_at) AS t FROM drift_events WHERE cluster_id=?", (cluster_id,))
@@ -484,6 +524,14 @@ def list_events(cluster_id):
     status = request.args.get('status', 'open')
     limit = max(1, min(int(request.args.get('limit', '100')), 500))
     try:
+        from pegaprox.api.helpers import caller_is_scoped
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import user_can_access_vm
+        
+        # Build the acting user for scope checks (honors token-floored effective_role)
+        user = build_authz_user(request.session.get('user', ''), request.session)
+        is_scoped = caller_is_scoped(user, cluster_id)
+        
         c = get_db().conn.cursor()
         if status == 'all':
             c.execute('''SELECT * FROM drift_events WHERE cluster_id=?
@@ -496,6 +544,28 @@ def list_events(cluster_id):
         out = []
         for r in c.fetchall():
             d = dict(r)
+            kind = d.get('kind', '')
+            scope = d.get('scope', '')
+            
+            # Scoped callers (VM-ACL / pool-only) may only see vm_config events for VMs they can access.
+            # Whole-cluster events (storage, network, cluster_options) and other VMs' configs are denied.
+            if is_scoped:
+                if kind == 'vm_config':
+                    # scope format: "qemu/100" or "lxc/101"
+                    try:
+                        vm_type, vmid_str = scope.split('/', 1)
+                        vmid = int(vmid_str)
+                        # Check if the caller can access this specific VM
+                        if not user_can_access_vm(user, cluster_id, vmid, 'vm.view', vm_type):
+                            continue  # Skip this event
+                    except (ValueError, AttributeError):
+                        # Malformed scope → fail closed (skip)
+                        continue
+                else:
+                    # Non-VM events (storage, network, cluster_options) are cluster-wide data
+                    # that scoped callers must not see
+                    continue
+            
             try:
                 d['diff'] = json.loads(d['diff'])
             except Exception:
@@ -515,6 +585,10 @@ def acknowledge_event(eid):
     promote = bool(body.get('promote', False))
     user = _current_user()
     try:
+        from pegaprox.api.helpers import caller_is_scoped
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import user_can_access_vm
+        
         c = get_db().conn.cursor()
         c.execute('SELECT * FROM drift_events WHERE id=?', (eid,))
         ev = c.fetchone()
@@ -526,6 +600,25 @@ def acknowledge_event(eid):
         ok, err = check_cluster_access(ev['cluster_id'])
         if not ok:
             return err
+        
+        # Scope check: scoped users may only acknowledge events they can see
+        acting_user = build_authz_user(request.session.get('user', ''), request.session)
+        is_scoped = caller_is_scoped(acting_user, ev['cluster_id'])
+        if is_scoped:
+            kind = ev['kind']
+            scope = ev['scope']
+            if kind == 'vm_config':
+                try:
+                    vm_type, vmid_str = scope.split('/', 1)
+                    vmid = int(vmid_str)
+                    if not user_can_access_vm(acting_user, ev['cluster_id'], vmid, 'vm.view', vm_type):
+                        return jsonify({'error': 'Access denied to this event'}), 403
+                except (ValueError, AttributeError):
+                    return jsonify({'error': 'Access denied to this event'}), 403
+            else:
+                # Non-VM events are cluster-wide data that scoped callers must not access
+                return jsonify({'error': 'Access denied to this event'}), 403
+        
         c.execute('''UPDATE drift_events SET status='acknowledged',
                      acknowledged_at=?, acknowledged_by=? WHERE id=?''',
                   (datetime.now().isoformat(), user, eid))
