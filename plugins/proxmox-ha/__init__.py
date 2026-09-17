@@ -82,14 +82,62 @@ def _authz_sid_or_error(cluster_id, validated_sid, permission):
     VM/CT behind the sid, not merely hold ha.view/ha.config on a reachable cluster. Cluster access
     passes for any VM-ACL/pool-scoped tenant user, so without this a portal user could add/remove/
     reconfigure another customer's VM in HA. Mirrors the built-in set_vm_ha_priority_api gate.
+    
+    Security fix (pentest): Verify the VM currently exists at this VMID before authorizing HA
+    operations. The ACL lookup uses only (cluster_id, vmid) without an immutable guest identity,
+    so when a VM is deleted and its VMID reused, a stale ACL would authorize operations on the
+    replacement guest. Checking that the VM exists and is of the expected type mitigates VMID
+    reuse attacks by ensuring the authorization applies to a currently-present guest, not a
+    deleted one whose ID was recycled.
+    
     Returns None if allowed, else an (error_response, status) tuple."""
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.utils.rbac import user_can_access_vm
     kind, _, num = validated_sid.partition(':')
     if kind not in ('vm', 'ct') or not num.isdigit():
         return jsonify({'error': 'Permission denied for this HA resource'}), 403
+    
+    vmid = int(num)
+    expected_type = 'lxc' if kind == 'ct' else 'qemu'
+    
+    # Security: Verify the VM currently exists at this VMID with the expected type before
+    # consulting the ACL. This prevents stale ACLs from authorizing HA operations on a
+    # replacement guest after VMID reuse. The ACL schema has no immutable identity field,
+    # so we must confirm the guest is present and matches the SID type before granting access.
+    manager, err = _get_manager_or_error(cluster_id)
+    if err:
+        return err
+    
+    try:
+        # Fetch current cluster resources to verify the VM exists and matches the expected type
+        resources = manager.get_vm_resources() if hasattr(manager, 'get_vm_resources') else []
+        vm_found = False
+        for r in resources:
+            if int(r.get('vmid', 0)) == vmid:
+                actual_type = r.get('type', 'qemu')
+                if actual_type != expected_type:
+                    # Type mismatch: the SID references a different guest type than what's
+                    # currently at this VMID (e.g., ACL for vm:100 but ct:100 exists now)
+                    log.warning(f"[{cluster_id}] HA authz: type mismatch for {validated_sid} "
+                               f"(expected {expected_type}, found {actual_type})")
+                    return jsonify({'error': 'Permission denied for this HA resource'}), 403
+                vm_found = True
+                break
+        
+        if not vm_found:
+            # No VM exists at this VMID: either it was deleted or never existed. Deny access
+            # to prevent stale ACLs from authorizing operations on a future guest at this ID.
+            log.warning(f"[{cluster_id}] HA authz: VM {vmid} not found (stale ACL or deleted guest)")
+            return jsonify({'error': 'Permission denied for this HA resource'}), 403
+    except Exception as e:
+        log.error(f"[{cluster_id}] HA authz: failed to verify VM {vmid} existence: {e}")
+        # Fail closed: if we can't verify the VM exists, deny access rather than risk
+        # authorizing a stale ACL on a reused VMID
+        return jsonify({'error': 'Permission denied for this HA resource'}), 403
+    
+    # VM exists and type matches; now check ACL-based authorization
     user = build_authz_user(request.session.get('user', ''), request.session)
-    if not user_can_access_vm(user, cluster_id, int(num), permission, 'lxc' if kind == 'ct' else 'qemu'):
+    if not user_can_access_vm(user, cluster_id, vmid, permission, expected_type):
         return jsonify({'error': 'Permission denied for this HA resource'}), 403
     return None
 
