@@ -549,6 +549,56 @@ def require_unconfined(cluster_id):
     return None
 
 
+def require_pbs_full_access(pbs_id):
+    """sec (pentest): guard for a WHOLE-PBS operation — package upgrade, reboot, or any other
+    host-wide action that affects every cluster linked to this PBS. check_pbs_access() admits a
+    caller who reaches ANY ONE linked cluster, deferring per-operation decisions downstream. For
+    host-wide operations the only correct answer for a tenant-scoped caller is: you must reach
+    EVERY linked cluster, not just one.
+
+    A PBS with no linked_clusters is treated as accessible to all (backward compatibility).
+    Global admins pass unconditionally. Otherwise the caller's allowed cluster set must be a
+    superset of the PBS's linked clusters.
+
+    Returns an error response to `return`, or None when the caller may proceed."""
+    from flask import request, jsonify
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.globals import pbs_managers
+    from pegaprox.models.permissions import ROLE_ADMIN
+
+    if pbs_id not in pbs_managers:
+        return jsonify({'error': 'PBS server not found'}), 404
+
+    pbs_mgr = pbs_managers[pbs_id]
+    user = build_authz_user(request.session.get('user', ''), request.session)
+
+    # Global admins have full access
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return None
+
+    # Get PBS linked clusters
+    pbs_linked = pbs_mgr.linked_clusters or []
+
+    # If PBS has no linked clusters, allow access (backward compatibility)
+    if not pbs_linked:
+        return None
+
+    # Get user's allowed clusters
+    user_clusters = get_user_clusters(user)
+
+    # If user has access to all clusters (None), allow
+    if user_clusters is None:
+        return None
+
+    # Check if user has access to ALL linked clusters (not just one)
+    for cluster_id in pbs_linked:
+        if cluster_id not in user_clusters:
+            return jsonify({'error': 'Access denied: this PBS operation affects clusters outside your authorization scope'}), 403
+
+    return None
+
+
 def check_vmware_access(vmware_id):
     """NS Jul 2026 (CodeAnt re-scan IDOR) — tenant gate for a VMware/ESXi server, mirroring
     check_pbs_access. Most vmware.py routes only had a role perm and never scoped to tenant, so

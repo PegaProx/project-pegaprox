@@ -12,7 +12,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined, require_pbs_full_access
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -424,9 +424,11 @@ def refresh_pbs_apt(pbs_id):
 @require_auth(perms=['admin.settings'])
 def start_pbs_update(pbs_id):
     """Start apt-get dist-upgrade on PBS host via SSH"""
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
-    if not ok:
+    # sec (pentest): host-wide package upgrade + optional reboot affects EVERY linked cluster,
+    # not just one. check_pbs_access() admits a caller who reaches any single linked cluster;
+    # require_pbs_full_access() requires access to ALL of them.
+    err = require_pbs_full_access(pbs_id)
+    if err:
         return err
     
     if pbs_id not in pbs_managers:
@@ -478,6 +480,11 @@ def get_pbs_update_status(pbs_id):
 @require_auth(perms=['admin.settings'])
 def clear_pbs_update_status(pbs_id):
     """Clear completed/failed update status"""
+    # sec (pentest): clearing update status is less critical than starting one, but for
+    # consistency require the same whole-PBS access check.
+    err = require_pbs_full_access(pbs_id)
+    if err:
+        return err
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     ok = pbs_managers[pbs_id].clear_update_status()
