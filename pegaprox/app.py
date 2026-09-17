@@ -1432,18 +1432,50 @@ def _create_listener(bind_host, port_num):
 # keep-alive (or a client that finished the TLS handshake then went silent) parks in
 # read_requestline forever, pinning its pool slot; once the pool fills, gevent.baseserver stops
 # accepting and the whole instance goes unreachable while the process sits idle. This mixin bounds
-# ONLY the inter-request idle read — a request that is actually being served (headers/body, SSE
-# streams, uploads, websocket upgrades) is never touched. PEGAPROX_KEEPALIVE_TIMEOUT=0 restores the
+# the entire unauthenticated request parsing phase (request line, headers, and body reads) to prevent
+# slow-HTTP attacks from exhausting the worker pool. PEGAPROX_KEEPALIVE_TIMEOUT=0 restores the
 # old unbounded behaviour.
 _KEEPALIVE_IDLE_TIMEOUT = float(os.environ.get('PEGAPROX_KEEPALIVE_TIMEOUT', '75'))
 
 
 class _IdleTimeoutMixin:
-    """Bound the idle wait for the next request line. Compose ahead of a gevent pywsgi handler
-    class in the MRO so `super().read_requestline()` reaches the real handler."""
+    """Bound the idle wait for the entire request parsing phase (request line, headers, body).
+    Compose ahead of a gevent pywsgi handler class in the MRO so `super().read_request()` reaches
+    the real handler. This prevents slow-HTTP attacks where clients send incomplete headers or
+    bodies to exhaust the finite worker pool."""
     _idle_timeout = _KEEPALIVE_IDLE_TIMEOUT
 
+    def read_request(self, raw_requestline):
+        """Wrap the entire request parsing (headers + body declaration) with a timeout.
+        
+        This method is called by gevent.pywsgi.WSGIHandler after read_requestline() returns.
+        It parses headers and prepares for body reading. By wrapping it with a timeout, we
+        prevent slow-header and slow-body attacks from holding worker slots indefinitely.
+        """
+        to = self._idle_timeout
+        if not to or to <= 0:
+            return super().read_request(raw_requestline)  # disabled → old unbounded behaviour
+        import gevent
+        t = gevent.Timeout(to)
+        t.start()
+        try:
+            return super().read_request(raw_requestline)
+        except gevent.Timeout as ex:
+            if ex is t:
+                # Timeout during header/body parsing → close connection
+                self.close_connection = True
+                return
+            raise
+        finally:
+            t.close()
+
     def read_requestline(self):
+        """Bound the idle wait for the request line with the same timeout.
+        
+        This covers the inter-request idle period (keep-alive connections waiting for the
+        next request). Once a request line arrives, read_request() takes over with its own
+        timeout for the header/body parsing phase.
+        """
         to = self._idle_timeout
         if not to or to <= 0:
             return super().read_requestline()          # disabled → old unbounded behaviour
