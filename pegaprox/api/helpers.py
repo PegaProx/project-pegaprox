@@ -579,6 +579,74 @@ def check_vmware_access(vmware_id):
     return False, (jsonify({'error': 'Access denied to this VMware server'}), 403)
 
 
+def check_vmware_cluster_access(vmware_id, vsphere_cluster_id):
+    """NS Dec 2026 (pentest) — cluster-level authorization for vSphere cluster operations.
+    
+    The DRS/HA mutation routes accept a vSphere cluster ID (e.g., 'domain-c7') which is an
+    internal vCenter identifier. In multi-tenant deployments where multiple application clusters
+    share a VMware server, a user with access to one application cluster could manipulate
+    vSphere clusters belonging to other application clusters.
+    
+    This function validates that:
+    1. The user has access to the VMware server (via check_vmware_access)
+    2. The vSphere cluster is mapped to an application cluster the user can access
+    
+    If no mapping exists for the vSphere cluster, access is denied by default (fail-closed).
+    Admins can configure mappings via the vmware_cluster_mappings table.
+    
+    Returns (True, None) or (False, error_response).
+    """
+    from flask import request, jsonify
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.globals import vmware_managers
+    from pegaprox.models.permissions import ROLE_ADMIN
+    from pegaprox.core.db import get_db
+    
+    # First check server-level access
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return ok, err
+    
+    # Admin always has access
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return True, None
+    
+    # Check if there's a mapping for this vSphere cluster
+    try:
+        db = get_db()
+        cursor = db.conn.cursor()
+        cursor.execute('''
+            SELECT app_cluster_id FROM vmware_cluster_mappings
+            WHERE vmware_id = ? AND vsphere_cluster_id = ?
+        ''', (vmware_id, vsphere_cluster_id))
+        row = cursor.fetchone()
+        
+        if not row:
+            # No mapping exists - fail closed for security
+            # In a properly configured system, all vSphere clusters should be mapped
+            logging.warning(f"[VMware] No cluster mapping for {vmware_id}/{vsphere_cluster_id}")
+            return False, (jsonify({'error': 'Access denied: cluster not mapped to any application cluster'}), 403)
+        
+        app_cluster_id = row['app_cluster_id']
+        
+        # Check if user has access to the mapped application cluster
+        uc = get_user_clusters(user)
+        if uc is None:
+            # User has access to all clusters
+            return True, None
+        
+        if app_cluster_id in uc:
+            return True, None
+        
+        return False, (jsonify({'error': 'Access denied: you do not have access to this cluster'}), 403)
+        
+    except Exception as e:
+        logging.error(f"[VMware] Error checking cluster access: {e}")
+        return False, (jsonify({'error': 'Internal error checking cluster access'}), 500)
+
+
 def safe_error(e, default_msg='An internal error occurred'):
     """Return a safe error message for API responses.
     MK Feb 2026 - logs full exception but returns generic message to client.

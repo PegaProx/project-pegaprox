@@ -1970,4 +1970,64 @@ def save_vmware_server(vmware_id: str, config: dict):
     db.conn.commit()
 
 
+def get_vmware_cluster_mappings(vmware_id: str) -> dict:
+    """Get all vSphere cluster to application cluster mappings for a VMware server.
+    
+    Returns a dict mapping vSphere cluster IDs to application cluster IDs.
+    """
+    db = get_db()
+    cursor = db.conn.cursor()
+    cursor.execute('''
+        SELECT vsphere_cluster_id, app_cluster_id FROM vmware_cluster_mappings
+        WHERE vmware_id = ?
+    ''', (vmware_id,))
+    return {row['vsphere_cluster_id']: row['app_cluster_id'] for row in cursor.fetchall()}
+
+
+def save_vmware_cluster_mapping(vmware_id: str, vsphere_cluster_id: str, app_cluster_id: str):
+    """Save a mapping between a vSphere cluster ID and an application cluster ID.
+    
+    This mapping is used for fine-grained authorization - users can only manipulate
+    vSphere clusters that are mapped to application clusters they have access to.
+    """
+    db = get_db()
+    cursor = db.conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute('''
+        INSERT OR REPLACE INTO vmware_cluster_mappings
+        (vmware_id, vsphere_cluster_id, app_cluster_id, created_at, updated_at)
+        VALUES (?, ?, ?, 
+                COALESCE((SELECT created_at FROM vmware_cluster_mappings 
+                         WHERE vmware_id = ? AND vsphere_cluster_id = ?), ?), ?)
+    ''', (vmware_id, vsphere_cluster_id, app_cluster_id, vmware_id, vsphere_cluster_id, now, now))
+    db.conn.commit()
+
+
+def delete_vmware_cluster_mapping(vmware_id: str, vsphere_cluster_id: str):
+    """Delete a vSphere cluster to application cluster mapping."""
+    db = get_db()
+    cursor = db.conn.cursor()
+    cursor.execute('''
+        DELETE FROM vmware_cluster_mappings
+        WHERE vmware_id = ? AND vsphere_cluster_id = ?
+    ''', (vmware_id, vsphere_cluster_id))
+    db.conn.commit()
+
+
+def get_app_cluster_for_vsphere_cluster(vmware_id: str, vsphere_cluster_id: str) -> str:
+    """Get the application cluster ID for a vSphere cluster ID.
+    
+    Returns None if no mapping exists.
+    """
+    db = get_db()
+    cursor = db.conn.cursor()
+    cursor.execute('''
+        SELECT app_cluster_id FROM vmware_cluster_mappings
+        WHERE vmware_id = ? AND vsphere_cluster_id = ?
+    ''', (vmware_id, vsphere_cluster_id))
+    row = cursor.fetchone()
+    return row['app_cluster_id'] if row else None
+
+
+
 

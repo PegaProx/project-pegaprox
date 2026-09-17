@@ -815,6 +815,28 @@ class PegaProxDB:
                 updated_at TEXT
             )
         ''')
+        # NS Dec 2026 (pentest) — map vSphere cluster IDs to application cluster IDs for
+        # fine-grained authorization. Without this, a user with access to one application
+        # cluster could manipulate any vSphere cluster on the shared VMware server.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vmware_cluster_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vmware_id TEXT NOT NULL,
+                vsphere_cluster_id TEXT NOT NULL,
+                app_cluster_id TEXT NOT NULL,
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(vmware_id, vsphere_cluster_id)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_vmware_cluster_mappings_vmware 
+            ON vmware_cluster_mappings(vmware_id)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_vmware_cluster_mappings_app 
+            ON vmware_cluster_mappings(vmware_id, app_cluster_id)
+        ''')
         # LW: Feb 2026 - API Tokens for programmatic access without sessions
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS api_tokens (
