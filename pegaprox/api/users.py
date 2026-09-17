@@ -2134,6 +2134,16 @@ def add_pool_permission_api(cluster_id, pool_id):
     if invalid_perms:
         return jsonify({'error': f'Invalid permissions: {invalid_perms}'}), 400
 
+    # sec (pentest): group identifiers are external (LDAP/OIDC) and have no tenant association in
+    # the database. Authorization queries match groups case-insensitively by name alone, without
+    # tenant predicates. A tenant-scoped admin could therefore create a grant for a group name
+    # associated with users in another tenant, causing those users to receive pool-derived cluster
+    # and VM permissions without a tenant boundary check. Restrict group-based pool permissions to
+    # global admins only; they can see across all tenants and understand the cross-tenant
+    # implications. User-based grants remain available to tenant admins and are validated below.
+    if subject_type == 'group' and request.session.get('role') != ROLE_ADMIN:
+        return jsonify({'error': 'Access denied: only a global admin may create group-based pool permissions'}), 403
+
     # sec (audit): pool_id and subject_id are attacker-chosen and POOL_PERMISSIONS includes
     # pool.admin, which short-circuits the per-VM gate for every VM in the pool — this is the
     # strongest grant primitive in the product and it had no object gate. _pool_visibility (the
@@ -2166,6 +2176,13 @@ def delete_pool_permission_api(cluster_id, pool_id, subject_type, subject_id):
     """Delete pool permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    
+    # sec (pentest): mirror the POST gate — a tenant-scoped admin must not delete group-based pool
+    # permissions, as they might be removing grants for groups in other tenants. Restrict group
+    # permission management to global admins only.
+    if subject_type == 'group' and request.session.get('role') != ROLE_ADMIN:
+        return jsonify({'error': 'Access denied: only a global admin may manage group-based pool permissions'}), 403
+    
     _err = _authz_object_write(cluster_id)
     if _err:
         return _err
