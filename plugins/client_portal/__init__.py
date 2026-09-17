@@ -796,6 +796,15 @@ def _create_ct():
     if len(password) < 8:
         return {'error': 'Password must be at least 8 characters'}, 400
 
+    # --- tenant cluster authorization (block if target cluster is not in tenant scope) ---
+    cluster_id = cc['cluster_id']
+    from pegaprox.utils.rbac import get_user_clusters
+    allowed_clusters = get_user_clusters(user, include_pools=False)
+    # None means all clusters (admin or default tenant), otherwise check the list
+    if allowed_clusters is not None and cluster_id not in allowed_clusters:
+        logging.warning(f'[client_portal] {username} attempted CT creation on unauthorized cluster {cluster_id}')
+        return {'error': 'Container creation is not enabled'}, 403
+
     # --- tenant quota (block if enforced) ---
     tenant_id = user.get('tenant_id')
     if tenant_id:
@@ -810,7 +819,7 @@ def _create_ct():
         except Exception:
             logging.exception('[client_portal] quota check failed')
 
-    cluster_id = cc['cluster_id']; node = cc['node']
+    node = cc['node']
     mgr = cluster_managers.get(cluster_id)
     if not mgr or not mgr.is_connected:
         return {'error': 'Target cluster is currently unavailable'}, 503
