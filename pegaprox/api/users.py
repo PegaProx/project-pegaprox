@@ -1929,9 +1929,25 @@ def set_vm_acl(cluster_id, vmid):
         if p not in PERMISSIONS:
             return jsonify({'error': f'Invalid permission: {p}'}), 400
 
-    _err = _authz_object_write(cluster_id, subjects=users, permissions=permissions)
-    if _err:
-        return _err
+    # NS Dec 2026 (pentest) — inherit_role=True grants a fixed set of VM operations at runtime
+    # (vm.view, vm.start, vm.stop, vm.restart, vm.console, vm.snapshot, vm.migrate, vm.clone,
+    # vm.config, vm.backup). A delegated operator who can only configure a VM must not be able
+    # to grant console/migration/cloning/backup authority by setting inherit_role=True with an
+    # empty explicit permission list — _authz_object_write would see no unauthorized explicit
+    # permission to reject. Validate the inherited set when the flag is true; otherwise validate
+    # only the explicit list (the existing _authz_object_write call below).
+    if inherit_role:
+        # The inherited permission set must match what user_can_access_vm() grants when
+        # inherit_role=True. Keep this list synchronized with the runtime grant in rbac.py.
+        inherited_perms = ['vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console',
+                          'vm.snapshot', 'vm.migrate', 'vm.clone', 'vm.config', 'vm.backup']
+        _err = _authz_object_write(cluster_id, subjects=users, permissions=inherited_perms)
+        if _err:
+            return _err
+    else:
+        _err = _authz_object_write(cluster_id, subjects=users, permissions=permissions)
+        if _err:
+            return _err
     # and the caller must actually control the VM they are writing a rule for
     from pegaprox.utils.auth import build_authz_user as _bau
     from pegaprox.utils.rbac import user_can_access_vm as _ucav

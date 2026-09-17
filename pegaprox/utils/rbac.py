@@ -946,6 +946,10 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
             if vm_acl.get('inherit_role', True):
                 # inherit_role=True: FULL VM access (start, stop, console, etc.)
                 # This means "this user has access to this VM"
+                # NS Dec 2026 (pentest) — this fixed permission set is the inherited grant that
+                # set_vm_acl() must validate when inherit_role=True. Keep synchronized with the
+                # inherited_perms list in api/users.py set_vm_acl() to prevent a delegated operator
+                # from granting permissions they do not hold by submitting an empty explicit list.
                 vm_permissions = ['vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 
                                   'vm.snapshot', 'vm.migrate', 'vm.clone', 'vm.config', 'vm.backup']
                 result = permission in vm_permissions
