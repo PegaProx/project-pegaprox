@@ -2257,17 +2257,33 @@ class PegaProxDB:
         decrypt. Split out of _migrate_users so the re-migration path can find out whether it
         has anything to restore BEFORE it clears the table."""
         from pegaprox.core.config import get_fernet
-        fernet = get_fernet()
-        if not fernet or not os.path.exists(USERS_FILE_ENCRYPTED):
-            return None
-
-        try:
-            with open(USERS_FILE_ENCRYPTED, 'rb') as f:
-                encrypted_data = f.read()
-            return json.loads(fernet.decrypt(encrypted_data).decode('utf-8'))
-        except Exception as e:
-            logging.error(f"Failed to load users: {e}")
-            return None
+        
+        # MK Jun 2026 (pentest finding: fail-open on key-resolution errors) —
+        # if the legacy encrypted user file exists but we can't get a decryptor,
+        # that's a key-resolution failure with established user state. Returning
+        # None here would let the migration path think there's nothing to restore,
+        # but the file's presence proves users existed. Fail closed.
+        if os.path.exists(USERS_FILE_ENCRYPTED):
+            fernet = get_fernet()
+            if not fernet:
+                raise RuntimeError(
+                    f"Legacy user file {USERS_FILE_ENCRYPTED} exists but encryption "
+                    "key could not be loaded. This indicates key corruption or "
+                    "misconfiguration. Refusing to proceed with migration to prevent "
+                    "data loss. Check logs for keystore errors."
+                )
+            try:
+                with open(USERS_FILE_ENCRYPTED, 'rb') as f:
+                    encrypted_data = f.read()
+                return json.loads(fernet.decrypt(encrypted_data).decode('utf-8'))
+            except Exception as e:
+                logging.error(f"Failed to load users: {e}")
+                raise RuntimeError(
+                    f"Legacy user file {USERS_FILE_ENCRYPTED} exists but could not be "
+                    f"decrypted or parsed: {e}. Refusing to proceed with migration."
+                )
+        
+        return None
 
     def _migrate_users(self) -> bool:
         """Migrate users from encrypted file"""

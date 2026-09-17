@@ -342,14 +342,27 @@ def build_authz_user(username: str, session: dict) -> dict:
 def is_initialized() -> bool:
     """True if first-run setup has been completed.
 
-    Two ways an install becomes initialised:
+    Three ways an install becomes initialised:
       1. /api/auth/setup ran successfully and wrote ADMIN_INITIALIZED_FILE
       2. backfill_initialized_marker() observed pre-existing users on an
          upgrade from a pre-setup-wizard build
+      3. (defense-in-depth) legacy encrypted user file exists — even if we
+         can't decrypt it, its presence proves this isn't a fresh install
 
     Pure read, no side effects.
     """
     if os.path.exists(ADMIN_INITIALIZED_FILE):
+        return True
+    # MK Jun 2026 (pentest finding: fail-open on key-resolution errors) —
+    # if the legacy encrypted user file exists, treat that as proof of
+    # initialization even if we can't currently decrypt it. This prevents
+    # the unauthenticated setup endpoint from reopening when the key is
+    # invalid but the file is present.
+    if os.path.exists(USERS_FILE_ENCRYPTED):
+        logging.warning(
+            f"[AUTH] {USERS_FILE_ENCRYPTED} exists but ADMIN_INITIALIZED_FILE "
+            "does not — treating as initialized to prevent setup bypass"
+        )
         return True
     # second-opinion against the DB in case the marker file was wiped but
     # the user table survived (volume mount oddities, manual restore, etc.)
@@ -382,9 +395,21 @@ def backfill_initialized_marker():
 
 def _load_users_legacy() -> dict:
     """old json loader, just for migration"""
-    fernet = get_fernet()
-    
-    if fernet and os.path.exists(USERS_FILE_ENCRYPTED):
+    # MK Jun 2026 (pentest finding: fail-open on key-resolution errors) —
+    # if the legacy encrypted user file exists but we can't get a decryptor,
+    # that's a key-resolution failure with established user state, not a
+    # fresh install. Returning {} here would let is_initialized() see no
+    # users and re-open the unauthenticated setup endpoint. Fail closed.
+    if os.path.exists(USERS_FILE_ENCRYPTED):
+        fernet = get_fernet()
+        if not fernet:
+            # encrypted user file present, but no valid key — lockout, not bypass
+            raise RuntimeError(
+                f"Legacy user file {USERS_FILE_ENCRYPTED} exists but encryption "
+                "key could not be loaded. This indicates key corruption or "
+                "misconfiguration. Refusing to proceed as uninitialised to prevent "
+                "unauthenticated setup bypass. Check logs for keystore errors."
+            )
         try:
             with open(USERS_FILE_ENCRYPTED, 'rb') as f:
                 encrypted_data = f.read()
@@ -393,7 +418,12 @@ def _load_users_legacy() -> dict:
             logging.info(f"loaded {len(users)} users from legacy file")
             return users
         except Exception as e:
+            # decryption or parse failure with a valid key — also fail closed
             logging.error(f"legacy load failed: {e}")
+            raise RuntimeError(
+                f"Legacy user file {USERS_FILE_ENCRYPTED} exists but could not be "
+                f"decrypted or parsed: {e}. Refusing to proceed as uninitialised."
+            )
     
     return {}
 
