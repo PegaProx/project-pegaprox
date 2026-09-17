@@ -99,31 +99,58 @@ def update_vmware_server(vmware_id):
         return err
     data = request.json or {}
     
+    # Fetch existing server configuration from DB or memory
+    db = get_db()
+    existing_row = None
     if vmware_id not in vmware_managers:
-        db = get_db()
-        row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
-        if not row:
+        existing_row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+        if not existing_row:
             return jsonify({'error': 'VMware server not found'}), 404
     
-    # MK May 2026 (#469 port) — cred-exfil guard. If host changes WHILE the
-    # password is preserved (came in as ********), don't auto-connect — that
-    # would ship the saved credential to a potentially attacker-controlled host.
-    credentials_preserved = False
+    # Determine if host/port is changing by comparing against existing configuration
+    # Check both in-memory manager (if enabled) and DB row (if disabled)
     host_changed = False
-
+    old_host = None
+    old_port = None
+    
     if vmware_id in vmware_managers:
         old_mgr = vmware_managers[vmware_id]
-        if (data.get('host') and data.get('host') != old_mgr.host) or \
-           (data.get('port') and int(data.get('port', 443)) != old_mgr.port):
+        old_host = old_mgr.host
+        old_port = old_mgr.port
+    elif existing_row:
+        existing_dict = dict(existing_row)
+        old_host = existing_dict.get('host')
+        old_port = existing_dict.get('port')
+    
+    if old_host is not None:
+        if (data.get('host') and data.get('host') != old_host) or \
+           (data.get('port') and int(data.get('port', 443)) != old_port):
             host_changed = True
-        if data.get('password') == '********':
-            # NS Aug 2026 (Aikido pentest) — never persist the preserved password against a CHANGED
-            # host: the saved row is reused verbatim by diagnose / Test Connection / the boot-time
-            # auto-connect, any of which would ship the secret to the new (possibly attacker-chosen)
-            # host. Require a full password whenever the host changes.
-            if host_changed:
-                return jsonify({'error': 'Re-enter the password when changing the VMware host.'}), 400
-            data['password'] = old_mgr.password
+    
+    # Credential exfiltration guard: when host changes, require a valid new password.
+    # Reject masked (********), empty, or omitted passwords to prevent rebinding
+    # the stored credential to an attacker-controlled endpoint.
+    password_provided = data.get('password')
+    credentials_preserved = False
+    
+    if host_changed:
+        # Host is changing - require explicit password re-entry
+        if not password_provided or password_provided == '********':
+            return jsonify({'error': 'Re-enter the password when changing the VMware host.'}), 400
+    else:
+        # Host not changing - allow password preservation
+        if password_provided == '********':
+            # Preserve existing password from memory or load from DB for VMwareManager
+            if vmware_id in vmware_managers:
+                data['password'] = vmware_managers[vmware_id].password
+            else:
+                # Server is disabled; load encrypted password from DB and decrypt it
+                # so VMwareManager can use it if the server is being re-enabled
+                if existing_row:
+                    existing_dict = dict(existing_row)
+                    encrypted_pass = existing_dict.get('pass_encrypted', '')
+                    if encrypted_pass:
+                        data['password'] = db._decrypt(encrypted_pass)
             credentials_preserved = True
 
     save_vmware_server(vmware_id, data)
