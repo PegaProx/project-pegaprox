@@ -1,9 +1,26 @@
 # PegaProx Docker Compose
 # NS: just run: docker compose up -d
+#
+# SECURITY NOTE: For production deployments, pin to an immutable digest instead of
+# a version tag to prevent supply-chain attacks. A compromised release workflow with
+# package-write access could re-point any tag (including version tags) to a malicious
+# image. Digest pinning ensures the exact image manifest is verified.
+#
+# To pin to a digest:
+#   1. Pull the desired version: docker pull ghcr.io/pegaprox/pegaprox:v1.1.1
+#   2. Get its digest: docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/pegaprox/pegaprox:v1.1.1
+#   3. Replace the image line below with: image: ghcr.io/pegaprox/pegaprox@sha256:...
+#
+# The digest format looks like: ghcr.io/pegaprox/pegaprox@sha256:abc123def456...
+# Unlike tags, digests are immutable and cannot be re-pointed without detection.
 
 services:
   pegaprox:
-    image: ghcr.io/pegaprox/pegaprox:latest
+    # SECURITY: Using version tag for usability. For production, replace with digest.
+    # See security note above for digest pinning instructions.
+    image: ghcr.io/pegaprox/pegaprox:v1.1.1
+    # For maximum security, use digest pinning instead (example format):
+    # image: ghcr.io/pegaprox/pegaprox@sha256:abc123def456...
     # build: .  # uncomment to build locally
     container_name: pegaprox
     ports:

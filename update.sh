@@ -99,7 +99,8 @@ if [ "$_PGX_METHOD" != "source" ] && [ "$_PGX_FORCE" -eq 0 ]; then
         echo -e "${YELLOW}(A git+pip update would diverge from dpkg and can break dependency handling.)${NC}"
     else
         echo -e "${YELLOW}Update it by pulling a fresh image and recreating the container:${NC}"
-        echo    "    docker pull ghcr.io/pegaprox/pegaprox:latest   # then recreate: compose up -d / docker run"
+        echo    "    docker pull ghcr.io/pegaprox/pegaprox:vX.Y.Z   # replace with desired version"
+        echo    "    # then recreate: docker compose up -d / docker run"
         echo -e "${YELLOW}(An in-place update here is discarded on the next image pull.)${NC}"
     fi
     echo ""

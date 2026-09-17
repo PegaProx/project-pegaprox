@@ -264,12 +264,14 @@ docker compose up -d
 
 Or without Compose:
 ```bash
+# SECURITY: For production, pin to a specific version tag or digest instead of :latest
+# to prevent supply-chain attacks. See docker-compose.yml for digest pinning instructions.
 docker run -d --name pegaprox \
   -p 5000:5000 -p 5001:5001 -p 5002:5002 \
   -v pegaprox-config:/app/config \
   -v pegaprox-logs:/app/logs \
   --restart unless-stopped \
-  ghcr.io/pegaprox/pegaprox:latest
+  ghcr.io/pegaprox/pegaprox:v1.1.1
 ```
 
 For local builds:
