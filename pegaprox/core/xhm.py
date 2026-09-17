@@ -1541,7 +1541,7 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
     """Connect to SSH with multiple auth methods (matches _ssh_exec behavior).
     Returns connected paramiko.SSHClient or raises Exception."""
     import paramiko
-    from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
+    from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, reload_host_keys, verify_transport_host_key
 
     client = paramiko.SSHClient()
     apply_host_key_policy(client, paramiko)
@@ -1570,6 +1570,9 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
         transport.auth_interactive(user, _ki_handler)
         if transport.is_authenticated():
             client._transport = transport
+            # reload known_hosts into client._host_keys so persist_host_keys()
+            # doesn't overwrite with the pre-verification snapshot
+            reload_host_keys(client)
             try: transport.set_keepalive(30)  # #546: keep the channel alive through long disk transfers
             except Exception: pass
             return client

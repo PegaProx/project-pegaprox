@@ -126,6 +126,23 @@ def secure_ssh_client(paramiko):
     return apply_host_key_policy(client, paramiko)
 
 
+def reload_host_keys(client):
+    """Reload known_hosts into the client's in-memory store.
+    
+    Call this after attaching a manually-verified Transport to an SSHClient
+    (client._transport = transport) and BEFORE persist_host_keys(). The manual
+    Transport path (verify_transport_host_key) saves newly learned keys directly
+    to the file via a separate HostKeys instance. Without this reload, the client's
+    _host_keys remains stale (pre-verification snapshot), so persist_host_keys()
+    would rewrite the file from that stale snapshot and erase the newly learned key.
+    """
+    try:
+        if os.path.exists(_KNOWN_HOSTS):
+            client.load_host_keys(_KNOWN_HOSTS)
+    except Exception:
+        pass
+
+
 def persist_host_keys(client):
     """Persist any newly-learned host keys so the next connection verifies against
     them. Best-effort: the config dir may be read-only. Serialized to avoid two

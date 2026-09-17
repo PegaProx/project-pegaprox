@@ -11,7 +11,7 @@ import threading
 import socket
 
 from pegaprox.constants import SSH_MAX_CONCURRENT
-from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
+from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, reload_host_keys, verify_transport_host_key
 from pegaprox.globals import (
     _ssh_active_connections, _ssh_connection_lock,
     _auth_action_attempts, _auth_action_lock,
@@ -187,6 +187,9 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
             
             if transport.is_authenticated():
                 client._transport = transport
+                # reload known_hosts into client._host_keys so persist_host_keys()
+                # doesn't overwrite with the pre-verification snapshot
+                reload_host_keys(client)
                 connected = True
         except Exception as e:
             errors.append(f'M1(ki-transport): {e}')
@@ -221,6 +224,9 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
                 
                 if transport2.is_authenticated():
                     client2._transport = transport2
+                    # reload known_hosts into client._host_keys so persist_host_keys()
+                    # doesn't overwrite with the pre-verification snapshot
+                    reload_host_keys(client2)
                     client = client2
                     connected = True
                 else:
