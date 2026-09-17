@@ -1334,8 +1334,8 @@ def _ssh_write_file(ssh, path, content, mode=None):
             rc = stdout.channel.recv_exit_status()
             if rc != 0:
                 raise RuntimeError(f"staging {tmp_path} failed (rc={rc})")
-        # Move to final location as root, set mode if requested
-        mv_cmd = f"sudo -n mv {q_tmp} {q_path}"
+        # Move to final location as root, set ownership to root, set mode if requested
+        mv_cmd = f"sudo -n mv {q_tmp} {q_path} && sudo -n chown root:root {q_path}"
         if mode is not None:
             mv_cmd += f" && sudo -n chmod {oct(mode)[2:]} {q_path}"
         stdin, stdout, stderr = ssh.exec_command(mv_cmd)
