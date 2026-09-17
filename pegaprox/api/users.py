@@ -69,29 +69,50 @@ def _role_at_or_below_caller(target_role):
     return _ROLE_LEVEL.get(target_role, 2) <= caller_lvl
 
 
-def _role_permissions(role):
-    """All permissions a role grants — builtin (ROLE_PERMISSIONS) or custom (load_custom_roles)."""
+def _role_permissions(role, tenant_id=None):
+    """All permissions a role grants — builtin (ROLE_PERMISSIONS) or custom (load_custom_roles).
+    
+    Resolution order matches the effective-permission path (get_role_permissions_for_user):
+    1. Builtin roles (admin/user/viewer)
+    2. Tenant-specific custom role (when tenant_id is provided)
+    3. Global custom role
+    
+    This ensures authorization checks see the same role definition that will be used at runtime,
+    preventing colliding role IDs from bypassing delegated-grant checks.
+    """
     if role in ROLE_PERMISSIONS:
         return list(ROLE_PERMISSIONS.get(role, []))
     cr = load_custom_roles()
+    # Check tenant-specific role first (when tenant_id is provided), matching runtime resolution
+    if tenant_id:
+        tenant_roles = cr.get('tenants', {}).get(tenant_id, {})
+        if role in tenant_roles:
+            return list((tenant_roles.get(role) or {}).get('permissions', []))
+    # Then check global custom role
     if role in cr.get('global', {}):
         return list((cr['global'].get(role) or {}).get('permissions', []))
-    for _tid, _roles in cr.get('tenants', {}).items():
-        if role in _roles:
-            return list((_roles.get(role) or {}).get('permissions', []))
+    # If tenant_id was not provided, check all tenant roles as fallback
+    if not tenant_id:
+        for _tid, _roles in cr.get('tenants', {}).items():
+            if role in _roles:
+                return list((_roles.get(role) or {}).get('permissions', []))
     return []
 
 
-def _caller_can_grant_role(target_role):
+def _caller_can_grant_role(target_role, target_tenant_id=None):
     # NS Aug 2026 (Aikido pentest) — the tier map above collapses every custom role to the 'user'
     # level, so a custom role carrying admin.* perms would pass _role_at_or_below_caller for a
     # user-tier delegate. Require a non-global-admin caller to actually hold every permission the
     # role grants before assigning it. Global admins keep full delegation.
+    # 
+    # Dec 2026 (pentest retest) — resolve the role in the target user's tenant context to prevent
+    # colliding role IDs (global + tenant with same name) from bypassing this check. The runtime
+    # permission path prioritizes tenant roles, so the authorization check must do the same.
     if request.session.get('role') == ROLE_ADMIN:
         return True
     from pegaprox.utils.auth import build_authz_user
     caller = build_authz_user(request.session.get('user', ''), request.session)
-    return all(has_permission(caller, p) for p in _role_permissions(target_role))
+    return all(has_permission(caller, p) for p in _role_permissions(target_role, target_tenant_id))
 
 
 def _caller_can_grant_perms(permissions):
@@ -867,7 +888,7 @@ def create_user():
         return jsonify({'error': 'Access denied: cannot create users in other tenants'}), 403
     if not _role_at_or_below_caller(role):
         return jsonify({'error': 'Cannot create a user with a role higher than your own'}), 403
-    if not _caller_can_grant_role(role):
+    if not _caller_can_grant_role(role, tenant_id):
         return jsonify({'error': 'Cannot assign a role that grants permissions beyond your own'}), 403
 
     # validate permissions are valid
@@ -958,8 +979,26 @@ def update_user(username):
             return jsonify({'error': 'Cannot modify your own role'}), 403
         if not _role_at_or_below_caller(data['role']):
             return jsonify({'error': 'Cannot assign a role with higher privileges than your own'}), 403
-        if not _caller_can_grant_role(data['role']):
+        
+        # Determine the target tenant_id for the role before authorization check
+        # This ensures we check permissions against the correct role definition
+        target_tenant_id = user.get('tenant_id', DEFAULT_TENANT_ID)
+        if data['role'] not in BUILTIN_ROLES:
+            custom_roles = load_custom_roles()
+            # check if role belongs to a tenant
+            for tid, roles in custom_roles.get('tenants', {}).items():
+                if data['role'] in roles:
+                    # NS Aug 2026 (Aikido pentest) — a tenant-scoped admin must not assign a role
+                    # owned by another tenant; it would silently move the account into that tenant.
+                    if _ct is not None and tid != _ct:
+                        return jsonify({'error': 'Cannot assign a role from another tenant'}), 403
+                    target_tenant_id = tid
+                    break
+        
+        # Now check if caller can grant this role, using the correct tenant context
+        if not _caller_can_grant_role(data['role'], target_tenant_id):
             return jsonify({'error': 'Cannot assign a role that grants permissions beyond your own'}), 403
+        
         # Prevent last admin from losing admin role
         if user['role'] == ROLE_ADMIN and data['role'] != ROLE_ADMIN:
             admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
@@ -978,10 +1017,6 @@ def update_user(username):
             found_tenant = False
             for tid, roles in custom_roles.get('tenants', {}).items():
                 if data['role'] in roles:
-                    # NS Aug 2026 (Aikido pentest) — a tenant-scoped admin must not assign a role
-                    # owned by another tenant; it would silently move the account into that tenant.
-                    if _ct is not None and tid != _ct:
-                        return jsonify({'error': 'Cannot assign a role from another tenant'}), 403
                     user['tenant_id'] = tid
                     found_tenant = True
                     logging.info(f"Auto-set tenant_id={tid} for user with role {data['role']}")
