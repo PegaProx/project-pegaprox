@@ -1585,7 +1585,25 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
         def wrap_socket_and_handle(self, client_socket, address):
             """Override to catch SSL errors and the shutdown GreenletExit during handshake"""
             try:
-                return super().wrap_socket_and_handle(client_socket, address)
+                # Bound the TLS handshake: an unauthenticated client that opens the socket but
+                # stalls the handshake would otherwise park here holding a pool slot until TCP
+                # gives up. The request-line idle timeout (read_requestline) cannot protect TLS
+                # negotiation because it runs after wrapping completes. Use the same timeout as
+                # the keep-alive idle window; None = disabled = old unbounded behaviour.
+                import gevent as _gv
+                _hs_timeout = _KEEPALIVE_IDLE_TIMEOUT if _KEEPALIVE_IDLE_TIMEOUT > 0 else None
+                if _hs_timeout and self.ssl_args:
+                    with _gv.Timeout(_hs_timeout):
+                        return super().wrap_socket_and_handle(client_socket, address)
+                else:
+                    return super().wrap_socket_and_handle(client_socket, address)
+            except _gv.Timeout:
+                # TLS handshake stalled beyond the deadline; close and return the pool slot
+                try:
+                    client_socket.close()
+                except Exception:
+                    pass
+                return
             except GreenletExit:
                 # gevent cancels connection greenlets on stop(); expected at exit, and it
                 # is a BaseException so the handler below would never see it. Its siblings
