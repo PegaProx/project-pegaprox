@@ -159,7 +159,10 @@ jobs:
           targets:
             lxc:
               create_message: |
-                PegaProx Appliance - Login: root / PegaProx2026!
+                PegaProx Appliance - SECURITY NOTICE:
+                No default password is set. Use console access to run 'passwd root' immediately.
+                SSH password authentication is DISABLED by default for security.
+                Configure SSH keys or enable password auth only after setting a strong password.
               config:
                 - type: all
                   before: 5
@@ -212,8 +215,13 @@ jobs:
                 # "sshpass not installed". Key auth works without it, but the appliance supports both.
                 apt-get -y install pegaprox sshpass
                 systemctl enable pegaprox || true
-                # --- Root-Login setzen ---
-                echo 'root:PegaProx2026!' | chpasswd
+                # --- Security: Lock root account, disable SSH password auth ---
+                # Root account is locked (no password set). User must set password via console.
+                passwd -l root
+                # Disable SSH password authentication by default
+                mkdir -p /etc/ssh/sshd_config.d
+                printf 'PasswordAuthentication no\\nPermitRootLogin prohibit-password\\nKbdInteractiveAuthentication no\\n' \\
+                  > /etc/ssh/sshd_config.d/99-pegaprox-security.conf
 
           mappings:
             architecture_map: debian
@@ -392,18 +400,27 @@ jobs:
             useradd -m -s /bin/bash pegaprox_admin
           fi
           usermod -aG sudo pegaprox_admin || true
-          echo 'pegaprox_admin:PegaProx2026!' | chpasswd
-          echo 'root:7eF9$&JHVspAmjWKcGmD!6QypzBsbmyA' | chpasswd
+          # Generate random passwords for both accounts
+          ADMIN_PASS=$(openssl rand -base64 32 | tr -d '/+=' | head -c 24)
+          ROOT_PASS=$(openssl rand -base64 32 | tr -d '/+=' | head -c 24)
+          echo "pegaprox_admin:${ADMIN_PASS}" | chpasswd
+          echo "root:${ROOT_PASS}" | chpasswd
+          # Force password change on first login for both accounts
+          passwd -e pegaprox_admin
+          passwd -e root
 
-          # --- SSH: Passwort-Login erlauben ---
+          # --- SSH: Disable password auth by default for security ---
+          # User must set their own password before SSH password auth is enabled
           mkdir -p /etc/ssh/sshd_config.d
-          printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin yes\n' \
-            > /etc/ssh/sshd_config.d/99-pegaprox.conf
+          printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' \
+            > /etc/ssh/sshd_config.d/99-pegaprox-security.conf
           systemctl reload ssh 2>/dev/null \
             || systemctl restart ssh 2>/dev/null \
             || systemctl restart sshd 2>/dev/null || true
 
           mkdir -p /etc/pegaprox
+          # Remove this installer script after execution to prevent credential exposure
+          rm -f /usr/local/sbin/install-pegaprox.sh
           systemctl disable pegaprox-firstboot.service || true
           INSTALLEOF
 
@@ -574,12 +591,24 @@ jobs:
             || echo -e "${R}PegaProx failed to start - check: journalctl -u pegaprox${N}"
 
           echo ""
-          echo -e "${Y}Set a password for the login user 'pegaprox_admin':${N}"
-          read -p "Set it now? [Y/n]: " sp
-          case "${sp:-y}" in
-            [Nn]*) echo -e "${Y}Later with: passwd pegaprox_admin${N}";;
-            *) passwd pegaprox_admin || echo -e "${Y}Password change skipped.${N}";;
-          esac
+          echo -e "${R}SECURITY: You must set a password for 'pegaprox_admin' before continuing.${N}"
+          echo -e "${Y}The system was deployed with a random temporary password that has expired.${N}"
+          echo -e "${Y}SSH password authentication will be enabled after you set your password.${N}"
+          echo ""
+          # Force password change - loop until successful
+          while true; do
+            if passwd pegaprox_admin; then
+              # Enable SSH password authentication after user sets their password
+              printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin prohibit-password\n' \
+                > /etc/ssh/sshd_config.d/99-pegaprox-security.conf
+              systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+              echo -e "${G}Password set successfully. SSH password authentication is now enabled.${N}"
+              break
+            else
+              echo -e "${R}Password change failed or was cancelled. You must set a password to continue.${N}"
+              read -p "Press ENTER to try again..." _
+            fi
+          done
 
           mkdir -p /etc/pegaprox
           touch "$MARKER"
@@ -686,7 +715,9 @@ jobs:
           #!/bin/bash
           if [ ! -f /etc/pegaprox/.setup-complete ] && [ -t 0 ] && [ -z "${PEGAPROX_SKIP_SETUP:-}" ]; then
             echo ""
-            echo -e "\033[1;33mPegaProx needs to be configured. The wizard starts in 5s (Ctrl+C to cancel)...\033[0m"
+            echo -e "\033[1;31m=== SECURITY NOTICE ===\"
+            echo -e "\033[1;33mPegaProx must be configured and you must set a password before the system is usable.\033[0m"
+            echo -e "\033[1;33mThe wizard will start in 5 seconds (Ctrl+C to cancel)...\033[0m"
             sleep 5
             if [ "$EUID" -eq 0 ]; then
               /usr/local/bin/pegaprox-setup
