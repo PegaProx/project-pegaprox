@@ -1210,7 +1210,22 @@ def _migration_reachable(t):
     if vmw and vid:
         try:
             _u = build_authz_user(request.session.get('user', ''), request.session)
-            return user_can_access_vmware_vm(_u, vmw, str(vid), 'vmware.vm.migrate')
+            if not user_can_access_vmware_vm(_u, vmw, str(vid), 'vmware.vm.migrate'):
+                return False
+        except Exception:
+            return False
+    # sec (pentest Dec 2026) — migration creation rejects confined callers via caller_is_scoped
+    # to prevent pool/ACL-scoped users from creating VMs on clusters they don't own. Lifecycle
+    # operations (list/status/confirm/cancel) must enforce the same target-cluster confinement
+    # check, otherwise a caller with pool/ACL fallback access and source-VM permission can
+    # enumerate and mutate migrations they could not have initiated. Apply the creation-time
+    # policy uniformly across all migration endpoints.
+    target_cid = getattr(t, 'target_cluster', None)
+    if target_cid:
+        try:
+            _u = build_authz_user(request.session.get('user', ''), request.session)
+            if caller_is_scoped(_u, target_cid):
+                return False
         except Exception:
             return False
     return True
