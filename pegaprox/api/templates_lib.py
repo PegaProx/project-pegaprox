@@ -520,6 +520,16 @@ def deploy(cluster_id):
         return jsonify({'error': 'cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
 
+    # NS Dec 2026 (pentest) — template deployment accepts caller-selected node, storage, and vmid
+    # without authorization for those targets. A scoped user (VM-ACL or pool-based cluster reach)
+    # must not create VMs on arbitrary nodes/storage/vmids outside their grant. Only unscoped users
+    # (those who reach the cluster through their tenant) may deploy templates.
+    from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.auth import build_authz_user
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_caller, cluster_id):
+        return jsonify({'error': 'Template deployment requires cluster-wide access'}), 403
+
     body = request.get_json(silent=True) or {}
     template_id = body.get('template_id')
     node = body.get('node')
