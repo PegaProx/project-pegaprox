@@ -118,30 +118,67 @@ def _authorize_pool_assignment(cluster_id, pool_id, vmid, vm_type=None):
     (pool membership drives user_can_access_vm), or detach any VM from any reachable pool. Require BOTH:
     (1) the caller can ALREADY manage the VM (so assigning cannot CONFER new access), and (2) the caller
     manages the target pool — admins and plain cluster-wide operators manage all pools on an owned
-    cluster; a pool-scoped caller only pools they hold a grant on. Returns (ok, error_response)."""
+    cluster; a pool-scoped caller only pools they hold a grant on. Returns (ok, error_response).
+    
+    sec (pentest Dec 2026): the VM-side check was vm.view, which allowed a caller with only visibility
+    to move a VM into a pool where they held management permissions and thereby escalate to those
+    permissions (rbac.py derives VM permissions from the VM's current pool). Require vm.config on the VM
+    itself OR management authority over the VM's current/source pool before allowing re-pooling. A VM
+    not yet in any pool (source_pool_id is None) requires only vm.config on the VM, as there is no
+    source pool to authorize against."""
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import user_can_access_vm, _pool_perms_for, get_user_clusters
+    from pegaprox.utils.rbac import user_can_access_vm, _pool_perms_for, get_user_clusters, get_vm_pool_cached
     from pegaprox.models.permissions import ROLE_ADMIN
     try:
         _vid = int(vmid)
     except (TypeError, ValueError):
         return False, (jsonify({'error': 'Invalid VMID'}), 400)
     user = build_authz_user(request.session.get('user', ''), request.session)
-    # (1) assigning/removing must not itself grant access — the caller must already be able to reach
-    # the VM. vm.view is the access floor: a foreign VM the caller can't see is blocked (kills the
-    # self-grant escalation), while a VM already in the caller's scope stays assignable (#766 intact).
-    if not user_can_access_vm(user, cluster_id, _vid, 'vm.view', vm_type):
-        return False, (jsonify({'error': 'Access denied to this VM'}), 403)
+    
+    # Admins bypass all checks
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return True, None
-    # (2) confine a scoped caller to pools they manage; a plain cluster-wide operator keeps all
+    
+    # (1) Determine the VM's current pool (if any)
+    source_pool_id = get_vm_pool_cached(cluster_id, _vid, vm_type)
+    
+    # (2) Authorization logic:
+    # - If VM is already in a pool (source_pool_id is not None), the caller must have management
+    #   authority over that source pool OR vm.config on the VM itself. This prevents a user with
+    #   only vm.view from moving a VM to escalate their permissions.
+    # - If VM is not in any pool, the caller must have vm.config on the VM.
+    # - Additionally, the caller must have permission on the destination pool.
+    
+    # Check if caller has vm.config on the VM (sufficient for both pooled and unpooled VMs)
+    has_vm_config = user_can_access_vm(user, cluster_id, _vid, 'vm.config', vm_type)
+    
+    # If VM is in a source pool and caller doesn't have vm.config, check source pool authority
+    if source_pool_id and not has_vm_config:
+        username = user.get('username', '')
+        user_groups = user.get('groups', [])
+        source_pool_perms = (_pool_perms_for(cluster_id, username, user_groups) or {}).get(source_pool_id, [])
+        
+        # Require pool.admin or vm.config permission on the source pool
+        has_source_authority = 'pool.admin' in source_pool_perms or 'vm.config' in source_pool_perms
+        
+        if not has_source_authority:
+            return False, (jsonify({'error': 'Access denied: insufficient authority over VM or its current pool'}), 403)
+    elif not source_pool_id and not has_vm_config:
+        # VM not in a pool, but caller lacks vm.config on the VM itself
+        return False, (jsonify({'error': 'Access denied: vm.config permission required'}), 403)
+    
+    # (3) Check destination pool access - confine a scoped caller to pools they manage
     from pegaprox.api.helpers import caller_is_scoped
     if not caller_is_scoped(user, cluster_id):
+        # Plain cluster-wide operator can manage all pools
         return True, None
-    _granted = {pid for pid, perms in (_pool_perms_for(cluster_id, user.get('username', ''),
-                                                        user.get('groups', [])) or {}).items() if perms}
+    
+    username = user.get('username', '')
+    user_groups = user.get('groups', [])
+    _granted = {pid for pid, perms in (_pool_perms_for(cluster_id, username, user_groups) or {}).items() if perms}
     if pool_id not in _granted:
-        return False, (jsonify({'error': 'Access denied to this pool'}), 403)
+        return False, (jsonify({'error': 'Access denied to destination pool'}), 403)
+    
     return True, None
 
 
