@@ -4365,7 +4365,7 @@ echo DONE""",
             power = api.VM.get_power_state(vm_ref)
 
             # connect to remote pool to get session
-            remote_session = XenAPI.Session(target_endpoint, ignore_ssl=True)
+            remote_session = XenAPI.Session(target_endpoint, ignore_ssl=not self.config.ssl_verification)
             remote_session.xenapi.login_with_password(
                 self.config.user, self.config.pass_, '1.0', 'PegaProx')
 
