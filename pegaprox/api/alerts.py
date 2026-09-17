@@ -731,13 +731,14 @@ def list_alert_channels():
     # MK: scrub url secrets on read — ?full=1 bypasses for edit flows
     # sec (audit): alert_webhooks is a GLOBAL list, so the bypass handed every alert.manage holder
     # (a delegable, tenant-scoped permission) every tenant's raw webhook URLs and tokens. A webhook
-    # URL is a bearer capability. Keep the edit flow, but require the settings-admin permission.
+    # URL is a bearer capability. Keep the edit flow, but require GLOBAL admin role.
     if request.args.get('full', '').lower() in ('1', 'true', 'yes'):
-        from pegaprox.utils.rbac import has_permission
         from pegaprox.utils.auth import build_authz_user
-        if not has_permission(build_authz_user(request.session.get('user', ''), request.session),
-                              'admin.settings'):
-            return jsonify({'error': 'Permission denied: admin.settings'}), 403
+        user = build_authz_user(request.session.get('user', ''), request.session)
+        # sec: admin.settings can be granted tenant-scoped; alert_webhooks is a single global list,
+        # so only a global admin (effective_role == ROLE_ADMIN) may read raw credentials.
+        if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
+            return jsonify({'error': 'Permission denied: global admin required'}), 403
         return jsonify(channels)
     return jsonify([_mask_channel(ch) for ch in channels])
 
@@ -747,6 +748,11 @@ def list_alert_channels():
 def create_alert_channel():
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     from pegaprox.utils.webhooks import new_channel
+    from pegaprox.utils.auth import build_authz_user
+    # sec: alert_webhooks is a global list; only global admins may write to it
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
+        return jsonify({'error': 'Permission denied: global admin required'}), 403
     settings = load_server_settings()
     channels = list(settings.get('alert_webhooks') or [])
     ch = new_channel(request.get_json() or {})
@@ -763,6 +769,11 @@ def create_alert_channel():
 @require_auth(perms=['alert.manage'])
 def update_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings, save_server_settings
+    from pegaprox.utils.auth import build_authz_user
+    # sec: alert_webhooks is a global list; only global admins may write to it
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
+        return jsonify({'error': 'Permission denied: global admin required'}), 403
     settings = load_server_settings()
     channels = list(settings.get('alert_webhooks') or [])
     data = request.get_json() or {}
@@ -790,6 +801,11 @@ def update_alert_channel(cid):
 @require_auth(perms=['alert.manage'])
 def delete_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings, save_server_settings
+    from pegaprox.utils.auth import build_authz_user
+    # sec: alert_webhooks is a global list; only global admins may write to it
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
+        return jsonify({'error': 'Permission denied: global admin required'}), 403
     settings = load_server_settings()
     before = settings.get('alert_webhooks') or []
     after = [c for c in before if c.get('id') != cid]
@@ -806,6 +822,11 @@ def delete_alert_channel(cid):
 def test_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings
     from pegaprox.utils.webhooks import send_to_channel
+    from pegaprox.utils.auth import build_authz_user
+    # sec: alert_webhooks is a global list; only global admins may access it
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
+        return jsonify({'error': 'Permission denied: global admin required'}), 403
     channels = (load_server_settings() or {}).get('alert_webhooks') or []
     ch = next((c for c in channels if c.get('id') == cid), None)
     if not ch:
