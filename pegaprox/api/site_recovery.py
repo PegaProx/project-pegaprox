@@ -92,11 +92,42 @@ def _authz_plan_vms(plan, starts_vms=False):
     a read-only pool grant let them fire a failover that starts every VM in it. Ask for vm.start
     instead, but only for a confined caller — site_recovery.failover is admin-only by default, so
     demanding vm.start from an unconfined DR operator would just break a legitimate custom role
-    without closing anything."""
+    without closing anything.
+    
+    Pentest Dec 2026 (empty-plan BOLA) — the per-VM loop alone authorized after zero iterations,
+    so a scoped caller reaching the plan's clusters could access/mutate an empty plan outside their
+    scope. Enforce an independent plan-level authorization decision first: the caller must be the
+    plan creator, a member of the plan's group, or an admin. Per-VM checks remain an additional
+    requirement for non-empty plans."""
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.utils.rbac import user_can_access_vm
     from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.models.permissions import ROLE_ADMIN
+    
     user = build_authz_user(request.session['user'], request.session)
+    username = request.session.get('user', '')
+    
+    # Plan-level authorization: check ownership, group membership, or admin role
+    effective_role = user.get('effective_role', user.get('role'))
+    is_admin = effective_role == ROLE_ADMIN
+    is_creator = plan.get('created_by') == username
+    
+    # Check group membership if plan has a group_id
+    in_plan_group = False
+    plan_group = plan.get('group_id', '').strip()
+    if plan_group:
+        # User groups can come from the user record or session (OIDC/SAML)
+        user_groups = user.get('groups', [])
+        if not user_groups:
+            user_groups = request.session.get('groups', [])
+        # Case-insensitive group matching (consistent with pool permissions)
+        in_plan_group = any(g.lower() == plan_group.lower() for g in user_groups)
+    
+    # Deny if caller has no plan-level relationship
+    if not (is_admin or is_creator or in_plan_group):
+        return False, (jsonify({'error': 'Access denied: you do not have permission to access this plan'}), 403)
+    
+    # Per-VM authorization for non-empty plans
     perm = 'vm.view'
     if starts_vms and caller_is_scoped(user, plan.get('source_cluster') or ''):
         perm = 'vm.start'
