@@ -2113,13 +2113,30 @@ class PegaProxDB:
             if needs_user_remigration:
                 try:
                     cursor.execute("DELETE FROM users")
-                    self.conn.commit()
-                    logging.info("Cleared users table for re-migration")
+                    # MK: DO NOT commit the deletion yet — if _migrate_users fails to insert
+                    # anything, we must roll back to avoid an empty users table that would
+                    # reopen /api/auth/setup on installs without the marker file.
+                    logging.info("Cleared users table for re-migration (pending commit)")
                 except Exception as e:
                     logging.error(f"Error clearing users: {e}")
+                    self.conn.rollback()
+                    needs_user_remigration = False
 
-            if self._migrate_users():
-                migrated_any = True
+            if needs_user_remigration or cluster_count == 0:
+                migration_result = self._migrate_users()
+                if needs_user_remigration:
+                    if migration_result:
+                        # At least one user was successfully inserted; commit the replacement
+                        self.conn.commit()
+                        logging.info("User re-migration committed")
+                        migrated_any = True
+                    else:
+                        # No users were inserted; roll back the deletion to preserve existing accounts
+                        self.conn.rollback()
+                        logging.error("User re-migration failed: no users were successfully inserted, "
+                                      "rolled back deletion to preserve existing accounts")
+                elif migration_result:
+                    migrated_any = True
         
         # Migrate sessions
         if self._migrate_sessions():
@@ -2270,13 +2287,20 @@ class PegaProxDB:
             return None
 
     def _migrate_users(self) -> bool:
-        """Migrate users from encrypted file"""
+        """Migrate users from encrypted file
+        
+        Returns True only if at least one user was successfully inserted.
+        This prevents the re-migration path from committing an empty users table
+        when all legacy records fail insertion, which would reopen /api/auth/setup
+        on installs without the initialization marker.
+        """
         data = self._read_legacy_users()
         if not data:
             return False
 
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
+        successful_count = 0
         
         for username, user in data.items():
             try:
@@ -2300,11 +2324,16 @@ class PegaProxDB:
                     1 if user.get('totp_enabled', False) else 0,
                     1 if user.get('force_password_change', False) else 0
                 ))
+                successful_count += 1
             except Exception as e:
                 logging.error(f"Failed to migrate user {username}: {e}")
         
-        logging.info(f"Migrated {len(data)} users to SQLite")
-        return True
+        if successful_count > 0:
+            logging.info(f"Migrated {successful_count} of {len(data)} users to SQLite")
+            return True
+        else:
+            logging.error(f"Failed to migrate any users: 0 of {len(data)} succeeded")
+            return False
     
     def _migrate_sessions(self) -> bool:
         """Migrate sessions from encrypted file"""
