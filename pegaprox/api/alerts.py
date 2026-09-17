@@ -724,14 +724,15 @@ def delete_alert(alert_id):
 # ─────────────────────────────────────────────────────────
 
 @bp.route('/api/alert-channels', methods=['GET'])
-@require_auth(perms=['alert.manage'])
+@require_auth(perms=['admin.settings'])
 def list_alert_channels():
     from pegaprox.api.helpers import load_server_settings
     channels = (load_server_settings() or {}).get('alert_webhooks') or []
     # MK: scrub url secrets on read — ?full=1 bypasses for edit flows
-    # sec (audit): alert_webhooks is a GLOBAL list, so the bypass handed every alert.manage holder
-    # (a delegable, tenant-scoped permission) every tenant's raw webhook URLs and tokens. A webhook
-    # URL is a bearer capability. Keep the edit flow, but require the settings-admin permission.
+    # sec (audit): alert_webhooks is a GLOBAL list; all channel CRUD now requires admin.settings
+    # (was alert.manage, a delegable tenant-scoped permission — any tenant alert manager could
+    # create exfiltration destinations, retarget or delete other tenants' channels, and trigger
+    # test delivery through globally configured destinations).
     if request.args.get('full', '').lower() in ('1', 'true', 'yes'):
         from pegaprox.utils.rbac import has_permission
         from pegaprox.utils.auth import build_authz_user
@@ -743,7 +744,7 @@ def list_alert_channels():
 
 
 @bp.route('/api/alert-channels', methods=['POST'])
-@require_auth(perms=['alert.manage'])
+@require_auth(perms=['admin.settings'])
 def create_alert_channel():
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     from pegaprox.utils.webhooks import new_channel
@@ -760,7 +761,7 @@ def create_alert_channel():
 
 
 @bp.route('/api/alert-channels/<cid>', methods=['PUT'])
-@require_auth(perms=['alert.manage'])
+@require_auth(perms=['admin.settings'])
 def update_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     settings = load_server_settings()
@@ -787,7 +788,7 @@ def update_alert_channel(cid):
 
 
 @bp.route('/api/alert-channels/<cid>', methods=['DELETE'])
-@require_auth(perms=['alert.manage'])
+@require_auth(perms=['admin.settings'])
 def delete_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     settings = load_server_settings()
@@ -802,7 +803,7 @@ def delete_alert_channel(cid):
 
 
 @bp.route('/api/alert-channels/<cid>/test', methods=['POST'])
-@require_auth(perms=['alert.manage'])
+@require_auth(perms=['admin.settings'])
 def test_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings
     from pegaprox.utils.webhooks import send_to_channel

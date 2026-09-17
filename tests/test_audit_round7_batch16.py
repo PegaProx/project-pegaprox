@@ -299,8 +299,9 @@ def test_push_unsubscribe_is_owner_scoped(api, seed, db):
     assert still is not None and still[0] == 'victim', "another user's subscription was deleted"
 
 
-# ── webhook secrets must not come back on ANY response path ───────────────────
-def test_alert_channel_update_does_not_echo_the_secret(api, seed, monkeypatch):
+# ── webhook channels require admin.settings (global resource) ─────────────────
+def test_alert_channel_update_denied_to_tenant_alert_manager(api, seed, monkeypatch):
+    # alert_webhooks is a GLOBAL list; a tenant-scoped alert.manage holder must not mutate it
     seed.tenant('acme', clusters=['cluster_1'])
     u = seed.user('chanmgr2', role='user', tenant_id='acme', permissions=['alert.manage'])
     secret = 'https://hooks.slack.com/services/T0/B0/VERYSECRETTOKENVALUE'
@@ -308,11 +309,9 @@ def test_alert_channel_update_does_not_echo_the_secret(api, seed, monkeypatch):
     import pegaprox.api.helpers as helpers_mod
     monkeypatch.setattr(helpers_mod, 'load_server_settings', lambda: store)
     monkeypatch.setattr(helpers_mod, 'save_server_settings', lambda s: store.update(s))
-    body = api.as_user(u).put('/api/alert-channels/c1', json={'name': 'renamed'}).get_json()
-    assert 'VERYSECRETTOKENVALUE' not in str(body), body
-    assert body['channel']['token'] == '********', body
-    # and the stored value is untouched
-    assert store['alert_webhooks'][0]['url'] == secret
+    # update now requires admin.settings
+    r = api.as_user(u).put('/api/alert-channels/c1', json={'name': 'renamed'})
+    assert r.status_code == 403, r.get_data(as_text=True)
 
 
 # ── config backup labelled "no secrets" still shipped two of them ─────────────

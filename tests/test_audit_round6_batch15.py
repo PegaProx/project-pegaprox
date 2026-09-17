@@ -307,8 +307,9 @@ def test_cluster_alert_rules_scoped(api, seed, db, monkeypatch):
     assert [a['id'] for a in body['alerts']] == ['r1', 'r3'], body
 
 
-# ── webhook secrets behind ?full=1 ────────────────────────────────────────────
-def test_alert_channels_full_requires_settings_admin(api, seed, monkeypatch):
+# ── webhook channels require admin.settings (global resource) ─────────────────
+def test_alert_channels_denied_to_tenant_alert_manager(api, seed, monkeypatch):
+    # alert_webhooks is a GLOBAL list; a tenant-scoped alert.manage holder must not mutate it
     seed.tenant('acme', clusters=['cluster_1'])
     u = seed.user('chanmgr', role='user', tenant_id='acme', permissions=['alert.manage'])
     import pegaprox.api.helpers as helpers_mod
@@ -316,12 +317,13 @@ def test_alert_channels_full_requires_settings_admin(api, seed, monkeypatch):
         'alert_webhooks': [{'id': 'c1', 'name': 'ops',
                             'url': 'https://hooks.slack.com/services/T0/B0/VERYSECRETTOKENVALUE',
                             'token': 'abc'}]})
-    r = api.as_user(u).get('/api/alert-channels?full=1')
-    assert r.status_code == 403, r.get_data(as_text=True)
-    # the masked view still works for them
-    masked = api.as_user(u).get('/api/alert-channels').get_json()
-    assert 'VERYSECRETTOKENVALUE' not in masked[0]['url']
-    assert masked[0]['token'] == '********'
+    # all channel operations now require admin.settings
+    assert api.as_user(u).get('/api/alert-channels').status_code == 403
+    assert api.as_user(u).get('/api/alert-channels?full=1').status_code == 403
+    assert api.as_user(u).post('/api/alert-channels', json={'url': 'https://x'}).status_code == 403
+    assert api.as_user(u).put('/api/alert-channels/c1', json={'name': 'x'}).status_code == 403
+    assert api.as_user(u).delete('/api/alert-channels/c1').status_code == 403
+    assert api.as_user(u).post('/api/alert-channels/c1/test').status_code == 403
 
 
 def test_alert_channels_full_allowed_for_settings_admin(api, seed, monkeypatch):
