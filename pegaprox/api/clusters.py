@@ -32,6 +32,61 @@ from pegaprox.api.helpers import (load_server_settings, get_connected_manager, c
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
 
+# SSRF mitigation: domain allowlist for cluster endpoints
+ALLOWED_CLUSTER_DOMAINS = ['example.com']  # add your allowed domains here
+
+def validate_cluster_endpoint(endpoint):
+    """Validate cluster endpoint against domain allowlist to prevent SSRF.
+    
+    Args:
+        endpoint: hostname or IP address (not a full URL)
+        
+    Returns:
+        str: validated endpoint
+        
+    Raises:
+        ValueError: if endpoint is invalid or not in allowlist
+    """
+    if not endpoint or not isinstance(endpoint, str):
+        raise ValueError('Invalid endpoint')
+    
+    endpoint = endpoint.strip()
+    
+    # Remove protocol if present (should be hostname/IP only)
+    if '://' in endpoint:
+        raise ValueError('Invalid endpoint')
+    
+    # Extract hostname (remove port if present)
+    if ':' in endpoint and not endpoint.startswith('['):  # not IPv6
+        hostname = endpoint.split(':')[0]
+    elif endpoint.startswith('['):  # IPv6 with port
+        if ']:' in endpoint:
+            hostname = endpoint.split(']:')[0] + ']'
+        else:
+            hostname = endpoint
+    else:
+        hostname = endpoint
+    
+    # Remove brackets from IPv6
+    hostname = hostname.strip('[]')
+    
+    # Check against domain allowlist
+    # For IPs, check exact match; for domains, check if it matches or is subdomain
+    is_allowed = False
+    for allowed_domain in ALLOWED_CLUSTER_DOMAINS:
+        if hostname == allowed_domain:
+            is_allowed = True
+            break
+        # Check if it's a subdomain (ends with .allowed_domain)
+        if hostname.endswith('.' + allowed_domain):
+            is_allowed = True
+            break
+    
+    if not is_allowed:
+        raise ValueError('Invalid endpoint')
+    
+    return endpoint
+
 @bp.route('/api/clusters', methods=['GET'])
 @require_auth()
 def get_clusters():
@@ -1262,6 +1317,20 @@ def update_cluster_config(cluster_id):
     updated = []
     for key, value in data.items():
         if key in ALLOWED_CONFIG_FIELDS and hasattr(mgr.config, key):
+            # SSRF mitigation: validate cluster endpoints
+            if key == 'host':
+                try:
+                    value = validate_cluster_endpoint(value)
+                except ValueError:
+                    return jsonify({'error': 'Invalid host value'}), 400
+            elif key == 'fallback_hosts':
+                if not isinstance(value, list):
+                    return jsonify({'error': 'fallback_hosts must be a list'}), 400
+                try:
+                    value = [validate_cluster_endpoint(h) for h in value if h]
+                except ValueError:
+                    return jsonify({'error': 'Invalid fallback_hosts value'}), 400
+            
             old = getattr(mgr.config, key)
             setattr(mgr.config, key, value)
             updated.append(key)
@@ -1293,6 +1362,20 @@ def update_cluster_config_live(cluster_id):
     updated = []
     for key, value in data.items():
         if key in ALLOWED_CONFIG_FIELDS and hasattr(mgr.config, key):
+            # SSRF mitigation: validate cluster endpoints
+            if key == 'host':
+                try:
+                    value = validate_cluster_endpoint(value)
+                except ValueError:
+                    return jsonify({'error': 'Invalid host value'}), 400
+            elif key == 'fallback_hosts':
+                if not isinstance(value, list):
+                    return jsonify({'error': 'fallback_hosts must be a list'}), 400
+                try:
+                    value = [validate_cluster_endpoint(h) for h in value if h]
+                except ValueError:
+                    return jsonify({'error': 'Invalid fallback_hosts value'}), 400
+            
             setattr(mgr.config, key, value)
             updated.append(key)
 
@@ -1731,7 +1814,11 @@ def set_fallback_hosts(cluster_id):
     if not isinstance(fallback_hosts, list):
         return jsonify({'error': 'fallback_hosts must be a list'}), 400
     
-    fallback_hosts = [str(h) for h in fallback_hosts if h]
+    # SSRF mitigation: validate cluster endpoints
+    try:
+        fallback_hosts = [validate_cluster_endpoint(str(h)) for h in fallback_hosts if h]
+    except ValueError:
+        return jsonify({'error': 'Invalid fallback_hosts value'}), 400
     
     mgr = cluster_managers[cluster_id]
     mgr.config.fallback_hosts = fallback_hosts
