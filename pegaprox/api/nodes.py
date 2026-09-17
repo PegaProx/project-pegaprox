@@ -356,6 +356,18 @@ def get_node_hardware_api(cluster_id, node):
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    
+    # Validate that the node is actually a member of this cluster before attempting
+    # SSH or hardware reads. Without this check, an attacker-controlled node name
+    # could receive SSH credentials when _get_node_ip falls back to the raw hostname.
+    mgr = cluster_managers[cluster_id]
+    try:
+        cluster_nodes = mgr.nodes or {}
+    except Exception:
+        cluster_nodes = {}
+    if cluster_nodes and node not in cluster_nodes:
+        return jsonify({'error': 'Unknown cluster node'}), 404
+    
     from pegaprox.core import bmc, redfish
     inband_ok, _ = _hw_consent_state()
     redfish_ok, _ = _redfish_consent_state()
@@ -365,7 +377,7 @@ def get_node_hardware_api(cluster_id, node):
             'code': 'CONSENT_REQUIRED',
             'current_version': bmc.HW_CONSENT_VERSION,
         }), 403
-    result = redfish.read_node_hardware(cluster_managers[cluster_id], cluster_id, node,
+    result = redfish.read_node_hardware(mgr, cluster_id, node,
                                         inband_ok=inband_ok, redfish_ok=redfish_ok)
     return jsonify(result)
 
