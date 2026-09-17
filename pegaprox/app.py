@@ -827,7 +827,10 @@ def _resolve_ssl_context(reverse_proxy, domain='', app_name='PegaProx',
 
 def main(debug_mode=False):
     """Main entry point - starts PegaProx server."""
-    from pegaprox.utils.auth import load_users, load_sessions, backfill_initialized_marker, is_initialized
+    from pegaprox.utils.auth import (
+        load_users, load_sessions, backfill_initialized_marker, is_initialized,
+        generate_setup_token, save_setup_token, load_setup_token
+    )
     from pegaprox.utils.audit import load_audit_log
     from pegaprox.core.config import load_config
     from pegaprox.core.pbs import load_pbs_servers
@@ -973,13 +976,34 @@ def main(debug_mode=False):
     backfill_initialized_marker()
 
     if not is_initialized():
-        print("\n" + "=" * 50)
+        # Generate or load the bootstrap token for first-run setup
+        setup_token = load_setup_token()
+        if not setup_token:
+            setup_token = generate_setup_token()
+            try:
+                save_setup_token(setup_token)
+            except Exception as e:
+                print(f"\n[ERROR] Failed to save setup token: {e}")
+                print("Setup will not be possible until this is resolved.\n")
+                sys.exit(1)
+        
+        print("\n" + "=" * 70)
         print("FIRST-RUN SETUP REQUIRED")
-        print("  No admin account exists yet — open the PegaProx URL")
-        print("  in a browser to create the first administrator via the")
-        print("  setup wizard. /api/auth/login is disabled until that")
-        print("  is done.")
-        print("=" * 50 + "\n")
+        print("=" * 70)
+        print("  No admin account exists yet. To complete setup:")
+        print("")
+        print("  1. Open the PegaProx URL in your browser")
+        print("  2. The setup wizard will prompt for a bootstrap token")
+        print("  3. Enter this token to prove you have console access:")
+        print("")
+        print(f"     SETUP TOKEN: {setup_token}")
+        print("")
+        print("  This token is required to prevent unauthorized network access")
+        print("  during initial setup. It will be invalidated after the first")
+        print("  admin account is created.")
+        print("")
+        print("  /api/auth/login is disabled until setup completes.")
+        print("=" * 70 + "\n")
 
     # Load existing configuration
     config = load_config()

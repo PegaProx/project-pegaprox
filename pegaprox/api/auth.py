@@ -24,6 +24,7 @@ from pegaprox.utils.auth import (
     generate_api_token, create_api_token, validate_api_token, revoke_user_api_tokens,
     list_user_tokens, revoke_api_token, require_auth,
     generate_session_id, mark_admin_initialized, ensure_api_tokens_table,
+    validate_setup_token, invalidate_setup_token,
     dummy_verify_password,
     ARGON2_AVAILABLE, TOTP_AVAILABLE,
 )
@@ -461,6 +462,19 @@ def auth_setup():
     _setup_attempts_by_ip[client_ip] = window
 
     data = request.get_json() or {}
+    
+    # Bootstrap token validation — prevents network attackers from claiming
+    # the first admin account. The token is generated on startup and logged
+    # to console; only the legitimate operator has access to it.
+    provided_token = data.get('setup_token', '').strip()
+    if not provided_token:
+        logging.warning(f"[SETUP] attempt from {client_ip} without bootstrap token")
+        return jsonify({'error': 'Setup token is required'}), 401
+    
+    if not validate_setup_token(provided_token):
+        logging.warning(f"[SETUP] invalid bootstrap token from {client_ip}")
+        return jsonify({'error': 'Invalid setup token'}), 403
+    
     username = sanitize_username(str(data.get('username', '')).strip().lower(), max_length=64)
     password = data.get('password', '')
     display_name = sanitize_identifier(str(data.get('display_name', '')).strip(), max_length=128)
@@ -484,6 +498,8 @@ def auth_setup():
         admin = create_initial_admin(username, password, display_name=display_name, email=email)
         save_users(admin)
         mark_admin_initialized()
+        # Invalidate the bootstrap token after successful setup so it can't be reused
+        invalidate_setup_token()
     except Exception as e:
         logging.error(f"[SETUP] failed to create initial admin: {e}")
         return jsonify({'error': 'Setup failed, check server logs'}), 500
