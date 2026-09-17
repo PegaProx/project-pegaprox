@@ -20,7 +20,7 @@ from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117
 from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     has_permission, get_user_clusters, filter_clusters_for_user,
-    user_can_access_vm, invalidate_pool_cache, get_vm_acls,
+    user_can_access_vm, user_can_access_vmware_vm, invalidate_pool_cache, get_vm_acls,
 )
 from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immediate_update
 from pegaprox.core.config import load_config, save_config
@@ -31,6 +31,46 @@ from pegaprox.api.helpers import (load_server_settings, get_connected_manager, c
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
+
+
+def _check_vm_access_generic_or_esxi(user, cluster_id, vmid, permission_base='view', vm_type=None):
+    """Check VM access for generic cluster routes, routing to the correct authorization helper.
+    
+    ESXi managers are registered in cluster_managers under their raw VMware server ID,
+    making them addressable by generic cluster routes. However, they must be authorized
+    using the VMware-specific helper (user_can_access_vmware_vm) which enforces the
+    vmware:<id> ACL namespace and vmware.vm.* permissions, not the generic helper
+    (user_can_access_vm) which uses the raw cluster ID and generic vm.* permissions.
+    
+    Args:
+        user: User dict from build_authz_user
+        cluster_id: Cluster/manager ID
+        vmid: VM identifier (int or str)
+        permission_base: Base permission name ('view', 'migrate', 'config', etc.)
+        vm_type: VM type for Proxmox ('qemu', 'lxc'), ignored for ESXi
+    
+    Returns:
+        bool: True if user has access, False otherwise
+    """
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return False
+    
+    cluster_type = getattr(mgr, 'cluster_type', 'proxmox')
+    
+    if cluster_type == 'esxi':
+        # ESXi: use VMware-specific authorization with vmware:<id> namespace
+        # and vmware.vm.* permissions
+        vmware_permission = f'vmware.vm.{permission_base}'
+        return user_can_access_vmware_vm(user, cluster_id, str(vmid), vmware_permission)
+    else:
+        # Proxmox/XCP-ng: use generic authorization with cluster ID and vm.* permissions
+        try:
+            vmid_int = int(vmid)
+        except (ValueError, TypeError):
+            return False
+        generic_permission = f'vm.{permission_base}'
+        return user_can_access_vm(user, cluster_id, vmid_int, generic_permission, vm_type)
 
 @bp.route('/api/clusters', methods=['GET'])
 @require_auth()
@@ -1153,7 +1193,6 @@ def get_cluster_resources(cluster_id):
 
     # NS Aug 2026 — build the authz user so an admin-owned scoped API token is floored to its
     # effective_role (the stored-role fast-path let such a token see everything).
-    from pegaprox.utils.rbac import user_can_access_vm as _ucav
     from pegaprox.utils.auth import build_authz_user
     user = build_authz_user(request.session['user'], request.session)
     user['username'] = request.session['user']
@@ -1189,7 +1228,7 @@ def get_cluster_resources(cluster_id):
             if _vmid is None:
                 continue
             try:
-                if _ucav(user, cluster_id, int(_vmid), 'vm.view', vm.get('type')):
+                if _check_vm_access_generic_or_esxi(user, cluster_id, _vmid, 'view', vm.get('type')):
                     filtered.append(vm)
             except Exception:
                 continue

@@ -313,17 +313,38 @@ def _filtered_resources_frame(resources, cluster_id, username, timestamp, effect
     O(distinct-scoped-users), not O(clients); we fetch a SINGLE user (get_db().get_user), never
     load_users() — that call is the documented hot-path landmine. user_can_access_vm admin-fast-
     returns and reads the cached ACL map, so the per-VM pass is a dict lookup per VM.
+    
+    ESXi managers registered in cluster_managers must use VMware-specific authorization
+    (user_can_access_vmware_vm) instead of the generic helper.
     """
     if not isinstance(resources, list):
         return None
-    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.utils.rbac import user_can_access_vm, user_can_access_vmware_vm
     user = _sse_stored_user(username, effective_role)
     if not user:
         return None
-    allowed = [
-        r for r in resources
-        if user_can_access_vm(user, cluster_id, r.get('vmid'), 'vm.view', r.get('type'))
-    ]
+    
+    # Detect if this is an ESXi cluster
+    mgr = cluster_managers.get(cluster_id)
+    is_esxi = mgr and getattr(mgr, 'cluster_type', 'proxmox') == 'esxi'
+    
+    allowed = []
+    for r in resources:
+        vmid = r.get('vmid')
+        if vmid is None:
+            continue
+        try:
+            if is_esxi:
+                # ESXi: use VMware-specific authorization
+                if user_can_access_vmware_vm(user, cluster_id, str(vmid), 'vmware.vm.view'):
+                    allowed.append(r)
+            else:
+                # Proxmox/XCP-ng: use generic authorization
+                if user_can_access_vm(user, cluster_id, vmid, 'vm.view', r.get('type')):
+                    allowed.append(r)
+        except Exception:
+            continue
+    
     return _serialize_sse_message('resources', allowed, cluster_id, timestamp)
 
 
@@ -331,13 +352,25 @@ def _sse_user_can_view_vm(username, cluster_id, vmid, effective_role=None):
     """sec (private disclosure Sep 2026 — audit M1): SSE only per-VM-filtered the 'resources' frame;
     'vm_config' (full VM config incl. possible cloud-init secrets) and per-VM 'tasks' rows were
     broadcast cluster-wide to any subscribed non-admin. This is the per-VM gate for those frames.
-    Single-user fetch (never load_users, the hot-path landmine), same pattern as the resources frame."""
-    from pegaprox.utils.rbac import user_can_access_vm
+    Single-user fetch (never load_users, the hot-path landmine), same pattern as the resources frame.
+    
+    ESXi managers registered in cluster_managers must use VMware-specific authorization."""
+    from pegaprox.utils.rbac import user_can_access_vm, user_can_access_vmware_vm
     user = _sse_stored_user(username, effective_role)
     if not user:
         return False
+    
+    # Detect if this is an ESXi cluster
+    mgr = cluster_managers.get(cluster_id)
+    is_esxi = mgr and getattr(mgr, 'cluster_type', 'proxmox') == 'esxi'
+    
     try:
-        return user_can_access_vm(user, cluster_id, int(vmid), 'vm.view')
+        if is_esxi:
+            # ESXi: use VMware-specific authorization
+            return user_can_access_vmware_vm(user, cluster_id, str(vmid), 'vmware.vm.view')
+        else:
+            # Proxmox/XCP-ng: use generic authorization
+            return user_can_access_vm(user, cluster_id, int(vmid), 'vm.view')
     except (TypeError, ValueError):
         return False
 

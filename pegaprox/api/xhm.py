@@ -11,7 +11,7 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
-from pegaprox.utils.rbac import user_can_access_vm
+from pegaprox.utils.rbac import user_can_access_vm, user_can_access_vmware_vm
 from pegaprox.api.helpers import check_cluster_access, caller_is_scoped
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
@@ -28,6 +28,45 @@ _xhm_lock = threading.Lock()
 # The UI reads the list to show recent results, so this is a retention window, not a cleanup.
 _XHM_RETENTION_SECONDS = 6 * 3600
 _XHM_MAX_FINISHED = 100
+
+
+def _check_vm_access_for_xhm(user, cluster_id, vmid, permission_base='migrate'):
+    """Check VM access for XHM operations, routing to the correct authorization helper.
+    
+    ESXi managers are registered in cluster_managers under their raw VMware server ID,
+    making them addressable by generic XHM routes. However, they must be authorized
+    using the VMware-specific helper (user_can_access_vmware_vm) which enforces the
+    vmware:<id> ACL namespace and vmware.vm.* permissions, not the generic helper
+    (user_can_access_vm) which uses the raw cluster ID and generic vm.* permissions.
+    
+    Args:
+        user: User dict from build_authz_user
+        cluster_id: Cluster/manager ID
+        vmid: VM identifier (int or str)
+        permission_base: Base permission name ('migrate', 'view', etc.)
+    
+    Returns:
+        bool: True if user has access, False otherwise
+    """
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return False
+    
+    cluster_type = getattr(mgr, 'cluster_type', 'proxmox')
+    
+    if cluster_type == 'esxi':
+        # ESXi: use VMware-specific authorization with vmware:<id> namespace
+        # and vmware.vm.* permissions
+        vmware_permission = f'vmware.vm.{permission_base}'
+        return user_can_access_vmware_vm(user, cluster_id, str(vmid), vmware_permission)
+    else:
+        # Proxmox/XCP-ng: use generic authorization with cluster ID and vm.* permissions
+        try:
+            vmid_int = int(vmid)
+        except (ValueError, TypeError):
+            return False
+        generic_permission = f'vm.{permission_base}'
+        return user_can_access_vm(user, cluster_id, vmid_int, generic_permission)
 
 
 def _prune_finished_migrations():
@@ -79,7 +118,7 @@ def xhm_plan():
     except (ValueError, TypeError):
         return jsonify({'error': 'Invalid source_vmid'}), 400
     
-    if not user_can_access_vm(user, source_cluster, vmid_int, 'vm.migrate'):
+    if not _check_vm_access_for_xhm(user, source_cluster, source_vmid, 'migrate'):
         return jsonify({'error': 'Access denied to source VM'}), 403
     # sec (audit): the target got check_cluster_access only — which admits a pool-/ACL-scoped
     # caller — yet this creates a BRAND-NEW guest there on a caller-chosen node and storage.
@@ -154,7 +193,7 @@ def xhm_start():
     except (ValueError, TypeError):
         return jsonify({'error': 'Invalid source_vmid'}), 400
     
-    if not user_can_access_vm(user, data['source_cluster'], vmid_int, 'vm.migrate'):
+    if not _check_vm_access_for_xhm(user, data['source_cluster'], data['source_vmid'], 'migrate'):
         return jsonify({'error': 'Access denied to source VM'}), 403
     if caller_is_scoped(user, data['target_cluster']):
         return jsonify({'error': 'Access denied to target cluster'}), 403
@@ -237,7 +276,7 @@ def _xhm_reachable(t):
     if svmid and scluster:
         try:
             _u = build_authz_user(request.session.get('user', ''), request.session)
-            return user_can_access_vm(_u, scluster, int(svmid), 'vm.migrate')
+            return _check_vm_access_for_xhm(_u, scluster, svmid, 'migrate')
         except Exception:
             return False
     return True
