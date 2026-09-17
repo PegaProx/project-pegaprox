@@ -2166,7 +2166,13 @@ def delete_pool_permission_api(cluster_id, pool_id, subject_type, subject_id):
     """Delete pool permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    _err = _authz_object_write(cluster_id)
+    
+    # sec (pentest): validate tenant membership of the subject being deleted, matching the POST
+    # handler's guard. Without this, a tenant-scoped admin.users delegate could revoke another
+    # tenant's pool permissions.
+    _err = _authz_object_write(cluster_id,
+                               subjects=[subject_id] if subject_type == 'user' else [],
+                               permissions=[])
     if _err:
         return _err
     _confined, _granted = _pool_visibility(cluster_id)
