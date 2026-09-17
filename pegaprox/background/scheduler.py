@@ -216,6 +216,19 @@ def execute_scheduled_task(task):
         return
     
     manager = cluster_managers[cluster_id]
+    
+    # Validate target VM exists before execution (defense against VMID reuse)
+    try:
+        # For XCP-ng clusters, verify the VMID still maps to a valid UUID
+        if hasattr(manager, '_resolve_vm'):
+            # This will raise ValueError if VMID doesn't exist in mapping
+            manager._resolve_vm(target_id)
+    except (ValueError, AttributeError, Exception) as e:
+        logging.error(f"Scheduled task skipped: Target VM {target_type}/{target_id} not found or invalid: {e}")
+        log_audit('scheduler', 'scheduled_task.skipped', 
+                 f"Task '{task.get('name')}' skipped: target VM {target_type}/{target_id} not found")
+        return
+    
     logging.info(f"Executing scheduled task: {_sl(task.get('name'))} - {action} on {target_type}/{target_id}")
     
     try:

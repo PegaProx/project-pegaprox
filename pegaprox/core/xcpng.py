@@ -888,12 +888,39 @@ class XcpngManager:
 
             api.VM.destroy(ref)
 
-            # cleanup vmid mapping
+            # cleanup vmid mapping and dependent records
             db = get_db()
             cursor = db.conn.cursor()
+            
+            # Remove pool memberships to prevent identity confusion on VMID reuse
+            cursor.execute('DELETE FROM xcpng_pool_members WHERE cluster_id = ? AND vmid = ?',
+                          (self.id, int(vmid)))
+            
+            # Remove scheduled tasks targeting this VM to prevent misdirected execution
+            cursor.execute('''DELETE FROM scheduled_tasks 
+                             WHERE cluster_id = ? 
+                             AND json_extract(config, '$.target_id') = ?
+                             AND json_extract(config, '$.target_type') IN ('qemu', 'vm')''',
+                          (self.id, str(vmid)))
+            
+            # Add VMID to tombstone table to prevent reuse
+            from datetime import datetime
+            cursor.execute('''INSERT OR IGNORE INTO xcpng_vmid_tombstones (cluster_id, vmid, deleted_at)
+                             VALUES (?, ?, ?)''',
+                          (self.id, int(vmid), datetime.now().isoformat()))
+            
+            # Remove the VMID mapping last
             cursor.execute('DELETE FROM xcpng_vmid_map WHERE cluster_id = ? AND vmid = ?',
                           (self.id, int(vmid)))
+            
             db.conn.commit()
+
+            # invalidate pool cache to reflect membership changes
+            try:
+                from pegaprox.utils.rbac import invalidate_pool_cache
+                invalidate_pool_cache(self.id)
+            except Exception as e:
+                self.logger.warning(f"Failed to invalidate pool cache: {e}")
 
             # invalidate cache
             self._cached_vms = None
@@ -4275,7 +4302,14 @@ echo DONE""",
                        (self.id, pool_id))
         vmids = [r[0] for r in cursor.fetchall()]
         members = []
+        stale_vmids = []
         for vmid in vmids:
+            # Validate VMID still has a valid UUID mapping (defense against reuse)
+            uuid = db.xcpng_resolve_vmid(self.id, vmid)
+            if not uuid:
+                # VMID no longer maps to any VM - mark for cleanup
+                stale_vmids.append(vmid)
+                continue
             # find VM in cache for name
             vm = next((v for v in (self._cached_vms or []) if v.get('vmid') == vmid), None)
             members.append({
@@ -4284,11 +4318,26 @@ echo DONE""",
                 'name': vm.get('name', '') if vm else '',
                 'status': vm.get('status', '') if vm else '',
             })
+        # Clean up stale pool memberships
+        if stale_vmids:
+            for vmid in stale_vmids:
+                cursor.execute('DELETE FROM xcpng_pool_members WHERE cluster_id = ? AND poolid = ? AND vmid = ?',
+                              (self.id, pool_id, vmid))
+            db.conn.commit()
+            self.logger.info(f"Cleaned up {len(stale_vmids)} stale pool memberships from {pool_id}")
         return {'poolid': pool_id, 'members': members}
 
     def get_vm_pool(self, vmid, vm_type='qemu'):
         db = get_db()
         cursor = db.conn.cursor()
+        # Validate VMID still has a valid UUID mapping before returning pool
+        uuid = db.xcpng_resolve_vmid(self.id, vmid)
+        if not uuid:
+            # VMID no longer maps to any VM - clean up any stale memberships
+            cursor.execute('DELETE FROM xcpng_pool_members WHERE cluster_id = ? AND vmid = ?',
+                          (self.id, int(vmid)))
+            db.conn.commit()
+            return None
         cursor.execute('SELECT poolid FROM xcpng_pool_members WHERE cluster_id = ? AND vmid = ?',
                        (self.id, int(vmid)))
         row = cursor.fetchone()

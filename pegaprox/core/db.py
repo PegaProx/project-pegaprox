@@ -1382,6 +1382,15 @@ class PegaProxDB:
             cursor.execute('''
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_xcpng_vmid ON xcpng_vmid_map(cluster_id, vmid)
             ''')
+            # Tombstone table to prevent VMID reuse after deletion
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS xcpng_vmid_tombstones (
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    deleted_at TEXT NOT NULL,
+                    PRIMARY KEY (cluster_id, vmid)
+                )
+            ''')
         except Exception as e:
             logging.error(f"Error creating xcpng_vmid_map table: {e}")
 
@@ -3190,17 +3199,29 @@ class PegaProxDB:
 
     # XCP-ng VMID mapping helpers - MK Mar 2026
     def xcpng_get_vmid(self, cluster_id, vm_uuid):
-        """Get or create synthetic VMID for XCP-ng VM UUID"""
+        """Get or create synthetic VMID for XCP-ng VM UUID
+        
+        Allocates VMIDs sequentially starting at 100, skipping any retired
+        (tombstoned) IDs to prevent identity confusion after deletion.
+        """
         cursor = self.conn.cursor()
         cursor.execute('SELECT vmid FROM xcpng_vmid_map WHERE cluster_id = ? AND uuid = ?',
                        (cluster_id, vm_uuid))
         row = cursor.fetchone()
         if row:
             return row['vmid']
-        # allocate next vmid starting at 100
+        # allocate next vmid starting at 100, skipping tombstoned IDs
         cursor.execute('SELECT MAX(vmid) FROM xcpng_vmid_map WHERE cluster_id = ?', (cluster_id,))
         max_row = cursor.fetchone()
         next_id = (max_row[0] or 99) + 1
+        
+        # Skip tombstoned VMIDs to prevent reuse
+        cursor.execute('SELECT vmid FROM xcpng_vmid_tombstones WHERE cluster_id = ? AND vmid >= ? ORDER BY vmid',
+                       (cluster_id, next_id))
+        tombstones = {row[0] for row in cursor.fetchall()}
+        while next_id in tombstones:
+            next_id += 1
+        
         cursor.execute('INSERT INTO xcpng_vmid_map (cluster_id, uuid, vmid) VALUES (?, ?, ?)',
                        (cluster_id, vm_uuid, next_id))
         self.conn.commit()
