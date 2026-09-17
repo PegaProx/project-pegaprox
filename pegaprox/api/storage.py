@@ -1267,6 +1267,53 @@ def run_auto_storage_balance():
                                 if mig.get('active'):
                                     actively_migrating_vmids.add(mig.get('vmid'))
 
+                        # NS Dec 2026 (Aikido 469089261 re-verify) — the worker runs USERLESS, so it can't
+                        # call user_can_access_vm. Confine it to VMs that have NO per-VM authorization scope
+                        # (no VM-ACL entry, not in a pool with grants). A VM protected by either is off-limits
+                        # to auto-balance — only a human with explicit vm.config on that VM may move its disks.
+                        # This keeps the security boundary consistent with execute_storage_migration (line 937).
+                        restricted_vmids = set()
+                        try:
+                            # Collect VMs with explicit ACL entries
+                            from pegaprox.utils.rbac import get_vm_acls
+                            cluster_acls = get_vm_acls().get(cluster_id, {})
+                            for vmid_str in cluster_acls.keys():
+                                try:
+                                    restricted_vmids.add(int(vmid_str))
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            # Collect VMs in pools that have any permission grants
+                            from pegaprox.utils.rbac import get_pool_membership_cache
+                            membership = get_pool_membership_cache(cluster_id)  # {'vmid:type': pool_id}
+                            pools_with_grants = set()
+                            try:
+                                # Get all pool permissions for this cluster
+                                pool_perms = get_db().query(
+                                    'SELECT DISTINCT pool_id FROM pool_permissions WHERE cluster_id = ?',
+                                    (cluster_id,)
+                                )
+                                if pool_perms:
+                                    pools_with_grants = {p['pool_id'] for p in pool_perms}
+                            except Exception as pe:
+                                logging.warning(f"Auto-balance: Could not check pool permissions: {pe}")
+                            
+                            # Mark VMs in pools with grants as restricted
+                            for key, pool_id in membership.items():
+                                if pool_id in pools_with_grants:
+                                    try:
+                                        vmid = int(key.split(':', 1)[0])
+                                        restricted_vmids.add(vmid)
+                                    except (ValueError, IndexError):
+                                        pass
+                            
+                            if restricted_vmids:
+                                logging.info(f"Auto-balance: Skipping {len(restricted_vmids)} VMs with ACL/pool restrictions")
+                        except Exception as e:
+                            logging.error(f"Auto-balance: Error checking VM restrictions: {e}")
+                            # Fail-safe: if we can't determine restrictions, skip this cycle
+                            continue
+
                         for vm in all_vms:
                             if migration_done or vms_checked >= max_vms_per_cycle:
                                 break
@@ -1281,6 +1328,10 @@ def run_auto_storage_balance():
 
                             # NS: Feb 2026 - skip VMs with active efficient snapshots
                             if vmid in eff_snap_vmids:
+                                continue
+
+                            # NS Dec 2026 (Aikido 469089261 re-verify) — skip VMs with ACL/pool restrictions
+                            if vmid in restricted_vmids:
                                 continue
 
                             # Check if target storage is available on this VM's node
