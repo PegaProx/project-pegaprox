@@ -332,7 +332,27 @@ def build_authz_user(username: str, session: dict) -> dict:
         # the owner: create_api_token binds a token at/below the owner's level and require_auth
         # re-floors the numeric role every request. A BUILTIN token role is still floored numerically.
         if token_role and token_role not in _h:
-            user['effective_role'] = token_role
+            # sec (pentest) — custom-role tokens kept their name verbatim, but RBAC then resolved
+            # the custom role's full permission set even after the owner was demoted or lost those
+            # permissions. Verify that the owner STILL holds every permission the custom role grants;
+            # if not, downgrade to viewer. Admins hold everything, so their custom tokens are
+            # unaffected. This mirrors require_auth's check and the issuance-time check in
+            # create_api_token, closing the stale-permission window for object-level authz.
+            try:
+                from pegaprox.utils.rbac import (get_user_permissions,
+                                                  get_role_permissions_for_user, DEFAULT_TENANT_ID)
+                _owner = dict(user, username=username)
+                _tid = _owner.get('tenant_id') or DEFAULT_TENANT_ID
+                _owner_perms = set(get_user_permissions(_owner, _tid))
+                _token_perms = set(get_role_permissions_for_user(dict(_owner, role=token_role), _tid))
+                _extra = _token_perms - _owner_perms
+                if _extra:
+                    user['effective_role'] = ROLE_VIEWER
+                else:
+                    user['effective_role'] = token_role
+            except Exception:
+                # fail closed: if we can't verify, treat as viewer
+                user['effective_role'] = ROLE_VIEWER
         else:
             eff = min(_h.get(token_role, 1), _h.get(user.get('role'), 1))
             user['effective_role'] = next((r for r, lvl in _h.items() if lvl == eff), ROLE_VIEWER)
@@ -985,15 +1005,42 @@ def require_auth(roles: list = None, perms: list = None):
             # to user.role would silently escalate every restricted token to its
             # owner's current global role. For session-auth (interactive login) we
             # still refresh so an admin-side role change applies on the next request.
+            _custom_role_valid = False  # track if a custom-role token is still valid
             if session.get('api_token'):
                 # Floor at min(token_role, user_current_role) — if user got demoted
                 # since token creation, follow them down so the token can't outrank
                 # its owner. Won't auto-escalate.
                 _hier = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
-                token_lvl = _hier.get(session.get('role'), 1)
+                token_role = session.get('role')
+                token_lvl = _hier.get(token_role, 1)
                 user_lvl = _hier.get(user.get('role'), 1)
                 eff_lvl = min(token_lvl, user_lvl)
                 fresh_role = next((r for r, lvl in _hier.items() if lvl == eff_lvl), ROLE_VIEWER)
+                # sec (pentest) — custom-role tokens are absent from _hier, so token_lvl defaults
+                # to 1 (viewer) and the min() above passes. But build_authz_user() and the
+                # effective_role publish below keep the custom name verbatim, so RBAC then resolves
+                # the custom role's full permission set — even after the owner is demoted or loses
+                # those permissions. Verify that the owner STILL holds every permission the custom
+                # role grants; if not, downgrade the token to viewer. Admins hold everything, so
+                # their custom tokens are unaffected. This mirrors the issuance-time check in
+                # create_api_token but runs on every request, closing the stale-permission window.
+                if token_role and token_role not in _hier:
+                    try:
+                        from pegaprox.utils.rbac import (get_user_permissions,
+                                                          get_role_permissions_for_user, DEFAULT_TENANT_ID)
+                        _owner = dict(user, username=session['user'])
+                        _tid = _owner.get('tenant_id') or DEFAULT_TENANT_ID
+                        _owner_perms = set(get_user_permissions(_owner, _tid))
+                        _token_perms = set(get_role_permissions_for_user(dict(_owner, role=token_role), _tid))
+                        _extra = _token_perms - _owner_perms
+                        if _extra:
+                            logging.warning(f"[APIToken] custom-role token '{token_role}' for '{session['user']}' "
+                                          f"downgraded to viewer — owner no longer holds: {', '.join(sorted(_extra)[:3])}")
+                        else:
+                            _custom_role_valid = True
+                    except Exception as _e:
+                        logging.warning(f"[APIToken] custom-role permission check failed for '{session['user']}': {_e}")
+                        # fail closed: if we can't verify, treat as viewer
                 # Don't mutate session['role'] — keep the original token-bound value
                 # in the session dict for audit/log purposes; fresh_role drives the
                 # role check below.
@@ -1056,11 +1103,15 @@ def require_auth(roles: list = None, perms: list = None):
             # (auth.py:334) — collapsing it to a builtin level would make the two disagree about
             # the same request, and it is the name that lets get_user_clusters do the
             # custom-role -> tenant remap.
+            # sec (pentest) — BUT if the custom role was downgraded because the owner lost
+            # its permissions, publish viewer, not the stale custom name.
             _eff_pub = fresh_role
             if session.get('api_token'):
                 _tr = session.get('role')
                 if _tr and _tr not in (ROLE_ADMIN, ROLE_USER, ROLE_VIEWER):
-                    _eff_pub = _tr
+                    # custom role: keep the name ONLY if it's still valid
+                    if _custom_role_valid:
+                        _eff_pub = _tr
             session = {**session, 'effective_role': _eff_pub}
             request.session = session
             
