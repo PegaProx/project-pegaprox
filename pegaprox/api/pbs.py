@@ -2471,6 +2471,12 @@ def probe_pbs_fingerprint():
     Used by the Add-PBS wizard so the user doesn't have to run openssl by hand.
 
     Body: {"host": "pbs.example.com", "port": 8007}
+    
+    MK 2026-06-15 (pentest TLS-identity): This endpoint performs an UNAUTHENTICATED probe
+    and returns whatever certificate the peer presents. The caller MUST verify the returned
+    fingerprint through an out-of-band channel (SSH to the PBS host, compare against the
+    output of `openssl x509 -in /etc/proxmox-backup/proxy.pem -noout -fingerprint -sha256`)
+    before saving the PBS config. The response includes a warning to that effect.
     """
     import socket as _sock
     import ssl as _ssl
@@ -2505,7 +2511,12 @@ def probe_pbs_fingerprint():
         fp = hashlib.sha256(der).hexdigest().upper()
         # PBS expects fingerprint formatted with colons: AA:BB:CC...
         formatted = ':'.join(fp[i:i+2] for i in range(0, len(fp), 2))
-        return jsonify({'fingerprint': formatted, 'host': host, 'port': port})
+        return jsonify({
+            'fingerprint': formatted, 
+            'host': host, 
+            'port': port,
+            'warning': 'Verify this fingerprint through a trusted channel (e.g., SSH to the PBS host and run: openssl x509 -in /etc/proxmox-backup/proxy.pem -noout -fingerprint -sha256) before saving. An attacker on the network path can present a different certificate.'
+        })
     except _sock.timeout:
         return jsonify({'error': f'TLS handshake timed out connecting to {host}:{port}'}), 504
     except (_sock.gaierror, ConnectionRefusedError, OSError) as e:
@@ -2756,17 +2767,30 @@ def auto_attach_pbs_to_clusters(pbs_id):
         storage_name = 'pbs-' + storage_name
     content = body.get('content') or 'backup'
 
-    # Probe live fingerprint so we always inject a current one
-    import socket as _sock, ssl as _ssl, hashlib
-    try:
-        ctx = _ssl._create_unverified_context()
-        with _sock.create_connection((pbs_mgr.host, pbs_mgr.port or 8007), timeout=10) as s:
-            with ctx.wrap_socket(s, server_hostname=pbs_mgr.host) as ssock:
-                der = ssock.getpeercert(binary_form=True)
-        fp_hex = hashlib.sha256(der).hexdigest().upper()
-        fingerprint = ':'.join(fp_hex[i:i+2] for i in range(0, len(fp_hex), 2))
-    except Exception as e:
-        return jsonify({'error': f'fingerprint probe failed: {e}'}), 502
+    # MK 2026-06-15 (pentest TLS-identity): if the PBS manager has a stored fingerprint, use it
+    # directly (it was already validated when the PBS was added/updated). If not, probe the live
+    # cert but DO NOT proceed if the PBS config has ssl_verify=True without a fingerprint — that
+    # would mean the operator expects CA validation but we're about to inject an unverified cert
+    # hash into PVE storage configs.
+    fingerprint = pbs_mgr.fingerprint
+    if not fingerprint:
+        if getattr(pbs_mgr, 'ssl_verify', True):
+            # Operator expects validation but provided no fingerprint — refuse to auto-inject
+            return jsonify({
+                'error': 'PBS has no stored fingerprint and ssl_verify is enabled. Add a fingerprint to the PBS config or disable ssl_verify to proceed.'
+            }), 400
+        # ssl_verify=False and no fingerprint: probe the live cert (legacy path, but log a warning)
+        logging.warning(f"[PBS:{pbs_mgr.name}] auto-storage probing live fingerprint without prior validation (ssl_verify=False, no stored fingerprint)")
+        import socket as _sock, ssl as _ssl, hashlib
+        try:
+            ctx = _ssl._create_unverified_context()
+            with _sock.create_connection((pbs_mgr.host, pbs_mgr.port or 8007), timeout=10) as s:
+                with ctx.wrap_socket(s, server_hostname=pbs_mgr.host) as ssock:
+                    der = ssock.getpeercert(binary_form=True)
+            fp_hex = hashlib.sha256(der).hexdigest().upper()
+            fingerprint = ':'.join(fp_hex[i:i+2] for i in range(0, len(fp_hex), 2))
+        except Exception as e:
+            return jsonify({'error': f'fingerprint probe failed: {e}'}), 502
 
     pbs_user = getattr(pbs_mgr, 'user', None) or getattr(pbs_mgr, 'username', None)
     pbs_pass = getattr(pbs_mgr, 'password', None)
@@ -2876,7 +2900,9 @@ def storage_preflight(cluster_id):
     except Exception as e:
         return jsonify({'ok': False, 'issues': [f'TCP {server}:{port} unreachable: {e}'], 'info': info}), 200
 
-    # 2) TLS + fingerprint
+    # 2) TLS + fingerprint — MK 2026-06-15 (pentest TLS-identity): validate the fingerprint
+    # BEFORE the auth probe. A mismatch is now BLOCKING — we must not send credentials to an
+    # endpoint that fails the trust check.
     try:
         ctx = _ssl._create_unverified_context()
         with _sock.create_connection((server, port), timeout=6) as s:
@@ -2885,15 +2911,55 @@ def storage_preflight(cluster_id):
         fp_hex = hashlib.sha256(der).hexdigest().upper()
         live_fp = ':'.join(fp_hex[i:i+2] for i in range(0, len(fp_hex), 2))
         info['live_fingerprint'] = live_fp
-        if given_fp and given_fp != live_fp:
-            issues.append(f'Fingerprint mismatch — server presents {live_fp[:16]}…, you supplied {given_fp[:16]}…')
+        if given_fp:
+            if given_fp != live_fp:
+                # BLOCKING: do not proceed to auth probe if fingerprint mismatches
+                return jsonify({
+                    'ok': False,
+                    'issues': [f'Fingerprint mismatch — server presents {live_fp[:16]}…, you supplied {given_fp[:16]}…'],
+                    'info': info
+                }), 200
+            else:
+                info['fingerprint_match'] = 'ok'
+        else:
+            # No fingerprint supplied — warn but allow (for CA-signed certs or explicit opt-out)
+            issues.append('No fingerprint supplied — connection will not be pinned to a specific certificate')
     except Exception as e:
         return jsonify({'ok': False, 'issues': [f'TLS handshake failed: {e}'], 'info': info}), 200
 
-    # 3) Auth probe
+    # 3) Auth probe — MK 2026-06-15 (pentest TLS-identity): if a fingerprint was supplied and
+    # validated above, pin the auth session to it. Otherwise, use system CA validation if the
+    # operator wants it (requires a CA-signed PBS cert).
     try:
         import requests as _r
-        s = _r.Session(); s.verify = False
+        s = _r.Session()
+        if given_fp:
+            # Pin to the validated fingerprint
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.ssl_ import create_urllib3_context
+            import ssl as _ssl_mod
+            
+            class FingerprintAdapter(HTTPAdapter):
+                def __init__(self, expected_fp, *args, **kwargs):
+                    self.expected_fp = expected_fp.upper().replace(':', '').replace(' ', '')
+                    super().__init__(*args, **kwargs)
+                
+                def init_poolmanager(self, *args, **kwargs):
+                    ctx = create_urllib3_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = _ssl_mod.CERT_REQUIRED
+                    kwargs['ssl_context'] = ctx
+                    kwargs['assert_fingerprint'] = self.expected_fp
+                    return super().init_poolmanager(*args, **kwargs)
+            
+            s.mount('https://', FingerprintAdapter(given_fp))
+            s.verify = False  # fingerprint pinning replaces CA validation
+        else:
+            # No fingerprint: fall back to unverified (matches legacy behavior for now, but
+            # the warning above alerts the operator). A future hardening could require either
+            # fingerprint or CA validation.
+            s.verify = False
+        
         ar = s.post(f'https://{server}:{port}/api2/json/access/ticket',
                     data={'username': username, 'password': password}, timeout=8)
         if ar.status_code != 200:

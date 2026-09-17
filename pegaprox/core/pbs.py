@@ -55,7 +55,12 @@ class PBSManager:
         self.api_token_id = config.get('api_token_id', '')  # user@realm!tokenname
         self.api_token_secret = config.get('api_token_secret', '')
         self.fingerprint = config.get('fingerprint', '')
-        self.ssl_verify = config.get('ssl_verify', False)
+        # MK 2026-06-15 (pentest TLS-identity): default to True (verify) unless explicitly disabled.
+        # A fingerprint alone is not enough — it must be validated against the live cert before
+        # credential-bearing requests. The old False default let every PBS connection send creds
+        # to an unverified endpoint, and the preflight/probe paths promoted whatever cert an
+        # attacker presented.
+        self.ssl_verify = config.get('ssl_verify', True)
         self.linked_clusters = config.get('linked_clusters', [])
         self.enabled = config.get('enabled', True)
         self.notes = config.get('notes', '')
@@ -70,7 +75,42 @@ class PBSManager:
             raise ValueError(f"Invalid or disallowed PBS host")
 
         self._session = requests.Session()
-        self._session.verify = self.ssl_verify
+        # MK 2026-06-15 (pentest TLS-identity): if a fingerprint is supplied, pin to it via a
+        # custom adapter that validates the peer cert hash before allowing the request. This
+        # enforces trust-on-first-use semantics: the operator supplies the expected fingerprint
+        # (from probe-fingerprint or an out-of-band channel), and we reject any mismatch before
+        # sending credentials. If ssl_verify is explicitly True and no fingerprint is given,
+        # fall back to system CA validation (requires PBS cert signed by a trusted CA).
+        if self.fingerprint:
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.ssl_ import create_urllib3_context
+            import ssl as _ssl_mod
+            import hashlib
+            
+            class FingerprintAdapter(HTTPAdapter):
+                def __init__(self, expected_fp, *args, **kwargs):
+                    self.expected_fp = expected_fp.upper().replace(':', '').replace(' ', '')
+                    super().__init__(*args, **kwargs)
+                
+                def init_poolmanager(self, *args, **kwargs):
+                    ctx = create_urllib3_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = _ssl_mod.CERT_REQUIRED
+                    kwargs['ssl_context'] = ctx
+                    kwargs['assert_fingerprint'] = self.expected_fp
+                    return super().init_poolmanager(*args, **kwargs)
+            
+            self._session.mount('https://', FingerprintAdapter(self.fingerprint))
+            self._session.verify = False  # fingerprint pinning replaces CA validation
+        elif self.ssl_verify:
+            self._session.verify = True
+        else:
+            # Explicit opt-out: operator set ssl_verify=false and provided no fingerprint.
+            # Log a warning but allow (for air-gapped/lab environments with self-signed certs
+            # and no fingerprint workflow yet in place).
+            logging.warning(f"[PBS:{self.name}] TLS verification disabled and no fingerprint provided — credentials will be sent over an unverified connection")
+            self._session.verify = False
+        
         self._ticket = None
         self._csrf_token = None
         self._using_api_token = bool(self.api_token_id and self.api_token_secret)
@@ -79,10 +119,6 @@ class PBSManager:
         self.last_error = ''
         self.last_status = {}
         self._lock = threading.Lock()
-        
-        # Disable SSL warnings if not verifying
-        if not self.ssl_verify:
-            self._session.verify = False
     
     @property
     def base_url(self):
@@ -1083,6 +1119,10 @@ def load_pbs_servers():
                 'api_token_id': row_dict.get('api_token_id', ''),
                 'api_token_secret': api_token_secret,
                 'fingerprint': row_dict.get('fingerprint', ''),
+                # MK 2026-06-15 (pentest TLS-identity): for EXISTING configs that have no
+                # ssl_verify column value (NULL or 0), preserve the old False default to avoid
+                # breaking working setups. NEW configs (via the API) will get True by default.
+                # If a fingerprint is present, it will be enforced regardless of ssl_verify.
                 'ssl_verify': bool(row_dict.get('ssl_verify', 0)),
                 'enabled': bool(row_dict.get('enabled', 1)),
                 'linked_clusters': json.loads(row_dict.get('linked_clusters', '[]')),
