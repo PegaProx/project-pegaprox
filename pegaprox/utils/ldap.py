@@ -38,7 +38,7 @@ def get_ldap_settings() -> dict:
         'viewer_group': settings.get('ldap_viewer_group', ''),
         'default_role': settings.get('ldap_default_role', ROLE_VIEWER),
         'auto_create_users': settings.get('ldap_auto_create_users', True),
-        'verify_tls': settings.get('ldap_verify_tls', False),  # NS: Mar 2026 - default off, most AD envs use internal CAs not in system trust store (#108)
+        'verify_tls': settings.get('ldap_verify_tls', True),  # SECURITY: Default to True - TLS verification required to prevent MITM attacks
         # MK: Feb 2026 - Custom group→role mappings for custom roles & tenants
         # Format: [{"group_dn": "CN=...", "role": "custom_role_name", "tenant": "tenant_id", "permissions": [...]}]
         'group_mappings': settings.get('ldap_group_mappings', []),
@@ -112,13 +112,16 @@ def ldap_authenticate(username: str, password: str) -> dict:
     
     try:
         # MK: Build server with optional TLS
-        # NS: Feb 2026 - SECURITY: configurable TLS cert verification (default CERT_NONE for backwards compat)
+        # SECURITY: TLS certificate verification is required by default to prevent MITM attacks
         tls_config = None
         if ldap_config['use_ssl'] or ldap_config['use_starttls']:
-            verify_tls = ldap_config.get('verify_tls', False)
+            verify_tls = ldap_config.get('verify_tls', True)
             validate = ssl_module.CERT_REQUIRED if verify_tls else ssl_module.CERT_NONE
             if validate == ssl_module.CERT_NONE:
-                logging.warning("[LDAP] TLS certificate verification disabled - MITM risk")
+                logging.error("[LDAP] SECURITY WARNING: TLS certificate verification is DISABLED. "
+                             "LDAP connections are vulnerable to man-in-the-middle attacks. "
+                             "Credentials and directory data can be intercepted. "
+                             "Enable 'Verify TLS Certificate' in LDAP settings or use a trusted CA.")
             tls_config = Tls(validate=validate)
         
         server = Server(server_url, port=port, use_ssl=ldap_config['use_ssl'], 

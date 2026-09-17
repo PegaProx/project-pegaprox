@@ -151,6 +151,7 @@ def load_server_settings():
         'ldap_viewer_group': '',
         'ldap_default_role': 'viewer',
         'ldap_auto_create_users': True,
+        'ldap_verify_tls': True,  # SECURITY: Default to True - TLS verification required to prevent MITM attacks
         'ldap_group_mappings': [],
         # NS: Mar 2026 - reverse proxy support (nginx/haproxy)
         'reverse_proxy_enabled': False,

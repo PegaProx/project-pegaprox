@@ -1622,6 +1622,22 @@ def update_server_settings():
                 if pwd and pwd != '********':
                     settings['ldap_bind_password'] = get_db()._encrypt(pwd)  # NS: Encrypt bind credential
             
+            # SECURITY: Enforce TLS certificate verification when SSL/STARTTLS is enabled
+            # Prevent MITM attacks on LDAP connections carrying credentials and directory data
+            if any(k in data for k in ldap_keys):
+                use_ssl = settings.get('ldap_use_ssl', False)
+                use_starttls = settings.get('ldap_use_starttls', False)
+                verify_tls = settings.get('ldap_verify_tls', True)
+                
+                if (use_ssl or use_starttls) and not verify_tls:
+                    logging.error(
+                        "[LDAP] SECURITY WARNING: TLS certificate verification is DISABLED while "
+                        "SSL/STARTTLS is enabled. LDAP connections are vulnerable to man-in-the-middle "
+                        "attacks. Credentials and directory data can be intercepted. "
+                        "This configuration should only be used in isolated test environments with "
+                        "self-signed certificates. Enable 'Verify TLS Certificate' for production use."
+                    )
+            
             # LW: Custom group→role mappings (JSON array)
             # NS: Feb 2026 - Simplified: just group_dn + role (including custom roles)
             # tenant/tenant_role kept for backwards compat but no longer in UI
@@ -2178,7 +2194,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2332,7 +2348,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -5379,7 +5395,7 @@ def test_ldap():
         'username_attribute': data.get('ldap_username_attribute', saved.get('ldap_username_attribute', 'sAMAccountName')),
         'email_attribute': data.get('ldap_email_attribute', saved.get('ldap_email_attribute', 'mail')),
         'display_name_attribute': data.get('ldap_display_name_attribute', saved.get('ldap_display_name_attribute', 'displayName')),
-        'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', False)),
+        'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', True)),  # SECURITY: Default to True
     }
 
     # Use saved password if masked
