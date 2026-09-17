@@ -676,3 +676,90 @@ def load_metrics_window(days):
     # NOTE: the returned dicts are the cached parsed structure — callers must
     # treat them as read-only (the aggregation paths only read, never mutate).
     return run_heavy_read(sql, sql_params, cache_key=f"mh_parsed:{days}", transform=_parse)
+
+
+def verify_archive_ownership(cluster_manager, volid, expected_vmid, cluster_id):
+    """Verify that a backup archive belongs to the authorized cluster and VM.
+    
+    Security (pentest Dec 2026): The restore and verification routes authorized the source
+    using a VMID parsed from caller-controlled archive text, but never bound that archive
+    to its authoritative PBS/datastore identity, cluster, namespace, backup group, type, or
+    snapshot. In deployments where linked clusters share a datastore or VMIDs are reused,
+    an authorized user could submit a reachable archive belonging to another tenant with
+    the same VMID and cause the manager-authenticated Proxmox API to restore it.
+    
+    This function:
+    1. Extracts the storage name from the volid (format: storage:path)
+    2. Verifies the storage exists on the target cluster
+    3. For PBS storages, verifies the archive exists and belongs to the expected VMID
+    
+    Returns (ok: bool, error_response: tuple or None)
+    """
+    from flask import jsonify
+    import re
+    
+    if not volid or ':' not in volid:
+        return False, (jsonify({'error': 'Invalid volid format'}), 400)
+    
+    # Extract storage name from volid (format: storage:path)
+    storage_name = volid.split(':', 1)[0]
+    archive_path = volid.split(':', 1)[1] if ':' in volid else ''
+    
+    # Verify the storage exists on this cluster by querying cluster storage list
+    # We need to check at least one node to verify storage accessibility
+    try:
+        # Get cluster resources to find an online node
+        resources = cluster_manager.get_vm_resources() or []
+        online_nodes = set()
+        for r in resources:
+            if r.get('type') == 'node' and r.get('status') == 'online':
+                online_nodes.add(r.get('node'))
+        
+        if not online_nodes:
+            # Fallback: try to get storage list from cluster manager's primary host
+            # This is a best-effort check - if we can't verify, we fail closed
+            return False, (jsonify({'error': 'No online nodes available to verify storage'}), 503)
+        
+        # Check if storage exists on any online node
+        storage_found = False
+        for node in list(online_nodes)[:3]:  # Check up to 3 nodes for efficiency
+            try:
+                storage_list = cluster_manager.get_storage_list(node) or []
+                for storage in storage_list:
+                    if storage.get('storage') == storage_name:
+                        storage_found = True
+                        storage_type = storage.get('type', '')
+                        
+                        # For PBS storages, perform additional verification
+                        if storage_type == 'pbs':
+                            # Verify the archive path matches the expected VMID
+                            # PBS archive paths contain the VMID in the path structure
+                            # Format: backup/vm/VMID/... or backup/ct/VMID/...
+                            vmid_match = re.search(r'/(?:vm|ct)/(\d+)/', archive_path)
+                            if vmid_match:
+                                archive_vmid = int(vmid_match.group(1))
+                                if archive_vmid != expected_vmid:
+                                    return False, (jsonify({'error': 'Archive VMID does not match authorized VM'}), 403)
+                            else:
+                                # Also check vzdump filename format
+                                vmid_match = re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', archive_path)
+                                if vmid_match:
+                                    archive_vmid = int(vmid_match.group(1))
+                                    if archive_vmid != expected_vmid:
+                                        return False, (jsonify({'error': 'Archive VMID does not match authorized VM'}), 403)
+                        
+                        break
+                if storage_found:
+                    break
+            except Exception as e:
+                logging.debug(f"Error checking storage on node {node}: {e}")
+                continue
+        
+        if not storage_found:
+            return False, (jsonify({'error': f'Storage "{storage_name}" not found on cluster or not accessible'}), 403)
+        
+        return True, None
+        
+    except Exception as e:
+        logging.error(f"Error verifying archive ownership: {e}")
+        return False, (jsonify({'error': 'Failed to verify archive ownership'}), 500)

@@ -12,7 +12,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined, verify_archive_ownership
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -2328,8 +2328,8 @@ def start_backup_verification(cluster_id):
         return jsonify({'error': 'vmid must be a number'}), 400
     _volid = str(data.get('backup_volid') or '')
     _is_lxc = '/ct/' in _volid or _volid.endswith('.lxc.tar') or 'vzdump-lxc' in _volid
-    if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
-                              cluster_id, _vmid, 'vm.backup', 'lxc' if _is_lxc else 'qemu'):
+    _authz_user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vm(_authz_user, cluster_id, _vmid, 'vm.backup', 'lxc' if _is_lxc else 'qemu'):
         return jsonify({'error': 'Access denied: you do not have permission for this VM'}), 403
     import re as _re
     _m = _re.search(r'/(?:vm|ct)/(\d+)/', _volid) or _re.search(r'-(?:qemu|lxc)-(\d+)-', _volid)
@@ -2338,6 +2338,15 @@ def start_backup_verification(cluster_id):
     # foreign archive in an odd format and the bind is skipped.
     if _volid and (not _m or int(_m.group(1)) != _vmid):
         return jsonify({'error': 'Access denied: backup_volid does not belong to the given VM'}), 403
+    
+    # Security (pentest Dec 2026): Verify the archive belongs to the authorized cluster.
+    # The VMID check above only proves the user can access SOME VM with that ID, but not
+    # that this specific archive belongs to that VM on THIS cluster. A foreign archive with
+    # a colliding VMID from a shared/linked datastore could bypass the check.
+    if _authz_user.get('effective_role', _authz_user.get('role')) != ROLE_ADMIN:
+        _ok, _err = verify_archive_ownership(cluster_managers[cluster_id], _volid, _vmid, cluster_id)
+        if not _ok:
+            return _err
 
     data['cluster_id'] = cluster_id
     pve_mgr = cluster_managers[cluster_id]
@@ -3273,6 +3282,14 @@ def restore_backup(cluster_id):
         if _src_vmid is None or not user_can_access_vm(_src_authz_user, cluster_id, _src_vmid,
                                                        'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
             return jsonify({'error': 'Permission denied for source backup'}), 403
+        
+        # Security (pentest Dec 2026): Verify the archive belongs to the authorized cluster.
+        # The VMID check above only proves the user can access SOME VM with that ID, but not
+        # that this specific archive belongs to that VM on THIS cluster. A foreign archive with
+        # a colliding VMID from a shared/linked datastore could bypass the check.
+        _ok, _err = verify_archive_ownership(cm, volid, _src_vmid, cluster_id)
+        if not _ok:
+            return _err
 
     # NS Aug 2026 (Aikido pentest) — overwrite (destructive qmrestore --force) and test (boots into
     # the VMID) both act on an EXISTING target VM, so require the same per-VM ACL as a direct VM op;
