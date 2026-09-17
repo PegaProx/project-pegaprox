@@ -123,6 +123,25 @@ def add_pbs_server():
     if not data.get('user'):
         return jsonify({'error': 'Username or API token is required'}), 400
     
+    # Pentest (Jan 2027) — validate linked_clusters authorization on creation. A tenant-scoped
+    # user with pbs.config must not be able to create a server with empty linked_clusters
+    # (globally accessible) or link it to clusters outside their scope. Admins may set any value.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.models.permissions import ROLE_ADMIN
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
+        user_clusters = get_user_clusters(user)
+        # user_clusters=None means all-cluster access (default tenant); otherwise it's a list
+        if user_clusters is not None:
+            # Tenant-scoped user: validate linked_clusters
+            new_linked = data.get('linked_clusters', [])
+            if not new_linked:
+                # Empty linked_clusters would make the server globally accessible
+                return jsonify({'error': 'Access denied: must specify linked_clusters'}), 403
+            if not all(c in user_clusters for c in new_linked):
+                return jsonify({'error': 'Access denied: linked_clusters contains clusters you cannot access'}), 403
+    
     pbs_id = str(uuid.uuid4())[:8]
     
     # Test connection first
@@ -238,6 +257,45 @@ def update_pbs_server(pbs_id):
             data['api_token_secret'] = old_mgr.api_token_secret
         if data.get('ssh_key') == '********':
             data['ssh_key'] = getattr(old_mgr, 'ssh_key', '')
+
+    # Pentest (Jan 2027) — validate linked_clusters authorization. A tenant-scoped user with
+    # pbs.config can update a server they already reach, but must not be able to clear or
+    # replace linked_clusters with values outside their tenant scope. check_pbs_access above
+    # only gates the OLD binding; without this a scoped user could set linked_clusters=[] (or
+    # omit it, which save_pbs_server defaults to []) and the server becomes globally accessible
+    # (check_pbs_access returns True for empty linkage). Admins may set any value; non-admins
+    # may only set clusters they have access to, and omission preserves the existing value.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.models.permissions import ROLE_ADMIN
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) != ROLE_ADMIN:
+        user_clusters = get_user_clusters(user)
+        # user_clusters=None means all-cluster access (default tenant); otherwise it's a list
+        if user_clusters is not None:
+            # Tenant-scoped user: validate or preserve linked_clusters
+            if 'linked_clusters' in data:
+                # Caller is explicitly setting linked_clusters
+                new_linked = data['linked_clusters']
+                if not new_linked:
+                    # Clearing linked_clusters would make the server globally accessible
+                    return jsonify({'error': 'Access denied: cannot clear linked_clusters'}), 403
+                if not all(c in user_clusters for c in new_linked):
+                    return jsonify({'error': 'Access denied: linked_clusters contains clusters you cannot access'}), 403
+            else:
+                # Caller omitted linked_clusters: preserve the existing value from DB/manager
+                # to prevent save_pbs_server's default of [] from clearing the binding
+                if old_mgr is not None:
+                    data['linked_clusters'] = getattr(old_mgr, 'linked_clusters', [])
+                else:
+                    # Server not loaded: fetch from DB
+                    db = get_db()
+                    row = db.conn.cursor().execute(
+                        "SELECT linked_clusters FROM pbs_servers WHERE id = ?", (pbs_id,)
+                    ).fetchone()
+                    if row:
+                        import json
+                        data['linked_clusters'] = json.loads(row['linked_clusters'] or '[]')
 
     save_pbs_server(pbs_id, data)
 
