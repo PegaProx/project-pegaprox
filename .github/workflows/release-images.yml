@@ -18,6 +18,19 @@ env:
   DEBIAN_RELEASE: "trixie"
   APT_POLL_RETRIES: "150"   # NS 2026-06-05 — gyptazy repo can lag; give it longer
   APT_POLL_INTERVAL: "30"
+  # NS 2026-08-15 — SHA-256 checksums for CDN-hosted .deb packages to prevent
+  # supply-chain attacks if the CDN or package publisher is compromised.
+  # These MUST be updated whenever package versions change.
+  #
+  # To obtain trusted checksums:
+  #   1. Download packages from a trusted source (e.g., directly from gyptazy's official repo)
+  #   2. Verify package authenticity through other means (GPG signature, official announcement, etc.)
+  #   3. Compute checksums: sha256sum python3-flask-sock_0.7.1_all.deb python3-xenapi_26.8.1_all.deb
+  #   4. Update the values below
+  #
+  # SECURITY: Build will fail if these contain placeholder values or if downloaded files don't match
+  FLASK_SOCK_SHA256: "MUST_BE_SET_TO_ACTUAL_SHA256_OF_python3-flask-sock_0.7.1_all.deb"
+  XENAPI_SHA256: "MUST_BE_SET_TO_ACTUAL_SHA256_OF_python3-xenapi_26.8.1_all.deb"
 
 jobs:
   # ----------------------------------------------------------------------
@@ -141,6 +154,25 @@ jobs:
           export PATH="$PATH:/snap/bin"
           distrobuilder --version
 
+      - name: Validate package checksums are configured
+        run: |
+          # NS 2026-08-15 — Fail fast if checksums haven't been updated from placeholders
+          if echo "${FLASK_SOCK_SHA256}" | grep -q "MUST_BE_SET"; then
+            echo "::error::FLASK_SOCK_SHA256 environment variable contains placeholder value"
+            echo "::error::Update the checksums in the workflow env: section before building"
+            echo "::error::Download python3-flask-sock_0.7.1_all.deb from a trusted source"
+            echo "::error::and run: sha256sum python3-flask-sock_0.7.1_all.deb"
+            exit 1
+          fi
+          if echo "${XENAPI_SHA256}" | grep -q "MUST_BE_SET"; then
+            echo "::error::XENAPI_SHA256 environment variable contains placeholder value"
+            echo "::error::Update the checksums in the workflow env: section before building"
+            echo "::error::Download python3-xenapi_26.8.1_all.deb from a trusted source"
+            echo "::error::and run: sha256sum python3-xenapi_26.8.1_all.deb"
+            exit 1
+          fi
+          echo "Package checksums are configured (not placeholders)"
+
       - name: distrobuilder-Definition schreiben
         run: |
           mkdir -p packaging/lxc
@@ -197,8 +229,27 @@ jobs:
                 set -eu
                 apt-get update
                 apt-get -y install wget
+                
+                # NS 2026-08-15 — Download .deb packages with integrity verification
+                # to prevent supply-chain attacks via compromised CDN or publisher.
                 wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
                 wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
+                
+                # Verify SHA-256 checksums before installation
+                echo "${FLASK_SOCK_SHA256}  python3-flask-sock_0.7.1_all.deb" | sha256sum -c - || {
+                  echo "ERROR: python3-flask-sock checksum verification failed"
+                  echo "This indicates the downloaded package does not match the expected hash."
+                  echo "DO NOT PROCEED - potential supply-chain compromise."
+                  exit 1
+                }
+                echo "${XENAPI_SHA256}  python3-xenapi_26.8.1_all.deb" | sha256sum -c - || {
+                  echo "ERROR: python3-xenapi checksum verification failed"
+                  echo "This indicates the downloaded package does not match the expected hash."
+                  echo "DO NOT PROCEED - potential supply-chain compromise."
+                  exit 1
+                }
+                
+                # Only install after successful verification
                 dpkg -i python3-flask-sock_0.7.1_all.deb
                 dpkg -i python3-xenapi_26.8.1_all.deb
                 install -d -m 0755 /etc/apt/keyrings
@@ -324,6 +375,25 @@ jobs:
             qemu-utils qemu-system-x86 qemu-system-arm qemu-efi-aarch64 \
             cloud-image-utils curl
 
+      - name: Validate package checksums are configured
+        run: |
+          # NS 2026-08-15 — Fail fast if checksums haven't been updated from placeholders
+          if echo "${FLASK_SOCK_SHA256}" | grep -q "MUST_BE_SET"; then
+            echo "::error::FLASK_SOCK_SHA256 environment variable contains placeholder value"
+            echo "::error::Update the checksums in the workflow env: section before building"
+            echo "::error::Download python3-flask-sock_0.7.1_all.deb from a trusted source"
+            echo "::error::and run: sha256sum python3-flask-sock_0.7.1_all.deb"
+            exit 1
+          fi
+          if echo "${XENAPI_SHA256}" | grep -q "MUST_BE_SET"; then
+            echo "::error::XENAPI_SHA256 environment variable contains placeholder value"
+            echo "::error::Update the checksums in the workflow env: section before building"
+            echo "::error::Download python3-xenapi_26.8.1_all.deb from a trusted source"
+            echo "::error::and run: sha256sum python3-xenapi_26.8.1_all.deb"
+            exit 1
+          fi
+          echo "Package checksums are configured (not placeholders)"
+
       - name: Debian Cloud-Image laden + Checksum verifizieren
         run: |
           # NS 2026-05-30 — the image we pull here becomes the rootfs of every
@@ -379,8 +449,28 @@ jobs:
 
           # --- Basis-Tools + PegaProx ---
           apt-get update
+          
+          # NS 2026-08-15 — Download .deb packages with integrity verification
+          # to prevent supply-chain attacks via compromised CDN or publisher.
           wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
           wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
+          
+          # Verify SHA-256 checksums before installation
+          # These checksums are embedded at image build time from the workflow environment
+          echo "FLASK_SOCK_SHA256_PLACEHOLDER  python3-flask-sock_0.7.1_all.deb" | sha256sum -c - || {
+            echo "ERROR: python3-flask-sock checksum verification failed"
+            echo "This indicates the downloaded package does not match the expected hash."
+            echo "DO NOT PROCEED - potential supply-chain compromise."
+            exit 1
+          }
+          echo "XENAPI_SHA256_PLACEHOLDER  python3-xenapi_26.8.1_all.deb" | sha256sum -c - || {
+            echo "ERROR: python3-xenapi checksum verification failed"
+            echo "This indicates the downloaded package does not match the expected hash."
+            echo "DO NOT PROCEED - potential supply-chain compromise."
+            exit 1
+          }
+          
+          # Only install after successful verification
           dpkg -i python3-flask-sock_0.7.1_all.deb
           dpkg -i python3-xenapi_26.8.1_all.deb
           apt-get -y install sudo sqlite3 ca-certificates curl
@@ -729,7 +819,14 @@ jobs:
           sudo cp gyptazy.asc  /mnt/img/etc/apt/keyrings/gyptazy.asc
           sudo cp gyptazy.list /mnt/img/etc/apt/sources.list.d/gyptazy.list
 
-          sudo cp install-pegaprox.sh /mnt/img/usr/local/sbin/install-pegaprox.sh
+          # NS 2026-08-15 — Substitute actual SHA-256 checksums into the installer
+          # script before copying it to the image. This embeds the integrity checks
+          # so first-boot installation will verify packages before dpkg -i.
+          sed -e "s/FLASK_SOCK_SHA256_PLACEHOLDER/${FLASK_SOCK_SHA256}/g" \
+              -e "s/XENAPI_SHA256_PLACEHOLDER/${XENAPI_SHA256}/g" \
+              install-pegaprox.sh > install-pegaprox-final.sh
+          
+          sudo cp install-pegaprox-final.sh /mnt/img/usr/local/sbin/install-pegaprox.sh
           sudo cp pegaprox-setup      /mnt/img/usr/local/bin/pegaprox-setup
           sudo cp pegaprox-setup-auto /mnt/img/usr/local/bin/pegaprox-setup-auto
           sudo chmod 0755 /mnt/img/usr/local/sbin/install-pegaprox.sh \
