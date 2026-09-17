@@ -10,6 +10,7 @@ import time
 import logging
 import threading
 from datetime import datetime
+from collections import defaultdict
 
 from pegaprox.constants import CONFIG_DIR
 # MK May 2026 — syslog DB also goes through dbcrypto for SQLCipher unlock.
@@ -40,9 +41,155 @@ _stop_event = threading.Event()
 _udp_sock = None
 _tcp_sock = None
 
+# Security: resource exhaustion mitigation (pentest finding 2026-09)
+# Per-source-IP rate limiting: track message counts in sliding windows to prevent
+# a single untrusted sender from exhausting the shared config volume.
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets = defaultdict(lambda: {'count': 0, 'window_start': 0.0})
+_RATE_LIMIT_WINDOW = 60.0  # seconds
+_RATE_LIMIT_MAX_MESSAGES = 1000  # messages per source IP per window
+_rate_limited_ips = {}  # IP -> last_log_time (to avoid log spam)
+
+# Disk space and database size limits to prevent filesystem exhaustion
+_MIN_FREE_SPACE_MB = 100  # Minimum free space to maintain on CONFIG_DIR volume
+_MAX_DB_SIZE_MB = 500  # Maximum size for syslog.db (env-tunable)
+_last_space_check = 0.0
+_space_check_interval = 10.0  # Check disk space every 10 seconds
+_disk_space_ok = True  # Cached result to avoid excessive syscalls
+
+
+def _check_rate_limit(source_ip):
+    """Per-source-IP rate limiting to prevent resource exhaustion.
+    
+    Returns True if the source is within limits, False if rate-limited.
+    Tracks messages per IP in sliding windows to prevent a single untrusted
+    sender from exhausting the shared config volume.
+    """
+    global _rate_limited_ips
+    now = time.monotonic()
+    
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets[source_ip]
+        
+        # Reset window if expired
+        if now - bucket['window_start'] >= _RATE_LIMIT_WINDOW:
+            bucket['count'] = 0
+            bucket['window_start'] = now
+        
+        bucket['count'] += 1
+        
+        # Check if over limit
+        if bucket['count'] > _RATE_LIMIT_MAX_MESSAGES:
+            # Log once per minute per IP to avoid log spam
+            last_log = _rate_limited_ips.get(source_ip, 0.0)
+            if now - last_log > 60.0:
+                logging.warning(f"[Syslog] rate limit exceeded for {source_ip} "
+                              f"({bucket['count']} msgs in {_RATE_LIMIT_WINDOW}s window)")
+                _rate_limited_ips[source_ip] = now
+            return False
+        
+        return True
+
+
+def _cleanup_rate_limit_state():
+    """Periodically clean up expired rate limit tracking state to prevent memory leaks.
+    
+    Removes buckets for IPs that haven't sent messages in the last hour.
+    """
+    now = time.monotonic()
+    cutoff = now - 3600.0  # 1 hour
+    
+    with _rate_limit_lock:
+        # Clean up expired buckets
+        expired = [ip for ip, bucket in _rate_limit_buckets.items() 
+                   if now - bucket['window_start'] > cutoff]
+        for ip in expired:
+            del _rate_limit_buckets[ip]
+        
+        # Clean up old rate-limited IP log timestamps
+        expired_ips = [ip for ip, ts in _rate_limited_ips.items() if now - ts > cutoff]
+        for ip in expired_ips:
+            del _rate_limited_ips[ip]
+        
+        if expired or expired_ips:
+            logging.debug(f"[Syslog] cleaned up {len(expired)} rate limit buckets, "
+                        f"{len(expired_ips)} rate-limited IPs")
+
+
+def _check_disk_space():
+    """Check if sufficient disk space is available on the CONFIG_DIR volume.
+    
+    Returns True if space is available, False if exhausted. Caches result
+    for _space_check_interval seconds to avoid excessive syscalls.
+    """
+    global _last_space_check, _disk_space_ok
+    now = time.monotonic()
+    
+    # Use cached result if recent
+    if now - _last_space_check < _space_check_interval:
+        return _disk_space_ok
+    
+    _last_space_check = now
+    
+    try:
+        stat = os.statvfs(CONFIG_DIR)
+        free_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+        
+        if free_mb < _MIN_FREE_SPACE_MB:
+            if _disk_space_ok:  # Log only on transition
+                logging.error(f"[Syslog] CONFIG_DIR volume has only {free_mb:.1f} MB free "
+                            f"(minimum {_MIN_FREE_SPACE_MB} MB) — rejecting new syslog messages")
+            _disk_space_ok = False
+            return False
+        
+        # Also check database size
+        if os.path.exists(DB_FILE):
+            db_size_mb = os.path.getsize(DB_FILE) / (1024 * 1024)
+            max_db_mb = int(os.environ.get('PEGAPROX_SYSLOG_MAX_DB_MB', str(_MAX_DB_SIZE_MB)))
+            
+            if db_size_mb > max_db_mb:
+                if _disk_space_ok:  # Log only on transition
+                    logging.error(f"[Syslog] syslog.db size ({db_size_mb:.1f} MB) exceeds "
+                                f"limit ({max_db_mb} MB) — rejecting new messages until pruned")
+                _disk_space_ok = False
+                return False
+        
+        if not _disk_space_ok:  # Log recovery
+            logging.info(f"[Syslog] disk space recovered ({free_mb:.1f} MB free) — accepting messages")
+        _disk_space_ok = True
+        return True
+        
+    except Exception as e:
+        logging.debug(f"[Syslog] disk space check failed: {e}")
+        # On error, assume space is available (fail open for legitimate traffic)
+        _disk_space_ok = True
+        return True
+
 
 def _enqueue_log(entry):
+    """Enqueue a syslog entry with rate limiting and disk space checks.
+    
+    Security: This is the earliest enforcement point for resource exhaustion
+    mitigation. Checks are performed before queueing to prevent untrusted
+    network traffic from exhausting the shared config volume.
+    """
     global _DROPPED
+    
+    # Extract source IP from entry tuple (index 1)
+    source_ip = entry[1] if len(entry) > 1 else 'unknown'
+    
+    # Rate limit per source IP
+    if not _check_rate_limit(source_ip):
+        _DROPPED += 1
+        return
+    
+    # Check disk space and database size
+    if not _check_disk_space():
+        _DROPPED += 1
+        if _DROPPED % 1000 == 1:
+            logging.warning(f"[Syslog] disk space exhausted — dropped {_DROPPED} messages")
+        return
+    
     try:
         _LOG_QUEUE.put_nowait(entry)
     except _queue.Full:
@@ -71,7 +218,10 @@ def _prune_old_logs():
     """S1: delete syslog rows older than the retention window (off-hub). The
     receiver only ever INSERTs, so without this syslog.db grows unbounded on the
     same volume as the main encrypted DB. The fts5 logs_ad trigger keeps the FTS
-    index in sync. timestamp is indexed (idx_logs_timestamp_id). NS 2026-06-05."""
+    index in sync. timestamp is indexed (idx_logs_timestamp_id). NS 2026-06-05.
+    
+    Security (2026-09): Also prune aggressively when approaching disk space or
+    database size limits to prevent resource exhaustion."""
     try:
         days = 30
         try:
@@ -79,6 +229,30 @@ def _prune_old_logs():
             days = max(1, min(3650, int(load_server_settings().get('syslog_retention_days', 30) or 30)))
         except Exception:
             pass
+        
+        # Check if we need aggressive pruning due to space constraints
+        aggressive_prune = False
+        try:
+            stat = os.statvfs(CONFIG_DIR)
+            free_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+            
+            if os.path.exists(DB_FILE):
+                db_size_mb = os.path.getsize(DB_FILE) / (1024 * 1024)
+                max_db_mb = int(os.environ.get('PEGAPROX_SYSLOG_MAX_DB_MB', str(_MAX_DB_SIZE_MB)))
+                
+                # Trigger aggressive pruning if:
+                # - Free space < 2x minimum threshold, or
+                # - DB size > 80% of limit
+                if free_mb < (_MIN_FREE_SPACE_MB * 2) or db_size_mb > (max_db_mb * 0.8):
+                    aggressive_prune = True
+                    # Reduce retention to 7 days when under pressure
+                    days = min(days, 7)
+                    logging.warning(f"[Syslog] aggressive pruning triggered "
+                                  f"(free: {free_mb:.1f}MB, db: {db_size_mb:.1f}MB, "
+                                  f"reducing retention to {days}d)")
+        except Exception as e:
+            logging.debug(f"[Syslog] space check during prune failed: {e}")
+        
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         conn = _open_db(timeout=30)
@@ -87,7 +261,13 @@ def _prune_old_logs():
             cur.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff,))
             n = cur.rowcount
             conn.commit()
-            if n and n > 0:
+            
+            # Run VACUUM after aggressive prune to reclaim space immediately
+            if aggressive_prune and n and n > 0:
+                logging.info(f"[Syslog] aggressive prune: deleted {n} rows, running VACUUM")
+                cur.execute("VACUUM")
+                conn.commit()
+            elif n and n > 0:
                 logging.info(f"[Syslog] retention prune: deleted {n} rows older than {days}d")
         finally:
             try:
@@ -101,7 +281,9 @@ def _prune_old_logs():
 def _drain_loop():
     """Batch queued syslog entries + flush them off the hub. Stop-aware (S5) so it
     exits within ~1s of stop_syslog_server (no leaked greenlet per OFF→ON toggle),
-    and runs a periodic retention prune (S1)."""
+    and runs a periodic retention prune (S1).
+    
+    Security (2026-09): Prune more frequently when under disk pressure."""
     try:
         from gevent import get_hub
     except Exception:
@@ -113,7 +295,9 @@ def _drain_loop():
         else:
             fn(*args)
 
-    last_prune = 0.0   # 0 → prune shortly after start, then hourly
+    last_prune = 0.0   # 0 → prune shortly after start, then hourly (or more often under pressure)
+    last_cleanup = time.monotonic()  # Rate limit state cleanup
+    
     while not _stop_event.is_set():
         batch = []
         try:
@@ -128,9 +312,21 @@ def _drain_loop():
                     except _queue.Empty:
                         break
                 _offhub(_flush_batch, (batch,))
-            if time.monotonic() - last_prune > 3600:
+            
+            # Prune more frequently when disk space is constrained
+            prune_interval = 3600  # Default: hourly
+            if not _disk_space_ok:
+                prune_interval = 300  # Every 5 minutes when under pressure
+            
+            if time.monotonic() - last_prune > prune_interval:
                 last_prune = time.monotonic()
                 _offhub(_prune_old_logs)
+            
+            # Clean up rate limit state hourly to prevent memory leaks
+            if time.monotonic() - last_cleanup > 3600:
+                last_cleanup = time.monotonic()
+                _cleanup_rate_limit_state()
+                
         except Exception as e:
             logging.debug(f"[Syslog] drain error: {e}")
             time.sleep(0.5)
