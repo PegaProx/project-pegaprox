@@ -864,10 +864,11 @@ def _destroy_guest():
       (b) the target is in the caller's own _get_my_vms() set — the single
           trusted ACL/pool ownership computation the whole portal uses
           (closes IDOR/BOLA against another tenant's guest),
-      (c) user_can_access_vm(..., 'vm.stop') — a portal-manageable guest.
-          vm.delete is intentionally NOT in the inherit_role whitelist
-          (rbac.py), so we authorize via vm.stop and NEVER add vm.delete to a
-          role — that would grant delete to every ACL'd user product-wide,
+      (c) user_can_access_vm(..., 'vm.delete') — the distinct delete permission.
+          vm.delete is separate from vm.stop in the permission model; custom ACLs
+          and pool grants can provide power control without destruction authority.
+          The allow_destroy setting enables the feature but does not authorize
+          individual deletions.
       (d) a type-the-name confirm matching the LIVE guest name.
     Then purge-delete, drop the stale VM-ACL row (so a recycled VMID can't
     inherit this grant), and audit."""
@@ -901,12 +902,12 @@ def _destroy_guest():
     if not target:
         return {'error': 'Not found or not permitted'}, 404
 
-    # (c) second, independent authz — vm.stop IS in the inherit_role whitelist.
+    # (c) second, independent authz — require the distinct vm.delete permission.
     try:
         vmid_int = int(vmid)
     except (ValueError, TypeError):
         return {'error': 'Invalid vmid'}, 400
-    if not user_can_access_vm(user, cluster_id, vmid_int, 'vm.stop'):
+    if not user_can_access_vm(user, cluster_id, vmid_int, 'vm.delete'):
         return {'error': 'Permission denied'}, 403
 
     # (d) type-the-name confirm — compared to the LIVE name from _get_my_vms,
