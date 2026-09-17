@@ -8121,7 +8121,10 @@ def get_hardware_options():
 # THIS cluster AND VM. Works without request.session (the async/standalone
 # handlers don't have one) by taking the resolved user dict directly.
 def _console_authz(user, cluster_id, vmid, vm_type=None):
-    """Return (ok, reason) — user must have cluster access AND per-VM console access."""
+    """Return (ok, reason) — user must have cluster access AND per-VM console access.
+    
+    Security: Fails closed if VM ACL store is unavailable.
+    """
     from pegaprox.utils.rbac import get_user_clusters, load_vm_acls, user_can_access_vm
     if not user:
         return False, 'no user'
@@ -8135,7 +8138,12 @@ def _console_authz(user, cluster_id, vmid, vm_type=None):
     # cluster gate (mirrors helpers.check_cluster_access, but no request.session)
     allowed = get_user_clusters(user)
     if allowed is not None and cluster_id not in allowed:
-        cluster_acls = load_vm_acls().get(cluster_id, {}) or {}
+        # Security: fail closed if ACL store is unavailable
+        try:
+            cluster_acls = load_vm_acls().get(cluster_id, {}) or {}
+        except Exception as e:
+            logging.error(f"[_console_authz] ACL store unavailable for {username}@{cluster_id}: {e}")
+            return False, 'ACL store unavailable'
         if not any(username in (a.get('users') or []) or '*' in (a.get('users') or [])
                    for a in cluster_acls.values()):
             return False, 'no cluster access'

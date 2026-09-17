@@ -551,20 +551,15 @@ def load_vm_acls() -> dict:
             }
         }
     }
+    
+    Security: Fails closed on database errors. The legacy JSON fallback and
+    empty-dict fallback were removed because they fail open: stale grants from
+    the migration-era snapshot can restore revoked VM access, while an empty
+    ACL map bypasses VM-specific confinement for users with general permissions.
+    Authorization must not proceed with unreliable ACL data.
     """
-    try:
-        db = get_db()
-        return db.get_all_vm_acls()
-    except Exception as e:
-        logging.error(f"Failed to load VM ACLs from database: {e}")
-        # Legacy fallback
-        if os.path.exists(VM_ACLS_FILE):
-            try:
-                with open(VM_ACLS_FILE, 'r') as f:
-                    return json.load(f)
-            except:
-                pass
-    return {}
+    db = get_db()
+    return db.get_all_vm_acls()
 
 
 def save_vm_acls(acls: dict):
@@ -890,6 +885,9 @@ def get_vm_acls():
     _vm_acls_cache behind a 30s TTL now that every write path invalidates it — this
     kills the per-VM reload storm at 1000+-VM scale without a stale-authz window
     (a write nulls the cache immediately; the TTL only caps a missed invalidation).
+    
+    Security: Propagates exceptions from load_vm_acls() to fail closed. Callers
+    must handle the exception; authorization cannot proceed with missing ACL data.
     """
     global _vm_acls_cache, _vm_acls_cache_time
     now = time.monotonic()
@@ -920,6 +918,8 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
     
     LW: Changed inherit_role=True to mean "full VM access" instead of "use role perms"
     This is more intuitive - adding someone to a VM ACL should grant them access to that VM
+    
+    Security: Fails closed if VM ACL data cannot be loaded from the database.
     """
     # MK: effective_role (token-scoped) wins over the stored role so an admin-owned
     # restricted token doesn't get the admin VM bypass below
@@ -927,7 +927,13 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
         return True
 
     username = user.get('username', '')
-    acls = get_vm_acls()
+    
+    # Security: fail closed if ACL store is unavailable
+    try:
+        acls = get_vm_acls()
+    except Exception as e:
+        logging.error(f"[VM-ACL] ACL store unavailable for {username}@{cluster_id} VM {vmid}: {e} → deny")
+        return False
     
     # LW: Debug logging to help troubleshoot ACL issues
     logging.debug(f"[VM-ACL] Checking access for user={username}, cluster={cluster_id}, vmid={vmid}, perm={permission}")
@@ -1063,12 +1069,21 @@ def get_user_vms(user: dict, cluster_id: str) -> list:
     """Get list of VMIDs user can access in a cluster
     
     Returns None if user can access all VMs (admin or no restrictions)
+    
+    Security: Fails closed if ACL store is unavailable (returns empty list).
     """
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return None
 
     username = user.get('username', '')
-    acls = get_vm_acls()
+    
+    # Security: fail closed if ACL store is unavailable
+    try:
+        acls = get_vm_acls()
+    except Exception as e:
+        logging.error(f"[VM-ACL] ACL store unavailable for get_user_vms({username}@{cluster_id}): {e} → deny all")
+        return []
+    
     cluster_acls = acls.get(cluster_id, {})
     
     # if no acls for this cluster, user can see all (based on general perms)
@@ -1112,6 +1127,8 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
     
     Returns:
         bool: True if user has access, False otherwise
+    
+    Security: Fails closed if ACL store is unavailable.
     """
     # NS Aug 2026 (Aikido pentest) — effective_role (token-scoped) wins over the stored role,
     # exactly like the Proxmox twin user_can_access_vm above; otherwise an admin-owned but
@@ -1120,7 +1137,13 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
         return True
 
     username = user.get('username', '')
-    acls = get_vm_acls()
+    
+    # Security: fail closed if ACL store is unavailable
+    try:
+        acls = get_vm_acls()
+    except Exception as e:
+        logging.error(f"[VMWARE-ACL] ACL store unavailable for {username}@{vmware_id} VM {vm_id}: {e} → deny")
+        return False
 
     # VMware ACLs are stored under vmware_id as the cluster key
     vmware_acls = acls.get(f'vmware:{vmware_id}', {})

@@ -63,7 +63,10 @@ def _get_portal_config():
 
 
 def _get_my_vms():
-    """Return all VMs the authenticated user can access across all clusters"""
+    """Return all VMs the authenticated user can access across all clusters
+    
+    Security: Fails closed if VM ACL store is unavailable.
+    """
     username = request.session.get('user', '')
     if not username:
         return {'error': 'Not authenticated'}, 401
@@ -77,7 +80,14 @@ def _get_my_vms():
         return {'redirect': '/', 'reason': 'admin'}
 
     cfg = _load_config()
-    all_acls = load_vm_acls()
+    
+    # Security: fail closed if ACL store is unavailable
+    try:
+        all_acls = load_vm_acls()
+    except Exception as e:
+        logging.error(f"[client_portal] ACL store unavailable for {username}: {e}")
+        return {'error': 'Authorization system temporarily unavailable'}, 503
+    
     result = []
 
     for cluster_id, mgr in cluster_managers.items():

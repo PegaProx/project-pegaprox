@@ -369,6 +369,8 @@ def get_connected_manager(cluster_id):
 def check_cluster_access(cluster_id):
     """Check if current user can access a cluster based on tenant or VM ACLs.
     Returns (True, None) if allowed, (False, error_response) if not.
+    
+    Security: Fails closed if VM ACL store is unavailable.
     """
     from flask import request, jsonify, g
     from pegaprox.utils.rbac import get_user_clusters
@@ -395,7 +397,12 @@ def check_cluster_access(cluster_id):
         # #248: check VM ACLs as fallback — users with VM-level access can reach the cluster
         username = request.session.get('user', '')
         from pegaprox.utils.rbac import load_vm_acls
-        cluster_acls = load_vm_acls().get(cluster_id, {})
+        # Security: fail closed if ACL store is unavailable
+        try:
+            cluster_acls = load_vm_acls().get(cluster_id, {})
+        except Exception as e:
+            logging.error(f"[check_cluster_access] ACL store unavailable for {username}@{cluster_id}: {e}")
+            return False, (jsonify({'error': 'Authorization system temporarily unavailable'}), 503)
         for vmid, acl in cluster_acls.items():
             if username in acl.get('users', []) or '*' in acl.get('users', []):
                 return True, None
