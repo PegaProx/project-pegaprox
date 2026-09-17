@@ -823,6 +823,59 @@ def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=
     return _deny()
 
 
+def _check_pbs_job_access(pbs_id):
+    """Check if current user can manage PBS jobs (whole-PBS operations).
+    
+    Jobs operate at the PBS instance level and can affect datastores shared across all
+    linked clusters. Unlike per-backup operations (which check VM ownership), job CRUD
+    requires access to ALL linked clusters to prevent cross-tenant job manipulation.
+    
+    Returns (True, None) if allowed, (False, error_response) if not.
+    
+    A PBS job is manageable if:
+    - User is admin (full access), OR
+    - PBS has no linked_clusters (backward compatibility), OR  
+    - User has access to ALL of the PBS's linked clusters (not just one)
+    """
+    from flask import request, jsonify
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.globals import pbs_managers
+    from pegaprox.models.permissions import ROLE_ADMIN
+
+    # Check if PBS exists
+    if pbs_id not in pbs_managers:
+        return False, (jsonify({'error': 'PBS server not found'}), 404)
+
+    pbs_mgr = pbs_managers[pbs_id]
+    user = build_authz_user(request.session.get('user', ''), request.session)
+
+    # Admins have full access
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return True, None
+    
+    # Get PBS linked clusters
+    pbs_linked = pbs_mgr.linked_clusters or []
+    
+    # If PBS has no linked clusters, allow access (backward compatibility)
+    if not pbs_linked:
+        return True, None
+    
+    # Get user's allowed clusters
+    user_clusters = get_user_clusters(user)
+    
+    # If user has access to all clusters (None), allow
+    if user_clusters is None:
+        return True, None
+    
+    # Require access to ALL linked clusters for job management
+    for cluster_id in pbs_linked:
+        if cluster_id not in user_clusters:
+            return False, (jsonify({'error': 'Access denied: PBS job operations require access to all linked clusters'}), 403)
+    
+    return True, None
+
+
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/snapshots', methods=['DELETE'])
 @require_auth(perms=['pbs.snapshot.delete'])
 def pbs_delete_snapshot(pbs_id, store):
@@ -908,8 +961,9 @@ def get_pbs_task_detail(pbs_id, upid):
 @require_auth(perms=['pbs.jobs.view'])
 def get_pbs_jobs(pbs_id):
     """List all PBS jobs (sync, verify, prune)"""
-    # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
-    ok, err = check_pbs_access(pbs_id)
+    # sec: jobs operate at PBS instance level and can affect all linked clusters' datastores;
+    # require access to ALL linked clusters to prevent cross-tenant job enumeration
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     if pbs_id not in pbs_managers:
@@ -931,8 +985,9 @@ def get_pbs_jobs(pbs_id):
 @require_auth(perms=['pbs.jobs.run'])
 def run_pbs_job(pbs_id, job_type, job_id):
     """Manually trigger a PBS job"""
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
+    # sec: jobs operate at PBS instance level and can affect all linked clusters' datastores;
+    # require access to ALL linked clusters to prevent cross-tenant job execution
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     
@@ -1359,8 +1414,9 @@ def create_pbs_datastore(pbs_id):
     NS: This creates the datastore config on the PBS. The path must already exist 
     on the PBS filesystem - we can't create directories remotely.
     """
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
+    # sec: datastores are shared across all linked clusters; require access to ALL
+    # linked clusters to prevent cross-tenant datastore creation
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     
@@ -1416,8 +1472,9 @@ def create_pbs_datastore(pbs_id):
 @require_auth(perms=['pbs.datastore.modify'])
 def update_pbs_datastore_config(pbs_id, store):
     """Update datastore configuration (retention, GC schedule, etc.)"""
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
+    # sec: datastores are shared across all linked clusters; require access to ALL
+    # linked clusters to prevent cross-tenant datastore modification
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     
@@ -1468,8 +1525,9 @@ def delete_pbs_datastore(pbs_id, store):
     NS: By default this only removes the config - actual backup data on disk stays.
     This is the safe default. To also destroy data, send keep_data=false (dangerous!).
     """
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
+    # sec: datastores are shared across all linked clusters; require access to ALL
+    # linked clusters to prevent cross-tenant datastore deletion
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     
@@ -1506,8 +1564,9 @@ def delete_pbs_datastore(pbs_id, store):
 @require_auth(perms=['pbs.jobs.create'])
 def create_pbs_job(pbs_id, job_type):
     """Create a new sync/verify/prune job"""
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
+    # sec: jobs operate at PBS instance level and can affect all linked clusters' datastores;
+    # require access to ALL linked clusters to prevent cross-tenant job creation
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     
@@ -1553,8 +1612,9 @@ def create_pbs_job(pbs_id, job_type):
 @require_auth(perms=['pbs.jobs.modify'])
 def update_pbs_job(pbs_id, job_type, job_id):
     """Update a job configuration"""
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
+    # sec: jobs operate at PBS instance level and can affect all linked clusters' datastores;
+    # require access to ALL linked clusters to prevent cross-tenant job modification
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     
@@ -1583,8 +1643,9 @@ def update_pbs_job(pbs_id, job_type, job_id):
 @require_auth(perms=['pbs.jobs.delete'])
 def delete_pbs_job(pbs_id, job_type, job_id):
     """Delete a job"""
-    # Check PBS access authorization
-    ok, err = check_pbs_access(pbs_id)
+    # sec: jobs operate at PBS instance level and can affect all linked clusters' datastores;
+    # require access to ALL linked clusters to prevent cross-tenant job deletion
+    ok, err = _check_pbs_job_access(pbs_id)
     if not ok:
         return err
     
