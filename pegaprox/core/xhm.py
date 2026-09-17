@@ -1896,10 +1896,14 @@ def _run_esxi_to_pve(task):
                 vm_folder = vmdk_rel_path.split('/')[0]
 
                 # create SSHFS mount on PVE node to ESXi datastore
+                # NS Dec 2026 — apply centralized host-key policy to the nested PVE→ESXi
+                # connection so strict mode and the pinned known_hosts are enforced.
+                from pegaprox.utils.ssh_security import cli_hostkey_opts
+                _hkc, _kh = cli_hostkey_opts()
                 mount_dir = f"{mount_base}-{idx}"
                 mount_cmds = [
                     f"mkdir -p {_q_local(mount_dir)}",
-                    f"sshfs -o StrictHostKeyChecking=accept-new,password_stdin "
+                    f"sshfs -o StrictHostKeyChecking={_hkc},UserKnownHostsFile={_q_local(_kh)},password_stdin "
                     f"{_q_local(esxi_user + '@' + esxi_host + ':/vmfs/volumes/' + datastore_name)} "
                     f"{_q_local(mount_dir)} <<< {_q_local(esxi_pass)}",
                 ]
@@ -1932,9 +1936,11 @@ def _run_esxi_to_pve(task):
                     # would leak the ESXi password in that node's `ps`/proc for up to
                     # 2h. Feed it over stdin into SSHPASS and use `sshpass -e` instead
                     # (same idiom as the HA-sync/smbios fixes).
+                    # NS Dec 2026 — apply centralized host-key policy to the nested PVE→ESXi
+                    # connection so strict mode and the pinned known_hosts are enforced.
                     scp_cmd = (
                         f"IFS= read -r SSHPASS; export SSHPASS; sshpass -e "
-                        f"scp -o StrictHostKeyChecking=accept-new "
+                        f"scp -o StrictHostKeyChecking={_hkc} -o UserKnownHostsFile={_q_local(_kh)} "
                         f"{_q_local(remote_src)} {_q_local(tmp_path)}"
                     )
                     scp_in, scp_out, scp_err = ssh_pve.exec_command(scp_cmd, timeout=7200)
