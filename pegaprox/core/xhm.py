@@ -1772,6 +1772,13 @@ def _run_esxi_to_pve(task):
     """
     import requests as _req
 
+    secure_tmp_dir = None
+    pve_host = None
+    pve_user = None
+    pve_pass = None
+    pve_key = None
+    pve_port = 22
+    
     try:
         src_mgr = cluster_managers.get(task.source_cluster)
         tgt_mgr = cluster_managers.get(task.target_cluster)
@@ -1835,6 +1842,27 @@ def _run_esxi_to_pve(task):
 
         imported_volumes = []
         mount_base = f"/tmp/xhm-esxi-{task.id}"
+        
+        # Create a secure temporary directory on the PVE node for fallback scp operations.
+        # Mode 0700 ensures only the SSH user (typically root) can access it, preventing
+        # symlink attacks where a local attacker creates /tmp/xhm-{task.id}-disk{idx}.vmdk
+        # as a symlink to redirect the root-run scp write to an arbitrary file.
+        try:
+            ssh_pve_init = _connect_ssh(pve_host, pve_user, pve_pass,
+                                        key_path=pve_key, port=pve_port)
+            _, mktemp_out, _ = ssh_pve_init.exec_command(
+                "mktemp -d -t xhm-XXXXXXXXXX", timeout=10
+            )
+            mktemp_out.channel.recv_exit_status()
+            secure_tmp_dir = mktemp_out.read().decode().strip()
+            ssh_pve_init.close()
+            if not secure_tmp_dir or not secure_tmp_dir.startswith('/tmp/'):
+                task.set_phase('failed', 'Failed to create secure temporary directory on PVE node')
+                return
+            task.log(f"Created secure temporary directory: {secure_tmp_dir}")
+        except Exception as e:
+            task.set_phase('failed', f'Failed to create secure temporary directory: {e}')
+            return
 
         for idx, disk in enumerate(disks):
             if task.cancel_event.is_set():
@@ -1926,7 +1954,8 @@ def _run_esxi_to_pve(task):
                     # fallback: scp the flat vmdk to temp, then import
                     # remote source path needs single-quoting on top of local
                     # quoting because scp invokes a remote shell.
-                    tmp_path = f"/tmp/xhm-{task.id}-disk{idx}.vmdk"
+                    # Use the secure temporary directory to prevent symlink attacks.
+                    tmp_path = f"{secure_tmp_dir}/disk{idx}.vmdk"
                     remote_src = f"{esxi_user}@{esxi_host}:" + _q_remote('/vmfs/volumes/' + datastore_name + '/' + flat_path)
                     # MK Jul 2026 — this scp runs on the PVE node, so `sshpass -p <pw>`
                     # would leak the ESXi password in that node's `ps`/proc for up to
@@ -2112,6 +2141,16 @@ def _run_esxi_to_pve(task):
     except Exception as e:
         logger.error(f"[XHM:{task.id}] ESXi->PVE failed: {e}")
         task.set_phase('failed', f'Migration error: {e}')
+    finally:
+        # Clean up the secure temporary directory on the PVE node
+        if secure_tmp_dir:
+            try:
+                ssh_cleanup = _connect_ssh(pve_host, pve_user, pve_pass,
+                                          key_path=pve_key, port=pve_port)
+                ssh_cleanup.exec_command(f"rm -rf {shlex.quote(secure_tmp_dir)}", timeout=10)
+                ssh_cleanup.close()
+            except Exception:
+                pass  # Best effort cleanup
 
 
 def _run_esxi_to_xcpng(task):
@@ -2125,6 +2164,8 @@ def _run_esxi_to_xcpng(task):
     import requests as _req
     import subprocess
 
+    secure_tmp_dir = None
+    
     try:
         src_mgr = cluster_managers.get(task.source_cluster)
         tgt_mgr = cluster_managers.get(task.target_cluster)
@@ -2195,6 +2236,14 @@ def _run_esxi_to_xcpng(task):
         esxi_user = getattr(src_mgr.config, 'ssh_user', 'root')
         esxi_pass = getattr(src_mgr.config, 'pass_', '')
         created_vdis = []
+        
+        # Create a secure temporary directory locally on the PegaProx server.
+        # Mode 0700 ensures only the process owner can access it, preventing
+        # symlink attacks where a local attacker creates /tmp/xhm-esxi-{task.id}-{idx}-flat.vmdk
+        # as a symlink to redirect file writes to an arbitrary location.
+        import tempfile
+        secure_tmp_dir = tempfile.mkdtemp(prefix='xhm-', suffix=f'-{task.id}')
+        task.log(f"Created secure temporary directory: {secure_tmp_dir}")
 
         for idx, disk in enumerate(disks):
             if task.cancel_event.is_set():
@@ -2239,10 +2288,10 @@ def _run_esxi_to_xcpng(task):
                 return
             task.log(f"  Created VDI {new_vdi_uuid}")
 
-            # strategy: SCP flat vmdk to /tmp on PegaProx, then qemu-img convert | HTTP PUT
+            # strategy: SCP flat vmdk to secure temp dir on PegaProx, then qemu-img convert | HTTP PUT
             # this uses local temp space but avoids SSHFS complexity
-            tmp_vmdk = f"/tmp/xhm-esxi-{task.id}-{idx}-flat.vmdk"
-            tmp_raw = f"/tmp/xhm-esxi-{task.id}-{idx}.raw"
+            tmp_vmdk = f"{secure_tmp_dir}/disk{idx}-flat.vmdk"
+            tmp_raw = f"{secure_tmp_dir}/disk{idx}.raw"
 
             try:
                 # SCP from ESXi
@@ -2400,5 +2449,13 @@ def _run_esxi_to_xcpng(task):
     except Exception as e:
         logger.error(f"[XHM:{task.id}] ESXi->XCP failed: {e}")
         task.set_phase('failed', f'Migration error: {e}')
+    finally:
+        # Clean up the secure temporary directory
+        if secure_tmp_dir:
+            try:
+                import shutil
+                shutil.rmtree(secure_tmp_dir, ignore_errors=True)
+            except Exception:
+                pass  # Best effort cleanup
 
 
