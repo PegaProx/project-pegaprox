@@ -26,6 +26,7 @@ from typing import List, Optional
 from pegaprox.constants import (
     SESSION_TIMEOUT, CONFIG_DIR, USERS_FILE_ENCRYPTED,
     SESSIONS_FILE, SESSIONS_FILE_ENCRYPTED, ADMIN_INITIALIZED_FILE,
+    SETUP_TOKEN_FILE,
     LOGIN_MAX_ATTEMPTS, LOGIN_LOCKOUT_TIME, LOGIN_ATTEMPT_WINDOW,
 )
 from pegaprox.globals import (
@@ -431,6 +432,59 @@ def mark_admin_initialized():
         os.chmod(ADMIN_INITIALIZED_FILE, 0o600)
     except Exception as e:
         logging.error(f"couldnt mark admin init: {e}")
+
+
+def generate_setup_token() -> str:
+    """Generate a cryptographically secure bootstrap token for first-run setup.
+    
+    Returns the token string. Caller is responsible for persisting it and
+    displaying it to the operator.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def save_setup_token(token: str):
+    """Persist the bootstrap token to disk with restrictive permissions."""
+    try:
+        with open(SETUP_TOKEN_FILE, 'w') as f:
+            f.write(token)
+        os.chmod(SETUP_TOKEN_FILE, 0o600)
+    except Exception as e:
+        logging.error(f"Failed to save setup token: {e}")
+        raise
+
+
+def load_setup_token() -> Optional[str]:
+    """Load the bootstrap token from disk, or None if it doesn't exist."""
+    try:
+        if not os.path.exists(SETUP_TOKEN_FILE):
+            return None
+        with open(SETUP_TOKEN_FILE, 'r') as f:
+            return f.read().strip()
+    except Exception as e:
+        logging.error(f"Failed to load setup token: {e}")
+        return None
+
+
+def validate_setup_token(provided_token: str) -> bool:
+    """Constant-time comparison of the provided token against the stored one.
+    
+    Returns True if the token matches, False otherwise.
+    """
+    stored_token = load_setup_token()
+    if not stored_token:
+        return False
+    return hmac.compare_digest(provided_token, stored_token)
+
+
+def invalidate_setup_token():
+    """Delete the bootstrap token file after successful setup."""
+    try:
+        if os.path.exists(SETUP_TOKEN_FILE):
+            os.remove(SETUP_TOKEN_FILE)
+    except Exception as e:
+        logging.error(f"Failed to remove setup token: {e}")
+
 
 def create_initial_admin(username: str, password: str, display_name: str = '', email: str = '') -> dict:
     """Build the first-admin user record from setup-wizard input.
