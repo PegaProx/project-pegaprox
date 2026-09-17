@@ -1588,6 +1588,10 @@ def create_custom_role():
     if not role_id:
         return jsonify({'error': 'Role ID required'}), 400
     
+    # Validate name is a scalar string (not array/object)
+    if not isinstance(name, str):
+        return jsonify({'error': 'Role name must be a string'}), 400
+    
     # cant use builtin names
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot use builtin role name'}), 400
@@ -1647,7 +1651,12 @@ def create_custom_role():
             'created': datetime.now().isoformat()
         }
     
-    save_custom_roles(custom)
+    try:
+        save_custom_roles(custom)
+    except Exception as e:
+        logging.error(f"Failed to save custom role: {e}")
+        return jsonify({'error': 'Failed to save role'}), 500
+    
     invalidate_roles_cache()
     
     usr = request.session['user']
@@ -1668,6 +1677,10 @@ def update_custom_role(role_id):
     name = data.get('name')
     permissions = data.get('permissions')
     tenant_id = data.get('tenant_id')  # which tenant's role to update
+    
+    # Validate name is a scalar string if provided (not array/object)
+    if name is not None and not isinstance(name, str):
+        return jsonify({'error': 'Role name must be a string'}), 400
     
     # Tenant validation: non-admins can only update roles in their own tenant
     user = build_authz_user(request.session.get('user', ''), request.session)
@@ -1707,7 +1720,12 @@ def update_custom_role(role_id):
         roles[role_id]['permissions'] = permissions
     roles[role_id]['modified'] = datetime.now().isoformat()
     
-    save_custom_roles(custom)
+    try:
+        save_custom_roles(custom)
+    except Exception as e:
+        logging.error(f"Failed to update custom role: {e}")
+        return jsonify({'error': 'Failed to update role'}), 500
+    
     invalidate_roles_cache()
     
     log_audit(request.session['user'], 'role.updated', f"Updated role: {role_id}")
@@ -1772,7 +1790,12 @@ def delete_custom_role(role_id):
     else:
         del custom['global'][role_id]
 
-    save_custom_roles(custom)
+    try:
+        save_custom_roles(custom)
+    except Exception as e:
+        logging.error(f"Failed to delete custom role: {e}")
+        return jsonify({'error': 'Failed to delete role'}), 500
+    
     invalidate_roles_cache()
     
     log_audit(request.session['user'], 'role.deleted', f"Deleted role: {role_id}")
@@ -1809,6 +1832,10 @@ def apply_role_template(template_id):
     role_id = data.get('role_id', template_id)
     role_name = data.get('name', ROLE_TEMPLATES[template_id]['name'])
     tenant_id = data.get('tenant_id')  # None = global
+    
+    # Validate role_name is a scalar string (not array/object)
+    if not isinstance(role_name, str):
+        return jsonify({'error': 'Role name must be a string'}), 400
     
     # validate role_id
     if role_id in BUILTIN_ROLES:
@@ -1856,7 +1883,12 @@ def apply_role_template(template_id):
             return jsonify({'error': 'Role already exists'}), 400
         custom['global'][role_id] = role_data
     
-    save_custom_roles(custom)
+    try:
+        save_custom_roles(custom)
+    except Exception as e:
+        logging.error(f"Failed to save role from template: {e}")
+        return jsonify({'error': 'Failed to save role'}), 500
+    
     invalidate_roles_cache()
     
     usr = request.session['user']

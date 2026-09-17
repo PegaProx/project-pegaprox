@@ -87,10 +87,10 @@ def save_custom_roles(roles: dict):
     
     uses SQLite now
     """
+    db = get_db()
+    cursor = db.conn.cursor()
+    
     try:
-        db = get_db()
-        cursor = db.conn.cursor()
-        
         # Clear existing roles
         cursor.execute('DELETE FROM custom_roles')
         
@@ -125,7 +125,10 @@ def save_custom_roles(roles: dict):
         
         db.conn.commit()
     except Exception as e:
+        # Rollback the transaction to prevent partial writes (e.g., DELETE without INSERT)
+        db.conn.rollback()
         logging.error(f"Failed to save custom roles: {e}")
+        raise  # Re-raise to notify caller of the failure
 
 # cache
 _custom_roles_cache = None
