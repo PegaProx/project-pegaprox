@@ -1769,19 +1769,45 @@ def list_api_tokens():
     role = request.session.get('role', ROLE_VIEWER)
     
     # MK 2026-06-10 (RBAC): the admin.api perm (not the admin role) sees all tokens — admin holds it via all-perms.
-    from pegaprox.utils.rbac import has_permission as _has_perm
-    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import has_permission as _has_perm, DEFAULT_TENANT_ID
+    from pegaprox.utils.auth import build_authz_user, load_users
     # sec (audit): the raw record kept the OWNER's admin role, so an admin-owned viewer token
     # could enumerate every user's tokens here (and revoke any of them below).
     if _has_perm(build_authz_user(username, request.session), 'admin.api') and request.args.get('all') == 'true':
         try:
             db = get_db()
             cursor = db.conn.cursor()
-            cursor.execute('''
-                SELECT id, token_prefix, username, name, role, permissions, expires_at,
-                       last_used_at, last_used_ip, created_at, revoked
-                FROM api_tokens ORDER BY created_at DESC
-            ''')
+            
+            # NS Dec 2026 (pentest): a tenant-scoped admin.api holder must not enumerate tokens
+            # belonging to users in OTHER tenants (cross-tenant disclosure + revocation vector).
+            # Only a global admin sees every token; tenant-scoped admins see only their tenant's.
+            if request.session.get('role') != ROLE_ADMIN:
+                users_db = load_users()
+                caller = users_db.get(username, {})
+                caller_tenant = caller.get('tenant_id', DEFAULT_TENANT_ID)
+                
+                # Build list of usernames in the caller's tenant
+                tenant_users = [u for u, udata in users_db.items() 
+                               if udata.get('tenant_id', DEFAULT_TENANT_ID) == caller_tenant]
+                
+                if not tenant_users:
+                    return jsonify({'tokens': []})
+                
+                placeholders = ','.join(['?'] * len(tenant_users))
+                cursor.execute(f'''
+                    SELECT id, token_prefix, username, name, role, permissions, expires_at,
+                           last_used_at, last_used_ip, created_at, revoked
+                    FROM api_tokens 
+                    WHERE username IN ({placeholders})
+                    ORDER BY created_at DESC
+                ''', tuple(tenant_users))
+            else:
+                cursor.execute('''
+                    SELECT id, token_prefix, username, name, role, permissions, expires_at,
+                           last_used_at, last_used_ip, created_at, revoked
+                    FROM api_tokens ORDER BY created_at DESC
+                ''')
+            
             tokens = [dict(row) for row in cursor.fetchall()]
             return jsonify({'tokens': tokens})
         except Exception as e:
@@ -1846,8 +1872,8 @@ def revoke_api_token_endpoint(token_id):
     role = request.session.get('role', ROLE_VIEWER)
     
     # MK 2026-06-10 (RBAC): the admin.api perm can revoke any token (admin holds it via all-perms).
-    from pegaprox.utils.rbac import has_permission as _has_perm
-    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import has_permission as _has_perm, DEFAULT_TENANT_ID
+    from pegaprox.utils.auth import build_authz_user, load_users
     if _has_perm(build_authz_user(username, request.session), 'admin.api'):
         try:
             db = get_db()
@@ -1855,10 +1881,26 @@ def revoke_api_token_endpoint(token_id):
             cursor.execute('SELECT username, name FROM api_tokens WHERE id = ?', (token_id,))
             row = cursor.fetchone()
             if row:
-                cursor.execute('UPDATE api_tokens SET revoked = 1 WHERE id = ?', (token_id,))
-                db.conn.commit()
                 token_owner = dict(row)['username']
                 token_name = dict(row)['name']
+                
+                # NS Dec 2026 (pentest): a tenant-scoped admin.api holder must not revoke tokens
+                # belonging to users in OTHER tenants (cross-tenant availability attack). Only a
+                # global admin can revoke any token; tenant-scoped admins are confined to their tenant.
+                if request.session.get('role') != ROLE_ADMIN:
+                    users_db = load_users()
+                    caller = users_db.get(username, {})
+                    caller_tenant = caller.get('tenant_id', DEFAULT_TENANT_ID)
+                    token_owner_data = users_db.get(token_owner, {})
+                    token_owner_tenant = token_owner_data.get('tenant_id', DEFAULT_TENANT_ID)
+                    
+                    if caller_tenant != token_owner_tenant:
+                        log_audit(username, 'security.token_revoke_denied', 
+                                 f"Denied cross-tenant token revoke attempt: token {token_id} (owner: {token_owner})")
+                        return jsonify({'error': 'Token not found'}), 404
+                
+                cursor.execute('UPDATE api_tokens SET revoked = 1 WHERE id = ?', (token_id,))
+                db.conn.commit()
                 log_audit(username, 'token.revoked', f"Revoked API token '{token_name}' (user: {token_owner})")
                 return jsonify({'success': True})
             return jsonify({'error': 'Token not found'}), 404
