@@ -3414,10 +3414,72 @@ class PegaProxDB:
             self.save_user(username, data)
     
     def delete_user(self, username: str):
-        """Delete user"""
+        """Delete user and cascade to VM ACLs, pool permissions, and related data
+        
+        Security fix: Remove the username from all VM ACLs and pool permissions
+        to prevent privilege escalation when the username is reused for a new account.
+        Also clean up user-specific data (favorites, WebAuthn credentials, push subscriptions).
+        """
         cursor = self.conn.cursor()
+        
+        # 1. Remove user from all VM ACL user lists (SECURITY-CRITICAL)
+        # Get all VM ACLs that contain this username
+        cursor.execute('SELECT id, cluster_id, vmid, users FROM vm_acls')
+        for row in cursor.fetchall():
+            acl_id = row['id']
+            users_json = row['users'] or '[]'
+            try:
+                users = json.loads(users_json)
+                if username in users:
+                    # Remove the username from the list
+                    users = [u for u in users if u != username]
+                    # Update the ACL with the filtered user list
+                    cursor.execute('UPDATE vm_acls SET users = ? WHERE id = ?',
+                                 (json.dumps(users), acl_id))
+            except (json.JSONDecodeError, TypeError):
+                # Malformed JSON, skip this ACL
+                logging.warning(f"Malformed VM ACL users JSON for ACL id={acl_id}")
+                continue
+        
+        # 2. Delete all pool permissions for this user (SECURITY-CRITICAL)
+        cursor.execute('''
+            DELETE FROM pool_permissions 
+            WHERE subject_type = 'user' AND subject_id = ?
+        ''', (username,))
+        
+        # 3. Clean up user-specific data (data hygiene, not security-critical)
+        # Delete user favorites
+        cursor.execute('DELETE FROM user_favorites WHERE username = ?', (username,))
+        
+        # Delete WebAuthn credentials
+        try:
+            cursor.execute('DELETE FROM webauthn_credentials WHERE username = ?', (username,))
+        except Exception:
+            pass  # Table may not exist in older installations
+        
+        # Delete push subscriptions
+        try:
+            cursor.execute('DELETE FROM push_subscriptions WHERE username = ?', (username,))
+        except Exception:
+            pass  # Table may not exist in older installations
+        
+        # Delete push inbox messages
+        try:
+            cursor.execute('DELETE FROM push_inbox WHERE username = ?', (username,))
+        except Exception:
+            pass  # Table may not exist in older installations
+        
+        # 4. Delete the user account
         cursor.execute('DELETE FROM users WHERE username = ?', (username,))
+        
         self.conn.commit()
+        
+        # 5. Invalidate caches to ensure authorization checks see the updated state
+        try:
+            from pegaprox.utils.rbac import invalidate_vm_acls_cache
+            invalidate_vm_acls_cache()
+        except Exception as e:
+            logging.warning(f"Failed to invalidate VM ACLs cache after user deletion: {e}")
     
     # ========================================
     # SESSION OPERATIONS
