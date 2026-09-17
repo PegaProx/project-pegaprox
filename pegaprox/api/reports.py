@@ -64,6 +64,17 @@ def _syslog_like_clause(search_text):
 
 
 def _syslog_hostname_tokens(value):
+    """Extract and normalize a hostname from various input formats.
+    
+    Returns a set containing only the full normalized hostname. Previously this
+    function also extracted the first label (e.g., 'node' from 'node.tenant-a.example'),
+    which caused cross-tenant disclosure when the authorization query used LIKE 'node.%'
+    patterns that matched hostnames from other tenants sharing the same first label.
+    
+    Security: The returned hostname is used for row-level authorization in syslog queries.
+    Since syslog ingestion stores only the parsed hostname without cluster or tenant
+    association, we must not use overly broad patterns that could match unrelated hosts.
+    """
     value = str(value or '').strip().lower()
     if not value:
         return set()
@@ -78,10 +89,9 @@ def _syslog_hostname_tokens(value):
     value = value.strip('.')
     if not value:
         return set()
-    tokens = {value}
-    if '.' in value:
-        tokens.add(value.split('.', 1)[0])
-    return tokens
+    # Return only the full hostname, not the first label.
+    # This prevents cross-tenant disclosure via overly broad LIKE patterns.
+    return {value}
 
 
 def _syslog_cluster_hostnames(cluster_id):
