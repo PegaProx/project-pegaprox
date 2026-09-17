@@ -2178,7 +2178,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2332,7 +2332,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -4264,6 +4264,16 @@ def start_rolling_update(cluster_id):
     
     # Configuration options
     include_reboot = data.get('include_reboot', False)
+    
+    # sec: node.update and node.reboot are separate permissions. Verify node.reboot authority
+    # when the caller requests a rolling update with reboots.
+    if include_reboot:
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import has_permission
+        user = build_authz_user(request.session.get('user', ''), request.session)
+        if not has_permission(user, 'node.reboot'):
+            return jsonify({'error': 'Permission denied: node.reboot required for rolling updates with reboots'}), 403
+    
     node_order = data.get('node_order', None)
     skip_up_to_date = data.get('skip_up_to_date', True)
     force_all = data.get('force_all', False)

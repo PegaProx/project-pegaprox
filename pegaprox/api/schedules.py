@@ -989,6 +989,15 @@ def set_update_schedule(cluster_id):
         return jsonify({'error': 'Cluster not found'}), 404
     
     data = request.json or {}
+    
+    # sec: node.update and node.reboot are separate permissions. A schedule with include_reboot=true
+    # will invoke start_node_update(..., reboot=True, force=True) outside the request authorization
+    # context. Verify node.reboot authority now, before persisting the reboot-enabled schedule.
+    if data.get('include_reboot', True):
+        user = build_authz_user(request.session.get('user', ''), request.session)
+        if not has_permission(user, 'node.reboot'):
+            return jsonify({'error': 'Permission denied: node.reboot required to schedule updates with reboots'}), 403
+    
     usr = getattr(request, 'session', {}).get('user', 'system')
     
     schedule = {
