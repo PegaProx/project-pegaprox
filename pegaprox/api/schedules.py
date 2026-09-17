@@ -37,6 +37,44 @@ def _require_action_perm(action):
         return jsonify({'error': f'Permission denied: {perm} required to schedule a {action} action'}), 403
     return None
 
+
+def _validate_schedule_field_types(data, field_name):
+    """Validate that schedule field values are of acceptable types for SQLite parameter binding.
+    
+    Returns (is_valid, error_message). SQLite cannot bind dict/list/object types to scalar columns.
+    This prevents malformed input from causing INSERT failures after the global DELETE in save_schedules.
+    """
+    value = data.get(field_name)
+    if value is None:
+        return True, None
+    
+    # Define allowed types per field
+    allowed_types = {
+        'name': (str,),
+        'vmid': (int, str),  # can be string that converts to int
+        'vm_type': (str,),
+        'action': (str,),
+        'schedule_type': (str,),
+        'time': (str,),
+        'date': (str,),
+        'days': (list,),  # list is OK, will be JSON-encoded
+        'enabled': (bool, int),
+        'cluster_id': (str,),
+    }
+    
+    if field_name not in allowed_types:
+        return True, None  # unknown field, let other validation handle it
+    
+    if not isinstance(value, allowed_types[field_name]):
+        return False, f"Field '{field_name}' must be of type {allowed_types[field_name]}, got {type(value).__name__}"
+    
+    # Additional validation for 'days' - must be list of strings
+    if field_name == 'days' and isinstance(value, list):
+        if not all(isinstance(d, str) for d in value):
+            return False, "Field 'days' must be a list of strings"
+    
+    return True, None
+
 # ============================================
 
 SCHEDULES_FILE = os.path.join(CONFIG_DIR, 'scheduled_actions.json')
@@ -120,6 +158,8 @@ def save_schedules(schedules):
     """Save scheduled actions to SQLite database
     
     SQLite migration
+    
+    Returns True on success, False on failure.
     """
     try:
         db = get_db()
@@ -154,8 +194,14 @@ def save_schedules(schedules):
             ))
         
         db.conn.commit()
+        return True
     except Exception as e:
         logging.error(f"Error saving schedules: {e}")
+        try:
+            db.conn.rollback()
+        except Exception as rollback_err:
+            logging.error(f"Failed to rollback after save error: {rollback_err}")
+        return False
 
 
 def check_schedules():
@@ -642,6 +688,12 @@ def create_schedule():
     if data['schedule_type'] == 'weekly' and not data.get('days'):
         return jsonify({'error': 'Days are required for weekly schedules'}), 400
     
+    # Validate field types to prevent SQLite parameter binding errors
+    for field in ['name', 'vmid', 'vm_type', 'action', 'schedule_type', 'time', 'date', 'days', 'cluster_id']:
+        is_valid, err_msg = _validate_schedule_field_types(data, field)
+        if not is_valid:
+            return jsonify({'error': err_msg}), 400
+    
     schedules = load_schedules()
     
     # Generate new ID
@@ -670,7 +722,9 @@ def create_schedule():
         schedules['actions'] = []
     
     schedules['actions'].append(new_schedule)
-    save_schedules(schedules)
+    
+    if not save_schedules(schedules):
+        return jsonify({'error': 'Failed to save schedule'}), 500
     
     log_audit(request.session.get('user', 'system'), 'schedule.created', 
              f"Created schedule '{new_schedule['name']}' for VM {data['vmid']}")
@@ -756,11 +810,20 @@ def update_schedule(schedule_id):
 
     # Update fields (vmid/vm_type added Mar 2026 - #133)
     updatable = ['name', 'vmid', 'vm_type', 'action', 'schedule_type', 'time', 'date', 'days', 'enabled']
+    
+    # Validate field types to prevent SQLite parameter binding errors
+    for field in updatable:
+        if field in data:
+            is_valid, err_msg = _validate_schedule_field_types(data, field)
+            if not is_valid:
+                return jsonify({'error': err_msg}), 400
+
     for field in updatable:
         if field in data:
             schedule[field] = data[field]
     
-    save_schedules(schedules)
+    if not save_schedules(schedules):
+        return jsonify({'error': 'Failed to save schedule'}), 500
     
     log_audit(request.session.get('user', 'system'), 'schedule.updated', 
              f"Updated schedule ID {schedule_id}")
@@ -799,7 +862,8 @@ def delete_schedule(schedule_id):
 
     schedules['actions'] = [s for s in schedules.get('actions', []) if s.get('id') != schedule_id]
 
-    save_schedules(schedules)
+    if not save_schedules(schedules):
+        return jsonify({'error': 'Failed to save schedule'}), 500
     
     log_audit(request.session.get('user', 'system'), 'schedule.deleted', 
              f"Deleted schedule ID {schedule_id}")
