@@ -256,10 +256,15 @@ def send_to_channels(alert, channel_ids=None):
 
 
 def new_channel(payload):
-    """Normalize admin-submitted channel data — strips unknown fields, assigns id."""
+    """Normalize admin-submitted channel data — strips unknown fields, assigns id.
+    
+    sec (pentest): always generate a fresh ID server-side rather than accepting a
+    caller-supplied value. Preserving payload.id allowed duplicate IDs, which in turn
+    permitted cross-tenant alert disclosure (the dispatcher sends to ALL channels
+    matching a given ID, so an attacker could shadow a legitimate channel)."""
     allowed = {'name', 'type', 'url', 'token', 'topic', 'enabled'}
     out = {k: v for k, v in (payload or {}).items() if k in allowed}
     out.setdefault('enabled', True)
     out.setdefault('type', 'generic')
-    out['id'] = (payload or {}).get('id') or uuid.uuid4().hex[:12]
+    out['id'] = uuid.uuid4().hex[:12]
     return out

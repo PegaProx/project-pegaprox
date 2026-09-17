@@ -752,6 +752,12 @@ def create_alert_channel():
     ch = new_channel(request.get_json() or {})
     if not ch.get('url'):
         return jsonify({'error': 'url required'}), 400
+    # sec (pentest): enforce uniqueness of channel IDs to prevent cross-tenant alert disclosure.
+    # The dispatcher sends to ALL channels matching a given ID, so a duplicate ID allows an
+    # attacker to shadow a legitimate channel and receive targeted alerts intended for it.
+    existing_ids = {str(c.get('id')) for c in channels}
+    if str(ch.get('id')) in existing_ids:
+        return jsonify({'error': 'A channel with this ID already exists'}), 409
     channels.append(ch)
     settings['alert_webhooks'] = channels
     save_server_settings(settings)
