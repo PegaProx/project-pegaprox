@@ -374,6 +374,15 @@ def validate_ws_token_api():
                 if not has_permission(user, 'node.shell'):
                     logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' lacks node.shell for a node shell on '{_sl(requested_cluster)}'")
                     return jsonify({'error': 'node.shell permission required'}), 403
+                
+                # sec (pentest): node-shell is a whole-cluster operation. A resource-scoped caller
+                # (VM-ACL or pool grant only, admitted by the #248/#555 fallback above) must not
+                # cross into node-shell flows. Reject scoped callers; only unconfined cluster
+                # operators proceed.
+                from pegaprox.api.helpers import caller_is_scoped
+                if caller_is_scoped(user, requested_cluster):
+                    logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is resource-scoped, denying node-shell access to '{_sl(requested_cluster)}'")
+                    return jsonify({'error': 'Access denied: node shell requires cluster-wide access'}), 403
 
             # MK May 2026 - lightweight cluster context for the SSH/VNC proxy.
             # We intentionally do NOT call mgr._get_node_ip() here: that has a

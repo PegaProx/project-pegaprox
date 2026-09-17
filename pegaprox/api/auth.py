@@ -1244,7 +1244,7 @@ def get_cluster_creds_internal(cluster_id):
     mgr = cluster_managers[cluster_id]
 
     # NS Mar 2026: use standard cluster access check (validates user's cluster assignments + tenant)
-    from pegaprox.api.helpers import check_cluster_access
+    from pegaprox.api.helpers import check_cluster_access, caller_is_scoped
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
@@ -1269,6 +1269,13 @@ def get_cluster_creds_internal(cluster_id):
     if 'node.shell' not in user_perms:
         logging.warning(f"[CLUSTER-CREDS] User {session['user']} lacks node.shell permission")
         return jsonify({'error': 'Permission denied'}), 403
+    
+    # sec (pentest): node-shell is a whole-cluster operation. A resource-scoped caller (VM-ACL or
+    # pool grant only, admitted by check_cluster_access's #248/#555 fallback) must not cross into
+    # node-shell flows. Reject scoped callers here; only unconfined cluster operators proceed.
+    if caller_is_scoped(user_data, cluster_id):
+        logging.warning(f"[CLUSTER-CREDS] User {session['user']} is resource-scoped, denying node-shell access to {cluster_id}")
+        return jsonify({'error': 'Access denied: node shell requires cluster-wide access'}), 403
     
     # Get node IPs - the cluster_host is our reliable fallback
     node_ips = {}

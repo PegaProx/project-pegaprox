@@ -4292,6 +4292,14 @@ def get_node_shell_ticket(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     
+    # sec (pentest): node-shell is a whole-cluster operation. A resource-scoped caller (VM-ACL or
+    # pool grant only, admitted by check_cluster_access's #248/#555 fallback) must not cross into
+    # node-shell flows. Reject scoped callers here; only unconfined cluster operators proceed.
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, cluster_id):
+        logging.warning(f"[NODE-SHELL] User {request.session.get('user')} is resource-scoped, denying node-shell access to {cluster_id}")
+        return jsonify({'error': 'Access denied: node shell requires cluster-wide access'}), 403
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -10254,6 +10262,18 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         logging.error(f"SHELL WS: User {session['user']} denied access to cluster {cluster_id}")
         try:
             ws.send('{"status":"error","message":"Access denied to this cluster"}')
+        except:
+            pass
+        return
+    
+    # sec (pentest): node-shell is a whole-cluster operation. A resource-scoped caller (VM-ACL or
+    # pool grant only) must not cross into node-shell flows. Reject scoped callers here; only
+    # unconfined cluster operators proceed. This WebSocket path doesn't use check_cluster_access's
+    # VM-ACL/pool fallback, but enforce confinement for consistency and defense in depth.
+    if caller_is_scoped(user, cluster_id):
+        logging.error(f"SHELL WS: User {session['user']} is resource-scoped, denying node-shell access to {cluster_id}")
+        try:
+            ws.send('{"status":"error","message":"Access denied: node shell requires cluster-wide access"}')
         except:
             pass
         return
