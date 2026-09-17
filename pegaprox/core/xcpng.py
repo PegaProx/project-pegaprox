@@ -1810,13 +1810,14 @@ class XcpngManager:
 
             # console URL is like https://host/console?ref=OpaqueRef:xxxx
             location = api.console.get_location(rfb_console)
-            # extract session ID for auth
-            session_ref = api.xenapi._session
+            # Security: Do NOT expose the manager's XenAPI session to clients.
+            # The console location URL contains the necessary console-specific authentication.
+            # Returning session_ref would leak the backend's XenAPI credential, allowing
+            # customers to perform operations beyond their authorized VM scope.
             return {
                 'success': True,
                 'type': 'xcpng_vnc',
                 'url': location,
-                'session_ref': session_ref,
                 'host': self.host,
                 'port': 443,
             }
