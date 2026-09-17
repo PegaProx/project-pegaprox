@@ -20,6 +20,7 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined
+from pegaprox.models.permissions import ROLE_ADMIN
 
 bp = Blueprint('nodes', __name__)
 
@@ -621,7 +622,7 @@ echo "PP_OK installed $ver"
 
 
 @bp.route('/api/clusters/<cluster_id>/hardware/ipmitool/install', methods=['POST'])
-@require_auth(perms=['admin.settings'])  # root apt-install on nodes -> admin-only, like starlvm
+@require_auth(roles=[ROLE_ADMIN])  # root apt-install on nodes -> admin-only, like starlvm
 def install_ipmitool_api(cluster_id):
     """Install ipmitool on cluster node(s) over SSH for in-band hardware monitoring.
 
@@ -1154,7 +1155,7 @@ def get_node_subscription_api(cluster_id, node):
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['PUT'])
-@require_auth(perms=['admin.settings'])
+@require_auth(roles=[ROLE_ADMIN])
 def update_node_subscription_api(cluster_id, node):
     """Update subscription key - admin only"""
     ok, err = check_cluster_access(cluster_id)
@@ -1178,7 +1179,7 @@ def update_node_subscription_api(cluster_id, node):
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['POST'])
-@require_auth(perms=['admin.settings'])
+@require_auth(roles=[ROLE_ADMIN])
 def check_node_subscription_api(cluster_id, node):
     """Refresh subscription status - admin only"""
     ok, err = check_cluster_access(cluster_id)
@@ -1202,7 +1203,7 @@ def check_node_subscription_api(cluster_id, node):
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['DELETE'])
-@require_auth(perms=['admin.settings'])
+@require_auth(roles=[ROLE_ADMIN])
 def delete_node_subscription_api(cluster_id, node):
     """Delete subscription key - admin only"""
     ok, err = check_cluster_access(cluster_id)
@@ -1687,7 +1688,7 @@ def get_smbios_autoconfig_status(cluster_id, node):
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig/deploy', methods=['POST'])
-@require_auth(perms=['admin.settings'])
+@require_auth(roles=[ROLE_ADMIN])
 def deploy_smbios_autoconfig(cluster_id, node):
     """Deploy SMBIOS auto-config script to node"""
     ok, err = check_cluster_access(cluster_id)
@@ -1766,7 +1767,7 @@ def deploy_smbios_autoconfig(cluster_id, node):
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig', methods=['DELETE'])
-@require_auth(perms=['admin.settings'])
+@require_auth(roles=[ROLE_ADMIN])
 def remove_smbios_autoconfig(cluster_id, node):
     """Remove SMBIOS auto-config from node"""
     ok, err = check_cluster_access(cluster_id)
@@ -1821,7 +1822,7 @@ def remove_smbios_autoconfig(cluster_id, node):
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig/control', methods=['POST'])
-@require_auth(perms=['admin.settings'])
+@require_auth(roles=[ROLE_ADMIN])
 def control_smbios_autoconfig(cluster_id, node):
     """Start/Stop/Rescan SMBIOS auto-config service on node"""
     ok, err = check_cluster_access(cluster_id)
@@ -1963,7 +1964,7 @@ def get_smbios_autoconfig_status_all(cluster_id):
 
 
 @bp.route('/api/clusters/<cluster_id>/smbios-autoconfig/deploy-all', methods=['POST'])
-@require_auth(perms=['admin.settings'])
+@require_auth(roles=[ROLE_ADMIN])
 def deploy_smbios_autoconfig_all(cluster_id):
     """Deploy SMBIOS auto-config script to ALL nodes in cluster"""
     ok, err = check_cluster_access(cluster_id)
@@ -2183,7 +2184,7 @@ def _cluster_node_names(mgr):
 
 
 @bp.route('/api/clusters/<cluster_id>/storage/starlvm/install', methods=['POST'])
-@require_auth(perms=['admin.settings'])  # MK: root apt-install on every node + caller-overridable repo/key → admin-only (not node.maintenance, which tenant_operator holds)
+@require_auth(roles=[ROLE_ADMIN])  # MK: root apt-install on every node + caller-overridable repo/key → admin-only (not node.maintenance, which tenant_operator holds)
 def install_starlvm_plugin(cluster_id):
     """Install the StarWind SAN plugin (starlvm storage type) on cluster nodes over SSH.
 
