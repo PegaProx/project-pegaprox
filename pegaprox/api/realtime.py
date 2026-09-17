@@ -269,7 +269,8 @@ def get_sse_token():
 def get_ws_token():
     """Get a single-use WebSocket auth token - avoids session_id in URLs"""
     user = request.session.get('user', 'unknown')
-    role = request.session.get('role', 'viewer')
+    # sec (pentest): use effective_role (floored) not the raw token role
+    role = request.session.get('effective_role', request.session.get('role', 'viewer'))
     token = create_ws_token(user, role)
     return jsonify({'token': token, 'expires_in': 60})
 

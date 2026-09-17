@@ -323,18 +323,41 @@ def build_authz_user(username: str, session: dict) -> dict:
     if session.get('api_token'):
         _h = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
         token_role = session.get('role')
-        # NS Aug 2026 (Aikido 469089255 core) — a token bound to a tenant CUSTOM role must KEEP that
-        # role name, not collapse to a builtin level. The old collapse both under-privileged the token
-        # (has_permission then only saw viewer perms) AND — the security bug — made get_user_clusters
-        # see a builtin, SKIP its custom-role→tenant remap (rbac.py:318), fall back to the owner's
-        # (default) tenant and return None = "all clusters". Keeping the name lets get_user_clusters
-        # scope the token to the role's tenant and lets its real permissions resolve. It can't outrank
-        # the owner: create_api_token binds a token at/below the owner's level and require_auth
-        # re-floors the numeric role every request. A BUILTIN token role is still floored numerically.
+        user_role = user.get('role')
+        
+        # sec (pentest): custom-role tokens must be validated against the owner's current role.
+        # The previous code kept custom role names verbatim without checking if the owner still
+        # holds that role. Apply the same flooring logic as require_auth.
         if token_role and token_role not in _h:
-            user['effective_role'] = token_role
+            # token has a custom role
+            if user_role == token_role:
+                # owner still has the same custom role
+                user['effective_role'] = token_role
+            elif user_role in _h:
+                # owner demoted to a built-in — floor to that
+                user['effective_role'] = user_role
+            else:
+                # owner has a different custom role — compare permissions
+                try:
+                    from pegaprox.utils.rbac import (get_role_permissions_for_user,
+                                                    DEFAULT_TENANT_ID, _tenant_defining_role)
+                    _tid = user.get('tenant_id') or DEFAULT_TENANT_ID
+                    _token_tenant = _tenant_defining_role(token_role, _tid)
+                    _user_tenant = _tenant_defining_role(user_role, _tid)
+                    _token_perms = set(get_role_permissions_for_user({'role': token_role}, _token_tenant))
+                    _user_perms = set(get_role_permissions_for_user({'role': user_role}, _user_tenant))
+                    if _token_perms - _user_perms:
+                        # token has extra perms — use owner's role
+                        user['effective_role'] = user_role
+                    else:
+                        # token perms are subset — keep token role
+                        user['effective_role'] = token_role
+                except Exception:
+                    # can't resolve — fail closed to owner's role
+                    user['effective_role'] = user_role
         else:
-            eff = min(_h.get(token_role, 1), _h.get(user.get('role'), 1))
+            # token has a built-in role — numeric flooring
+            eff = min(_h.get(token_role, 1), _h.get(user_role, 1))
             user['effective_role'] = next((r for r, lvl in _h.items() if lvl == eff), ROLE_VIEWER)
     return user
 
@@ -990,10 +1013,55 @@ def require_auth(roles: list = None, perms: list = None):
                 # since token creation, follow them down so the token can't outrank
                 # its owner. Won't auto-escalate.
                 _hier = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
-                token_lvl = _hier.get(session.get('role'), 1)
-                user_lvl = _hier.get(user.get('role'), 1)
-                eff_lvl = min(token_lvl, user_lvl)
-                fresh_role = next((r for r, lvl in _hier.items() if lvl == eff_lvl), ROLE_VIEWER)
+                token_role = session.get('role')
+                user_role = user.get('role')
+                
+                # sec (pentest): custom-role tokens were never floored. The numeric hierarchy
+                # only covers built-ins, so a token bound to a tenant custom role kept that
+                # role verbatim even after the owner was demoted to viewer or had the custom
+                # role removed. Check: if the token carries a custom role, the owner must
+                # STILL hold that exact role OR a higher built-in. If the owner's role changed,
+                # floor the token to the owner's current (lower) role.
+                if token_role and token_role not in _hier:
+                    # token has a custom role
+                    if user_role == token_role:
+                        # owner still has the same custom role — allow it
+                        fresh_role = token_role
+                    elif user_role in _hier:
+                        # owner demoted to a built-in role — floor token to that built-in
+                        fresh_role = user_role
+                        logging.info(f"[APIToken] Token with custom role '{token_role}' floored to "
+                                   f"owner's current role '{user_role}' for user '{session['user']}'")
+                    else:
+                        # owner has a different custom role — compare permission sets and use
+                        # the intersection (most restrictive). If we can't resolve, fail closed.
+                        try:
+                            from pegaprox.utils.rbac import (get_role_permissions_for_user, 
+                                                            DEFAULT_TENANT_ID, _tenant_defining_role)
+                            _tid = user.get('tenant_id') or DEFAULT_TENANT_ID
+                            _token_tenant = _tenant_defining_role(token_role, _tid)
+                            _user_tenant = _tenant_defining_role(user_role, _tid)
+                            _token_perms = set(get_role_permissions_for_user({'role': token_role}, _token_tenant))
+                            _user_perms = set(get_role_permissions_for_user({'role': user_role}, _user_tenant))
+                            # if token has permissions the owner no longer has, demote to owner's role
+                            if _token_perms - _user_perms:
+                                fresh_role = user_role
+                                logging.info(f"[APIToken] Token role '{token_role}' has permissions beyond "
+                                           f"owner's current role '{user_role}' — floored for user '{session['user']}'")
+                            else:
+                                # token permissions are subset of owner's — keep token role
+                                fresh_role = token_role
+                        except Exception as _e:
+                            # can't resolve permissions — fail closed to owner's current role
+                            logging.warning(f"[APIToken] Failed to compare custom roles for token "
+                                          f"'{token_role}' vs owner '{user_role}': {_e} — flooring to owner role")
+                            fresh_role = user_role
+                else:
+                    # token has a built-in role — apply numeric flooring
+                    token_lvl = _hier.get(token_role, 1)
+                    user_lvl = _hier.get(user_role, 1)
+                    eff_lvl = min(token_lvl, user_lvl)
+                    fresh_role = next((r for r, lvl in _hier.items() if lvl == eff_lvl), ROLE_VIEWER)
                 # Don't mutate session['role'] — keep the original token-bound value
                 # in the session dict for audit/log purposes; fresh_role drives the
                 # role check below.
@@ -1052,16 +1120,10 @@ def require_auth(roles: list = None, perms: list = None):
             # is deliberately left at the token's declared value (audit/logging), so without this
             # every one of those guards read a stale role and silently did nothing. fresh_role is
             # already min(token, owner) for tokens and the DB-refreshed role for sessions.
-            # A non-builtin (custom) token role keeps its NAME here, matching build_authz_user
-            # (auth.py:334) — collapsing it to a builtin level would make the two disagree about
-            # the same request, and it is the name that lets get_user_clusters do the
-            # custom-role -> tenant remap.
-            _eff_pub = fresh_role
-            if session.get('api_token'):
-                _tr = session.get('role')
-                if _tr and _tr not in (ROLE_ADMIN, ROLE_USER, ROLE_VIEWER):
-                    _eff_pub = _tr
-            session = {**session, 'effective_role': _eff_pub}
+            # sec (pentest): the previous code re-published the raw token role for custom roles,
+            # bypassing the flooring logic above. Use fresh_role consistently — it already contains
+            # the correctly floored role (custom or built-in) after the validation above.
+            session = {**session, 'effective_role': fresh_role}
             request.session = session
             
             return f(*args, **kwargs)
