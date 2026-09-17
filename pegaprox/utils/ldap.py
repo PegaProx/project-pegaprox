@@ -322,13 +322,17 @@ def ldap_provision_user(ldap_result: dict) -> dict:
     users = load_users()
     
     if username in users:
-        # NS: SECURITY - Don't overwrite local-only accounts with LDAP
+        # NS: SECURITY - Don't allow LDAP to overwrite accounts from other auth sources
+        # This prevents account takeover if an LDAP principal's username collides with
+        # an existing local/OIDC/Entra account. Mirror the OIDC guard: only update
+        # accounts that LDAP already owns.
         existing_source = users[username].get('auth_source', 'local')
-        if existing_source == 'local' and users[username].get('password_hash'):
-            logging.warning(f"[LDAP] Rejected provisioning for '{username}' - local account with password exists")
+        if existing_source != 'ldap':
+            logging.warning(f"[LDAP] Rejected login for '{username}' - a {existing_source} "
+                            f"account of that name exists and cannot be taken over by LDAP")
             return None  # Caller should handle None return
         
-        # Update existing LDAP/OIDC user with fresh LDAP info
+        # Update existing LDAP user with fresh LDAP info
         user = users[username]
         user['display_name'] = ldap_result.get('display_name', username)
         user['email'] = ldap_result.get('email', user.get('email', ''))

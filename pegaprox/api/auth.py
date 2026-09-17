@@ -668,7 +668,15 @@ def auth_login():
             if ldap_config['auto_create_users'] or username in users_db:
                 user = ldap_provision_user(ldap_result)
                 if user is None:
-                    # NS: Local account exists - fall through to local auth
+                    # Account exists but is owned by a different auth source (local/OIDC/Entra).
+                    # Check what type it is to provide a helpful error message.
+                    existing_source = users_db.get(username, {}).get('auth_source', 'local')
+                    if existing_source in ('oidc', 'entra'):
+                        # OIDC/Entra account - cannot be taken over by LDAP
+                        provider_name = 'Microsoft Entra ID' if existing_source == 'entra' else 'OIDC'
+                        logging.warning(f"[LDAP] Rejected takeover attempt: '{username}' is a {existing_source} account")
+                        return jsonify({'error': f'This account is managed by {provider_name}. Please use the SSO login button.'}), 403
+                    # Local account - fall through to local auth (backward compatibility)
                     logging.info(f"[LDAP] User '{username}' has local account, skipping LDAP provisioning")
                 else:
                     users_db = load_users()  # Reload after provisioning
