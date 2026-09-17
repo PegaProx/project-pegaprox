@@ -322,9 +322,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             qemu-utils qemu-system-x86 qemu-system-arm qemu-efi-aarch64 \
-            cloud-image-utils curl
+            cloud-image-utils curl gnupg
 
-      - name: Debian Cloud-Image laden + Checksum verifizieren
+      - name: Debian Cloud-Image laden + Signatur + Checksum verifizieren
         run: |
           # NS 2026-05-30 — the image we pull here becomes the rootfs of every
           # published PegaProx VM appliance. Downloading over plain HTTPS without
@@ -333,12 +333,31 @@ jobs:
           # could substitute a backdoored qcow2 and every release artefact would
           # carry it. Fix: pull SHA512SUMS from the same path Debian publishes
           # alongside the image and fail the build if the hash doesn't match.
+          #
+          # NS 2026-06-06 — Pentest finding: sha512sum -c alone does not authenticate
+          # provenance; an attacker who compromises the Debian CDN or TLS trust path
+          # can replace both the qcow2 and SHA512SUMS and pass the check. We now verify
+          # the detached GPG signature (SHA512SUMS.sign) against Debian's official CD
+          # signing key before trusting the manifest. This closes the supply-chain
+          # integrity gap at the release boundary.
           set -euo pipefail
           BASE_URL="https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/latest"
           IMG_NAME="debian-13-genericcloud-${{ matrix.arch }}.qcow2"
 
+          # Import Debian's official CD signing key (DF9B9C49EAA9298432589D76DA87E80D6294BE9B).
+          # This is the long-term key used to sign official Debian installation and cloud images.
+          # Key fingerprint verification: https://www.debian.org/CD/verify
+          gpg --batch --keyserver keyserver.ubuntu.com \
+            --recv-keys DF9B9C49EAA9298432589D76DA87E80D6294BE9B
+
           wget -q -O pegaprox.qcow2 "${BASE_URL}/${IMG_NAME}"
           wget -q -O SHA512SUMS     "${BASE_URL}/SHA512SUMS"
+          wget -q -O SHA512SUMS.sign "${BASE_URL}/SHA512SUMS.sign"
+
+          # Verify the detached signature. This proves the SHA512SUMS file was signed
+          # by Debian's CD team and has not been tampered with. If this fails, the
+          # build aborts before we trust any checksums or mount the image.
+          gpg --batch --verify SHA512SUMS.sign SHA512SUMS
 
           # SHA512SUMS lists every asset Debian ships at this path. Pull the
           # row for our image, swap the original filename for the local name
