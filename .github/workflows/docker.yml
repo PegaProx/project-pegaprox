@@ -5,9 +5,13 @@ name: Build Docker Image
 # push. main moves constantly and we don't want a Docker image per commit; the
 # v* tag is pushed when a release is cut. workflow_dispatch stays as the manual
 # escape hatch (a dispatch from main still refreshes :latest via is_default_branch).
+# Security 2026-12 — changed from push:tags to release:published. Raw tags can be
+# created by any repository writer; the release event requires explicit publication
+# through the GitHub UI/API and provides a trust boundary. This prevents a repository
+# writer from publishing attacker-controlled images by simply creating a v* tag.
 on:
-  push:
-    tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
 
 # MK May 2026 — top-level permissions implicitly cascaded `packages: write`
@@ -58,9 +62,10 @@ jobs:
         with:
           images: ghcr.io/pegaprox/pegaprox
           tags: |
-            type=match,pattern=v(.*),group=1
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
 
       - name: Build and push
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
