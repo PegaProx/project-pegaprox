@@ -479,6 +479,24 @@ def set_user_perms(username):
             if p not in PERMISSIONS:
                 return jsonify({'error': f'Invalid permission: {p}'}), 400
         
+        # Pentest fix: delegation ceiling enforcement — a non-global-admin may only grant
+        # permissions and roles they themselves hold. The admin.* name check above blocks only
+        # explicit admin permissions; valid operational permissions such as node.shell,
+        # cluster.admin, plugins.manage, security.settings.manage, and update.manage would
+        # otherwise pass validation. Custom roles are resolved to their permission sets and
+        # checked against the caller's effective grants. This mirrors the checks in create_user
+        # and update_user (users.py) and closes the self-grant privilege escalation path.
+        if request.session.get('role') != ROLE_ADMIN:
+            from pegaprox.api.users import _caller_can_grant_role, _caller_can_grant_perms
+            if role and not _caller_can_grant_role(role):
+                log_audit(request.session.get('user', ''), 'security.privilege_amplification_denied',
+                          f"Denied granting role '{role}' to {username} (caller lacks role permissions)")
+                return jsonify({'error': 'Cannot assign a role that grants permissions beyond your own'}), 403
+            if extra and not _caller_can_grant_perms(extra):
+                log_audit(request.session.get('user', ''), 'security.privilege_amplification_denied',
+                          f"Denied granting extra permissions to {username} (caller lacks those permissions)")
+                return jsonify({'error': 'Cannot grant permissions you do not hold'}), 403
+        
         if 'tenant_permissions' not in users_db[username]:
             users_db[username]['tenant_permissions'] = {}
         
