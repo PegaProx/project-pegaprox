@@ -30,9 +30,21 @@ _syslog_thread = None
 # Now the packet path only enqueues (no DB work) onto a BOUNDED queue (floods
 # drop instead of buffering), and a single drain greenlet writes batches OFF the
 # hub via the gevent threadpool (one keying per batch, ~2/sec max under load).
+#
+# SEC 2026-12 (pentest): the queue was bounded by entry count (20k) but not by
+# aggregate bytes. An attacker could fill it with 64 KiB TCP lines (1.3 GB) or
+# 8 KiB UDP datagrams (160 MB), exhausting memory. Now: (1) per-message size cap
+# of 2 KiB (RFC 5424 recommends 2048 octets for syslog over UDP/TCP); (2) aggregate
+# byte budget of 40 MB (20k entries × 2 KiB); (3) truncate oversized messages at
+# admission rather than rejecting the connection. Legitimate syslog senders stay
+# within the cap; attackers are constrained to the budget regardless of payload size.
 import queue as _queue
 _LOG_QUEUE = _queue.Queue(maxsize=20000)
 _DROPPED = 0
+_MAX_MESSAGE_BYTES = 2048  # per-message size cap (RFC 5424 recommendation)
+_MAX_QUEUE_BYTES = 40 * 1024 * 1024  # 40 MB aggregate budget (20k × 2 KiB)
+_queue_bytes = 0  # current aggregate size; updated by _enqueue_log / _drain_loop
+_queue_bytes_lock = threading.Lock()
 
 # Runtime start/stop so the Settings → Syslog toggle can open/close the port live
 # (not only on restart). The listeners track their socket here so stop can close it.
@@ -42,13 +54,33 @@ _tcp_sock = None
 
 
 def _enqueue_log(entry):
-    global _DROPPED
-    try:
-        _LOG_QUEUE.put_nowait(entry)
-    except _queue.Full:
-        _DROPPED += 1
-        if _DROPPED % 1000 == 1:
-            logging.warning(f"[Syslog] ingest queue full — dropped {_DROPPED} messages (flood / slow disk?)")
+    """Enqueue a syslog entry with byte-budget enforcement. The entry tuple's
+    message field (index 6) is already truncated by the caller to _MAX_MESSAGE_BYTES.
+    We track the approximate size (timestamp + IP + hostname + message) and reject
+    when the aggregate budget is exhausted, preventing memory-exhaustion DoS.
+    SEC 2026-12 (pentest): unauthenticated senders previously could fill 20k entries
+    with 64 KiB payloads (1.3 GB). Now capped at 40 MB total."""
+    global _DROPPED, _queue_bytes
+    # Approximate entry size: sum of string lengths in the tuple. The message (index 6)
+    # is the dominant contributor; other fields (timestamp, IP, hostname, severity_text,
+    # protocol) are small. This is a conservative estimate (Python string overhead not
+    # included, but the budget is generous enough to absorb it).
+    msg_size = sum(len(str(f)) for f in entry if f is not None)
+    
+    with _queue_bytes_lock:
+        if _queue_bytes + msg_size > _MAX_QUEUE_BYTES:
+            _DROPPED += 1
+            if _DROPPED % 1000 == 1:
+                logging.warning(f"[Syslog] byte budget exhausted ({_queue_bytes}/{_MAX_QUEUE_BYTES}) — "
+                                f"dropped {_DROPPED} messages (flood / slow disk?)")
+            return
+        try:
+            _LOG_QUEUE.put_nowait(entry)
+            _queue_bytes += msg_size
+        except _queue.Full:
+            _DROPPED += 1
+            if _DROPPED % 1000 == 1:
+                logging.warning(f"[Syslog] ingest queue full — dropped {_DROPPED} messages (flood / slow disk?)")
 
 
 def _flush_batch(batch):
@@ -101,7 +133,10 @@ def _prune_old_logs():
 def _drain_loop():
     """Batch queued syslog entries + flush them off the hub. Stop-aware (S5) so it
     exits within ~1s of stop_syslog_server (no leaked greenlet per OFF→ON toggle),
-    and runs a periodic retention prune (S1)."""
+    and runs a periodic retention prune (S1).
+    SEC 2026-12: decrements _queue_bytes as entries are dequeued, maintaining the
+    aggregate byte budget for memory-exhaustion DoS mitigation."""
+    global _queue_bytes
     try:
         from gevent import get_hub
     except Exception:
@@ -116,18 +151,26 @@ def _drain_loop():
     last_prune = 0.0   # 0 → prune shortly after start, then hourly
     while not _stop_event.is_set():
         batch = []
+        batch_bytes = 0
         try:
             try:
-                batch = [_LOG_QUEUE.get(timeout=1.0)]   # timed so we can notice _stop_event
+                entry = _LOG_QUEUE.get(timeout=1.0)   # timed so we can notice _stop_event
+                batch = [entry]
+                batch_bytes = sum(len(str(f)) for f in entry if f is not None)
             except _queue.Empty:
                 batch = []
             if batch:
                 for _ in range(999):
                     try:
-                        batch.append(_LOG_QUEUE.get_nowait())
+                        entry = _LOG_QUEUE.get_nowait()
+                        batch.append(entry)
+                        batch_bytes += sum(len(str(f)) for f in entry if f is not None)
                     except _queue.Empty:
                         break
                 _offhub(_flush_batch, (batch,))
+                # Decrement the byte budget now that we've dequeued the batch
+                with _queue_bytes_lock:
+                    _queue_bytes = max(0, _queue_bytes - batch_bytes)
             if time.monotonic() - last_prune > 3600:
                 last_prune = time.monotonic()
                 _offhub(_prune_old_logs)
@@ -293,7 +336,9 @@ def parse_syslog(message):
 
 
 def _udp_listener(host, port):
-    """UDP syslog listener using plain sockets (gevent-compatible)"""
+    """UDP syslog listener using plain sockets (gevent-compatible).
+    SEC 2026-12: truncates messages to _MAX_MESSAGE_BYTES before queue admission
+    to prevent memory-exhaustion DoS (pentest finding: 8 KiB datagrams × 20k = 160 MB)."""
     import socket
     global _udp_sock
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -313,6 +358,9 @@ def _udp_listener(host, port):
             if not message:
                 continue
             hostname, facility, severity, severity_text, msg = parse_syslog(message)
+            # SEC 2026-12: truncate the message field to the per-message cap
+            if len(msg) > _MAX_MESSAGE_BYTES:
+                msg = msg[:_MAX_MESSAGE_BYTES] + "... [truncated]"
             entry = (
                 datetime.now().isoformat(),
                 addr[0], hostname, facility, severity, severity_text, msg, "UDP"
@@ -344,10 +392,16 @@ def _tcp_listener(host, port):
         return
 
     def handle_client(client_sock, addr):
-        # sec (audit): the accumulator had no bound, so a peer that sends bytes and never a
+        # SEC (audit): the accumulator had no bound, so a peer that sends bytes and never a
         # newline grows it forever — and this listener takes unauthenticated connections off
         # the network. RFC 5424 allows long messages but nothing near this; past the cap the
         # peer is not speaking syslog, so drop it rather than keep buying memory.
+        # SEC 2026-12 (pentest): the check `len(buf) > _MAX_LINE and b'\n' not in buf` only
+        # rejected when there was NO newline. A 64 KiB line followed by \n passed through,
+        # and 20k such lines = 1.3 GB. Now: (1) enforce _MAX_MESSAGE_BYTES (2 KiB) per line
+        # after split, truncating oversized messages; (2) still drop connections that send
+        # >64 KiB with no newline (not syslog). The per-message cap + aggregate byte budget
+        # in _enqueue_log() together prevent memory exhaustion.
         _MAX_LINE = 64 * 1024
         try:
             buf = b""
@@ -365,6 +419,9 @@ def _tcp_listener(host, port):
                     message = line.decode(errors="ignore").strip()
                     if message:
                         hostname, facility, severity, severity_text, msg = parse_syslog(message)
+                        # SEC 2026-12: truncate the message field to the per-message cap
+                        if len(msg) > _MAX_MESSAGE_BYTES:
+                            msg = msg[:_MAX_MESSAGE_BYTES] + "... [truncated]"
                         entry = (
                             datetime.now().isoformat(),
                             addr[0], hostname, facility, severity, severity_text, msg, "TCP"
