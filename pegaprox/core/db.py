@@ -2068,6 +2068,10 @@ class PegaProxDB:
         cursor.execute("SELECT COUNT(*) FROM clusters")
         cluster_count = cursor.fetchone()[0]
         
+        # Check if users already exist
+        cursor.execute("SELECT COUNT(*) FROM users")
+        user_count = cursor.fetchone()[0]
+        
         # Check if users have proper password_salt (fix for schema migration)
         needs_user_remigration = getattr(self, '_force_remigrate_users', False)
         
@@ -2097,7 +2101,7 @@ class PegaProxDB:
             if self._migrate_clusters():
                 migrated_any = True
         
-        # Migrate users (always if needs_user_remigration or no users)
+        # Migrate users (only if needs_user_remigration or no users exist yet)
         if needs_user_remigration and not self._read_legacy_users():
             # MK: the DELETE below used to run unconditionally, and _migrate_users() writes
             # nothing when the legacy file is gone or no longer decrypts — which is every
@@ -2108,7 +2112,7 @@ class PegaProxDB:
                           "keeping the existing accounts")
             needs_user_remigration = False
 
-        if needs_user_remigration or cluster_count == 0:
+        if needs_user_remigration or (cluster_count == 0 and user_count == 0):
             # Clear existing users if re-migrating
             if needs_user_remigration:
                 try:
