@@ -731,7 +731,8 @@ def create_api_token(username: str, token_name: str, role: str = None,
     if role not in role_hierarchy:
         try:
             from pegaprox.utils.rbac import (get_user_permissions,
-                                              get_role_permissions_for_user, DEFAULT_TENANT_ID)
+                                              get_role_permissions_for_user, DEFAULT_TENANT_ID,
+                                              get_custom_roles)
             _owner = dict(user, username=username)
             # Resolve BOTH sides in the owner's tenant. get_role_permissions_for_user only
             # consults tenant custom roles when it is given a tenant_id (rbac.py:161) — calling
@@ -740,6 +741,18 @@ def create_api_token(username: str, token_name: str, role: str = None,
             # catch. Request time resolves the same role WITH the tenant, so the token then
             # carried the elevated set.
             _tid = _owner.get('tenant_id') or DEFAULT_TENANT_ID
+            
+            # sec (pentest): Before checking permissions, verify the role actually exists in the
+            # owner's tenant or globally. A role that exists only in a foreign tenant will fall
+            # through to viewer permissions in get_role_permissions_for_user, making the subset
+            # check pass. At request time, _tenant_defining_role then remaps to the foreign tenant,
+            # granting cross-tenant access. Reject foreign-only roles here.
+            _custom = get_custom_roles()
+            _role_exists = (role in _custom.get('global', {}) or
+                           role in _custom.get('tenants', {}).get(_tid, {}))
+            if not _role_exists:
+                return {'error': f'Role "{role}" does not exist in your tenant or globally'}
+            
             _owner_perms = set(get_user_permissions(_owner, _tid))
             _token_perms = set(get_role_permissions_for_user(dict(_owner, role=role), _tid))
             _extra = _token_perms - _owner_perms
