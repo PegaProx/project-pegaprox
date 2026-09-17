@@ -594,11 +594,19 @@ def create_policy(cluster_id):
         return jsonify({'error': 'cluster manager not found'}), 404
     creator = build_authz_user(request.session.get('user', ''), request.session)
     try:
-        denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, {
+        targets = _resolve_targets(mgr, {
                       'target_type': target_type, 'target_value': target_value, 'cluster_id': cluster_id})
+        denied = [f"{t}/{v}@{n}" for n, v, t in targets
                   if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
     except Exception as e:
         return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    # sec-fix: fail closed when target resolution yields no VMs for a scoped caller.
+    # An empty list conflates legitimate zero-match and enumeration failure; a scoped
+    # user cannot prove authorization over an empty set, so deny creation.
+    from pegaprox.api.helpers import caller_is_scoped
+    if caller_is_scoped(creator, cluster_id) and not targets:
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied creating policy on {cluster_id}: target resolution yielded no VMs (scoped user cannot prove authorization)")
+        return jsonify({'error': "Permission denied: cannot create policy with empty target resolution (no VMs match your selector or inventory enumeration failed)"}), 403
     if denied:
         # don't echo the specific out-of-scope VM identifiers back — that would disclose the
         # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
@@ -651,11 +659,19 @@ def update_policy(cluster_id, pid):
     mgr = cluster_managers.get(cluster_id)
     if mgr:
         try:
-            denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, {
+            targets = _resolve_targets(mgr, {
                           'target_type': tt, 'target_value': tv, 'cluster_id': cluster_id})
+            denied = [f"{t}/{v}@{n}" for n, v, t in targets
                       if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
         except Exception as e:
             return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+        # sec-fix: fail closed when target resolution yields no VMs for a scoped caller.
+        # An empty list conflates legitimate zero-match and enumeration failure; a scoped
+        # user cannot prove authorization over an empty set, so deny update.
+        from pegaprox.api.helpers import caller_is_scoped
+        if caller_is_scoped(creator, cluster_id) and not targets:
+            logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied updating policy {pid}@{cluster_id}: target resolution yielded no VMs (scoped user cannot prove authorization)")
+            return jsonify({'error': "Permission denied: cannot update policy with empty target resolution (no VMs match your selector or inventory enumeration failed)"}), 403
     else:
         _tv = str(tv).strip()
         if str(tt).lower() in ('vm', 'vmid') and _tv.lstrip('-').isdigit():
@@ -736,10 +752,18 @@ def delete_policy(cluster_id, pid):
         return jsonify({'error': 'cluster manager not found'}), 404
     caller = build_authz_user(request.session.get('user', ''), request.session)
     try:
-        denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, _row_to_policy(prow))
+        targets = _resolve_targets(mgr, _row_to_policy(prow))
+        denied = [f"{t}/{v}@{n}" for n, v, t in targets
                   if not user_can_access_vm(caller, cluster_id, v, 'vm.snapshot', t)]
     except Exception as e:
         return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    # sec-fix: fail closed when target resolution yields no VMs for a scoped caller.
+    # An empty list conflates legitimate zero-match and enumeration failure; a scoped
+    # user cannot prove authorization over an empty set, so deny deletion.
+    from pegaprox.api.helpers import caller_is_scoped
+    if caller_is_scoped(caller, cluster_id) and not targets:
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied deleting policy {pid}@{cluster_id}: target resolution yielded no VMs (scoped user cannot prove authorization)")
+        return jsonify({'error': "Permission denied: cannot delete policy with empty target resolution (no VMs match the policy's selector or inventory enumeration failed)"}), 403
     if denied:
         # don't echo the specific out-of-scope VM identifiers back — that would disclose the
         # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
@@ -779,10 +803,18 @@ def run_policy_now(cluster_id, pid):
         return jsonify({'error': 'cluster manager not found'}), 404
     caller = build_authz_user(request.session.get('user', ''), request.session)
     try:
-        denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, _row_to_policy(prow))
+        targets = _resolve_targets(mgr, _row_to_policy(prow))
+        denied = [f"{t}/{v}@{n}" for n, v, t in targets
                   if not user_can_access_vm(caller, cluster_id, v, 'vm.snapshot', t)]
     except Exception as e:
         return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    # sec-fix: fail closed when target resolution yields no VMs for a scoped caller.
+    # An empty list conflates legitimate zero-match and enumeration failure; a scoped
+    # user cannot prove authorization over an empty set, so deny run-now dispatch.
+    from pegaprox.api.helpers import caller_is_scoped
+    if caller_is_scoped(caller, cluster_id) and not targets:
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied running policy {pid}@{cluster_id}: target resolution yielded no VMs (scoped user cannot prove authorization)")
+        return jsonify({'error': "Permission denied: cannot run policy with empty target resolution (no VMs match the policy's selector or inventory enumeration failed)"}), 403
     if denied:
         # don't echo the specific out-of-scope VM identifiers back — that would disclose the
         # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
@@ -811,7 +843,13 @@ def _policy_targets_authorized(cluster_id, policy, perm='vm.snapshot'):
     mgr = cluster_managers.get(cluster_id)
     if mgr:
         try:
-            for _n, _v, _t in _resolve_targets(mgr, policy):
+            targets = _resolve_targets(mgr, policy)
+            # sec-fix: fail closed when target resolution yields no VMs for a scoped caller.
+            # An empty list conflates legitimate zero-match and enumeration failure; a scoped
+            # user cannot prove authorization over an empty set, so deny access.
+            if not targets:
+                return False
+            for _n, _v, _t in targets:
                 if not user_can_access_vm(creator, cluster_id, _v, perm, _t):
                     return False
             return True
