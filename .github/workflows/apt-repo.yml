@@ -34,6 +34,13 @@ concurrency:
 
 jobs:
   build:
+    # MK 2026-08-09 (pentest finding) — a workflow_dispatch can be fired from ANY
+    # branch; without this guard an attacker could dispatch from a branch with a
+    # modified build-apt-repo.sh that exfiltrates APT_GPG_PRIVATE_KEY or publishes
+    # malicious signed packages. Pin the job to the main ref so a dispatch from
+    # elsewhere is a harmless no-op. Release events are safe (immutable tags);
+    # push events are already constrained to main by the `on:` trigger.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
