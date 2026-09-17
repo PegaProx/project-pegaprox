@@ -516,8 +516,10 @@ def check_pbs_access(pbs_id):
     if not pbs_linked:
         return True, None
     
-    # Get user's allowed clusters
-    user_clusters = get_user_clusters(user)
+    # sec (pentest): include_pools=False. A Proxmox pool grant authorizes resources in that pool,
+    # not all PBS resources on a linked server. Mirroring check_vmware_access, tenant ownership
+    # (not pool membership) is the correct authorization boundary for server-wide access.
+    user_clusters = get_user_clusters(user, include_pools=False)
     
     # If user has access to all clusters (None), allow
     if user_clusters is None:
@@ -571,7 +573,12 @@ def check_vmware_access(vmware_id):
     linked = getattr(vmware_managers[vmware_id], 'linked_clusters', None) or []
     if not linked:
         return True, None   # backward-compat: unlinked server is accessible to all
-    uc = get_user_clusters(user)
+    # sec (pentest): include_pools=False. A Proxmox pool grant authorizes resources in that pool,
+    # not all ESXi/vCenter resources on a linked server. The VMware per-VM path (user_can_access_vmware_vm)
+    # explicitly uses include_pools=False, confirming that pool-only access must not establish VMware
+    # server ownership. Without this, a user with only a pool grant for a linked cluster bypasses tenant
+    # isolation and gains server-wide access to host inventory and other server-level VMware endpoints.
+    uc = get_user_clusters(user, include_pools=False)
     if uc is None:
         return True, None
     if any(c in uc for c in linked):
