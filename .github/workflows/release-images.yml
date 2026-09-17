@@ -11,7 +11,7 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   PVE_PORT: "5000"
@@ -25,6 +25,8 @@ jobs:
   # ----------------------------------------------------------------------
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.ver.outputs.version }}
       is_release: ${{ steps.ver.outputs.is_release }}
@@ -115,6 +117,8 @@ jobs:
   build-lxc:
     needs: prepare
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # NS Aug 2026 — arm64 builds under qemu emulation and is flaky; a failed arm64 leg must NOT
     # block the amd64 release. publish attaches whatever artifacts exist (glob), so a missing
     # arm64 asset is fine; amd64 has no continue-on-error, so a real amd64 failure still blocks.
@@ -306,6 +310,8 @@ jobs:
   build-vm:
     needs: prepare
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # NS Aug 2026 — see build-lxc: keep the emulated arm64 leg from blocking the amd64 release.
     continue-on-error: ${{ matrix.arch == 'arm64' }}
     strategy:
@@ -828,6 +834,8 @@ jobs:
     needs: [prepare, build-lxc, build-vm]
     if: ${{ always() && needs.build-lxc.result == 'success' && needs.build-vm.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
