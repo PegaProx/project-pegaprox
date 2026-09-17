@@ -2339,6 +2339,17 @@ def start_backup_verification(cluster_id):
     if _volid and (not _m or int(_m.group(1)) != _vmid):
         return jsonify({'error': 'Access denied: backup_volid does not belong to the given VM'}), 403
 
+    # NS Dec 2026 (pentest) — verification allocates a NEW VMID via /cluster/nextid and restores
+    # to caller-selected node/storage/network_bridge, which is a whole-cluster operation (choosing
+    # infrastructure placement). A VM-scoped or pool-scoped user must not be able to place workloads
+    # outside their authorized scope. Require vm.create permission and cluster-wide (unconfined) access.
+    from pegaprox.utils.rbac import has_permission
+    if not has_permission(build_authz_user(request.session.get('user', ''), request.session), 'vm.create'):
+        return jsonify({'error': 'Permission denied: vm.create required for backup verification'}), 403
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
     data['cluster_id'] = cluster_id
     pve_mgr = cluster_managers[cluster_id]
 
@@ -3284,6 +3295,19 @@ def restore_backup(cluster_id):
         if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
                                   cluster_id, target_vmid, 'vm.backup', 'lxc' if _is_lxc else 'qemu'):
             return jsonify({'error': 'Permission denied for target VM'}), 403
+
+    # NS Dec 2026 (pentest) — mode='new' and mode='test' both create a NEW VM on caller-selected
+    # node/storage/network, which is a whole-cluster operation (choosing infrastructure placement).
+    # A VM-scoped or pool-scoped user must not be able to place workloads outside their authorized
+    # scope. Require vm.create permission and cluster-wide (unconfined) access for these modes.
+    if mode in ('new', 'test'):
+        from pegaprox.utils.rbac import has_permission
+        from pegaprox.utils.auth import build_authz_user
+        if not has_permission(build_authz_user(request.session.get('user', ''), request.session), 'vm.create'):
+            return jsonify({'error': 'Permission denied: vm.create required to restore into a new VM'}), 403
+        _cerr = require_unconfined(cluster_id)
+        if _cerr:
+            return _cerr
 
     # Test-mode = verify pipeline without cleanup
     if mode == 'test':
