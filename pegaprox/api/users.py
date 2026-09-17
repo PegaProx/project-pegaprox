@@ -2140,7 +2140,7 @@ def add_pool_permission_api(cluster_id, pool_id):
     # H3 fix, ~100 lines up) gates pool READS; apply the same confinement to the write.
     _err = _authz_object_write(cluster_id,
                                subjects=[subject_id] if subject_type == 'user' else [],
-                               permissions=[])
+                               permissions=permissions)
     if _err:
         return _err
     _confined, _granted = _pool_visibility(cluster_id)
