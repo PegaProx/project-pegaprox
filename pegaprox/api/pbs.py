@@ -687,6 +687,12 @@ def pbs_prune(pbs_id, store):
         ok, err = _authz_pbs_backup(mgr, data.get('backup_type'), data.get('backup_id'))
         if not ok:
             return err
+    else:
+        # Store-wide prune affects all backups across all linked clusters.
+        # Require access to ALL linked clusters, not just one.
+        ok, err = _authz_pbs_datastore_wide_op(mgr)
+        if not ok:
+            return err
     result = mgr.prune_datastore(
         store, ns=data.get('ns'),
         keep_last=data.get('keep_last'), keep_daily=data.get('keep_daily'),
@@ -764,6 +770,54 @@ def _caller_is_scoped_here(mgr, user):
     from pegaprox.api.helpers import caller_is_scoped
     _cids = list(mgr.linked_clusters or []) or list(cluster_managers.keys())
     return any(caller_is_scoped(user, c) for c in _cids)
+
+
+def _authz_pbs_datastore_wide_op(mgr):
+    """Authorize datastore-wide destructive operations (delete, store-wide prune).
+
+    A datastore is shared across every VM on every linked cluster. Datastore-wide destructive
+    operations (deletion with destroy-data, store-wide prune without dry-run) affect all
+    backups on the datastore, including those belonging to other tenants on other linked
+    clusters. Therefore, the caller must have access to ALL linked clusters, not just one.
+
+    Admins pass. For non-admins, check_pbs_access already verified the caller can reach at
+    least one linked cluster; this function additionally requires they can reach ALL of them.
+    Returns (ok, err_response).
+    """
+    from flask import request, jsonify
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.models.permissions import ROLE_ADMIN
+
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    # Admins have full access
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return True, None
+    
+    # Get PBS linked clusters
+    pbs_linked = mgr.linked_clusters or []
+    
+    # If PBS has no linked clusters, allow (backward compatibility - accessible to all)
+    if not pbs_linked:
+        return True, None
+    
+    # Get user's allowed clusters
+    user_clusters = get_user_clusters(user)
+    
+    # If user has access to all clusters (None), allow
+    if user_clusters is None:
+        return True, None
+    
+    # For datastore-wide operations, user must have access to ALL linked clusters
+    for cluster_id in pbs_linked:
+        if cluster_id not in user_clusters:
+            return False, (jsonify({
+                'error': 'Access denied: datastore-wide operations require access to all linked clusters',
+                'hint': f'This datastore is shared across clusters: {", ".join(pbs_linked)}'
+            }), 403)
+    
+    return True, None
 
 
 def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=None, scoped=None):
@@ -1486,6 +1540,12 @@ def delete_pbs_datastore(pbs_id, store):
             'error': 'Data destruction requires explicit confirmation',
             'hint': 'Send confirm_destroy=true to permanently delete all backup data'
         }), 400
+    
+    # Datastore-wide authorization: deletion affects all backups across all linked clusters.
+    # Require access to ALL linked clusters, not just one.
+    ok, err = _authz_pbs_datastore_wide_op(mgr)
+    if not ok:
+        return err
     
     result = mgr.delete_datastore(store=store, keep_data=keep_data)
     
