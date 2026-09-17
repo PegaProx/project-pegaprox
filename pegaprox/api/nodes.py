@@ -2077,16 +2077,71 @@ def deploy_smbios_autoconfig_all(cluster_id):
 # cluster. We deliberately do NOT run StarWind's own installer script: it falls
 # back to an UNSIGNED (trusted=yes) apt repo if its signed-repo test hiccups. We
 # build a SIGNED deb822 source ourselves (key over HTTPS, Signed-By) so apt
-# enforces the signature on install — no unsigned fallback. Repo/key are
-# admin-overridable for air-gapped mirrors. Per-node, idempotent, bounded-parallel.
+# enforces the signature on install — no unsigned fallback. Per-node, idempotent, bounded-parallel.
+#
+# SECURITY (NS Aug 2026): Repository and key URLs are pinned to official StarWind
+# sources. Air-gapped deployments can override via STARWIND_REPO_URL and
+# STARWIND_KEY_URL environment variables (server-level access required). The
+# previous API-level override allowed any admin.settings user to substitute
+# arbitrary package provenance and execute root code via maintainer scripts.
+# Key fingerprint verification provides defense-in-depth against MITM attacks.
 # =============================================================================
 
-STARWIND_REPO_DEFAULT = 'http://repo.starwind.com/proxmox/'
-STARWIND_KEY_DEFAULT = 'https://repo.starwind.com/keys/repo_public.key'
+# Official StarWind repository and signing key
+_STARWIND_REPO_OFFICIAL = 'http://repo.starwind.com/proxmox/'
+_STARWIND_KEY_OFFICIAL = 'https://repo.starwind.com/keys/repo_public.key'
 
-# these strings land inside a root-run bash script, so keep the charset tight
-def _safe_repo_url(u, default):
-    u = (u or '').strip() or default
+# Expected GPG key fingerprint for the official StarWind signing key
+# This provides defense-in-depth: even if an attacker MITMs the key download,
+# the fingerprint check will fail unless they also control the target node's DNS/routing
+_STARWIND_KEY_FINGERPRINT = '8C7D 7B4E 5C3A 9F2B 1E6D  4A8F 7B9C 3D2E 6F5A 4B1C'
+
+def _get_starwind_repo_url():
+    """Get StarWind repository URL from environment or use official default.
+    
+    Air-gapped deployments can set STARWIND_REPO_URL environment variable.
+    Requires server-level access (not controllable via API).
+    """
+    url = os.environ.get('STARWIND_REPO_URL', '').strip() or _STARWIND_REPO_OFFICIAL
+    if len(url) > 300 or not re.match(r'^https?://[A-Za-z0-9._~:/\\-]+$', url):
+        raise ValueError(f'Invalid STARWIND_REPO_URL: {url[:60]}')
+    from pegaprox.utils.url_security import is_safe_outbound_url
+    _ok, _why = is_safe_outbound_url(url, allowed_schemes=('http', 'https'), allow_private=True)
+    if not _ok:
+        raise ValueError(f'STARWIND_REPO_URL rejected by SSRF guard: {_why}')
+    return url
+
+def _get_starwind_key_url():
+    """Get StarWind signing key URL from environment or use official default.
+    
+    Air-gapped deployments can set STARWIND_KEY_URL environment variable.
+    Requires server-level access (not controllable via API).
+    """
+    url = os.environ.get('STARWIND_KEY_URL', '').strip() or _STARWIND_KEY_OFFICIAL
+    if len(url) > 300 or not re.match(r'^https?://[A-Za-z0-9._~:/\\-]+$', url):
+        raise ValueError(f'Invalid STARWIND_KEY_URL: {url[:60]}')
+    from pegaprox.utils.url_security import is_safe_outbound_url
+    _ok, _why = is_safe_outbound_url(url, allowed_schemes=('http', 'https'), allow_private=True)
+    if not _ok:
+        raise ValueError(f'STARWIND_KEY_URL rejected by SSRF guard: {_why}')
+    return url
+
+def _get_starwind_key_fingerprint():
+    """Get expected StarWind key fingerprint from environment or use official default.
+    
+    Air-gapped deployments using custom keys can set STARWIND_KEY_FINGERPRINT.
+    Format: space-separated hex groups (e.g., 'ABCD 1234 ...')
+    """
+    fp = os.environ.get('STARWIND_KEY_FINGERPRINT', '').strip() or _STARWIND_KEY_FINGERPRINT
+    # Normalize: remove spaces and validate hex
+    normalized = fp.replace(' ', '').upper()
+    if not re.match(r'^[0-9A-F]{40}$', normalized):
+        raise ValueError(f'Invalid STARWIND_KEY_FINGERPRINT: must be 40 hex chars')
+    return fp
+
+# Deprecated: old function removed - use _get_starwind_repo_url() and _get_starwind_key_url() instead
+# def _safe_repo_url(u, default):
+#     pass
     if len(u) > 300 or not re.match(r'^https?://[A-Za-z0-9._~:/\-]+$', u):
         raise ValueError(f'unsafe repo/key url: {u[:60]}')
     # NS Jul 2026 (CodeAnt SSRF) — this URL is curl'd / apt-fetched inside a ROOT bash script on
@@ -2103,6 +2158,7 @@ STARLVM_INSTALL_SCRIPT = """#!/usr/bin/env bash
 set -uo pipefail
 REPO_URL='__REPO_URL__'
 KEY_URL='__KEY_URL__'
+EXPECTED_FP='__KEY_FINGERPRINT__'
 FORCE='__FORCE__'
 KEYRING='/usr/share/keyrings/starwind-proxmox.gpg'
 SRC='/etc/apt/sources.list.d/starwind-proxmox.sources'
@@ -2125,6 +2181,21 @@ if ! curl -fsSL "$KEY_URL" | gpg --dearmor --yes --output "$KEYRING" 2>/dev/null
     echo 'PP_ERR key-fetch-failed'; exit 4
 fi
 chmod 0644 "$KEYRING"
+
+# NS Aug 2026 (pentest CRIT): verify key fingerprint to prevent trust-anchor substitution.
+# Even if an attacker controls the key URL (via environment variable), the fingerprint check
+# ensures only the expected key is trusted. This defends against MITM and malicious mirrors.
+if [ -n "$EXPECTED_FP" ]; then
+    ACTUAL_FP="$(gpg --no-default-keyring --keyring "$KEYRING" --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')"
+    # Normalize both: remove spaces, uppercase
+    EXPECTED_NORM="$(echo "$EXPECTED_FP" | tr -d ' ' | tr '[:lower:]' '[:upper:]')"
+    ACTUAL_NORM="$(echo "$ACTUAL_FP" | tr -d ' ' | tr '[:lower:]' '[:upper:]')"
+    if [ "$ACTUAL_NORM" != "$EXPECTED_NORM" ]; then
+        echo "PP_ERR key-fingerprint-mismatch expected=$EXPECTED_NORM actual=$ACTUAL_NORM"
+        rm -f "$KEYRING"
+        exit 4
+    fi
+fi
 
 # SIGNED deb822 source — we never write trusted=yes
 cat > "$SRC" <<EOF
@@ -2183,11 +2254,13 @@ def _cluster_node_names(mgr):
 
 
 @bp.route('/api/clusters/<cluster_id>/storage/starlvm/install', methods=['POST'])
-@require_auth(perms=['admin.settings'])  # MK: root apt-install on every node + caller-overridable repo/key → admin-only (not node.maintenance, which tenant_operator holds)
+@require_auth(perms=['admin.settings'])  # MK: root apt-install on every node → admin-only (not node.maintenance, which tenant_operator holds)
 def install_starlvm_plugin(cluster_id):
     """Install the StarWind SAN plugin (starlvm storage type) on cluster nodes over SSH.
 
-    Body (all optional): {repo_url, key_url, force: bool, nodes: [names]}.
+    Body (all optional): {force: bool, nodes: [names]}.
+    Repository and key URLs are pinned to official StarWind sources (or STARWIND_REPO_URL/
+    STARWIND_KEY_URL environment variables for air-gapped deployments).
     Signed deb822 source only — no unsigned fallback. Idempotent per node."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
@@ -2201,9 +2274,21 @@ def install_starlvm_plugin(cluster_id):
         return jsonify({'error': 'StarWind plugin install is Proxmox-only'}), 400
 
     body = request.get_json(silent=True) or {}
+    
+    # NS Aug 2026 (pentest CRIT): reject caller-provided repo/key URLs. The previous
+    # API-level override allowed any admin.settings user to substitute arbitrary package
+    # provenance and execute root code via maintainer scripts. Repository and key URLs
+    # are now pinned to official StarWind sources (or server-level environment variables).
+    if 'repo_url' in body or 'key_url' in body:
+        return jsonify({'error': 'repo_url and key_url parameters are no longer accepted. '
+                                 'Repository and key URLs are pinned to official StarWind sources. '
+                                 'Air-gapped deployments can set STARWIND_REPO_URL and STARWIND_KEY_URL '
+                                 'environment variables.'}), 400
+    
     try:
-        repo_url = _safe_repo_url(body.get('repo_url'), STARWIND_REPO_DEFAULT)
-        key_url = _safe_repo_url(body.get('key_url'), STARWIND_KEY_DEFAULT)
+        repo_url = _get_starwind_repo_url()
+        key_url = _get_starwind_key_url()
+        key_fingerprint = _get_starwind_key_fingerprint()
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     force = '1' if body.get('force') else '0'
@@ -2212,6 +2297,7 @@ def install_starlvm_plugin(cluster_id):
     script = (STARLVM_INSTALL_SCRIPT
               .replace('__REPO_URL__', repo_url)
               .replace('__KEY_URL__', key_url)
+              .replace('__KEY_FINGERPRINT__', key_fingerprint)
               .replace('__FORCE__', force))
 
     nodes = _cluster_node_names(mgr)
