@@ -423,6 +423,35 @@ def save_users(users: dict):
     except Exception as e:
         logging.error(f"save failed: {e}")
 
+# Setup lock: serialize first-run provisioning across concurrent requests
+_setup_lock = threading.Lock()
+
+def claim_initialization() -> bool:
+    """Atomically claim the first-run setup slot.
+    
+    Returns True if this caller won the race and may proceed with admin creation.
+    Returns False if another request (or process) already claimed initialization.
+    
+    Uses O_CREAT | O_EXCL for atomic cross-process exclusion. The marker file
+    is the durable claim; writing it first (before persisting the user) prevents
+    TOCTOU races where concurrent requests both pass is_initialized() and create
+    separate admin accounts.
+    """
+    try:
+        # Atomic file creation: fails if file already exists
+        fd = os.open(ADMIN_INITIALIZED_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, datetime.now().isoformat().encode('utf-8'))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        # Another request/process already claimed initialization
+        return False
+    except Exception as e:
+        logging.error(f"claim_initialization failed: {e}")
+        return False
+
 def mark_admin_initialized():
     """mark admin as customized so we dont recreate it"""
     try:

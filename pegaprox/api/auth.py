@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """auth routes (login, logout, 2FA, OIDC, API tokens) - split from monolith dec 2025, NS"""
 
+import os
 import time
 import threading
 import logging
@@ -18,7 +19,7 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import (
     hash_password, verify_password, needs_password_rehash,
     validate_password_policy, load_users, save_users, save_single_user,
-    create_initial_admin, is_initialized,
+    create_initial_admin, is_initialized, claim_initialization, _setup_lock,
     create_session, validate_session, invalidate_session,
     invalidate_all_user_sessions, cleanup_expired_sessions,
     generate_api_token, create_api_token, validate_api_token, revoke_user_api_tokens,
@@ -441,8 +442,8 @@ _setup_attempts_by_ip = {}  # very light rate-limit, IP → list[ts]
 
 @bp.route('/api/auth/setup', methods=['POST'])
 def auth_setup():
+    # Early check before acquiring lock - avoids unnecessary lock contention
     if is_initialized():
-        # already done, no replay
         return jsonify({
             'error': 'PegaProx is already initialised',
             'code': 'ALREADY_INITIALIZED',
@@ -478,15 +479,40 @@ def auth_setup():
     if not ok:
         return jsonify({'error': err}), 400
 
-    # build, save, mark — order matters: if mark fails the next request
-    # would re-allow setup and double-create, so the audit log catches it.
-    try:
-        admin = create_initial_admin(username, password, display_name=display_name, email=email)
-        save_users(admin)
-        mark_admin_initialized()
-    except Exception as e:
-        logging.error(f"[SETUP] failed to create initial admin: {e}")
-        return jsonify({'error': 'Setup failed, check server logs'}), 500
+    # Atomic claim with lock: serialize setup attempts and prevent TOCTOU races.
+    # The lock ensures only one request proceeds within this process; claim_initialization()
+    # uses O_CREAT|O_EXCL for cross-process/worker atomicity. The marker is written FIRST
+    # (before user persistence) so it acts as the durable claim.
+    with _setup_lock:
+        # Re-check after acquiring lock - another request may have completed setup
+        if is_initialized():
+            return jsonify({
+                'error': 'PegaProx is already initialised',
+                'code': 'ALREADY_INITIALIZED',
+            }), 409
+        
+        # Atomically claim the initialization slot
+        if not claim_initialization():
+            # Lost the race - another process/worker claimed it
+            return jsonify({
+                'error': 'PegaProx is already initialised',
+                'code': 'ALREADY_INITIALIZED',
+            }), 409
+        
+        # We won the race - proceed with admin creation
+        try:
+            admin = create_initial_admin(username, password, display_name=display_name, email=email)
+            save_users(admin)
+        except Exception as e:
+            # Rollback: remove the marker file so setup can be retried
+            try:
+                if os.path.exists(ADMIN_INITIALIZED_FILE):
+                    os.unlink(ADMIN_INITIALIZED_FILE)
+            except Exception as cleanup_err:
+                logging.error(f"[SETUP] failed to rollback marker file: {cleanup_err}")
+            
+            logging.error(f"[SETUP] failed to create initial admin: {e}")
+            return jsonify({'error': 'Setup failed, check server logs'}), 500
 
     log_audit(username, 'admin.initial_setup',
               f"First admin '{username}' created via setup wizard from {client_ip}")
