@@ -831,6 +831,19 @@ def auth_login():
     if username in login_attempts_by_user:
         del login_attempts_by_user[username]
     
+    # SECURITY: Reject known legacy default password for admin accounts
+    # MK: Aug 2026 - pentest finding: legacy/upgraded installs could still authenticate
+    # with the historical default password. The warning-only approach let the session
+    # be created; this enforcement gate rejects the credential before session creation.
+    if user.get('role') == ROLE_ADMIN and password == 'admin':
+        logging.warning(f"SECURITY: Admin user '{username}' attempted login with legacy default password from {client_ip}")
+        log_audit(username, 'auth.legacy_password_rejected',
+                  f"Login rejected: legacy default password still in use (from {client_ip})")
+        return jsonify({
+            'error': 'This account uses a legacy default password and must be reset. Contact your administrator.',
+            'code': 'LEGACY_PASSWORD_REJECTED'
+        }), 403
+    
     # NS: Auto-migrate password to Argon2id if using old PBKDF2 format - Jan 2026
     # Only rehash for locally-authenticated users - LDAP passwords must NEVER be stored locally
     if not ldap_authenticated and needs_password_rehash(user.get('password_salt', ''), user.get('password_hash', '')):
@@ -901,8 +914,6 @@ def auth_login():
         'reverse_proxy_enabled': effective_reverse_proxy(settings),
         'air_gap_mode': settings.get('air_gap_mode', False),
         'requires_2fa_setup': requires_2fa_setup,  # NS: Feb 2026 - Force 2FA
-        # NS: Security warning if using default password
-        'security_warning': 'DEFAULT_PASSWORD' if (user['role'] == ROLE_ADMIN and password == 'admin') else None,
         'requires_password_change': bool(user.get('force_password_change'))
     })
     
