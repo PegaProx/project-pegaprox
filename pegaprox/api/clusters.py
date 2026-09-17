@@ -172,6 +172,10 @@ def add_cluster():
     if 'pass' not in data:
         data['pass'] = ''
 
+    # Ensure ssl_verification defaults to True for security
+    if 'ssl_verification' not in data:
+        data['ssl_verification'] = True
+
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
     cluster_type = data.get('cluster_type', 'proxmox')
@@ -371,6 +375,10 @@ def reconfigure_cluster(cluster_id):
         return jsonify({'error': 'Password or SSH key is required'}), 400
     if 'pass' not in data:
         data['pass'] = ''
+
+    # Ensure ssl_verification defaults to True for security
+    if 'ssl_verification' not in data:
+        data['ssl_verification'] = True
 
     cluster_type = data.get('cluster_type', getattr(cluster_managers[cluster_id], 'cluster_type', 'proxmox'))
 
