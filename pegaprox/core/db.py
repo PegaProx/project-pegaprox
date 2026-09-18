@@ -537,16 +537,35 @@ class PegaProxDB:
             CREATE INDEX IF NOT EXISTS idx_migration_timestamp ON migration_history(timestamp DESC)
         ''')
 
-        # #720 — persist SOFT (non-HA) node maintenance so it survives a PegaProx restart. Native HA
-        # maintenance is re-derived from PVE on each poll (#78) and is NOT stored here.
+        # #720 — persist node maintenance so it survives a PegaProx restart.
+        # Originally SOFT (non-HA) entries only: native HA maintenance was supposed to be
+        # re-derived from PVE on each poll (#78). That re-derivation is blind on PVE 9 (see
+        # _get_native_ha_maintenance_nodes), so we persist BOTH kinds now and keep native_ha
+        # alongside — exit_maintenance_mode needs it to clear the flag upstream after a restart.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS node_maintenance (
                 cluster_id TEXT NOT NULL,
                 node TEXT NOT NULL,
                 entered_at TEXT NOT NULL,
+                native_ha INTEGER DEFAULT 0,
                 PRIMARY KEY (cluster_id, node)
             )
         ''')
+
+        # migration for DBs created before native_ha was persisted
+        try:
+            cursor.execute("PRAGMA table_info(node_maintenance)")
+            _nm_cols = [col[1] for col in cursor.fetchall()]
+            if 'native_ha' not in _nm_cols:
+                logging.info("Adding native_ha column to node_maintenance table...")
+                cursor.execute("ALTER TABLE node_maintenance ADD COLUMN native_ha INTEGER DEFAULT 0")
+        except Exception as e:
+            # #720 — do NOT swallow this. A node_maintenance table left without the native_ha
+            # column silently disables maintenance persistence (save/get raise on every call),
+            # which is the exact bug this column fixes. Fail init loudly rather than commit a
+            # half-migrated schema (review).
+            logging.error(f"node_maintenance native_ha migration failed: {e}")
+            raise
 
         # Server settings table
         cursor.execute('''
@@ -4575,26 +4594,32 @@ class PegaProxDB:
     # AFFINITY RULES OPERATIONS
     # ========================================
     
-    def save_node_maintenance(self, cluster_id: str, node: str):
-        """#720 — persist a soft (non-HA) node-maintenance entry so it survives a PegaProx restart."""
+    def save_node_maintenance(self, cluster_id: str, node: str, native_ha: bool = False):
+        """#720 — persist a node-maintenance entry so it survives a PegaProx restart.
+
+        native_ha records whether PVE also holds the node in HA maintenance, so a restored
+        entry can still clear the upstream flag when the user exits maintenance.
+        """
         cursor = self.conn.cursor()
         cursor.execute(
-            'INSERT OR REPLACE INTO node_maintenance (cluster_id, node, entered_at) VALUES (?, ?, '
-            'COALESCE((SELECT entered_at FROM node_maintenance WHERE cluster_id=? AND node=?), ?))',
-            (cluster_id, node, cluster_id, node, datetime.now().isoformat()))
+            'INSERT OR REPLACE INTO node_maintenance (cluster_id, node, entered_at, native_ha) '
+            'VALUES (?, ?, '
+            'COALESCE((SELECT entered_at FROM node_maintenance WHERE cluster_id=? AND node=?), ?), ?)',
+            (cluster_id, node, cluster_id, node, datetime.now().isoformat(), 1 if native_ha else 0))
         self.conn.commit()
 
     def remove_node_maintenance(self, cluster_id: str, node: str):
-        """#720 — drop a persisted soft-maintenance entry on exit."""
+        """#720 — drop a persisted maintenance entry on exit."""
         cursor = self.conn.cursor()
         cursor.execute('DELETE FROM node_maintenance WHERE cluster_id=? AND node=?', (cluster_id, node))
         self.conn.commit()
 
     def get_node_maintenance(self, cluster_id: str) -> list:
-        """#720 — [(node, entered_at), ...] of a cluster's persisted soft maintenance, for restore."""
+        """#720 — [(node, entered_at, native_ha), ...] of a cluster's persisted maintenance."""
         cursor = self.conn.cursor()
-        cursor.execute('SELECT node, entered_at FROM node_maintenance WHERE cluster_id=?', (cluster_id,))
-        return [(r['node'], r['entered_at']) for r in cursor.fetchall()]
+        cursor.execute('SELECT node, entered_at, native_ha FROM node_maintenance WHERE cluster_id=?',
+                       (cluster_id,))
+        return [(r['node'], r['entered_at'], bool(r['native_ha'])) for r in cursor.fetchall()]
 
     def get_affinity_rules(self, cluster_id: str = None) -> dict:
         """Get affinity rules"""
