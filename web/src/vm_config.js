@@ -1532,8 +1532,8 @@
             const getValue = (section, key) => {
                 if (key in changes) return changes[key];
                 // Try parsed section first, then raw config as fallback
-                const parsedValue = config?.[section]?.[key];
-                if (parsedValue !== undefined && parsedValue !== '') return parsedValue;
+                const sectionObj = config?.[section];
+                if (sectionObj && key in sectionObj) return sectionObj[key];
                 // Fallback to raw config
                 return config?.raw?.[key] ?? '';
             };
@@ -4819,32 +4819,75 @@
                                                         {/* Parse current boot order and available devices */}
                                                         {(() => {
                                                             const currentBoot = getValue('options', 'boot') || '';
-                                                            const bootDevices = currentBoot.includes('order=') 
-                                                                ? currentBoot.split('order=')[1].split(';').filter(d => d)
-                                                                : [];
+                                                            const raw = config?.raw || {};
+                                                            const bootdisk = getValue('options', 'bootdisk') || '';
                                                             
-                                                            // LW: Collect all bootable devices from config
-                                                            const allDevices = [];
+                                                            // Collect all bootable device IDs from config
+                                                            const allBootableDevices = [];
                                                             if (config.disks) {
                                                                 config.disks.forEach(d => {
-                                                                    if (!d.id.includes('cloudinit')) allDevices.push(d.id);
+                                                                    if (!d.id.includes('cloudinit')) allBootableDevices.push(d.id);
                                                                 });
                                                             }
                                                             if (config.networks) {
-                                                                config.networks.forEach(n => allDevices.push(n.id));
+                                                                config.networks.forEach(n => allBootableDevices.push(n.id));
                                                             }
-                                                            // Add common devices that might not be in disks array
                                                             ['ide2', 'ide0', 'sata0', 'scsi0', 'virtio0', 'net0'].forEach(dev => {
-                                                                if (!allDevices.includes(dev)) {
-                                                                    // Check if device exists in raw config
-                                                                    if (config[dev]) allDevices.push(dev);
+                                                                if (!allBootableDevices.includes(dev) && raw[dev]) {
+                                                                    allBootableDevices.push(dev);
                                                                 }
                                                             });
                                                             
+                                                            // Parse Proxmox boot order: [[legacy=]<[acdn]{1,4}>] [,order=<dev[;dev...]>]
+                                                            // legacy chars: a=floppy, c=hard disk (bootdisk), d=cdrom, n=network
+                                                            const bootDevices = [];
+                                                            if (currentBoot) {
+                                                                const parts = currentBoot.split(',');
+                                                                const legacyChars = [];
+                                                                let orderDevices = [];
+                                                                
+                                                                parts.forEach(part => {
+                                                                    if (part.startsWith('order=')) {
+                                                                        orderDevices = part.split('order=')[1].split(';').filter(d => d);
+                                                                    } else {
+                                                                        // Strip optional 'legacy=' prefix, then extract chars
+                                                                        const clean = part.startsWith('legacy=') ? part.slice(7) : part;
+                                                                        for (const ch of clean.toLowerCase()) {
+                                                                            if ('acdn'.includes(ch)) legacyChars.push(ch);
+                                                                        }
+                                                                    }
+                                                                });
+                                                                
+                                                                // Resolve legacy chars to device IDs
+                                                                legacyChars.forEach(ch => {
+                                                                    if (ch === 'c' && bootdisk && allBootableDevices.includes(bootdisk)) {
+                                                                        if (!bootDevices.includes(bootdisk)) bootDevices.push(bootdisk);
+                                                                    } else if (ch === 'd') {
+                                                                        allBootableDevices.forEach(d => {
+                                                                            if (d === 'ide2' || (raw[d] && String(raw[d]).includes('media=cdrom'))) {
+                                                                                if (!bootDevices.includes(d)) bootDevices.push(d);
+                                                                            }
+                                                                        });
+                                                                    } else if (ch === 'n') {
+                                                                        allBootableDevices.forEach(d => {
+                                                                            if (d.match(/^net\d+$/) && !bootDevices.includes(d)) bootDevices.push(d);
+                                                                        });
+                                                                    }
+                                                                    // 'a' = floppy — rarely configured, skip if no floppy device exists
+                                                                });
+                                                                
+                                                                // Append order= devices (explicit, take precedence)
+                                                                orderDevices.forEach(d => {
+                                                                    if (allBootableDevices.includes(d) && !bootDevices.includes(d)) {
+                                                                        bootDevices.push(d);
+                                                                    }
+                                                                });
+                                                            }
+                                                            
                                                             // Sort: boot devices first in order, then others
                                                             const sortedDevices = [
-                                                                ...bootDevices.filter(d => allDevices.includes(d)),
-                                                                ...allDevices.filter(d => !bootDevices.includes(d))
+                                                                ...bootDevices.filter(d => allBootableDevices.includes(d)),
+                                                                ...allBootableDevices.filter(d => !bootDevices.includes(d))
                                                             ].filter((v, i, a) => a.indexOf(v) === i); // unique
                                                             
                                                             const toggleDevice = (device) => {
@@ -4879,12 +4922,13 @@
                                                                         // NS: Determine device type icon + color
                                                                         const isDisk = device.match(/^(scsi|virtio|ide|sata)\d+$/);
                                                                         const isNet = device.match(/^net\d+$/);
-                                                                        const isCdrom = device === 'ide2' || (config[device] && String(config[device]).includes('media=cdrom'));
+                                                                        const deviceRaw = config.raw ? config.raw[device] : undefined;
+                                                                        const isCdrom = device === 'ide2' || (deviceRaw && String(deviceRaw).includes('media=cdrom'));
                                                                         const iconColor = isCdrom ? 'text-yellow-400' : isNet ? 'text-cyan-400' : isDisk ? 'text-blue-400' : 'text-gray-400';
                                                                         const iconBg = isCdrom ? 'bg-yellow-500/10' : isNet ? 'bg-cyan-500/10' : isDisk ? 'bg-blue-500/10' : 'bg-gray-500/10';
                                                                         
                                                                         // Get device detail from config
-                                                                        const deviceDetail = config[device] ? String(config[device]).split(',')[0] : '';
+                                                                        const deviceDetail = deviceRaw ? String(deviceRaw).split(',')[0] : '';
                                                                         
                                                                         return (
                                                                             <div 
