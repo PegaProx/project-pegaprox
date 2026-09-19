@@ -140,6 +140,8 @@ def save_config():
                     'balance_containers': getattr(manager.config, 'balance_containers', False),
                     'balance_local_disks': getattr(manager.config, 'balance_local_disks', False),
                     'proxlb_tags_enabled': bool(getattr(manager.config, 'proxlb_tags_enabled', False)),
+                    'proxlb_pins_auto_migrate': bool(getattr(manager.config, 'proxlb_pins_auto_migrate', False)),
+                    'proxlb_pins_strict': bool(getattr(manager.config, 'proxlb_pins_strict', False)),
                     'dry_run': getattr(manager.config, 'dry_run', False),
                     'enabled': getattr(manager.config, 'enabled', True),
                     'ha_enabled': getattr(manager.config, 'ha_enabled', False),
