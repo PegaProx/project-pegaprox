@@ -671,15 +671,20 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
             result['_authoritative'] = True
     
     # Build list of group identifiers (IDs for Entra, names for generic)
+    # Security: For Entra groups (dict with id+name), only the immutable id is used for
+    # authorization to prevent displayName collision attacks. For generic OIDC (string),
+    # the string itself is the only identifier available.
     group_ids = set()
-    group_names = set()
+    group_names = set()  # Kept for logging/display only when id is present
     for g in groups:
         if isinstance(g, dict):
+            # Entra: only add the immutable id to the authorization set
             group_ids.add(g.get('id', '').lower())
+            # Store name separately for potential logging, but never authorize on it
             group_names.add(g.get('name', '').lower())
         elif isinstance(g, str):
+            # Generic OIDC: string is the only identifier, so it must be used
             group_ids.add(g.lower())
-            group_names.add(g.lower())
     
     # NS: Also check ID token 'groups' claim (Entra can embed group IDs in token)
     if id_token_claims:
@@ -696,13 +701,14 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     # otherwise a custom default_role silently swallows every mapping below.
     role_from_default = True
 
-    if admin_group and (admin_group in group_ids or admin_group in group_names):
+    # Security: Only match on group_ids (immutable identifiers), never on mutable displayName
+    if admin_group and admin_group in group_ids:
         result['role'] = ROLE_ADMIN
         role_from_default = False
-    elif user_group and (user_group in group_ids or user_group in group_names):
+    elif user_group and user_group in group_ids:
         result['role'] = ROLE_USER
         role_from_default = False
-    elif viewer_group and (viewer_group in group_ids or viewer_group in group_names):
+    elif viewer_group and viewer_group in group_ids:
         result['role'] = ROLE_VIEWER
         role_from_default = False
 
@@ -728,7 +734,8 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
 
     for mapping in config.get('group_mappings', []):
         map_group = (mapping.get('group_id') or mapping.get('group_dn') or '').strip().lower()
-        if map_group and (map_group in group_ids or map_group in group_names):
+        # Security: Only match on group_ids (immutable identifiers), never on mutable displayName
+        if map_group and map_group in group_ids:
             if mapping.get('role') and mapping['role'] not in _role_prio:
                 matched_custom_roles.append(mapping['role'])
             # The configured default stands for "no group matched" (that is how the setting
