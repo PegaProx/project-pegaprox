@@ -15,7 +15,7 @@ from datetime import datetime
 from urllib.parse import urlencode, urlparse, urlunparse
 
 # NS May 2026 — SSRF guard for admin-supplied OIDC URLs (discovery / token / userinfo).
-from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError, resolve_and_pin_url
 
 # auth_source values that mean "this row is owned by an OIDC-family IdP", i.e.
 # the ones whose oidc_sub is meaningful. 'local' and 'ldap' rows are excluded on
@@ -198,7 +198,15 @@ def get_oidc_endpoints(config: dict) -> dict:
                 # MK May 2026 (#412): pass allow_private through so internal
                 # IdPs at 10.x / 192.168.x can be used when the operator
                 # explicitly opted in. Metadata blocklist still binds.
-                sanitize_outbound_url(discovery_url, allow_private=allow_private_ip)
+                # NS Sep 2026: use resolve_and_pin_url to close DNS rebinding
+                # window (GHSA-hmcf-9q7f-vx35). Pin the validated IP so the
+                # actual fetch can't be rebound to metadata / loopback.
+                discovery_url = resolve_and_pin_url(
+                    discovery_url,
+                    allowed_schemes=('https', 'http'),
+                    allow_private=allow_private_ip,
+                    tls_verified=not skip_ssl
+                )
             except SsrfError as guard_err:
                 logging.warning(f"[OIDC] discovery_url rejected by SSRF guard: {guard_err}")
                 # MK May 2026 (#188 follow-up): never return None — callers
