@@ -26,7 +26,7 @@ sqlcipher3-binary>=0.6.0; sys_platform == "linux" and platform_machine == "x86_6
 
 # === SSH & Console ===
 paramiko>=4.0.0
-websockets>=11.0
+websockets==16.1
 websocket-client>=1.6.0
 h11>=0.16.0
 
