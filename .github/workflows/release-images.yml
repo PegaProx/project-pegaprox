@@ -253,6 +253,7 @@ jobs:
             sudo systemd-nspawn -D /tmp/ct/rootfs \
               --machine pegaprox-test \
               --boot \
+              --private-users=pick \
               --bind-ro=/etc/resolv.conf \
               > /tmp/nspawn.log 2>&1 &
           else
@@ -260,7 +261,11 @@ jobs:
             sudo docker run -d \
               --name pegaprox-test \
               --platform linux/arm64 \
-              --privileged \
+              --cap-add SYS_ADMIN \
+              --cap-add NET_ADMIN \
+              --tmpfs /run:rw,noexec,nosuid,size=64m \
+              --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+              -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
               -p ${PVE_PORT}:${PVE_PORT} \
               --entrypoint /bin/sh \
               pegaprox-lxc-smoke:arm64 \
