@@ -88,7 +88,7 @@ class PegaProxConfig:
         self.host = cluster_data['host']
         self.user = cluster_data['user']
         self.pass_ = cluster_data.get('pass', '')
-        self.ssl_verification = cluster_data.get('ssl_verification', False)
+        self.ssl_verification = cluster_data.get('ssl_verification', True)
         self.migration_threshold = cluster_data.get('migration_threshold', 20)
         self.migration_tolerance = cluster_data.get('migration_tolerance', 10)
         self.check_interval = cluster_data.get('check_interval', 300)
