@@ -2420,6 +2420,17 @@ class PegaProxManager:
                     f"[PROXLB] {v['name']} ({v['vmid']}) is off its pin but excluded from "
                     "balancing — leaving it alone")
                 continue
+            # find_migration_candidate skips guests migrated in the last 900s to
+            # stop ping-pong. The reconcile records that cooldown after a move but
+            # never read it back, so a guest HA or an operator keeps pulling off
+            # its pin got dragged back on every cycle. Defer it until it lapses.
+            last_move = self._vm_migration_cooldown.get(v['vmid'])
+            if last_move and (time.time() - last_move) < 900:
+                self.logger.info(
+                    f"[PROXLB] {v['name']} ({v['vmid']}) is off its pin but was migrated "
+                    "recently — waiting out the cooldown")
+                result['deferred'].append(v)
+                continue
             # Sep 2026 — a pin does not make a local disk shared. The balancer
             # skips local-storage guests unless balance_local_disks is on
             # (find_migration_candidate), and a reconcile that ignores that just
