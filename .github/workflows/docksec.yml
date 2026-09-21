@@ -2,7 +2,7 @@ name: DockSec
 
 on:
   push:
-    branches: [main]
+    branches: [Testing, main]
     paths:
       - '**/Dockerfile*'
       - '**/Containerfile*'
