@@ -3118,7 +3118,9 @@ class PegaProxDB:
         now = datetime.now().isoformat()
 
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
-        cursor.execute('SELECT group_id, display_name, sort_order, created_at FROM clusters WHERE id = ?', (cluster_id,))
+        cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
+                       'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict '
+                       'FROM clusters WHERE id = ?', (cluster_id,))
         existing = cursor.fetchone()
 
         # MK May 2026 — preserve previously-set worldmap location across save_cluster
@@ -3202,9 +3204,13 @@ class PegaProxDB:
             data.get('longitude', existing_lon),
             data.get('location_label', existing_loc_label) or '',
             (data.get('node_ui_suffix', existing_node_ui_suffix) or '').strip().lstrip('.'),
-            1 if data.get('proxlb_tags_enabled', False) else 0,
-            1 if data.get('proxlb_pins_auto_migrate', False) else 0,
-            1 if data.get('proxlb_pins_strict', False) else 0,
+            # INSERT OR REPLACE rewrites every column, so a flag the payload omits
+            # gets forced to 0. A merge-restore from an older backup that predates
+            # these fields would silently switch them off. Fall back to the stored
+            # value when the key is absent. An explicit False still wins.
+            1 if data.get('proxlb_tags_enabled', existing['proxlb_tags_enabled'] if existing else False) else 0,
+            1 if data.get('proxlb_pins_auto_migrate', existing['proxlb_pins_auto_migrate'] if existing else False) else 0,
+            1 if data.get('proxlb_pins_strict', existing['proxlb_pins_strict'] if existing else False) else 0,
             existing['created_at'] if existing else now,
             now
         ))
