@@ -227,6 +227,8 @@ class PegaProxDB:
                 balance_containers INTEGER DEFAULT 0,
                 balance_local_disks INTEGER DEFAULT 0,
                 proxlb_tags_enabled INTEGER DEFAULT 0,
+                proxlb_pins_auto_migrate INTEGER DEFAULT 0,
+                proxlb_pins_strict INTEGER DEFAULT 0,
                 dry_run INTEGER DEFAULT 1,
                 enabled INTEGER DEFAULT 1,
                 ha_enabled INTEGER DEFAULT 0,
@@ -1103,6 +1105,29 @@ class PegaProxDB:
                     logging.info("Added proxlb_tags_enabled column to clusters table")
                 except Exception as e:
                     logging.error(f"Failed to add proxlb_tags_enabled column: {e}")
+
+            # A plb_pin_ tag is only a veto on proposed moves — it never pulls a
+            # guest back to its pinned node. Reconciliation does, and like every
+            # other autonomous move it stays off until the operator asks for it.
+            if 'proxlb_pins_auto_migrate' not in cluster_columns:
+                logging.info("Adding proxlb_pins_auto_migrate column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN proxlb_pins_auto_migrate INTEGER DEFAULT 0")
+                    logging.info("Added proxlb_pins_auto_migrate column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add proxlb_pins_auto_migrate column: {e}")
+
+            # A pin ranks evacuation targets; it does not veto the drain, because a
+            # guest left behind on a node that is about to reboot is the worse
+            # outcome. Operators whose pins are hard constraints (licensing, PCI
+            # passthrough, local disks) turn this on to get the old veto back.
+            if 'proxlb_pins_strict' not in cluster_columns:
+                logging.info("Adding proxlb_pins_strict column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN proxlb_pins_strict INTEGER DEFAULT 0")
+                    logging.info("Added proxlb_pins_strict column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add proxlb_pins_strict column: {e}")
 
             # MK Feb 2026: Add smbios_autoconfig for per-cluster SMBIOS settings
             if 'smbios_autoconfig' not in cluster_columns:
@@ -2986,6 +3011,8 @@ class PegaProxDB:
                 'balance_containers': bool(row['balance_containers']),
                 'balance_local_disks': bool(row['balance_local_disks']),
                 'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
+                'proxlb_pins_auto_migrate': bool(row['proxlb_pins_auto_migrate']) if 'proxlb_pins_auto_migrate' in row.keys() else False,
+                'proxlb_pins_strict': bool(row['proxlb_pins_strict']) if 'proxlb_pins_strict' in row.keys() else False,
                 'dry_run': bool(row['dry_run']),
                 'enabled': bool(row['enabled']),
                 'ha_enabled': bool(row['ha_enabled']),
@@ -3073,6 +3100,8 @@ class PegaProxDB:
             'balance_containers': bool(row['balance_containers']),
             'balance_local_disks': bool(row['balance_local_disks']),
             'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
+            'proxlb_pins_auto_migrate': bool(row['proxlb_pins_auto_migrate']) if 'proxlb_pins_auto_migrate' in row.keys() else False,
+            'proxlb_pins_strict': bool(row['proxlb_pins_strict']) if 'proxlb_pins_strict' in row.keys() else False,
             'dry_run': bool(row['dry_run']),
             'enabled': bool(row['enabled']),
             'ha_enabled': bool(row['ha_enabled']),
@@ -3108,7 +3137,9 @@ class PegaProxDB:
         now = datetime.now().isoformat()
 
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
-        cursor.execute('SELECT group_id, display_name, sort_order, created_at FROM clusters WHERE id = ?', (cluster_id,))
+        cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
+                       'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict '
+                       'FROM clusters WHERE id = ?', (cluster_id,))
         existing = cursor.fetchone()
 
         # MK May 2026 — preserve previously-set worldmap location across save_cluster
@@ -3146,10 +3177,10 @@ class PegaProxDB:
              api_port,
              latitude, longitude, location_label,
              node_ui_suffix,
-             proxlb_tags_enabled,
+             proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -3192,7 +3223,13 @@ class PegaProxDB:
             data.get('longitude', existing_lon),
             data.get('location_label', existing_loc_label) or '',
             (data.get('node_ui_suffix', existing_node_ui_suffix) or '').strip().lstrip('.'),
-            1 if data.get('proxlb_tags_enabled', False) else 0,
+            # INSERT OR REPLACE rewrites every column, so a flag the payload omits
+            # gets forced to 0. A merge-restore from an older backup that predates
+            # these fields would silently switch them off. Fall back to the stored
+            # value when the key is absent. An explicit False still wins.
+            1 if data.get('proxlb_tags_enabled', existing['proxlb_tags_enabled'] if existing else False) else 0,
+            1 if data.get('proxlb_pins_auto_migrate', existing['proxlb_pins_auto_migrate'] if existing else False) else 0,
+            1 if data.get('proxlb_pins_strict', existing['proxlb_pins_strict'] if existing else False) else 0,
             existing['created_at'] if existing else now,
             now
         ))
