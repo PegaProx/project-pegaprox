@@ -1277,6 +1277,11 @@ ALLOWED_CONFIG_FIELDS = {
     'node_ui_suffix',  # MK Aug 2026 (#689) — FQDN suffix for "Open in Proxmox" node links
 }
 
+# These persist as INTEGER (db.py save_cluster) and reload through bool(), so a
+# truthy string like "false" would round-trip back to True and silently flip an
+# opt-in on. Only a real bool is accepted for them, no bool() coercion.
+BOOLEAN_CONFIG_FIELDS = {'proxlb_pins_auto_migrate', 'proxlb_pins_strict'}
+
 @bp.route('/api/clusters/<cluster_id>', methods=['PUT'])
 @require_auth(perms=['cluster.config'])
 def update_cluster_config(cluster_id):
@@ -1293,6 +1298,12 @@ def update_cluster_config(cluster_id):
 
     data = request.json
     mgr = cluster_managers[cluster_id]
+
+    # Reject non-boolean pin flags before any assignment, so a partial apply
+    # can't leave mgr.config half-mutated.
+    for _bk in BOOLEAN_CONFIG_FIELDS:
+        if _bk in data and type(data[_bk]) is not bool:
+            return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
 
     # update config - only allowed fields
     updated = []
@@ -1325,6 +1336,12 @@ def update_cluster_config_live(cluster_id):
 
     data = request.json
     mgr = cluster_managers[cluster_id]
+
+    # Reject non-boolean pin flags before any assignment, so a partial apply
+    # can't leave mgr.config half-mutated.
+    for _bk in BOOLEAN_CONFIG_FIELDS:
+        if _bk in data and type(data[_bk]) is not bool:
+            return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
 
     updated = []
     for key, value in data.items():
