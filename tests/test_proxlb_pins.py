@@ -498,6 +498,36 @@ def test_admin_can_force_a_reconcile(api, seed):
     mgr.reconcile_proxlb_pins.assert_called_once_with(force=True)
 
 
+def test_a_string_force_is_rejected_not_coerced(api, seed):
+    # bool("false") is True, so the old (request.json or {}).get('force') form
+    # turned {"force": "false"} into a forced reconcile that skipped the
+    # auto_migrate switch. force must be a real boolean or the route says 400.
+    admin = seed.user('root', role='admin', tenant_id='default')
+    mgr = _api_manager(api)
+    resp = api.as_user(admin).post(RECONCILE_ROUTE, json={'force': 'false'})
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    mgr.reconcile_proxlb_pins.assert_not_called()
+
+
+def test_a_non_object_body_is_rejected(api, seed):
+    # A JSON array is not an object, so it must not slip through as an empty body
+    admin = seed.user('root', role='admin', tenant_id='default')
+    mgr = _api_manager(api)
+    resp = api.as_user(admin).post(RECONCILE_ROUTE, json=['force'])
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    mgr.reconcile_proxlb_pins.assert_not_called()
+
+
+def test_a_missing_body_reconciles_without_forcing(api, seed):
+    # No JSON body must not 415 and must default to the honour-the-switch path
+    admin = seed.user('root', role='admin', tenant_id='default')
+    outcome = {'violations': [], 'migrated': [], 'failed': [], 'auto_migrate': True}
+    mgr = _api_manager(api, reconcile_proxlb_pins=outcome)
+    resp = api.as_user(admin).post(RECONCILE_ROUTE)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    mgr.reconcile_proxlb_pins.assert_called_once_with(force=False)
+
+
 def test_reconcile_is_denied_when_the_cluster_is_only_reachable_via_an_acl(api, seed):
     # Same class of hole as Aikido 469089250 on /balance-now: this moves guests
     # across the whole cluster, so a single VM-ACL grant must not unlock it.

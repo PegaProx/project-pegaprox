@@ -2901,7 +2901,14 @@ def reconcile_proxlb_pins_api(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
-    force = bool((request.json or {}).get('force', False))
+    body = request.get_json(silent=True)
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return jsonify({'error': 'Request body must be a JSON object'}), 400
+    force = body.get('force', False)
+    if not isinstance(force, bool):
+        return jsonify({'error': "'force' must be a boolean"}), 400
     try:
         result = mgr.reconcile_proxlb_pins(force=force)
     except Exception as e:
