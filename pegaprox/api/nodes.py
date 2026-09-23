@@ -1439,16 +1439,36 @@ def save_processed_vm(vmid):
         f.write(f"{{vmid}}\\n")
 
 def get_current_smbios(vmid):
-    """read smbios from conf file directly — no perl overhead"""
+    """read smbios from conf file directly — no perl overhead.
+
+    Section-aware: `qm set` on a RUNNING vm writes into the conf's
+    [PENDING] section (applied at the next vm start), so a pending
+    smbios1 line must win over the main-section value. Without this
+    the daemon never sees its own previous stamp and re-writes smbios1
+    on every poll cycle. smbios1 lines inside any OTHER bracketed
+    section (e.g. snapshot sections) are stale snapshots of old config
+    and are ignored.
+    """
     try:
         conf_path = f"/etc/pve/qemu-server/{{vmid}}.conf"
         if not os.path.exists(conf_path):
             return None
+        main_val = None
+        pending_val = None
+        section = 'main'
         with open(conf_path, 'r') as f:
             for line in f:
-                if line.startswith('smbios1:'):
-                    return line.split(':', 1)[1].strip()
-        return None
+                s = line.strip()
+                if s.startswith('[') and s.endswith(']'):
+                    section = 'pending' if s == '[PENDING]' else 'other'
+                    continue
+                if s.startswith('smbios1:'):
+                    val = s.split(':', 1)[1].strip()
+                    if section == 'pending':
+                        pending_val = val
+                    elif section == 'main':
+                        main_val = val
+        return pending_val if pending_val is not None else main_val
     except:
         return None
 
