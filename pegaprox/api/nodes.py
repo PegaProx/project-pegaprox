@@ -1411,16 +1411,34 @@ def save_processed_vm(vmid):
         f.write(f"{{vmid}}\\n")
 
 def get_current_smbios(vmid):
-    """read smbios from conf file directly — no perl overhead"""
+    """read smbios from conf file directly — no perl overhead.
+    t_d5f0225b: pending-section aware — qm set on a RUNNING vm lands in the
+    [PENDING] section until next start; prefer it over the main-section value
+    so the daemon sees its own previous stamp instead of re-writing every
+    30s cycle (245k+ spurious writes observed on cloudnode-02)."""
     try:
         conf_path = f"/etc/pve/qemu-server/{{vmid}}.conf"
         if not os.path.exists(conf_path):
             return None
+        main_val = None
+        pending_val = None
+        in_pending = False
         with open(conf_path, 'r') as f:
             for line in f:
-                if line.startswith('smbios1:'):
-                    return line.split(':', 1)[1].strip()
-        return None
+                s = line.strip()
+                if s == '[PENDING]':
+                    in_pending = True
+                    continue
+                if s.startswith('[') and s.endswith(']'):
+                    in_pending = False
+                    continue
+                if s.startswith('smbios1:'):
+                    val = s.split(':', 1)[1].strip()
+                    if in_pending:
+                        pending_val = val
+                    else:
+                        main_val = val
+        return pending_val if pending_val is not None else main_val
     except:
         return None
 

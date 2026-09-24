@@ -480,6 +480,12 @@ def get_users():
             'permissions': user.get('permissions', []),  # LW: For permission display
             'portal_only': user.get('portal_only', False),
             'user_folder': user.get('user_folder', ''),
+            'granted_roles': [r['role_name'] for r in get_db().conn.execute(
+                'SELECT role_name FROM user_roles WHERE username = ?', (username,)).fetchall()],
+            # SRK (SPEC-2026-011 D6): explicit tenant memberships beyond home
+            'granted_tenants': [r['tenant_id'] for r in get_db().conn.execute(
+                'SELECT tenant_id FROM user_tenants WHERE username = ? '
+                'ORDER BY granted_at, tenant_id', (username,)).fetchall()],
         })
     
     return jsonify(users_list)
@@ -943,7 +949,14 @@ def update_user(username):
     # out of it
     _ct = _caller_tenant_or_none()
     if _ct is not None:
-        if user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
+        # SRK (SPEC-2026-011 D6): caller containment is now set-based over the
+        # target's effective tenant set (home UNION user_tenants memberships).
+        # The HOME-move rule below stays scalar on purpose (A8): membership
+        # alone must never let a scoped admin re-home an account.
+        import pegaprox.utils.rbac as _rbac_d6
+        _tset = set(_rbac_d6.get_user_tenant_memberships(username))
+        _tset.add(user.get('tenant_id', DEFAULT_TENANT_ID))
+        if _ct not in _tset:
             return jsonify({'error': 'Access denied: cannot modify users in other tenants'}), 403
         if data.get('tenant_id', _ct) != _ct:
             return jsonify({'error': 'Access denied: cannot move users to other tenants'}), 403
@@ -983,6 +996,17 @@ def update_user(username):
                     if _ct is not None and tid != _ct:
                         return jsonify({'error': 'Cannot assign a role from another tenant'}), 403
                     user['tenant_id'] = tid
+                    # SRK (SPEC-2026-011 D6/A8): home re-point also records a
+                    # user_tenants row so the scalar stays inside the set.
+                    try:
+                        get_db().conn.cursor().execute(
+                            'INSERT OR IGNORE INTO user_tenants '
+                            '(username, tenant_id, granted_at, granted_by) VALUES (?, ?, ?, ?)',
+                            (username, tid, datetime.now().isoformat(),
+                             request.session.get('user', '')))
+                        get_db().conn.commit()
+                    except Exception as _e:
+                        logging.warning(f"[d6] membership backfill on home re-point failed: {_e}")
                     found_tenant = True
                     logging.info(f"Auto-set tenant_id={tid} for user with role {data['role']}")
                     break
@@ -1198,11 +1222,16 @@ def get_tenants():
     users = load_users()
     user = users.get(username, {})
     user_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+    # SRK (SPEC-2026-011 D6): visible tenants = home UNION explicit
+    # memberships UNION default. (Pre-D6 this was scalar-only, which hid
+    # tenants like mmc from every dropdown even when roles were granted.)
+    import pegaprox.utils.rbac as _rbac_d6
+    _visible = {user_tenant, DEFAULT_TENANT_ID}
+    _visible.update(_rbac_d6.get_user_tenant_memberships(username))
     
     result = []
     for tid, t in tenants_db.items():
-        # user sees only their tenant + default tenant
-        if tid != user_tenant and tid != DEFAULT_TENANT_ID:
+        if tid not in _visible:
             continue
         
         result.append({
@@ -2292,3 +2321,300 @@ def delete_user_folder(folder_id):
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
+
+
+# ======================================================================
+# SRK (SPEC-2026-010 P2): tenant-scoped multi-role management API.
+# GET/PUT/DELETE /api/users/<username>/roles
+# Guards (all server-side): require_auth(perms=['admin.users']) on every
+# route; global admin (users.role == admin) bypasses tenant containment;
+# a tenant-scoped admin.users holder may only manage users in their OWN
+# tenant with roles of the SAME tenant. Grant validates the role exists
+# and is tenant-pure (custom_roles.tenant_id). Revoking the PRIMARY role
+# is rejected (it is managed via user edit, not the junction). Every
+# mutation is audited (D8: user.role.grant / user.role.revoke). The P1
+# resolvers are cache-free, so revocation bites on the next request.
+# ======================================================================
+def _roles_tenant_of(role_name):
+    """Tenant of a custom role, or None if the role does not exist."""
+    try:
+        cur = get_db().conn.cursor()
+        cur.execute('SELECT tenant_id FROM custom_roles WHERE name = ?', (role_name,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        row = row if isinstance(row, dict) else dict(zip(
+            ['tenant_id'], [row[0]]))
+        return row.get('tenant_id')
+    except Exception as e:
+        logging.error(f"[roles-api] role lookup failed for '{role_name}': {e}")
+        return None
+
+
+def _roles_guard(username, role_tenant=None):
+    """Shared guard. Returns (target_user, None) or (None, (resp, status)).
+
+    Containment: caller must exist; global admin passes; otherwise caller
+    tenant must equal target tenant AND (when given) role tenant.
+    """
+    users = load_users()
+    if username not in users:
+        return None, (jsonify({'error': 'User not found'}), 404)
+    target = users[username]
+    sess = getattr(request, 'session', {}) or {}
+    caller_name = sess.get('user', '')
+    caller = users.get(caller_name)
+    if not caller:
+        # cannot establish containment -> deny (defense in depth; the
+        # require_auth decorator has already authenticated the principal)
+        return None, (jsonify({'error': 'Access denied'}), 403)
+    if caller.get('role') == ROLE_ADMIN:
+        return target, None
+    caller_t = caller.get('tenant_id') or DEFAULT_TENANT_ID
+    target_t = target.get('tenant_id') or DEFAULT_TENANT_ID
+    if caller_t != target_t:
+        return None, (jsonify({'error': 'Access denied'}), 403)
+    if role_tenant is not None and role_tenant != caller_t:
+        return None, (jsonify({'error': 'Access denied'}), 403)
+    return target, None
+
+
+def _roles_snapshot(username):
+    import pegaprox.utils.rbac as _rb
+    grants = _rb.get_user_role_grants(username)
+    return grants
+
+
+@bp.route('/api/users/<username>/roles', methods=['GET'])
+@require_auth(perms=['admin.users'])
+def roles_list(username):
+    """List a user's granted junction roles + effective tenant set."""
+    target, err = _roles_guard(username)
+    if err:
+        return err
+    grants = _roles_snapshot(username)
+    tset = sorted({g.get('tenant_id') for g in grants if g.get('tenant_id')})
+    primary_t = target.get('tenant_id') or DEFAULT_TENANT_ID
+    if target.get('role') != ROLE_ADMIN and primary_t not in tset:
+        tset = [primary_t] + tset
+    return jsonify({
+        'username': username,
+        'primary_role': target.get('role'),
+        'granted_roles': grants,
+        'role_tenants': tset,  # SRK (SPEC-2026-011 D6/A7): renamed from effective_tenants
+        'effective_tenants': tset,  # deprecated alias, remove next release
+    })
+
+
+@bp.route('/api/users/<username>/roles', methods=['PUT'])
+@require_auth(perms=['admin.users'])
+def roles_grant(username):
+    """Grant one tenant-pure role. Body: {"role": "<custom_role_name>"}"""
+    body = request.get_json(silent=True) or {}
+    role = (body.get('role') or '').strip()
+    if not role:
+        return jsonify({'error': 'role required'}), 400
+    r_tenant = _roles_tenant_of(role)
+    if r_tenant is None:
+        # invariant 2: role must exist in custom_roles; no wildcard/derived
+        return jsonify({'error': 'Unknown role'}), 404
+    target, err = _roles_guard(username, role_tenant=r_tenant)
+    if err:
+        return err
+    sess = getattr(request, 'session', {}) or {}
+    caller_name = sess.get('user', '')
+    db = get_db()
+    cur = db.conn.cursor()
+    # SRK (SPEC-2026-011 D6/A8): grant auto-memberships the role's tenant so
+    # role_tenants stay inside the effective set. The GUARD above stays
+    # home-pinned on purpose: membership alone never confers grant rights.
+    try:
+        import pegaprox.utils.rbac as _rbac_d6
+        if r_tenant not in _rbac_d6.get_user_tenant_memberships(username):
+            cur.execute(
+                'INSERT OR IGNORE INTO user_tenants '
+                '(username, tenant_id, granted_at, granted_by) VALUES (?, ?, ?, ?)',
+                (username, r_tenant, datetime.now().isoformat(), caller_name))
+            logging.info(f"[d6] auto-membership {username} -> {r_tenant}")
+    except Exception as _e:
+        logging.warning(f"[d6] auto-membership insert failed: {_e}")
+    try:
+        cur.execute(
+            'INSERT OR IGNORE INTO user_roles '
+            '(username, role_name, tenant_id, granted_at, granted_by) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (username, role, r_tenant,
+             datetime.now().isoformat(), caller_name)
+        )
+        db.conn.commit()
+        inserted = cur.rowcount or 0
+    except Exception as e:
+        return jsonify({'error': safe_error(e)}), 500
+    log_audit(caller_name, 'user.role.grant',
+              f"user={username} role={role} tenant={r_tenant}")
+    return jsonify({
+        'success': True,
+        'granted': bool(inserted),
+        'granted_roles': _roles_snapshot(username),
+    })
+
+
+@bp.route('/api/users/<username>/roles', methods=['DELETE'])
+@require_auth(perms=['admin.users'])
+def roles_revoke(username):
+    """Revoke one granted role. Body: {"role": "<custom_role_name>"}"""
+    body = request.get_json(silent=True) or {}
+    role = (body.get('role') or '').strip()
+    if not role:
+        return jsonify({'error': 'role required'}), 400
+    target, err = _roles_guard(username)
+    if err:
+        return err
+    if target.get('role') == role:
+        return jsonify({'error': 'Cannot revoke the primary role; '
+                        'change it via user edit'}), 400
+    sess = getattr(request, 'session', {}) or {}
+    caller_name = sess.get('user', '')
+    caller = load_users().get(caller_name, {})
+    scoped = caller.get('role') != ROLE_ADMIN
+    db = get_db()
+    cur = db.conn.cursor()
+    try:
+        if scoped:
+            cur.execute(
+                'DELETE FROM user_roles WHERE username = ? AND role_name = ? '
+                'AND tenant_id = ?',
+                (username, role, caller.get('tenant_id') or DEFAULT_TENANT_ID))
+        else:
+            cur.execute(
+                'DELETE FROM user_roles WHERE username = ? AND role_name = ?',
+                (username, role))
+        db.conn.commit()
+        removed = cur.rowcount or 0
+    except Exception as e:
+        return jsonify({'error': safe_error(e)}), 500
+    log_audit(caller_name, 'user.role.revoke',
+              f"user={username} role={role} removed={bool(removed)}")
+    return jsonify({
+        'success': True,
+        'revoked': bool(removed),
+        'granted_roles': _roles_snapshot(username),
+    })
+
+
+# -- SRK (SPEC-2026-011 D6): explicit multi-tenant membership API -----------
+@bp.route('/api/users/<username>/tenants', methods=['GET'])
+@require_auth(perms=['admin.users'])
+def tenants_list_d6(username):
+    """List a user's explicit tenant memberships + home tenant."""
+    target, err = _roles_guard(username)
+    if err:
+        return err
+    import pegaprox.utils.rbac as _rbac_d6
+    return jsonify({
+        'username': username,
+        'home_tenant': target.get('tenant_id', DEFAULT_TENANT_ID),
+        'granted_tenants': _rbac_d6.get_user_tenant_memberships(username),
+    })
+
+
+@bp.route('/api/users/<username>/tenants', methods=['PUT'])
+@require_auth(perms=['admin.users'])
+def tenants_grant_d6(username):
+    """Add a tenant membership. Body: {"tenant_id": "<id>"}"""
+    body = request.get_json(silent=True) or {}
+    tid = (body.get('tenant_id') or '').strip()
+    if not tid:
+        return jsonify({'error': 'tenant_id required'}), 400
+    # Q1: tenant must exist
+    if tid not in load_tenants():
+        return jsonify({'error': 'Unknown tenant'}), 404
+    target, err = _roles_guard(username)
+    if err:
+        return err
+    sess = getattr(request, 'session', {}) or {}
+    caller_name = sess.get('user', '')
+    caller = load_users().get(caller_name, {})
+    # Q1: non-admin caller needs a shared tenant with the target
+    if caller.get('role') != ROLE_ADMIN:
+        import pegaprox.utils.rbac as _rbac_d6
+        _cset = set(_rbac_d6.get_user_tenant_memberships(caller_name)) | {caller.get('tenant_id', DEFAULT_TENANT_ID)}
+        _tset = set(_rbac_d6.get_user_tenant_memberships(username)) | {target.get('tenant_id', DEFAULT_TENANT_ID)}
+        if not (_cset & _tset):
+            return jsonify({'error': 'Access denied: no shared tenant with this user'}), 403
+    db = get_db()
+    cur = db.conn.cursor()
+    try:
+        cur.execute(
+            'INSERT OR IGNORE INTO user_tenants '
+            '(username, tenant_id, granted_at, granted_by) VALUES (?, ?, ?, ?)',
+            (username, tid, datetime.now().isoformat(), caller_name))
+        db.conn.commit()
+        inserted = cur.rowcount or 0
+    except Exception as e:
+        return jsonify({'error': safe_error(e)}), 500
+    log_audit(caller_name, 'user.tenant.grant', f"user={username} tenant={tid}")
+    import pegaprox.utils.rbac as _rbac_d6
+    return jsonify({
+        'success': True,
+        'granted': bool(inserted),
+        'granted_tenants': _rbac_d6.get_user_tenant_memberships(username),
+    })
+
+
+@bp.route('/api/users/<username>/tenants', methods=['DELETE'])
+@require_auth(perms=['admin.users'])
+def tenants_revoke_d6(username):
+    """Remove a tenant membership. Body: {"tenant_id": "<id>"}
+
+    Role grants in the removed tenant stay in user_roles but go DORMANT (A10).
+    Removing the HOME tenant re-points users.tenant to the oldest remaining
+    membership (granted_at order) and re-adds the old home as a membership row
+    so nothing is silently lost."""
+    body = request.get_json(silent=True) or {}
+    tid = (body.get('tenant_id') or '').strip()
+    if not tid:
+        return jsonify({'error': 'tenant_id required'}), 400
+    target, err = _roles_guard(username)
+    if err:
+        return err
+    home = target.get('tenant_id', DEFAULT_TENANT_ID)
+    import pegaprox.utils.rbac as _rbac_d6
+    memberships = _rbac_d6.get_user_tenant_memberships(username)
+    remaining = [t for t in memberships if t != tid]
+    if tid not in memberships:
+        return jsonify({'error': 'Not a member of that tenant'}), 404
+    sess = getattr(request, 'session', {}) or {}
+    caller_name = sess.get('user', '')
+    new_home = None
+    if tid == home:
+        if not remaining:
+            return jsonify({'error': 'Cannot remove the last tenant'}), 400
+        new_home = remaining[0]
+        remaining = remaining[1:]
+        users_db = load_users()
+        users_db[username]['tenant_id'] = new_home
+        save_users(users_db)
+    db = get_db()
+    cur = db.conn.cursor()
+    try:
+        if new_home:
+            cur.execute(
+                'INSERT OR IGNORE INTO user_tenants '
+                '(username, tenant_id, granted_at, granted_by) VALUES (?, ?, ?, ?)',
+                (username, home, datetime.now().isoformat(), caller_name))
+        cur.execute('DELETE FROM user_tenants WHERE username = ? AND tenant_id = ?',
+                    (username, tid))
+        db.conn.commit()
+        removed = cur.rowcount or 0
+    except Exception as e:
+        return jsonify({'error': safe_error(e)}), 500
+    log_audit(caller_name, 'user.tenant.revoke',
+              f"user={username} tenant={tid} removed={bool(removed)}"
+              + (f" home_moved={home}->{new_home}" if new_home else ""))
+    return jsonify({
+        'success': True,
+        'removed': bool(removed),
+        'home_tenant': new_home or home,
+        'granted_tenants': _rbac_d6.get_user_tenant_memberships(username),
+    })

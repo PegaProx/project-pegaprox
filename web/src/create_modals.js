@@ -2378,6 +2378,7 @@
             const [newTokenRole, setNewTokenRole] = useState('');
             const [newTokenExpiry, setNewTokenExpiry] = useState('');
             const [createdToken, setCreatedToken] = useState(null);
+            const [mintableRoles, setMintableRoles] = useState([]);
             const [tokenCopied, setTokenCopied] = useState(false);
             
             // Password Policy state - NS Jan 2026
@@ -2512,11 +2513,36 @@
                     if (response.ok) {
                         const data = await response.json();
                         setTokens(data.tokens || []);
+                        fetchMintableRoles();
                     }
                 } catch (e) { console.error('fetchTokens error:', e); }
                 finally { setTokensLoading(false); }
             };
             
+            const fetchMintableRoles = async () => {
+                // SPEC-2026-011 hardening (2026-09-14): loud failure on BOTH
+                // paths (network + !ok), 1 retry — same contract as fetchRoles.
+                // A silent empty list here reads as "no roles pickable" and
+                // wasted a morning diagnosing a stale browser bundle.
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const response = await fetch(`${API_URL}/auth/tokens/mintable-roles`, {
+                            credentials: 'include',
+                            headers: getAuthHeaders()
+                        });
+                        if (response.ok) {
+                            const data = await response.json();
+                            setMintableRoles(data.roles || []);
+                            return;
+                        }
+                    } catch (e) { console.error('fetchMintableRoles error:', e); }
+                    if (attempt === 0) {
+                        if (addToast) addToast('Failed to load tenant roles — retrying…', 'error');
+                    }
+                }
+                if (addToast) addToast('Failed to load tenant roles — role picker limited to builtin', 'error');
+            };
+
             const createToken = async () => {
                 if (!newTokenName.trim()) return;
                 setLoading(true);
@@ -3407,7 +3433,6 @@
                                             </div>
                                             <div className={`grid ${user?.role === 'admin' ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
                                                 {/* NS: Only admins can pick a different role - everyone else gets their own */}
-                                                {user?.role === 'admin' && (
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">Role</label>
                                                     <select
@@ -3416,12 +3441,23 @@
                                                         className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm"
                                                     >
                                                         <option value="">Same as my role</option>
-                                                        <option value="viewer">Viewer</option>
-                                                        <option value="user">User</option>
-                                                        <option value="admin">Admin</option>
+                                                        {mintableRoles.length > 0 && (
+                                                            <optgroup label="My tenant roles">
+                                                                {mintableRoles.map(r => (
+                                                                    <option key={r.name} value={r.name}>{r.name} · {r.tenant_id}</option>
+                                                                ))}
+                                                            </optgroup>
+                                                        )}
+                                                        {user?.role === 'admin' && (
+                                                            <optgroup label="Builtin">
+                                                                <option value="viewer">Viewer</option>
+                                                                <option value="user">User</option>
+                                                                <option value="admin">Admin</option>
+                                                            </optgroup>
+                                                        )}
                                                     </select>
+                                                    <p className="text-xs text-gray-500 mt-1">One key per tenant role — each key is pinned to that role's tenant.</p>
                                                 </div>
-                                                )}
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">Expires (optional)</label>
                                                     <select
@@ -3473,6 +3509,11 @@
                                                                     token.role === 'user' ? 'bg-blue-500/20 text-blue-400' :
                                                                     'bg-gray-500/20 text-gray-400'
                                                                 }`}>{token.role}</span>
+                                                                {mintableRoles.some(r => r.name === token.role) && (
+                                                                    <span className="text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300">
+                                                                        {mintableRoles.find(r => r.name === token.role).tenant_id}
+                                                                    </span>
+                                                                )}
                                                                 {token.revoked ? <span className="text-xs text-red-400">revoked</span> : null}
                                                             </div>
                                                             <div className="text-xs text-gray-500 mt-1 flex gap-3 flex-wrap">
