@@ -16,9 +16,36 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, require_unconfined
+from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('datacenter', __name__)
+
+# MK Sep 2026 - every SDN id here arrives as a URL path segment and is then interpolated
+# into the PVE API path we speak with the cluster's stored root credential. requests
+# resolves dot segments before sending, so an id of ".." moves the whole PUT or DELETE one
+# level up the SDN tree and onto a sibling collection - measured, not assumed. The router
+# refuses a slash, so it is one level per request rather than the walk the snapshot name
+# allowed, but it is the same class and the same fix.
+#
+# Deliberately here rather than at each of the eighteen handlers: the nineteenth is the one
+# that would have been forgotten. subnet_id is excluded because it legitimately contains a
+# slash (it is a CIDR) and its handler already percent-encodes it.
+_SDN_ID_PARAMS = ('zone_id', 'vnet_id', 'fabric_id', 'controller_id', 'ipam_id', 'dns_id')
+
+
+@bp.before_request
+def _reject_unusable_sdn_ids():
+    from pegaprox.utils.sanitization import validate_sdn_id
+    for key in _SDN_ID_PARAMS:
+        val = (request.view_args or {}).get(key)
+        if val is not None and not validate_sdn_id(val):
+            logging.warning("[SDN] refused %s=%r on %s - not a usable SDN id",
+                            key, val, request.path)
+            return jsonify({'error': f'invalid {key}'}), 400
+    return None
+
 
 
 def _list_cluster_node_names(manager):
@@ -129,7 +156,7 @@ def _get_node_multipath_data(manager, node):
         def ssh_run(command, timeout=15):
             try:
                 stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout)
-                return stdout.read().decode('utf-8', errors='replace')
+                return _read_capped(stdout)
             except Exception as e:
                 logging.debug(f"[Multipath] exec failed on {node}: {e}")
                 return None
@@ -332,7 +359,12 @@ def setup_multipath(cluster_id):
         return error
 
     data = request.json or {}
-    target_nodes = data.get('nodes', [])  # Empty = all nodes
+    # MK Sep 2026 - one multipath.conf push per entry, and duplicates were pushed twice.
+    # Nothing bounded the array, so the request decided how much work the cluster did.
+    target_nodes, _lerr = bounded_list(data.get('nodes'), max_items=256, max_length=253,
+                                       name='nodes')
+    if _lerr:
+        return jsonify({'error': _lerr}), 400
     vendor = data.get('vendor', 'default')  # default, netapp, emc, hpe, pure, dell
     policy = data.get('policy', 'service-time')  # round-robin, service-time, queue-length
     # NS Aug 2026 (Aikido pentest) — policy is interpolated raw into `path_selector "{policy} 0"`
@@ -389,8 +421,8 @@ def setup_multipath(cluster_id):
                 def _exec(cmd, timeout=30):
                     """Run command, return (rc, stdout, stderr)"""
                     stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
-                    out = stdout.read().decode('utf-8', errors='replace')
-                    err = stderr.read().decode('utf-8', errors='replace')
+                    out = _read_capped(stdout)
+                    err = _read_capped(stderr)
                     rc = stdout.channel.recv_exit_status()
                     return rc, out, err
 
@@ -674,8 +706,8 @@ def reconfigure_multipath(cluster_id, node):
 
         # Reconfigure multipath
         stdin, stdout, stderr = ssh.exec_command('multipathd reconfigure && sleep 2 && multipath -ll', timeout=60)
-        out = stdout.read().decode('utf-8', errors='replace')
-        err = stderr.read().decode('utf-8', errors='replace')
+        out = _read_capped(stdout)
+        err = _read_capped(stderr)
         rc = stdout.channel.recv_exit_status()
 
         user = getattr(request, 'session', {}).get('user', 'system')
@@ -835,8 +867,8 @@ def login_iscsi_target(cluster_id, node):
 
         def _exec(cmd, timeout=30):
             stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
-            out = stdout.read().decode('utf-8', errors='replace')
-            err = stderr.read().decode('utf-8', errors='replace')
+            out = _read_capped(stdout)
+            err = _read_capped(stderr)
             rc = stdout.channel.recv_exit_status()
             return rc, out, err
 

@@ -394,10 +394,10 @@ def check_cluster_access(cluster_id):
     if allowed is not None and cluster_id not in allowed:
         # #248: check VM ACLs as fallback — users with VM-level access can reach the cluster
         username = request.session.get('user', '')
-        from pegaprox.utils.rbac import load_vm_acls
+        from pegaprox.utils.rbac import load_vm_acls, acl_grants_user
         cluster_acls = load_vm_acls().get(cluster_id, {})
         for vmid, acl in cluster_acls.items():
-            if username in acl.get('users', []) or '*' in acl.get('users', []):
+            if acl_grants_user(acl, username):
                 return True, None
         # #555: pool fallback — any pool grant in THIS cluster lets the user reach it
         # (per-VM gating still runs downstream via user_can_access_vm)
@@ -428,7 +428,8 @@ def caller_is_scoped(user, cluster_id):
     treated a portal user as a cluster-wide operator and handed back the whole cluster. Centralised
     here so the rule can't drift between call sites again."""
     from pegaprox.models.permissions import ROLE_ADMIN
-    from pegaprox.utils.rbac import get_user_clusters, user_has_any_pool_access, get_vm_acls
+    from pegaprox.utils.rbac import (get_user_clusters, user_has_any_pool_access, get_vm_acls,
+                                     acls_unavailable, acl_grants_user)
     if not user:
         return True   # unknown identity → treat as confined (fail closed)
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
@@ -443,8 +444,16 @@ def caller_is_scoped(user, cluster_id):
         return True
     username = user.get('username', '')
     try:
-        for _vmid, acl in (get_vm_acls().get(cluster_id, {}) or {}).items():
-            if username in (acl.get('users') or []):
+        _acls = get_vm_acls()
+        if acls_unavailable(_acls):
+            # the store no longer raises on a failed read, it answers with an empty
+            # snapshot - which would walk past this loop and report "not confined".
+            # Same answer as the except below: cannot tell, so treat as confined.
+            return True
+        for _vmid, acl in (_acls.get(cluster_id, {}) or {}).items():
+            # the wildcard counts here too: a user whose only reach is a '*' row is
+            # still confined to that row's VM, not a cluster-wide operator
+            if acl_grants_user(acl, username):
                 return True
     except Exception:
         return True
@@ -571,7 +580,12 @@ def check_vmware_access(vmware_id):
     linked = getattr(vmware_managers[vmware_id], 'linked_clusters', None) or []
     if not linked:
         return True, None   # backward-compat: unlinked server is accessible to all
-    uc = get_user_clusters(user)
+    # MK Sep 2026 - include_pools=False. get_user_clusters() with pools counts a cluster
+    # the caller only REACHES through a pool grant, so holding one pool on a Proxmox
+    # cluster that happens to be linked here handed them the ESXi server's whole
+    # inventory. A pool grant is a claim on VMs inside that cluster, not a claim on the
+    # server it is linked to; tenant ownership is the right question for that boundary.
+    uc = get_user_clusters(user, include_pools=False)
     if uc is None:
         return True, None
     if any(c in uc for c in linked):

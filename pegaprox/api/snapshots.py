@@ -87,14 +87,30 @@ def _row_to_policy(r):
     }
 
 
+class TargetResolutionFailed(Exception):
+    """The cluster could not say what this policy points at.
+
+    MK Sep 2026 - this used to be an empty target list, and both the create and the
+    update handler authorize a policy by walking its resolved targets: no targets
+    means nothing to deny, so a failed inventory fetch let a policy be pointed at VMs
+    the caller cannot touch without a single check running. The offline branch of the
+    update handler already fails closed for a scoped caller; this makes the
+    manager-is-here-but-did-not-answer case behave the same way.
+    """
+
+
 def _resolve_targets(mgr, policy):
-    """Return list of (node, vmid, vm_type) tuples that match the policy."""
+    """Return list of (node, vmid, vm_type) tuples that match the policy.
+
+    Raises TargetResolutionFailed when the inventory could not be read - an empty
+    list means "nothing matches", never "I could not look".
+    """
     targets = []
     try:
         resources = mgr.get_vm_resources() or []
     except Exception as e:
         logging.warning(f"[snap-sched] get_vm_resources failed: {e}")
-        return targets
+        raise TargetResolutionFailed(str(e)) from e
 
     if policy['target_type'] == 'vm':
         wanted = {x.strip() for x in (policy['target_value'] or '').split(',') if x.strip()}
@@ -376,7 +392,17 @@ def _execute_policy(policy_id, force=False):
         db.conn.commit()
         return
 
-    targets = _resolve_targets(mgr, policy)
+    try:
+        targets = _resolve_targets(mgr, policy)
+    except TargetResolutionFailed as e:
+        # do not snapshot a guessed target set
+        log_lines.append(f'could not resolve targets: {e}')
+        c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?, summary=?
+                     WHERE id=?''',
+                  (datetime.now().isoformat(), '\n'.join(log_lines),
+                   'target resolution failed', run_id))
+        db.conn.commit()
+        return
     log_lines.append(f"resolved {len(targets)} target VMs")
 
     # MK Jun 2026 (sec-review): a tag/all-VMs policy must only snapshot VMs its creator
@@ -391,10 +417,27 @@ def _execute_policy(policy_id, force=False):
             if policy_creator:
                 policy_creator['username'] = creator_name
             else:
-                log_lines.append(f"creator '{creator_name}' no longer exists — per-VM authz not applied")
+                # MK Sep 2026 - this said "per-VM authz not applied" and then ran the
+                # policy over every resolved target. An off-boarded account's policy
+                # therefore kept snapshotting VMs its creator was never allowed to
+                # touch. require_auth() already fails closed on a deleted account; a
+                # policy acting in that account's name has to do the same.
+                log_lines.append(f"creator '{creator_name}' no longer exists - refusing to run "
+                                 f"this policy unscoped")
+                c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?,
+                             summary=? WHERE id=?''',
+                          (datetime.now().isoformat(), '\n'.join(log_lines),
+                           'policy creator no longer exists', run_id))
+                db.conn.commit()
+                return
         except Exception as e:
-            log_lines.append(f"could not load creator for authz (running unfiltered): {e}")
-            policy_creator = None
+            log_lines.append(f"could not load the creator to scope this run: {e}")
+            c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?,
+                         summary=? WHERE id=?''',
+                      (datetime.now().isoformat(), '\n'.join(log_lines),
+                       'creator lookup failed', run_id))
+            db.conn.commit()
+            return
     else:
         log_lines.append('policy has no recorded creator — per-VM authz not applied (legacy policy)')
 

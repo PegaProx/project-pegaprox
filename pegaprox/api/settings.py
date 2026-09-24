@@ -150,7 +150,7 @@ def get_security_status():
                 'enabled': API_RATE_LIMIT > 0,
                 'requests_per_window': API_RATE_LIMIT,
                 'window_seconds': API_RATE_WINDOW,
-                'active_clients': len(api_request_counts),
+                'active_clients': len(api_rate_window),
             }
         },
         'session_management': {
@@ -3213,29 +3213,27 @@ def get_cluster_audit_log_api(cluster_id):
     # keep the full log (mirrors the /clusters/<id>/tasks confinement). vmids are detected from the
     # entry's free-text details with the same patterns the ?vmid filter above uses.
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import (get_user_clusters as _guc, user_has_any_pool_access as _uhpa,
-                                     get_user_pool_vmids as _gupv, get_vm_acls as _gva)
+    from pegaprox.utils.rbac import get_user_pool_vmids as _gupv, get_vm_acls as _gva
     _au = build_authz_user(request.session.get('user', ''), request.session)
-    if True:
-        from pegaprox.api.helpers import caller_is_scoped
-        if caller_is_scoped(_au, cluster_id):
-            _acc = set(_gupv(_au, cluster_id) or [])
-            for _v, _a in (_gva().get(cluster_id, {}) or {}).items():
-                if _au.get('username') in (_a.get('users') or []) and str(_v).lstrip('-').isdigit():
-                    _acc.add(int(_v))
+    from pegaprox.api.helpers import caller_is_scoped
+    if caller_is_scoped(_au, cluster_id):
+        _acc = set(_gupv(_au, cluster_id) or [])
+        for _v, _a in (_gva().get(cluster_id, {}) or {}).items():
+            if _au.get('username') in (_a.get('users') or []) and str(_v).lstrip('-').isdigit():
+                _acc.add(int(_v))
 
-            def _mentions_accessible(_d):
-                for _vid in _acc:
-                    s = str(_vid)
-                    for p in (f"VM {s} ", f"VM {s}-", f"VM {s})", f"CT {s} ", f"CT {s}-", f"CT {s})",
-                              f"QEMU {s} ", f"LXC {s} ", f"/{s} ", f"/{s})", f"qemu/{s}", f"lxc/{s}"):
-                        if p in _d:
-                            return True
-                    if _d.endswith((f"VM {s}", f"CT {s}", f"QEMU {s}", f"LXC {s}")):
+        def _mentions_accessible(_d):
+            for _vid in _acc:
+                s = str(_vid)
+                for p in (f"VM {s} ", f"VM {s}-", f"VM {s})", f"CT {s} ", f"CT {s}-", f"CT {s})",
+                          f"QEMU {s} ", f"LXC {s} ", f"/{s} ", f"/{s})", f"qemu/{s}", f"lxc/{s}"):
+                    if p in _d:
                         return True
-                return False
+                if _d.endswith((f"VM {s}", f"CT {s}", f"QEMU {s}", f"LXC {s}")):
+                    return True
+            return False
 
-            filtered = [e for e in filtered if _mentions_accessible(e.get('details', ''))]
+        filtered = [e for e in filtered if _mentions_accessible(e.get('details', ''))]
 
     return jsonify(filtered)
 
@@ -4266,6 +4264,16 @@ def start_rolling_update(cluster_id):
     
     # Configuration options
     include_reboot = data.get('include_reboot', False)
+    # MK Sep 2026 - node.reboot is a permission this product defines, ships in the
+    # tenant-admin template and enforced in exactly no route, so an operator who built a
+    # role with node.update and deliberately withheld node.reboot still got their nodes
+    # rebooted. Asked for only when the run will actually reboot one, so an update-only
+    # rolling pass keeps working on node.update alone.
+    if include_reboot:
+        from pegaprox.utils.rbac import has_permission as _hasp
+        from pegaprox.utils.auth import build_authz_user as _bau
+        if not _hasp(_bau(request.session.get('user', ''), request.session), 'node.reboot'):
+            return jsonify({'error': 'Rebooting nodes needs the node.reboot permission'}), 403
     node_order = data.get('node_order', None)
     skip_up_to_date = data.get('skip_up_to_date', True)
     force_all = data.get('force_all', False)

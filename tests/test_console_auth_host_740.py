@@ -70,3 +70,52 @@ def test_mint_returns_none_for_token_only_cluster():
     m = _mgr('10.0.0.1', '10.0.0.2')
     m.config.pass_ = None  # token-registered cluster: nothing to mint a session ticket with
     assert m.mint_console_auth_ticket() is None
+
+
+# MK Sep 2026 — the rule above is "never PREFER the fallback", not "never reach it".
+# Pinning the mint to the registered node meant that once that node actually went away,
+# console and the RFB screenshot fallback died and stayed dead while every other call
+# followed current_host and kept working. Measured on a live cluster: the registered host
+# refused TCP outright, the three fallbacks answered in ~3s, and a screenshot request sat
+# there for 52s before giving up. These two tests keep both halves honest.
+
+def test_an_unreachable_registered_node_does_not_end_the_story():
+    m = _mgr('10.0.0.1', '10.0.0.2')
+    m.config.fallback_hosts = ['10.0.0.9']
+    seen = []
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            return json.dumps({'data': {'ticket': 'PVE:tkt', 'CSRFPreventionToken': 'x'}}).encode()
+
+    def _fake_urlopen(req, *a, **k):
+        seen.append(req.full_url)
+        if '10.0.0.1' in req.full_url:
+            raise TimeoutError("registered node is down")
+        return _Resp()
+
+    with mock.patch('urllib.request.urlopen', _fake_urlopen):
+        assert m.mint_console_auth_ticket() == 'PVE:tkt'
+
+    assert '10.0.0.1' in seen[0], "the registered node must still be asked first"
+    assert len(seen) > 1, "gave up instead of trying a node that was actually up"
+
+
+def test_a_rejection_still_stops_at_the_registered_node():
+    """The #740.2 hazard itself: if the account isn't valid, walking the cluster would just
+    produce a burst of failed logins. A 401 is an answer, not a reachability problem."""
+    import urllib.error
+    m = _mgr('10.0.0.1', '10.0.0.2')
+    m.config.fallback_hosts = ['10.0.0.9']
+    seen = []
+
+    def _fake_urlopen(req, *a, **k):
+        seen.append(req.full_url)
+        raise urllib.error.HTTPError(req.full_url, 401, 'denied', {}, None)
+
+    with mock.patch('urllib.request.urlopen', _fake_urlopen):
+        assert m.mint_console_auth_ticket() is None
+
+    assert len(seen) == 1, f"sprayed logins across the cluster after a 401: {seen}"

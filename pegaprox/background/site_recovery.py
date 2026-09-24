@@ -13,6 +13,7 @@ from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # MK #338693885 (Aikido CWE-117): plan name is request-body-controlled → strip CR/LF before any log/audit/SSE line
+from pegaprox.utils.sanitization import redact_url
 
 logger = logging.getLogger('pegaprox.site_recovery')
 
@@ -52,10 +53,20 @@ def _fire_webhook(url):
             return
         # M-8: don't follow a 30x to an internal host (the guard above only
         # validates the first hop).
-        requests.post(url, json={'event': 'site_recovery', 'timestamp': datetime.utcnow().isoformat()},
-                      timeout=30, allow_redirects=False)
+        # MK Sep 2026 - nothing here reads the response, but without stream=True requests
+        # downloads the whole body anyway. The URL is operator-configured and the guard
+        # above only decides where it may point, not what comes back, so a webhook that
+        # answers with a gigabyte would take the failover worker with it. Ask for the
+        # headers, then close.
+        _wh = requests.post(url, json={'event': 'site_recovery',
+                                       'timestamp': datetime.utcnow().isoformat()},
+                            timeout=30, allow_redirects=False, stream=True)
+        _wh.close()
     except Exception as e:
-        logger.warning(f"[SR] Webhook failed: {url} - {e}")
+        # MK Sep 2026 - a Slack or Teams webhook URL has no userinfo: the secret IS the
+        # path, and this printed the whole thing on every failure. The exception text can
+        # carry it too, so both go through the redactor.
+        logger.warning(f"[SR] Webhook failed: {redact_url(url)} - {redact_url(str(e))}")
 
 
 # NS 2026-04-24 — pre-flight validation. Real-world cause of most "Site Recovery failed
@@ -336,6 +347,38 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         return False, str(e)
 
 
+def _source_vm_is_running(src_mgr, vmid):
+    """(running, checked) for the source guest.
+
+    MK Sep 2026 - emergency failover starts the replica on the target while the source is
+    presumed gone. If the source is in fact still up, both guests now run with the same
+    identity on the same replicated disks, and whichever the storage believes last wins.
+
+    The important half is what happens when we CANNOT look: that is the network partition,
+    which is the case emergency failover exists for. Refusing there would block the one
+    scenario the feature is for, so unreachable means proceed - loudly. Only a source we
+    can see AND that is still running gets refused, because that is not an emergency, it
+    is a planned failover somebody clicked the wrong button for.
+
+    Returns (running, checked). checked=False means we could not tell.
+    """
+    if not src_mgr or not getattr(src_mgr, 'is_connected', False):
+        return False, False
+    try:
+        res = src_mgr._api_get(
+            f"https://{src_mgr.host}:{src_mgr.api_port}/api2/json/cluster/resources",
+            params={'type': 'vm'})
+        if res.status_code != 200:
+            return False, False
+        for r in res.json().get('data', []):
+            if int(r.get('vmid', 0)) == int(vmid):
+                return r.get('status') == 'running', True
+        return False, True          # gone from the source entirely: nothing to collide with
+    except Exception as e:
+        logger.debug(f"[SR] could not read source state for {vmid}: {e}")
+        return False, False
+
+
 def _start_replicated_vm(tgt_mgr, vmid, vm_type='qemu'):
     """Start a replicated VM on target (emergency failover).
     The VM should already exist on target from replication.
@@ -399,40 +442,52 @@ def _disconnect_test_nics(tgt_mgr, node, vmid, vm_type='qemu'):
     'unplugged' (link_down=1) so the isolated test can't collide with production
     IPs on the live network. QEMU-only (link_down is a KVM NIC property); a no-op
     for LXC. Runs while the clone is still stopped, so it boots disconnected.
-    Returns the number of NICs disconnected."""
+
+    MK Sep 2026 - used to return a bare count, and the caller threw it away and started the
+    clone regardless. A count cannot tell "this guest has no NICs" from "we could not read
+    its config", and both came back as 0 - so the one failure mode that matters, a test
+    clone coming up with live NICs as a twin of a running production VM, looked exactly
+    like success. Returns {'ok', 'disconnected', 'total', 'unsupported', 'error'} now and
+    the caller treats not-ok as a reason not to start.
+    """
     if vm_type != 'qemu':
-        return 0
+        # link_down is a KVM NIC property; there is no equivalent for a container here.
+        return {'ok': True, 'disconnected': 0, 'total': 0, 'unsupported': True, 'error': ''}
     try:
         res = tgt_mgr.get_vm_config(node, int(vmid), vm_type)
     except Exception as e:
         logger.warning(f"[SR] link-down: cannot read config for test VM {vmid}: {e}")
-        return 0
+        return {'ok': False, 'disconnected': 0, 'total': 0, 'unsupported': False,
+                'error': f'config unreadable: {e}'}
     # get_vm_config returns {'success': True, 'config': parsed}; the flat netN
     # keys live in config['raw'] (parsed itself only has grouped sections).
     if not isinstance(res, dict) or not res.get('success'):
-        logger.warning(f"[SR] link-down: get_vm_config failed for test VM {vmid}: "
-                       f"{res.get('error') if isinstance(res, dict) else res}")
-        return 0
+        _why = res.get('error') if isinstance(res, dict) else res
+        logger.warning(f"[SR] link-down: get_vm_config failed for test VM {vmid}: {_why}")
+        return {'ok': False, 'disconnected': 0, 'total': 0, 'unsupported': False,
+                'error': f'config unavailable: {_why}'}
     cfg = res.get('config') or {}
     raw = cfg.get('raw', cfg)
-    n = 0
-    for key in list(raw.keys()):
-        # netN entries are the VM's virtual NICs (net0, net1, ...)
-        if key.startswith('net') and key[3:].isdigit():
-            try:
-                res = tgt_mgr.toggle_network_link(node, int(vmid), key, True)
-                if not isinstance(res, dict) or res.get('success', True) is not False:
-                    n += 1
-                else:
-                    logger.warning(f"[SR] link-down: {key} on test VM {vmid} failed: {res.get('error')}")
-            except Exception as e:
-                logger.warning(f"[SR] link-down: {key} on test VM {vmid} raised: {e}")
+    nics = [k for k in raw.keys() if k.startswith('net') and k[3:].isdigit()]
+    n, failed = 0, []
+    for key in nics:
+        try:
+            r = tgt_mgr.toggle_network_link(node, int(vmid), key, True)
+            if not isinstance(r, dict) or r.get('success', True) is not False:
+                n += 1
+            else:
+                failed.append(f"{key}: {r.get('error')}")
+                logger.warning(f"[SR] link-down: {key} on test VM {vmid} failed: {r.get('error')}")
+        except Exception as e:
+            failed.append(f"{key}: {e}")
+            logger.warning(f"[SR] link-down: {key} on test VM {vmid} raised: {e}")
     if n:
-        logger.info(f"[SR] Test VM {vmid}: started with {n} NIC(s) disconnected (link_down)")
-    return n
+        logger.info(f"[SR] Test VM {vmid}: {n} of {len(nics)} NIC(s) disconnected (link_down)")
+    return {'ok': not failed, 'disconnected': n, 'total': len(nics),
+            'unsupported': False, 'error': '; '.join(failed)}
 
 
-def execute_failover(plan_id, failover_type='planned'):
+def execute_failover(plan_id, failover_type='planned', authorized_vmids=None):
     """Main failover orchestrator. Runs in greenlet.
 
     failover_type: 'planned', 'emergency', 'failback'
@@ -444,6 +499,18 @@ def execute_failover(plan_id, failover_type='planned'):
 
     event_id = _create_event(plan_id, failover_type)
     vms = _get_plan_vms(plan_id)
+    # MK Sep 2026 - the route authorized a VM list and then spawned us, and we read the
+    # list again from the database. Anything added in between - by a second request, or by
+    # the same caller racing their own approval - was acted on without ever being
+    # authorized. Work on the intersection with what was actually approved. None means an
+    # internal caller (the scheduler) that has no per-request authorization to carry.
+    if authorized_vmids is not None:
+        _approved = {str(v) for v in authorized_vmids}
+        _before = len(vms)
+        vms = [v for v in vms if str(v.get('vmid')) in _approved]
+        if len(vms) != _before:
+            logger.warning(f"[SR] plan {plan_id}: {_before - len(vms)} VM(s) were added "
+                           f"after authorization and are excluded from this failover")
     boot_groups = _group_vms_by_boot(vms)
     results = {}
     failed = False
@@ -510,7 +577,18 @@ def execute_failover(plan_id, failover_type='planned'):
                 # source is down - start replicated VM on target
                 logger.info(f"[SR] Emergency: starting {_sl(vm_name)} ({vmid}) on target")
                 _broadcast_progress(plan_id, f"Starting {_sl(vm_name)} on target...", int(completed / total_vms * 100))
-                ok, err = _start_replicated_vm(tgt_mgr, vmid, vm_type)
+                _running, _checked = _source_vm_is_running(src_mgr, vmid)
+                if _running:
+                    ok, err = False, ("source guest is still running - this is not an "
+                                      "emergency; stop it or use planned failover")
+                    logger.error(f"[SR] refusing emergency start of {_sl(vm_name)} ({vmid}): "
+                                 f"the source is reachable and the guest is running")
+                else:
+                    if not _checked:
+                        logger.warning(f"[SR] source state for {vmid} could not be verified "
+                                       f"(cluster unreachable) - starting the replica anyway, "
+                                       f"which is what emergency failover is for")
+                    ok, err = _start_replicated_vm(tgt_mgr, vmid, vm_type)
             else:
                 # planned or failback - live migrate
                 if not src_mgr or not src_mgr.is_connected:
@@ -664,8 +742,28 @@ def execute_test_failover(plan_id):
                                 test_vmids.append({'vmid': test_vmid, 'vm_type': vtype})
                                 # MK Jul 2026 (#413) — optionally disconnect every NIC
                                 # BEFORE start so the test clone can't grab a live IP.
+                                _iso = None
                                 if plan.get('test_disconnect_nics'):
-                                    _disconnect_test_nics(tgt_mgr, node_name, test_vmid, vtype)
+                                    _iso = _disconnect_test_nics(tgt_mgr, node_name, test_vmid, vtype)
+                                    if not _iso.get('ok'):
+                                        # The operator asked for isolation. Starting anyway is
+                                        # the one outcome a TEST failover must never produce:
+                                        # a clone of a running production guest, on its network,
+                                        # with its addresses. Leave it stopped and say why.
+                                        logger.error(
+                                            f"[SR] Test failover: NIC isolation failed for test VM "
+                                            f"{test_vmid} ({_iso.get('error')}) - leaving it stopped")
+                                        results[str(vmid)] = {
+                                            'success': False, 'test_vmid': test_vmid,
+                                            'error': f"cloned OK but NIC isolation failed, not started: "
+                                                     f"{_iso.get('error')}"}
+                                        found = True
+                                        break
+                                    if _iso.get('unsupported'):
+                                        logger.warning(
+                                            f"[SR] Test failover: NIC isolation was requested but "
+                                            f"link_down does not exist for {vtype} - test CT "
+                                            f"{test_vmid} starts on the live network")
                                 # NS Apr 2026: was start_vm() which doesn't exist — use vm_action
                                 start_res = tgt_mgr.vm_action(node_name, test_vmid, vtype, 'start')
                                 if start_res.get('success'):
@@ -861,6 +959,38 @@ def _heartbeat_check():
         timeout = plan.get('failover_timeout', 120)
 
         if elapsed >= timeout:
+            # MK Sep 2026 - "I cannot reach the source" and "the source is down" are not the
+            # same statement, and starting the replicas on the strength of the first one is
+            # how you get two copies of a guest writing to their own disks. We cannot fence
+            # the source: it is unreachable, that is the whole premise. What we CAN do is
+            # notice when the problem is at our end - if this management plane cannot reach
+            # ANY cluster right now, the far more likely explanation is our own network, and
+            # the source is sitting there running happily.
+            _others = [cid for cid in cluster_managers
+                       if cid not in (plan['source_cluster'], plan.get('target_cluster'))]
+            if _others:
+                _any_other_up = any(
+                    getattr(cluster_managers.get(cid), 'is_connected', False) for cid in _others)
+                if not _any_other_up:
+                    logger.error(
+                        f"[SR] BLOCKING auto-failover for '{_sl(plan['name'])}': this server "
+                        f"cannot reach any of its {len(_others)} other cluster(s) either, so the "
+                        f"source is probably up and we are the ones isolated. Starting the "
+                        f"replicas now would run the same guests twice.")
+                    log_audit('system', 'site_recovery.auto_failover_blocked',
+                              f"Auto-failover for '{_sl(plan['name'])}' blocked: management "
+                              f"plane is isolated from every cluster")
+                    _cooldowns[plan_id] = now + 300
+                    continue
+            # the target has to be reachable too - failing over into a cluster we cannot talk
+            # to accomplishes nothing and leaves the plan in 'running'
+            _tgt_mgr = cluster_managers.get(plan.get('target_cluster'))
+            if _tgt_mgr is not None and not getattr(_tgt_mgr, 'is_connected', False):
+                logger.error(f"[SR] BLOCKING auto-failover for '{_sl(plan['name'])}': the "
+                             f"target cluster is not reachable either")
+                _cooldowns[plan_id] = now + 300
+                continue
+
             # NS Apr 2026: before auto-failover, verify every VM in plan has a healthy recent
             # replication. Otherwise we'd start VMs that were never copied, or worse, stale copies.
             vms = db.query("SELECT * FROM site_recovery_vms WHERE plan_id = ?", (plan_id,))

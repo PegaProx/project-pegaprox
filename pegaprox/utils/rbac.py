@@ -24,6 +24,34 @@ from pegaprox.models.permissions import (
 )
 from pegaprox.core.db import get_db
 
+class _Snapshot(dict):
+    """A snapshot of a store that knows whether it is real.
+
+    Both loaders in this file answered `{}` for two different things: "this install
+    has none configured" and "the store did not load". Read as the former, an empty
+    answer WIDENS - an ACL-scoped user falls through to their role on the whole
+    cluster - and, worse, the writers here start with a DELETE and hand that empty
+    answer straight back to the table. MK Sep 2026
+    """
+    __slots__ = ('unavailable',)
+
+    def __init__(self, *args, unavailable=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unavailable = unavailable
+
+
+def store_unavailable(snapshot) -> bool:
+    """True when this is an "I could not read it", not an empty store.
+
+    Tolerates a plain dict from a caller that built one itself.
+    """
+    return bool(getattr(snapshot, 'unavailable', False))
+
+
+# the ACL paths were written against this name first; keep it reading naturally there
+acls_unavailable = store_unavailable
+
+
 def load_custom_roles() -> dict:
     """Load custom roles from SQLite database
     
@@ -74,20 +102,29 @@ def load_custom_roles() -> dict:
                 # Global role
                 global_roles[row['name']] = role_data
         
-        return {'global': global_roles, 'tenants': tenant_roles}
+        return _Snapshot({'global': global_roles, 'tenants': tenant_roles})
     except Exception as e:
         logging.error(f"Error loading custom roles from database: {e}")
         # NS May 2026 - plain-JSON CUSTOM_ROLES_FILE fallback removed (encrypted DB only).
 
-    return {'global': {}, 'tenants': {}}
+    # NOT "this install has no custom roles" - we could not read them.
+    return _Snapshot({'global': {}, 'tenants': {}}, unavailable=True)
 
 
 def save_custom_roles(roles: dict):
-    """Save custom roles to SQLite database
+    """Save custom roles to SQLite database. True when the table was rewritten.
     
     uses SQLite now
     """
-    # SRK (SPEC-2026-010 P1): role-deletion guard, BEFORE the try/except so a
+    if store_unavailable(roles):
+        # this starts with a DELETE; writing back a snapshot that never loaded would
+        # drop every custom role in the installation, in every tenant, and leave the
+        # accounts bound to them with nothing to resolve against.
+        logging.error("[RBAC] refusing to rewrite custom_roles from a snapshot that "
+                      "failed to load")
+        return False
+
+    # SRK (SPEC-2026-010 P1, 110lymph): role-deletion guard, BEFORE the try/except so a
     # blocked delete surfaces as an error instead of being swallowed into the
     # log. This function REWRITES custom_roles wholesale (DELETE+reinsert), so a
     # DB-level FK from user_roles is impossible; the "role with live grants must
@@ -112,6 +149,7 @@ def save_custom_roles(roles: dict):
         raise
     except Exception as _e:
         logging.error(f"[user_roles] grant-guard check failed: {_e}")
+
 
     try:
         db = get_db()
@@ -150,8 +188,14 @@ def save_custom_roles(roles: dict):
                 ))
         
         db.conn.commit()
+        return True
     except Exception as e:
+        try:
+            get_db().conn.rollback()
+        except Exception:
+            pass
         logging.error(f"Failed to save custom roles: {e}")
+        return False
 
 # cache
 _custom_roles_cache = None
@@ -159,7 +203,14 @@ _custom_roles_cache = None
 def get_custom_roles():
     global _custom_roles_cache
     if _custom_roles_cache is None:
-        _custom_roles_cache = load_custom_roles()
+        fresh = load_custom_roles()
+        if store_unavailable(fresh):
+            # this cache has no TTL - it is filled once and kept until something
+            # invalidates it. Pinning a failed load here would leave every
+            # custom-role account with no permissions until the next restart, and
+            # hand the empty snapshot to the next writer.
+            return fresh
+        _custom_roles_cache = fresh
     return _custom_roles_cache
 
 def invalidate_roles_cache():
@@ -218,15 +269,21 @@ def load_tenants() -> dict:
     try:
         db = get_db()
         tenants_list = db.get_all_tenants()
-        
-        if tenants_list:
-            # Convert list to dict format
-            return {t['id']: t for t in tenants_list}
     except Exception as e:
         logging.error(f"Error loading tenants from database: {e}")
         # NS May 2026 - plain-JSON TENANTS_FILE fallback removed (encrypted DB only).
+        # MK Sep 2026 - this used to fall through to "create the default tenant", and the
+        # default tenant's empty cluster list is the one that means ALL clusters. So a
+        # single unreadable row handed every default-tenant user the whole estate, and
+        # then SAVED that invented tenant over whatever an operator had confined it to.
+        # Unreadable is not empty. Say which one it was and let the callers decide.
+        return _Snapshot(unavailable=True)
 
-    # Create default tenant
+    if tenants_list:
+        # Convert list to dict format
+        return _Snapshot({t['id']: t for t in tenants_list})
+
+    # nothing stored and the read succeeded, so this really is a fresh install
     default = {
         DEFAULT_TENANT_ID: {
             'id': DEFAULT_TENANT_ID,
@@ -236,7 +293,7 @@ def load_tenants() -> dict:
         }
     }
     save_tenants(default)
-    return default
+    return _Snapshot(default)
 
 
 def save_tenants(tenants: dict):
@@ -428,6 +485,20 @@ def get_user_permissions(user: dict, tenant_id: str = None) -> list:
         _cap = set(get_role_permissions_for_user({'role': _eff}, _tenant_defining_role(_eff, tenant_id)))
         base_perms = [p for p in base_perms if p in _cap]
 
+    # MK Sep 2026 - and cap by what the OWNER holds right now. The block above caps by the
+    # token's own role, which is the right ceiling only while the owner still outranks it.
+    # A token bound to a custom role never went through the numeric floor in
+    # build_authz_user, so demoting its owner, stripping one of their permissions, or
+    # editing the custom role itself left the token resolving through the old, larger set.
+    # require_auth re-floors BUILTIN token roles on every request; this is the same
+    # promise for custom ones, and it is evaluated per-tenant because that is the only
+    # place the answer is actually decidable.
+    if user.get('_token_owner_capped'):
+        _owner = {k: v for k, v in user.items()
+                  if k not in ('effective_role', '_token_owner_capped')}
+        _owner_perms = set(get_user_permissions(_owner, tenant_id))
+        base_perms = [p for p in base_perms if p in _owner_perms]
+
     return base_perms
 
 def has_permission(user: dict, permission: str, tenant_id: str = None) -> bool:
@@ -476,6 +547,14 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     # restricted to viewer/user doesn't inherit the owner's all-cluster access.
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return None  # None means all clusters
+
+    # MK Sep 2026 - we could not read the tenant table, so we do not know what this caller
+    # is confined to. A default-tenant user would otherwise land on the empty-clusters
+    # branch below and be handed every cluster. Nobody gets widened on a failed read; a
+    # tenant with no clusters already answers [] and this matches it.
+    if store_unavailable(tenants_db):
+        tenants_db = {}      # never keep a failed read around
+        return []
 
     tenant_id = user.get('tenant_id', DEFAULT_TENANT_ID)
 
@@ -553,12 +632,16 @@ def filter_clusters_for_user(clusters: dict, user: dict) -> dict:
     return {k: v for k, v in clusters.items() if k in allowed}
 
 
-def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, force=False):
+def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, add_disk_gb=0, force=False):
     """#502 — sum a tenant's current resource usage across its clusters and decide
-    whether adding (add_cores, add_mem_gb, add_vms) would exceed its quota.
+    whether adding (add_cores, add_mem_gb, add_vms, add_disk_gb) would exceed its quota.
     Returns {'ok', 'enforce', 'violations', 'usage', 'quota'}. FAIL-OPEN: any error
     returns ok=True so a quota bug can never block a legitimate VM create.
-    force=True computes usage even when no quota is set (for the usage display)."""
+    force=True computes usage even when no quota is set (for the usage display).
+
+    NS Sep 2026 — disk joins cores/memory/vms as the fourth dimension. It is the one an MSP
+    actually runs out of first, and it was the only one of the four a tenant could grow without
+    limit. Same shape as the others: 0 = unlimited, same enforce mode, same fail-open."""
     try:
         global tenants_db
         # NS #502 — always refresh: the cached global goes stale after a quota edit,
@@ -568,14 +651,16 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, force=Fa
         qv = int(t.get('quota_max_vms', 0) or 0)
         qc = int(t.get('quota_max_cores', 0) or 0)
         qm = int(t.get('quota_max_memory_gb', 0) or 0)
+        qd = int(t.get('quota_max_disk_gb', 0) or 0)
         enforce = t.get('quota_enforcement') or 'block'
-        if not force and qv <= 0 and qc <= 0 and qm <= 0:
+        if not force and qv <= 0 and qc <= 0 and qm <= 0 and qd <= 0:
             return {'ok': True, 'enforce': enforce, 'violations': [], 'usage': {}, 'quota': {}}
         allowed = get_user_clusters({'role': ROLE_VIEWER, 'tenant_id': tenant_id})  # None = all clusters
         from pegaprox.globals import cluster_managers
         used_vms = 0
         used_cores = 0
         used_mem = 0.0
+        used_disk = 0.0
         # iterate a copy — get_vm_resources() below is a live API call, and a
         # concurrent cluster add/remove used to blow up the walk. That lands in the
         # fail-open except at the bottom, so the quota just stopped being enforced.
@@ -593,6 +678,10 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, force=Fa
                     used_mem += float(vm.get('maxmem') or 0) / (1024.0 ** 3)
                 except (ValueError, TypeError):
                     pass
+                try:
+                    used_disk += float(vm.get('maxdisk') or 0) / (1024.0 ** 3)
+                except (ValueError, TypeError):
+                    pass
         violations = []
         if qv > 0 and used_vms + add_vms > qv:
             violations.append('vms')
@@ -600,14 +689,56 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, force=Fa
             violations.append('cores')
         if qm > 0 and used_mem + add_mem_gb > qm:
             violations.append('memory')
+        if qd > 0 and used_disk + add_disk_gb > qd:
+            violations.append('disk')
         return {
             'ok': not violations, 'enforce': enforce, 'violations': violations,
-            'usage': {'vms': used_vms, 'cores': used_cores, 'memory_gb': round(used_mem, 1)},
-            'quota': {'vms': qv, 'cores': qc, 'memory_gb': qm},
+            'usage': {'vms': used_vms, 'cores': used_cores, 'memory_gb': round(used_mem, 1),
+                      'disk_gb': round(used_disk, 1)},
+            'quota': {'vms': qv, 'cores': qc, 'memory_gb': qm, 'disk_gb': qd},
         }
     except Exception as e:
         logging.warning(f"[quota] check failed, allowing create (fail-open): {e}")
         return {'ok': True, 'enforce': 'warn', 'violations': [], 'usage': {}, 'quota': {}}
+
+
+def tenant_vmid_range(tenant_id):
+    """(start, end) of the VMID slice a tenant may create in, or (0, 0) for no restriction.
+
+    NS Sep 2026 — two tenants creating guests on a shared cluster otherwise compete for the same
+    ids: PVE hands out the next free VMID globally, so whoever creates first takes it and the
+    other's numbering drifts into their neighbour's block. Giving each tenant its own slice keeps
+    a customer's guests recognisable by id alone, which is what makes per-tenant backup selectors
+    and log greps usable at all."""
+    try:
+        t = (load_tenants() or {}).get(tenant_id) or {}
+        start = int(t.get('vmid_range_start', 0) or 0)
+        end = int(t.get('vmid_range_end', 0) or 0)
+        if start <= 0 or end <= 0 or end < start:
+            return 0, 0
+        return start, end
+    except Exception as e:
+        logging.debug(f"[vmid-range] lookup failed for {tenant_id}: {e}")
+        return 0, 0
+
+
+def check_tenant_vmid(tenant_id, vmid):
+    """Return (ok, message). A tenant with a configured range may only create inside it.
+
+    Unlike the quota this does NOT honour quota_enforcement: a range is not a soft ceiling you
+    can be over by one, it is the boundary that stops two tenants colliding on the same id. A
+    'warn' here would just let the collision happen quietly. No range configured → always ok,
+    which is every install that has not set one."""
+    start, end = tenant_vmid_range(tenant_id)
+    if not start:
+        return True, ''
+    try:
+        v = int(vmid)
+    except (TypeError, ValueError):
+        return True, ''      # nothing to judge; PVE allocates and the id lands wherever it lands
+    if start <= v <= end:
+        return True, ''
+    return False, f'VMID {v} is outside this tenant\'s range ({start}-{end})'
 
 
 # =============================================================================
@@ -619,6 +750,33 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, force=Fa
 # =============================================================================
 
 VM_ACLS_FILE = os.path.join(CONFIG_DIR, 'vm_acls.json')
+
+# What an ACL row with inherit_role=True actually hands out. It is a fixed set, not the
+# beneficiary's own role, and it is the DEFAULT for a new row - so the grant-ceiling check
+# on the write path has to weigh THIS, not the (unused) explicit permission list. MK Sep 2026
+ACL_INHERITED_VM_PERMISSIONS = ('vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console',
+                                'vm.snapshot', 'vm.migrate', 'vm.clone', 'vm.config', 'vm.backup')
+
+
+def acl_grants_user(acl, username: str) -> bool:
+    """Does this one VM-ACL row grant `username` access?
+
+    Nine places asked this question and one of them asked it differently:
+    caller_is_scoped() tested `username in users` and left out the `'*'` wildcard
+    that every other gate honours. So a user whose ONLY reach into a cluster was a
+    wildcard ACL was classified as "not confined" and handed the whole-cluster
+    views, while user_can_access_vm() correctly treated them as ACL-scoped. One
+    definition now, so the two cannot drift apart again. MK Sep 2026
+
+    Note this is the *membership* question. The narrower "is this caller confined
+    to specific VMs" question in user_can_access_vm deliberately counts explicit
+    names only - a wildcard row confines nobody - and is left alone.
+    """
+    if not isinstance(acl, dict):
+        return False
+    members = acl.get('users') or []
+    return username in members or '*' in members
+
 
 def load_vm_acls() -> dict:
     """Load VM access control lists from SQLite database
@@ -638,29 +796,40 @@ def load_vm_acls() -> dict:
     """
     try:
         db = get_db()
-        return db.get_all_vm_acls()
+        return _Snapshot(db.get_all_vm_acls())
     except Exception as e:
         logging.error(f"Failed to load VM ACLs from database: {e}")
         # Legacy fallback
         if os.path.exists(VM_ACLS_FILE):
             try:
                 with open(VM_ACLS_FILE, 'r') as f:
-                    return json.load(f)
-            except:
+                    return _Snapshot(json.load(f))
+            except Exception:
                 pass
-    return {}
+    # NOT an empty ACL table - we do not know what the ACLs are.
+    return _Snapshot(unavailable=True)
 
 
 def save_vm_acls(acls: dict):
-    """Save VM ACLs to SQLite database
+    """Save VM ACLs to SQLite database. True when it wrote.
     
     SQLite migration
     """
+    if store_unavailable(acls):
+        # save_all_vm_acls only upserts, so this cannot clear the table the way the
+        # role writer could - but writing back a snapshot that never loaded is still
+        # writing a decision we did not make. Refuse, and keep the pair symmetric so
+        # a future delete in save_all_vm_acls does not turn this into a wipe.
+        logging.error("[RBAC] refusing to write VM ACLs from a snapshot that failed "
+                      "to load")
+        return False
     try:
         db = get_db()
         db.save_all_vm_acls(acls)
+        return True
     except Exception as e:
         logging.error(f"Failed to save VM ACLs: {e}")
+        return False
 
 _vm_acls_cache = None
 
@@ -979,7 +1148,12 @@ def get_vm_acls():
     now = time.monotonic()
     if _vm_acls_cache is not None and (now - _vm_acls_cache_time) < _VM_ACLS_TTL:
         return _vm_acls_cache
-    _vm_acls_cache = load_vm_acls()
+    fresh = load_vm_acls()
+    if acls_unavailable(fresh):
+        # never cache a failed load: a momentary DB hiccup would otherwise deny
+        # every scoped user for the whole TTL, and a stale success is no better.
+        return fresh
+    _vm_acls_cache = fresh
     _vm_acls_cache_time = now
     return _vm_acls_cache
 
@@ -1012,7 +1186,14 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
 
     username = user.get('username', '')
     acls = get_vm_acls()
-    
+    if acls_unavailable(acls):
+        # An unread ACL store is not an empty one. Reading it as empty lets this
+        # function fall through to the role-wide grant below and hands a confined
+        # user the whole cluster.
+        logging.error(f"[VM-ACL] ACL store unavailable - denying {permission} for "
+                      f"'{username}' on {cluster_id}/{vmid}")
+        return False
+
     # LW: Debug logging to help troubleshoot ACL issues
     logging.debug(f"[VM-ACL] Checking access for user={username}, cluster={cluster_id}, vmid={vmid}, perm={permission}")
     logging.debug(f"[VM-ACL] Available ACLs for cluster: {list(acls.get(cluster_id, {}).keys())}")
@@ -1026,13 +1207,11 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
         logging.debug(f"[VM-ACL] VM {vmid} ACL found, allowed users: {allowed_users}")
         
         # MK: If user is in the ACL whitelist, check their ACL permissions
-        if username in allowed_users or '*' in allowed_users:
+        if acl_grants_user(vm_acl, username):
             if vm_acl.get('inherit_role', True):
                 # inherit_role=True: FULL VM access (start, stop, console, etc.)
                 # This means "this user has access to this VM"
-                vm_permissions = ['vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 
-                                  'vm.snapshot', 'vm.migrate', 'vm.clone', 'vm.config', 'vm.backup']
-                result = permission in vm_permissions
+                result = permission in ACL_INHERITED_VM_PERMISSIONS
                 logging.debug(f"[VM-ACL] User {username} in ACL with inherit_role=True, checking {permission}: {result}")
                 return result
             else:
@@ -1075,7 +1254,21 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
                 if permission in pool_perms:
                     logging.debug(f"[POOL-PERM] User {username} has {permission} for pool '{pool_id}'")
                     return True
-                
+
+                # NS Sep 2026 (#793) — a non-empty grant on the pool confers VISIBILITY of its
+                # members. vm.view can't be stored in a grant at all: POOL_PERMISSIONS (users.py) is
+                # the allowlist the grant endpoint validates against and has never carried it, so
+                # for vm.view the exact match above could only ever be satisfied by pool.admin. Once
+                # 6441b70 correctly stopped pool-scoped callers falling through to the blanket
+                # role-level vm.view, every preset below Admin started listing an EMPTY pool, and
+                # the only way to make a VM appear was to hand out pool.admin — which carries
+                # vm.delete. get_user_pool_vmids already draws this line (its `permission is None`
+                # arm); the inventory gate never learned it. Actions stay on the exact match above:
+                # this only answers "may they SEE it".
+                if permission in ('vm.view', 'pool.view'):
+                    logging.debug(f"[POOL-PERM] {username} holds {pool_perms} on '{pool_id}' → visibility")
+                    return True
+
                 logging.debug(f"[POOL-PERM] User {username} has pool perms {pool_perms} but not {permission}")
             else:
                 logging.debug(f"[POOL-PERM] User {username} has no permissions for pool '{pool_id}'")
@@ -1139,6 +1332,12 @@ def get_user_vms(user: dict, cluster_id: str) -> list:
 
     username = user.get('username', '')
     acls = get_vm_acls()
+    if acls_unavailable(acls):
+        # None here means "no restrictions at all" - the last thing to answer when
+        # we could not read the restrictions.
+        logging.error(f"[VM-ACL] ACL store unavailable - no VMs listed for "
+                      f"'{username}' on {cluster_id}")
+        return []
     cluster_acls = acls.get(cluster_id, {})
     
     # if no acls for this cluster, user can see all (based on general perms)
@@ -1148,8 +1347,7 @@ def get_user_vms(user: dict, cluster_id: str) -> list:
     # collect VMs user has access to
     allowed_vms = []
     for vmid, acl in cluster_acls.items():
-        users = acl.get('users', [])
-        if username in users or '*' in users:
+        if acl_grants_user(acl, username):
             allowed_vms.append(int(vmid))
     
     return allowed_vms if allowed_vms else None
@@ -1191,16 +1389,48 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
 
     username = user.get('username', '')
     acls = get_vm_acls()
+    if acls_unavailable(acls):
+        logging.error(f"[VM-ACL] ACL store unavailable - denying {permission} for "
+                      f"'{username}' on vmware:{vmware_id}/{vm_id}")
+        return False
+
+    # Gate on the VMware server's tenant reach BEFORE anything else. NS Jul 2026 (CodeAnt BOLA)
+    # added this for the no-ACL fallback only: the general role permission previously granted ANY
+    # vmware.vm.* holder access to EVERY server's VMs regardless of tenant. MK Sep 2026 - an ACL
+    # row returned True above it, so a row naming a tenant-A user (or carrying '*') on a server
+    # that belongs to tenant B handed over full VM access across the boundary. An ACL is a grant
+    # WITHIN a tenant's estate, never a way into somebody else's. Mirrors check_pbs_access: admin
+    # already returned above; an unlinked server stays backward-compat open; otherwise the caller
+    # must reach one of the server's linked clusters.
+    # MK Sep 2026 (CodeAnt, same day) - this used to log the error and carry on. While the
+    # gate only guarded the no-ACL fallback that merely reopened the older hole; now that it
+    # guards the ACL path too, an exception here skips exactly the cross-tenant check this
+    # function exists for. A gate that cannot run has not said yes. Matches the ACL-store
+    # check a few lines above, which already denies when it cannot read.
+    try:
+        from pegaprox.globals import vmware_managers
+        _mgr = vmware_managers.get(vmware_id)
+        _linked = (getattr(_mgr, 'linked_clusters', None) or []) if _mgr else []
+        # include_pools=False: a Proxmox POOL grant says nothing about the ESXi guests on a
+        # server that happens to be linked to that cluster, and the default (True) let a
+        # pool-scoped caller through. Tenant ownership is the right question here.
+        _uc = get_user_clusters(user, include_pools=False) if _linked else None
+    except Exception as _e:
+        logging.error(f"[VMWARE-ACL] tenant gate could not run for {vmware_id}, denying "
+                      f"{permission} for '{username}': {_e}")
+        return False
+    if _linked and _uc is not None and not any(c in _uc for c in _linked):
+        logging.debug(f"[VMWARE-ACL] {username} cannot reach any linked cluster of "
+                      f"{vmware_id} - deny {permission}")
+        return False
 
     # VMware ACLs are stored under vmware_id as the cluster key
     vmware_acls = acls.get(f'vmware:{vmware_id}', {})
     vm_acl = vmware_acls.get(str(vm_id), {})
     
     if vm_acl:
-        allowed_users = vm_acl.get('users', [])
-        
-        # If user is in the ACL whitelist, check their ACL permissions
-        if username in allowed_users or '*' in allowed_users:
+        # one definition of what a row grants, wildcard included (acl_grants_user)
+        if acl_grants_user(vm_acl, username):
             if vm_acl.get('inherit_role', True):
                 # inherit_role=True: FULL VM access
                 vmware_permissions = ['vmware.vm.view', 'vmware.vm.power', 'vmware.vm.manage', 
@@ -1211,30 +1441,6 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
                 vm_perms = vm_acl.get('permissions', [])
                 return permission in vm_perms
     
-    # No VM-specific ACL — fall back to the general role permission, BUT gate it by the VMware
-    # server's tenant reach first. NS Jul 2026 (CodeAnt BOLA) — this fallback previously granted
-    # ANY vmware.vm.* holder access to EVERY VMware server's VMs regardless of tenant (the Proxmox
-    # user_can_access_vm has the equivalent guard at ~853; the VMware path was missing it). Mirror
-    # check_pbs_access: admin already returned above; an unlinked server stays backward-compat open;
-    # otherwise require the caller to reach one of the server's linked clusters.
-    try:
-        from pegaprox.globals import vmware_managers
-        _mgr = vmware_managers.get(vmware_id)
-        _linked = (getattr(_mgr, 'linked_clusters', None) or []) if _mgr else []
-        if _linked:
-            # sec (audit): include_pools=False. A Proxmox POOL grant says nothing about the ESXi
-            # guests on a server that happens to be linked to that cluster — but the default
-            # (include_pools=True) let a pool-scoped caller through this gate, and the scope-wins
-            # guard below only confines callers who hold a vmware:<id> ACL. So a pool grant on one
-            # Proxmox cluster widened into every VM on a linked ESXi server. Tenant ownership is
-            # the right question here.
-            _uc = get_user_clusters(user, include_pools=False)   # None => all (admin/default tenant)
-            if _uc is not None and not any(c in _uc for c in _linked):
-                logging.debug(f"[VMWARE-ACL] {username} cannot reach any linked cluster of {vmware_id} → deny {permission}")
-                return False
-    except Exception as _e:
-        logging.error(f"[VMWARE-ACL] tenant-gate error for {vmware_id}: {_e}")
-
     # MK Aug 2026 (sec-report, symplasson) — mirror the Proxmox user_can_access_vm scope-wins
     # guard: a user EXPLICITLY scoped to specific VMware VMs via a vmware:<id> ACL must stay
     # confined to those VMs, not inherit every VM on the server once their tenant reaches a

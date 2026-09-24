@@ -9,6 +9,26 @@ import time
 
 import pegaprox.utils.rbac as rbac
 
+import re
+
+
+def _handler_body(src, marker):
+    """The whole body of one handler, from its `def` to the next top-level one.
+
+    MK Sep 2026 - these assertions used to slice a fixed number of characters after the
+    def (`src[i:i + 4000]`). That is not the handler, it is a guess about how long the
+    handler is, and it breaks the moment anyone adds a few lines above the thing being
+    asserted: test_v2p_target_cluster_is_confined went red when a permission check was
+    added to start_vmware_migration, with the gate it looks for still present, 400
+    characters past the cutoff. Take the real body so the test says what it means.
+    """
+    i = src.index(marker)
+    rest = src[i + len(marker):]
+    ends = [m.start() for m in re.finditer(r'\n@bp\.route|\ndef |\nclass ', rest)]
+    return src[i:i + len(marker) + (min(ends) if ends else len(rest))]
+
+
+
 
 def _pool_membership(cluster_id, mapping):
     data = {f"{vmid}:{vtype}": pool for vmid, (vtype, pool) in mapping.items()}
@@ -641,8 +661,7 @@ def test_update_schedule_post_has_the_same_gate_as_its_delete_twin():
 def test_cross_cluster_replication_delete_and_run_gate_the_guest():
     src = open('pegaprox/api/vms.py').read()
     for fn in ('def delete_cross_cluster_replication(', 'def run_cross_cluster_replication('):
-        i = src.index(fn)
-        body = src[i:i + 3000]
+        body = _handler_body(src, fn)
         assert 'user_can_access_vm' in body, f"{fn} still gates on cluster reach alone"
 
 
@@ -743,15 +762,13 @@ def test_v2p_target_cluster_is_confined():
     """Starting a V2P migration CREATES a guest on the target, and a new vmid matches no
     per-object grant — the XHM twin asks the confinement question about its target."""
     src = open('pegaprox/api/vmware.py').read()
-    i = src.index('def start_vmware_migration(')
-    body = src[i:i + 4000]
+    body = _handler_body(src, 'def start_vmware_migration(')
     assert 'caller_is_scoped' in body, "the V2P target is still gated on reachability alone"
 
 
 def test_legacy_ha_toggle_has_the_confinement_gate():
     src = open('pegaprox/api/clusters.py').read()
-    i = src.index('def set_ha_status(')
-    body = src[i:i + 1500]
+    body = _handler_body(src, 'def set_ha_status(')
     assert 'require_unconfined' in body, "the legacy HA toggle is still ungated"
 
 
@@ -761,8 +778,7 @@ def test_bulk_snapshot_delete_gates_clusters_and_the_token(api, seed):
     kept both defects: identity from the raw record, and `user_data.get('clusters', [])`
     reading a key the record does not have — always [], so the cluster guard short-circuited."""
     src = open('pegaprox/api/vms.py').read()
-    i = src.index('def snapshots_overview_delete(')
-    body = src[i:i + 2500]
+    body = _handler_body(src, 'def snapshots_overview_delete(')
     # strip comments — the fix's own commentary quotes the old expression
     body = '\n'.join(l.split('#')[0] for l in body.split('\n'))
     assert 'build_authz_user' in body, "still builds identity from the raw record"
@@ -803,8 +819,7 @@ def test_v2p_key_cleanup_can_actually_authenticate():
     """The cleanup authenticates with -i <key>, but its option list was copied from the
     password-auth helpers and excluded publickey — so the removal could never succeed."""
     src = open('pegaprox/core/v2p.py').read()
-    i = src.index('def _cleanup_temp_ssh_key(')
-    body = src[i:i + 1500]
+    body = _handler_body(src, 'def _cleanup_temp_ssh_key(')
     assert 'PreferredAuthentications=publickey' in body, \
         "the key-based cleanup still cannot offer publickey"
 
@@ -815,16 +830,14 @@ def test_backup_job_update_authorizes_the_stored_job_too():
     a crafted PUT naming nothing but the caller's own vmid passed and still landed on a job
     targeting someone else's guests."""
     src = open('pegaprox/api/storage.py').read()
-    i = src.index('def update_backup_job(')
-    body = src[i:i + 3000]
+    body = _handler_body(src, 'def update_backup_job(')
     assert '_authz_backup_targets(cluster_id, _stored)' in body, \
         "the PUT still authorizes only the submitted payload"
 
 
 def test_snapshot_policy_listing_is_scoped():
     src = open('pegaprox/api/snapshots.py').read()
-    i = src.index('def list_policies(')
-    body = src[i:i + 1500]
+    body = _handler_body(src, 'def list_policies(')
     assert '_policy_targets_authorized' in body, "the policy listing is still unscoped"
 
 
@@ -860,10 +873,20 @@ def test_syslog_tcp_buffer_is_bounded():
 
 
 def test_api_rate_limit_map_is_pruned():
-    src = open('pegaprox/app.py').read()
-    i = src.index('with g.api_rate_limit_lock:')
-    assert 'g.api_request_counts.pop(' in src[i:i + 1200], \
-        "the rate-limit map is still never pruned"
+    """Keyed by an unauthenticated remote IP, so it must not grow without bound.
+
+    Sep 2026: this used to look for the open-coded `g.api_request_counts.pop(` sweep.
+    That sweep removed only EXPIRED windows and ran on a size trigger, so holding the
+    map just above the threshold with live windows gave a full scan per request that
+    freed nothing. The shared bounded counter replaced it; the property is the same,
+    so ask about the property instead of the spelling."""
+    from pegaprox.utils.ratelimit import SlidingWindow
+
+    w = SlidingWindow(limit=1000, window=60, max_keys=64)
+    for i in range(5000):
+        w.allow(f'2001:db8::{i}')
+
+    assert len(w) <= 64, f"{len(w)} keys retained from 5000 distinct sources"
 
 
 def test_scheduler_touches_only_the_task_it_ran(db):
@@ -943,6 +966,5 @@ def test_backup_verification_reads_are_scoped():
     for fn in ('def get_backup_verification_status(',
                'def get_backup_verification_history(',
                'def get_active_verifications('):
-        i = src.index(fn)
-        body = src[i:i + 1800]
+        body = _handler_body(src, fn)
         assert '_verification_rows_visible' in body, f"{fn} is still unscoped"

@@ -63,6 +63,7 @@ VNC_PVE_CONNECT_TIMEOUT = int(os.environ.get('PEGAPROX_VNC_CONNECT_TIMEOUT', '15
 # offloaded PVE socket calls burn VNC_PVE_CONNECT_TIMEOUT instead of connecting. Route to_thread
 # through gevent once, process-wide; no-op when gevent isn't patched in (e.g. under pytest).
 from pegaprox.utils.concurrent import install_gevent_to_thread, gevent_listen_socket
+from pegaprox.utils.ssh import read_capped as _read_capped
 install_gevent_to_thread()
 
 
@@ -2672,17 +2673,17 @@ def test_node_connection(cluster_id):
 
         # Get hostname
         stdin, stdout, stderr = ssh.exec_command('hostname')
-        hostname = stdout.read().decode().strip()
+        hostname = _read_capped(stdout).strip()
         
         # Check if Proxmox is installed
         stdin, stdout, stderr = ssh.exec_command('pveversion 2>/dev/null || echo "NOT_INSTALLED"')
-        pve_output = stdout.read().decode().strip()
+        pve_output = _read_capped(stdout).strip()
         proxmox_installed = 'NOT_INSTALLED' not in pve_output
         proxmox_version = pve_output if proxmox_installed else None
         
         # Check if already in a cluster
         stdin, stdout, stderr = ssh.exec_command('pvecm status 2>/dev/null || echo "NO_CLUSTER"')
-        cluster_output = stdout.read().decode().strip()
+        cluster_output = _read_capped(stdout).strip()
         already_in_cluster = 'NO_CLUSTER' not in cluster_output and 'Cluster information' in cluster_output
         
         current_cluster = None
@@ -2702,7 +2703,7 @@ def test_node_connection(cluster_id):
             'ls /etc/pve/corosync.conf 2>/dev/null && echo HAS_PVE_COROSYNC; '
             'ls /etc/pve/nodes/ 2>/dev/null | wc -l'
         )
-        orphan_output = stdout.read().decode().strip()
+        orphan_output = _read_capped(stdout).strip()
         has_old_config = 'HAS_AUTHKEY' in orphan_output or 'HAS_COROSYNC' in orphan_output or 'HAS_PVE_COROSYNC' in orphan_output
         
         # Check if /etc/pve/nodes/ has dirs for other nodes (leftover from old cluster)
@@ -3200,8 +3201,8 @@ def remove_node_from_cluster(cluster_id, node_name):
         stdin, stdout, stderr = ssh.exec_command(cmd, timeout=60)
         
         exit_code = stdout.channel.recv_exit_status()
-        stdout_text = stdout.read().decode('utf-8', errors='ignore')
-        stderr_text = stderr.read().decode('utf-8', errors='ignore')
+        stdout_text = _read_capped(stdout)
+        stderr_text = _read_capped(stderr)
         
         ssh.close()
         
@@ -3256,7 +3257,7 @@ def remove_node_from_cluster(cluster_id, node_name):
                 if cleanup_connected:
                     # SAFETY CHECK: Verify we're on the correct node before wiping config!
                     stdin, stdout, stderr = ssh_cleanup.exec_command('hostname', timeout=10)
-                    actual_hostname = stdout.read().decode().strip()
+                    actual_hostname = _read_capped(stdout).strip()
                     
                     # LW: Case-insensitive compare - Proxmox uses lowercase node names
                     # but hostname might be "Pve1" while node_name is "pve1"
@@ -3442,7 +3443,7 @@ def node_action_api(cluster_id, node_name, action):
         try:
             # Check if we're already root (common on Proxmox)
             stdin, stdout, stderr = ssh.exec_command('id -u')
-            uid = stdout.read().decode().strip()
+            uid = _read_capped(stdout).strip()
             is_root = (uid == '0')
             
             # Always use PTY for reliable execution
@@ -3685,11 +3686,35 @@ def get_next_vmid_api(cluster_id):
     
     mgr = cluster_managers[cluster_id]
     result = mgr.get_next_vmid()
-    
-    if result['success']:
-        return jsonify({'vmid': result['vmid']})
-    else:
+
+    if not result['success']:
         return jsonify({'error': result['error']}), 500
+
+    # NS Sep 2026 — when the caller's tenant has a VMID range, hand back the next free id INSIDE
+    # it rather than PVE's global next. Without this the range would only ever be a rejection at
+    # create time: the dialog pre-fills from here, so a user would be offered an id their own
+    # tenant is then not allowed to use. Falls straight back to PVE's answer when no range is set
+    # (every install that has not configured one) or when the range is full.
+    try:
+        from pegaprox.utils.rbac import tenant_vmid_range, DEFAULT_TENANT_ID
+        _u = load_users().get(request.session.get('user', ''), {})
+        _start, _end = tenant_vmid_range(_u.get('tenant_id') or DEFAULT_TENANT_ID)
+        if _start:
+            _taken = set()
+            for _vm in (mgr.get_vm_resources() or []):
+                try:
+                    _taken.add(int(_vm.get('vmid')))
+                except (TypeError, ValueError):
+                    continue
+            _free = next((v for v in range(_start, _end + 1) if v not in _taken), None)
+            if _free is not None:
+                return jsonify({'vmid': _free, 'range': [_start, _end]})
+            return jsonify({'vmid': result['vmid'], 'range': [_start, _end],
+                            'range_exhausted': True})
+    except Exception as _re:
+        logging.debug(f"[vmid-range] nextid fallback to cluster-wide: {_re}")
+
+    return jsonify({'vmid': result['vmid']})
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/clone', methods=['POST'])
@@ -3889,6 +3914,12 @@ def get_spice_console(cluster_id, node, vm_type, vmid):
 _vm_screenshot_cache = {}          # {f"{cid}:{vmid}": (mono_ts, png_bytes)}
 _vm_screenshot_lock = threading.Lock()
 _VM_SCREENSHOT_TTL = 60.0
+# MK Sep 2026 — a screenshot that fails used to cache nothing, so every tile poll
+# redid the whole SSH-screendump-then-RFB dance. Each attempt holds one slot of the
+# bounded request pool for as long as it takes to time out, and a wall of tiles for
+# guests that can't be grabbed will sit on all of them — which is what starves the
+# console and the SSE stream. Remember the failure too, just for less long.
+_VM_SCREENSHOT_FAIL_TTL = 120.0
 
 
 # NS Jun 2026 — RFB fallback for the console tile. screendump (qm monitor) is the
@@ -3911,22 +3942,41 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = _ssl.CERT_NONE
 
-    # login → vncproxy ticket/port (same flow as vnc_poll)
-    login_data = urllib.parse.urlencode({'username': mgr.config.user, 'password': mgr.config.pass_}).encode('utf-8')
-    login_req = urllib.request.Request(f"https://{mgr.auth_host}:{port}/api2/json/access/ticket", data=login_data, method='POST')
-    with urllib.request.urlopen(login_req, context=ssl_ctx, timeout=10) as r:
-        login_result = _json.loads(r.read().decode('utf-8'))
-    pve_ticket = login_result['data']['ticket']
-    csrf_token = login_result['data']['CSRFPreventionToken']
+    # NS Sep 2026 — this used to mint its own ticket with a raw urllib call against
+    # mgr.auth_host. Two things wrong with that. auth_host is the REGISTERED node, which
+    # stops answering the moment a cluster fails over — every other call follows
+    # current_host and keeps working, so screenshots broke on their own and stayed broken.
+    # And a bare urlopen sidesteps the pooled session, so each tile refresh opened fresh
+    # TLS connections to :8006 outside urllib3's pool — the connection churn that took
+    # consoles down in #713.
+    #
+    # mint_console_auth_ticket walks reachable candidates now, and the vncproxy POST goes
+    # through the manager's pooled, already-authenticated session.
+    pve_ticket, csrf_token = mgr.mint_console_auth_ticket(with_csrf=True)
+    if not pve_ticket:
+        # no password on the cluster (API-token-only), or every node refused. Either way
+        # the websocket leg below needs a PVEAuthCookie, so stop here with something the
+        # caller can log instead of burning the timeout on a handshake that cannot work.
+        raise IOError("no PVE session ticket available for this cluster (API-token-only?)")
 
+    # The vncproxy POST must go out as the SAME identity that will open the websocket —
+    # PVE ties the PVEVNC ticket to the requester. On a cluster configured with an API
+    # token the pooled session sends Authorization, PVE honours the token, and the
+    # cookie-authenticated websocket is then a different user: "invalid PVEVNC ticket".
+    # Setting Authorization to None drops it for this one request while keeping the
+    # pooled connection, so we stay inside urllib3's pool.
     vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/vncproxy"
-    vnc_req = urllib.request.Request(vnc_url, data=urllib.parse.urlencode({'websocket': '1'}).encode('utf-8'), method='POST')
-    vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
-    vnc_req.add_header('CSRFPreventionToken', csrf_token)
-    with urllib.request.urlopen(vnc_req, context=ssl_ctx, timeout=10) as r:
-        vnc_result = _json.loads(r.read().decode('utf-8'))
-    vnc_ticket = vnc_result['data']['ticket']
-    vnc_port = vnc_result['data']['port']
+    vnc_resp = mgr._create_session().post(
+        vnc_url, data={'websocket': '1'}, timeout=10,
+        headers={'Authorization': None,
+                 'Cookie': f'PVEAuthCookie={pve_ticket}',
+                 'CSRFPreventionToken': csrf_token or ''},
+    )
+    if vnc_resp.status_code != 200:
+        raise IOError(f"vncproxy refused: HTTP {vnc_resp.status_code}")
+    vnc_data = vnc_resp.json().get('data') or {}
+    vnc_ticket = vnc_data['ticket']
+    vnc_port = vnc_data['port']
 
     # optional SSH tunnel for clusters where 8006 isn't directly reachable from us
     tunnel_endpoint = None
@@ -4001,7 +4051,10 @@ def get_vm_screenshot(cluster_id, node, vm_type, vmid):
     if request.args.get('fresh') != '1':
         with _vm_screenshot_lock:
             hit = _vm_screenshot_cache.get(cache_key)
-        if hit and (now - hit[0]) < _VM_SCREENSHOT_TTL:
+        # a remembered failure short-circuits before we touch the cluster at all
+        if hit and hit[1] is None and (now - hit[0]) < _VM_SCREENSHOT_FAIL_TTL:
+            return jsonify({'error': 'screenshot unavailable', 'cached': True}), 502
+        if hit and hit[1] is not None and (now - hit[0]) < _VM_SCREENSHOT_TTL:
             resp = current_app.response_class(hit[1], mimetype='image/png')
             resp.headers['Cache-Control'] = 'private, max-age=60'
             resp.headers['X-Screenshot-Cache'] = 'hit'
@@ -4021,6 +4074,8 @@ def get_vm_screenshot(cluster_id, node, vm_type, vmid):
             png = _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10)
         except Exception as e2:
             logging.info(f"[Screenshot] RFB fallback also failed {vm_type}/{vmid}@{node}: {e2}")
+            with _vm_screenshot_lock:
+                _vm_screenshot_cache[cache_key] = (time.monotonic(), None)
             return jsonify({'error': f'screenshot unavailable: {e2}'}), 502
 
     with _vm_screenshot_lock:
@@ -6481,6 +6536,9 @@ def _execute_local_replication(job):
         # tag it so the cleanup below can find it by tag now that it no longer carries the repl-* name.
         try:
             _restore_vm_identity(mgr, target_node, clone_vmid, vm_type, _identity, force_onboot_off=True)
+            # the result is deliberately not fatal here: unlike the cross-cluster paths, an
+            # untagged replica in-cluster only costs us the cleanup below finding it, so old
+            # replicas pile up instead of the job refusing to run. _tag_as_replica logs it.
             _tag_as_replica(mgr, target_node, clone_vmid, vm_type, job_id)
         except Exception as _ident_e:
             logging.warning(f"[REPL] Job {job_id}: identity/onboot restore failed on replica {clone_vmid}: {_ident_e}")
@@ -6674,8 +6732,13 @@ def _job_tag(job_id):
     return f'xcrepl-job-{job_id}'
 
 
-def _read_target_tags(mgr, node, vmid, vm_type):
-    """Return the set of tags on a VM, or None if config fetch failed."""
+def _read_target_tag_list(mgr, node, vmid, vm_type):
+    """Tags in the order PVE stores them, or None if the config fetch failed.
+
+    MK Sep 2026 (#799) — _tag_as_replica appends to this list and writes it back,
+    and leaving the operator's own tags alone includes not reshuffling them, so the
+    merge works on the ordered form rather than on the set below.
+    """
     try:
         cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
         resp = mgr._api_get(cfg_url)
@@ -6684,9 +6747,15 @@ def _read_target_tags(mgr, node, vmid, vm_type):
         cfg = resp.json().get('data', {})
         tags_raw = cfg.get('tags', '') or ''
         # PVE separates tags by ';' for both LXC and QEMU.
-        return {t.strip() for t in tags_raw.split(';') if t.strip()}
+        return [t.strip() for t in tags_raw.split(';') if t.strip()]
     except Exception:
         return None
+
+
+def _read_target_tags(mgr, node, vmid, vm_type):
+    """Return the set of tags on a VM, or None if config fetch failed."""
+    tags = _read_target_tag_list(mgr, node, vmid, vm_type)
+    return None if tags is None else set(tags)
 
 
 def _is_replica_of_job(mgr, node, vmid, vm_type, job_id):
@@ -6697,33 +6766,62 @@ def _is_replica_of_job(mgr, node, vmid, vm_type, job_id):
     return _job_tag(job_id) in tags
 
 
-def _tag_as_replica(mgr, node, vmid, vm_type, job_id):
+def _tag_as_replica(mgr, node, vmid, vm_type, job_id, attempts=3):
     """Mark the freshly-migrated replica with the job-specific + general
     pegaprox-replica tags. Preserves any pre-existing tags so users' own
-    organisation tags stay intact."""
+    organisation tags stay intact. Returns (ok, detail).
+
+    MK Sep 2026 (#799) — this was best-effort in every direction: a failed config
+    read returned silently and a rejected PUT only logged a warning, while
+    _is_replica_of_job, which READS the same tag on the next run, aborts the job
+    outright. So the run that actually broke the pairing reported success, and the
+    operator heard about it a day later through a message about a tag nobody had
+    told them we failed to write.
+
+    A 200 on the PUT is not proof either. PVE queues a config write behind the
+    guest lock the migration has only just released, and the guard reads the config
+    rather than our status code — so confirm it the way the guard will, by reading
+    it back. Retry a couple of times first: the lock is the likely cause and it
+    clears on its own, which makes this transient far more often than fatal.
+    """
     cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
-    try:
-        resp = mgr._api_get(cfg_url)
-        if resp.status_code != 200:
-            return
-        cfg = resp.json().get('data', {})
-        tags_raw = cfg.get('tags', '') or ''
-        existing = [t.strip() for t in tags_raw.split(';') if t.strip()]
-        want = [PEGAPROX_REPLICA_TAG, _job_tag(job_id)]
-        merged = list(existing)
-        for t in want:
-            if t not in merged:
-                merged.append(t)
-        if merged == existing:
-            return  # nothing to do
-        new_tags = ';'.join(merged)
-        put = mgr._api_put(cfg_url, data={'tags': new_tags})
-        if put.status_code == 200:
-            logging.info(f"[XCREPL] Tagged replica {vm_type}/{vmid} on {node} with {want}")
-        else:
-            logging.warning(f"[XCREPL] tag PUT returned {put.status_code}: {put.text[:200]}")
-    except Exception as e:
-        logging.warning(f"[XCREPL] Could not tag replica {vmid}: {e}")
+    want = [PEGAPROX_REPLICA_TAG, _job_tag(job_id)]
+    detail = 'no attempt made'
+    for attempt in range(1, attempts + 1):
+        try:
+            existing = _read_target_tag_list(mgr, node, vmid, vm_type)
+            if existing is None:
+                detail = 'could not read the replica config'
+            else:
+                merged = list(existing)
+                for t in want:
+                    if t not in merged:
+                        merged.append(t)
+                if merged == existing:
+                    return True, ''
+                put = mgr._api_put(cfg_url, data={'tags': ';'.join(merged)})
+                if put.status_code != 200:
+                    detail = f'PVE rejected the tag write with HTTP {put.status_code}'
+                else:
+                    back = _read_target_tags(mgr, node, vmid, vm_type)
+                    if back is not None and _job_tag(job_id) in back:
+                        logging.info(f"[XCREPL] Tagged replica {vm_type}/{vmid} on {node} with {want}")
+                        return True, ''
+                    detail = 'PVE accepted the tag write but the tag was not on the guest afterwards'
+        except Exception as e:
+            detail = f'{type(e).__name__}: {e}'
+        if attempt < attempts:
+            time.sleep(2 * attempt)
+    logging.error(f"[XCREPL] Job {job_id}: replica {vm_type}/{vmid} on {node} is NOT carrying "
+                  f"{_job_tag(job_id)} after {attempts} attempts — {detail}")
+    return False, detail
+
+
+def _untagged_replica_error(job_id, vmid, node, detail):
+    """The sentence the operator gets on the run that failed, not the one after it."""
+    return (f"Replica {vmid} was created on {node} but could not be tagged "
+            f"{_job_tag(job_id)} ({detail}). The next run refuses to replace an untagged "
+            f"target, so tag it by hand or the job stays stuck here.")
 
 
 # ============================================================================
@@ -7004,12 +7102,15 @@ def _execute_replication_incremental(job):
         logging.info(f"[XCINCR] Job {job_id}: shipped {total/1e6:.1f} MB ({', '.join(m for _,_,m in replicated)})")
 
         # 4. build the replica VM shell on a (re)build (disks already seeded)
+        tag_ok, tag_detail = True, ''
         if rebuild:
             _build_incremental_replica_vm(target_mgr, target_node, tgt_vmid, cfg, replicated, target_storage, job)
             try: _restore_vm_identity(target_mgr, target_node, tgt_vmid, vm_type, identity)
             except Exception as e: logging.warning(f"[XCINCR] {job_id}: identity: {e}")
-            try: _tag_as_replica(target_mgr, target_node, tgt_vmid, vm_type, job_id)
-            except Exception as e: logging.warning(f"[XCINCR] {job_id}: tag: {e}")
+            try: tag_ok, tag_detail = _tag_as_replica(target_mgr, target_node, tgt_vmid, vm_type, job_id)
+            except Exception as e:
+                tag_ok, tag_detail = False, f'{type(e).__name__}: {e}'
+                logging.warning(f"[XCINCR] {job_id}: tag: {e}")
 
         # 4. advance the base: keep @new_snap (next diff base), drop the old one, prune strays
         db.execute("UPDATE cross_cluster_replications SET last_snapshot=? WHERE id=?", (new_snap, job_id))
@@ -7026,7 +7127,14 @@ def _execute_replication_incremental(job):
                     zfs_prune_snapshots(tgt_ssh, f"{_xcincr_zfs_pool(tgt_ssh, target_storage)}/{tgt_vol}", {new_snap}, 'xcincr-')
             except Exception:
                 pass
-        _update_repl_status(db, job_id, 'ok', '')
+        # MK Sep 2026 (#799) — the base advance above is what makes the next run an
+        # incremental one, and that run's first move is the tag check. Reporting ok here
+        # while the tag is missing means the job is already broken and says otherwise.
+        if tag_ok:
+            _update_repl_status(db, job_id, 'ok', '')
+        else:
+            _update_repl_status(db, job_id, 'error',
+                                _untagged_replica_error(job_id, tgt_vmid, target_node, tag_detail))
         logging.info(f"[XCINCR] Job {job_id}: done, base advanced to {new_snap}")
         return True
     except Exception as e:
@@ -7363,10 +7471,15 @@ def _execute_replication(job):
                     # MK May 2026 (#413) — tag the replica so the safety gate on the next
                     # run recognises it as ours and can cycle it without operator action.
                     try:
-                        _tag_as_replica(target_mgr, target_node, tgt_vmid, vm_type, job_id)
+                        tag_ok, tag_detail = _tag_as_replica(target_mgr, target_node, tgt_vmid, vm_type, job_id)
                     except Exception as e:
+                        tag_ok, tag_detail = False, f'{type(e).__name__}: {e}'
                         logging.warning(f"[XCREPL] Job {job_id}: replica-tag write failed: {e}")
-                    _update_repl_status(db, job_id, 'ok', '')
+                    if tag_ok:
+                        _update_repl_status(db, job_id, 'ok', '')
+                    else:
+                        _update_repl_status(db, job_id, 'error',
+                                            _untagged_replica_error(job_id, tgt_vmid, target_node, tag_detail))
                 else:
                     logging.error(f"[XCREPL] Job {job_id}: migration task failed: {mig_detail}")
                     _update_repl_status(db, job_id, 'error', f'Migration task failed: {mig_detail}')
@@ -11028,12 +11141,28 @@ def create_vm_api(cluster_id, node):
         _tid = _qu.get('tenant_id') or DEFAULT_TENANT_ID
         _qcores = int(vm_config.get('cores') or 1) * int(vm_config.get('sockets') or 1)
         _qmem = float(vm_config.get('memory') or 0) / 1024.0  # MB → GB
-        _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1)
+        _qdisk = float(vm_config.get('disk_size') or 0)       # already GB
+        _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1,
+                                   add_disk_gb=_qdisk)
         if not _qchk['ok'] and _qchk.get('enforce') == 'block':
             return jsonify({'error': f"Tenant quota exceeded ({', '.join(_qchk['violations'])}) — "
                             f"usage {_qchk['usage']} vs quota {_qchk['quota']}", 'quota': _qchk}), 403
     except Exception as _qe:
         logging.debug(f"[quota] qemu pre-flight skipped: {_qe}")
+
+    # NS Sep 2026 — VMID range. Deliberately NOT inside the fail-open block above: the quota is a
+    # ceiling and erring open there is right, but a range exists to stop two tenants landing on
+    # the same id, and silently allowing that produces a collision nobody notices until restore
+    # time. A tenant with no range configured is unaffected.
+    try:
+        from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID as _DT
+        _ru = load_users().get(request.session.get('user', ''), {})
+        _rok, _rmsg = check_tenant_vmid(_ru.get('tenant_id') or _DT, vm_config.get('vmid'))
+    except Exception as _re:
+        logging.debug(f"[vmid-range] qemu pre-flight skipped: {_re}")
+        _rok, _rmsg = True, ''
+    if not _rok:
+        return jsonify({'error': _rmsg}), 403
 
     result = manager.create_vm(node, vm_config)
 
@@ -11075,12 +11204,26 @@ def create_container_api(cluster_id, node):
         _tid = _qu.get('tenant_id') or DEFAULT_TENANT_ID
         _qcores = int(ct_config.get('cores') or 1)
         _qmem = float(ct_config.get('memory') or 0) / 1024.0  # MB → GB
-        _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1)
+        # CT root disk is 'disk_size' like the VM path; 'rootfs'/'disk' are the PVE-side spellings
+        _qdisk = float(ct_config.get('disk_size') or ct_config.get('disk') or 0)
+        _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1,
+                                   add_disk_gb=_qdisk)
         if not _qchk['ok'] and _qchk.get('enforce') == 'block':
             return jsonify({'error': f"Tenant quota exceeded ({', '.join(_qchk['violations'])}) — "
                             f"usage {_qchk['usage']} vs quota {_qchk['quota']}", 'quota': _qchk}), 403
     except Exception as _qe:
         logging.debug(f"[quota] lxc pre-flight skipped: {_qe}")
+
+    # NS Sep 2026 — VMID range, same reasoning as the qemu twin above.
+    try:
+        from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID as _DT
+        _ru = load_users().get(request.session.get('user', ''), {})
+        _rok, _rmsg = check_tenant_vmid(_ru.get('tenant_id') or _DT, ct_config.get('vmid'))
+    except Exception as _re:
+        logging.debug(f"[vmid-range] lxc pre-flight skipped: {_re}")
+        _rok, _rmsg = True, ''
+    if not _rok:
+        return jsonify({'error': _rmsg}), 403
 
     result = manager.create_container(node, ct_config)
     

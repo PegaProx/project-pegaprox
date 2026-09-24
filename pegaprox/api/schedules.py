@@ -43,6 +43,25 @@ SCHEDULES_FILE = os.path.join(CONFIG_DIR, 'scheduled_actions.json')
 _scheduler_thread = None
 _scheduler_running = False
 
+class _ScheduleSnapshot(dict):
+    """A schedule snapshot that knows whether it really came from the table.
+
+    load_schedules() answered `{'actions': [], 'last_id': 0}` both for "no schedules
+    configured" and for "the table did not load", and save_schedules() starts with an
+    unconditional DELETE. So one failed read followed by an ordinary create request
+    rewrote the table to contain that single new row - every scheduled action in the
+    installation, across every tenant, gone and committed. MK Sep 2026
+
+    Same lesson _record_action_run() already learned below: never hand a snapshot back
+    to a writer that clears the table first.
+    """
+    __slots__ = ('unavailable',)
+
+    def __init__(self, *args, unavailable=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unavailable = unavailable
+
+
 def load_schedules():
     """Load scheduled actions from SQLite database
     
@@ -80,17 +99,18 @@ def load_schedules():
                 'created_by': row['created_by'],
             })
         
-        return {'actions': actions, 'last_id': last_id}
+        return _ScheduleSnapshot(actions=actions, last_id=last_id)
     except Exception as e:
         logging.error(f"Error loading schedules from database: {e}")
         # Legacy fallback
         try:
             if os.path.exists(SCHEDULES_FILE):
                 with open(SCHEDULES_FILE, 'r') as f:
-                    return json.load(f)
-        except:
+                    return _ScheduleSnapshot(json.load(f))
+        except Exception:
             pass
-    return {'actions': [], 'last_id': 0}
+    # NOT an empty schedule table - we do not know what is in it.
+    return _ScheduleSnapshot(actions=[], last_id=0, unavailable=True)
 
 
 def _record_action_run(action_id, last_run, disable=False):
@@ -117,15 +137,22 @@ def _record_action_run(action_id, last_run, disable=False):
 
 
 def save_schedules(schedules):
-    """Save scheduled actions to SQLite database
-    
+    """Save scheduled actions to SQLite database. True when the table was rewritten.
+
     SQLite migration
     """
+    if getattr(schedules, 'unavailable', False):
+        # the snapshot never loaded; writing it back would clear the table
+        logging.error("[Schedules] refusing to rewrite the table from a snapshot "
+                      "that failed to load")
+        return False
     try:
         db = get_db()
         cursor = db.conn.cursor()
-        
-        # Clear existing schedules
+
+        # Clear existing schedules. The insert loop below is part of the same
+        # transaction - committing the DELETE on its own would leave an empty table
+        # behind if a single row failed to write.
         cursor.execute('DELETE FROM scheduled_actions')
         
         now = datetime.now().isoformat()
@@ -154,8 +181,14 @@ def save_schedules(schedules):
             ))
         
         db.conn.commit()
+        return True
     except Exception as e:
+        try:
+            get_db().conn.rollback()
+        except Exception:
+            pass
         logging.error(f"Error saving schedules: {e}")
+        return False
 
 
 def check_schedules():
@@ -643,7 +676,13 @@ def create_schedule():
         return jsonify({'error': 'Days are required for weekly schedules'}), 400
     
     schedules = load_schedules()
-    
+    if getattr(schedules, 'unavailable', False):
+        # an empty snapshot here is not "you have no schedules" - it is "the table did
+        # not answer". Saying 404/creating on top of it is how the whole table got
+        # rewritten from one row.
+        return jsonify({'error': 'Schedules are temporarily unavailable - check the '
+                                 'server logs', 'code': 'SCHEDULE_STORE_UNAVAILABLE'}), 503
+
     # Generate new ID
     new_id = schedules.get('last_id', 0) + 1
     schedules['last_id'] = new_id
@@ -670,8 +709,12 @@ def create_schedule():
         schedules['actions'] = []
     
     schedules['actions'].append(new_schedule)
-    save_schedules(schedules)
-    
+    if not save_schedules(schedules):
+        # the write was refused or rolled back; do not audit it as done or tell the
+        # caller it happened.
+        return jsonify({'error': 'Could not save the schedule - check the server logs',
+                        'code': 'SCHEDULE_WRITE_FAILED'}), 500
+
     log_audit(request.session.get('user', 'system'), 'schedule.created', 
              f"Created schedule '{new_schedule['name']}' for VM {data['vmid']}")
     
@@ -684,6 +727,10 @@ def update_schedule(schedule_id):
     """Update a scheduled action"""
     data = request.json or {}
     schedules = load_schedules()
+    if getattr(schedules, 'unavailable', False):
+        # see create_schedule: an empty snapshot is not "you have none"
+        return jsonify({'error': 'Schedules are temporarily unavailable - check the '
+                                 'server logs', 'code': 'SCHEDULE_STORE_UNAVAILABLE'}), 503
 
     # Find the schedule
     schedule = next((s for s in schedules.get('actions', []) if s.get('id') == schedule_id), None)
@@ -759,9 +806,11 @@ def update_schedule(schedule_id):
     for field in updatable:
         if field in data:
             schedule[field] = data[field]
-    
-    save_schedules(schedules)
-    
+
+    if not save_schedules(schedules):
+        return jsonify({'error': 'Could not save the schedule - check the server logs',
+                        'code': 'SCHEDULE_WRITE_FAILED'}), 500
+
     log_audit(request.session.get('user', 'system'), 'schedule.updated', 
              f"Updated schedule ID {schedule_id}")
     
@@ -773,6 +822,10 @@ def update_schedule(schedule_id):
 def delete_schedule(schedule_id):
     """Delete a scheduled action"""
     schedules = load_schedules()
+    if getattr(schedules, 'unavailable', False):
+        # see create_schedule: an empty snapshot is not "you have none"
+        return jsonify({'error': 'Schedules are temporarily unavailable - check the '
+                                 'server logs', 'code': 'SCHEDULE_STORE_UNAVAILABLE'}), 503
 
     # verify tenant access before deleting
     schedule = next((s for s in schedules.get('actions', []) if s.get('id') == schedule_id), None)
@@ -799,8 +852,10 @@ def delete_schedule(schedule_id):
 
     schedules['actions'] = [s for s in schedules.get('actions', []) if s.get('id') != schedule_id]
 
-    save_schedules(schedules)
-    
+    if not save_schedules(schedules):
+        return jsonify({'error': 'Could not save the schedule - check the server logs',
+                        'code': 'SCHEDULE_WRITE_FAILED'}), 500
+
     log_audit(request.session.get('user', 'system'), 'schedule.deleted', 
              f"Deleted schedule ID {schedule_id}")
     
@@ -990,7 +1045,17 @@ def set_update_schedule(cluster_id):
     
     data = request.json or {}
     usr = getattr(request, 'session', {}).get('user', 'system')
-    
+
+    # MK Sep 2026 - arming this with include_reboot set schedules a node reboot, and
+    # node.reboot is the permission for that (see the manual route in settings.py). It
+    # was enforced nowhere, so withholding it from a role changed nothing.
+    if data.get('enabled', False) and data.get('include_reboot', True):
+        from pegaprox.utils.rbac import has_permission as _hasp
+        from pegaprox.utils.auth import build_authz_user as _bau
+        if not _hasp(_bau(usr, getattr(request, 'session', {}) or {}), 'node.reboot'):
+            return jsonify({'error': 'Scheduling a node reboot needs the node.reboot '
+                                     'permission'}), 403
+
     schedule = {
         'enabled': data.get('enabled', False),
         'schedule_type': data.get('schedule_type', 'recurring'),

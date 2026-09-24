@@ -42,7 +42,7 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.concurrent import run_per_node
-from pegaprox.api.helpers import check_cluster_access, parse_pve_error, load_server_settings
+from pegaprox.api.helpers import require_unconfined, check_cluster_access, parse_pve_error, load_server_settings
 
 bp = Blueprint('multi_sdn', __name__)
 
@@ -73,17 +73,31 @@ def _resolve_member(cid):
     return mgr, None
 
 
-def _require_members_access(cluster_ids):
+def _require_members_access(cluster_ids, mutating=False):
     """Gate every member cluster the operation touches; return the first deny's
     Flask error response, or None if the caller may reach them all. Modeled on
     dr_drill._require_plan_access — a caller who can reach cluster A but not B
-    must not be able to mutate/read B's SDN through the aggregate."""
+    must not be able to mutate/read B's SDN through the aggregate.
+
+    MK Sep 2026 - `mutating` is the missing half. check_cluster_access answers
+    REACHABILITY, and by design its #248/#555 fallbacks admit a caller whose only
+    claim on the cluster is a VM-ACL row or a pool grant, deferring the real
+    decision downstream. For SDN there is no downstream: a vnet, a zone or an EVPN
+    controller is cluster-wide plumbing with no per-object notion, so creating,
+    editing, applying or deleting one is a whole-cluster act. A portal user with one
+    VM ACL was reaching every one of those routes. require_unconfined is the guard
+    the rest of the codebase already uses for exactly this shape.
+    """
     for cid in cluster_ids:
         if not cid:
             continue
         ok, err = check_cluster_access(cid)
         if not ok:
             return err
+        if mutating:
+            _uerr = require_unconfined(cid)
+            if _uerr:
+                return _uerr
     return None
 
 
@@ -829,7 +843,7 @@ def create_multi_vnet():
     if err:
         return jsonify({'error': err}), 400
     members = defn['member_clusters']
-    denied = _require_members_access(members)
+    denied = _require_members_access(members, mutating=True)
     if denied:
         return denied
     atomic = body.get('atomic', True) is not False
@@ -933,7 +947,7 @@ def reapply_multi_vnet(vid):
         return jsonify({'error': 'not found'}), 404
     rec = _row_to_dict(row)
     members = rec.get('member_clusters', [])
-    denied = _require_members_access(members)
+    denied = _require_members_access(members, mutating=True)
     if denied:
         return denied
     defn = rec.get('desired_state') or {}
@@ -976,7 +990,7 @@ def delete_multi_vnet(vid):
         return jsonify({'error': 'not found'}), 404
     rec = _row_to_dict(row)
     members = rec.get('member_clusters', [])
-    denied = _require_members_access(members)
+    denied = _require_members_access(members, mutating=True)
     if denied:
         return denied
     purge = request.args.get('purge') in ('1', 'true', 'yes')
@@ -1047,7 +1061,7 @@ def edit_multi_vnet(vid):
         return jsonify({'error': 'not found'}), 404
     rec = _row_to_dict(row)
     members = rec.get('member_clusters', [])
-    denied = _require_members_access(members)
+    denied = _require_members_access(members, mutating=True)
     if denied:
         return denied
     defn = rec.get('desired_state') or {}
@@ -1130,7 +1144,7 @@ def reconcile_multi_vnet(vid):
         return jsonify({'error': 'not found'}), 404
     rec = _row_to_dict(row)
     members = rec.get('member_clusters', [])
-    denied = _require_members_access(members)
+    denied = _require_members_access(members, mutating=True)
     if denied:
         return denied
     defn = rec.get('desired_state') or {}
@@ -1207,7 +1221,7 @@ def add_multi_vnet_member(vid):
     if new_cid in members:
         return jsonify({'error': f"cluster '{new_cid}' is already a member"}), 409
     # gate on ALL members INCLUDING the new one — a caller who can't reach it can't add it
-    denied = _require_members_access(members + [new_cid])
+    denied = _require_members_access(members + [new_cid], mutating=True)
     if denied:
         return denied
     defn = rec.get('desired_state') or {}
@@ -1266,7 +1280,7 @@ def remove_multi_vnet_member(vid, cid):
         return jsonify({'error': 'not found'}), 404
     rec = _row_to_dict(row)
     members = rec.get('member_clusters', [])
-    denied = _require_members_access(members)
+    denied = _require_members_access(members, mutating=True)
     if denied:
         return denied
     if cid not in members:
@@ -1390,6 +1404,14 @@ def _msdn_scan_once():
                                 h(payload)
                             except Exception:
                                 pass
+                        # same gap as #815 on the config-drift side: handlers are the
+                        # plugin hook, the configured webhook channels are a separate
+                        # dispatch that nobody here was calling.
+                        try:
+                            from pegaprox.utils.webhooks import send_to_channels
+                            send_to_channels(payload)
+                        except Exception as _we:
+                            logging.warning(f"[multi_sdn] webhook dispatch failed: {_we}")
                 except Exception as e:
                     logging.debug(f"[multi_sdn] drift alert emit failed: {e}")
 

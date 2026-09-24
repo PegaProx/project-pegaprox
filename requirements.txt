@@ -9,7 +9,9 @@ flask-compress>=1.14
 werkzeug>=3.1.6
 requests>=2.34.0
 requests-toolbelt>=1.0.0
-urllib3>=2.7.0
+# MK Sep 2026 - 2.8.0 closes six advisories against 2.7.x, two of them critical.
+# Floor, not a pin: an exact == here fights requests, which carries its own range.
+urllib3>=2.8.0
 dnspython>=2.7.0
 
 # === Encryption & Security ===
@@ -24,7 +26,18 @@ sqlcipher3-binary>=0.6.0; sys_platform == "linux" and platform_machine == "x86_6
 
 # === SSH & Console ===
 paramiko>=4.0.0
-websockets>=11.0
+# MK Sep 2026 - 16.1 fixes two advisories against the 11.x line. The client one applies
+# to us directly: api/vms.py and the generated .ssh_ws_server.py both call
+# websockets.connect() with a live PVEAuthCookie in additional_headers, and the bug replays
+# those headers on a cross-origin redirect. Floor, not a pin - an == here would also lock
+# out 16.1.1, which is a patch on top of that very fix. Capped below 18 the way cryptography
+# is: this library moved its server API twice already (12 deprecated the legacy one, 15
+# removed it), our console passes process_request and a hand-bound gevent socket into it, and
+# nothing in CI opens a real console - so a new major should wait for somebody to try it.
+# Checked against 17.1: serve() still takes process_request/ping_interval/ping_timeout/ssl/sock,
+# connect() still takes additional_headers/open_timeout, and both our callbacks already use the
+# new two-argument shape.
+websockets>=16.1,<18
 websocket-client>=1.6.0
 h11>=0.16.0
 
@@ -56,6 +69,14 @@ XenAPI>=23.14.0
 defusedxml>=0.7.1
 
 # === Transitive pins (scanner hygiene; newer versions pulled automatically) ===
-setuptools>=83.0.0
-zipp>=3.19.1
+# MK Sep 2026 — dropped the setuptools floor pin from #608. Since 3.12 ensurepip ships no
+# setuptools, so that line was the only reason it was in the image at all, and it dragged
+# its vendored wheel 0.46.3 in with it (84.0.0 still vendors 0.46.3, so bumping is no fix).
+# Nothing imports setuptools or pkg_resources at runtime; sdists resolve via PEP 517 build
+# isolation. Verified on a pip-only venv: all 53 packages install, setuptools absent after.
+# MK Sep 2026 - zipp only ever arrives here through Flask's importlib-metadata, which
+# Flask itself requires only below 3.10. Without the marker this floor installs a package
+# nothing uses on every modern deployment; with it, the CVE floor still applies exactly
+# where the package actually turns up. min_python is 3.8, so that case is real.
+zipp>=3.19.1; python_version < "3.10"
 idna>=3.15

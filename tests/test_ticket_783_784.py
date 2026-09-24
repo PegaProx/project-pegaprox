@@ -139,9 +139,13 @@ def test_the_subprocess_handle_is_actually_threaded_through():
 
 def test_greenlet_exit_during_handshake_is_swallowed():
     """gevent cancels connection greenlets on stop(); GreenletExit is a BaseException so
-    the SSL handler below it never saw one, and it surfaced as a shutdown traceback."""
+    the SSL handler below it never saw one, and it surfaced as a shutdown traceback.
+
+    MK Sep 2026 - this read `src[i:i + 900]` and went red when the handshake timeout was
+    added above the except: the clause was still there, 780 characters past the cutoff.
+    Take the method, not a guess at its length."""
+    from _srcutil import handler_body
     src = open('pegaprox/app.py').read()
-    i = src.index('def wrap_socket_and_handle')
-    block = src[i:i + 900]
+    block = handler_body(src, 'def wrap_socket_and_handle', nested=True)
 
     assert 'except GreenletExit' in block

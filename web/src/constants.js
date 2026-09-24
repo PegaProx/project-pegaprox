@@ -12,8 +12,12 @@
         // const API_URL = 'https://pegaprox.internal/api' // old staging
         
         // NS: Central version constant - keep in sync with backend PEGAPROX_VERSION
-        const PEGAPROX_VERSION = "1.1.1";
+        const PEGAPROX_VERSION = "1.2.0";
         const DEBUG = false; // set true for verbose logging
+
+        // Human-readable cluster label. Rename only writes display_name; name is
+        // the value typed at add time and is not unique across clusters.
+        const clusterLabel = (c) => (c && (c.display_name || c.name || c.id)) || '';
 
         // NS: global time formatting — reads user pref from localStorage
         // NS Jul 2026 (perf): fmtDate/fmtTime are called thousands of times per render

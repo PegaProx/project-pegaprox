@@ -156,6 +156,15 @@ def xhm_start():
     
     if not user_can_access_vm(user, data['source_cluster'], vmid_int, 'vm.migrate'):
         return jsonify({'error': 'Access denied to source VM'}), 403
+    # MK Sep 2026 - remove_source DESTROYS the source guest once the copy lands. That is
+    # vm.delete, not vm.migrate, and the distinction is load-bearing here: vm.delete is
+    # deliberately absent from the inherit_role permission set, so a VM-ACL user holds
+    # vm.migrate and never vm.delete. Without this check the migration path was the way
+    # around that - copy the guest somewhere, tick the box, and the original is gone.
+    if data.get('remove_source'):
+        if not user_can_access_vm(user, data['source_cluster'], vmid_int, 'vm.delete'):
+            return jsonify({'error': 'Access denied: removing the source guest needs '
+                                     'vm.delete on it'}), 403
     if caller_is_scoped(user, data['target_cluster']):
         return jsonify({'error': 'Access denied to target cluster'}), 403
 

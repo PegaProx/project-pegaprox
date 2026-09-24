@@ -2147,23 +2147,56 @@ def _inject_virtio_drivers(pve_mgr, task):
 
     # 1) Tooling. losetup + ntfsfix come with util-linux/ntfs-3g.
     # python3-hivex for registry edits (Debian's libhivex-bin lacks hivexregedit
-    # so we use the Python binding which is also more robust + idempotent).
-    # qemu-utils ships qemu-nbd — needed for file-based targets (NFS qcow2 etc.).
+    # so we use the Python binding which is also more robust + idempotent), and
+    # libhivex-bin for hivexsh, which the version probe below shells out to.
     # ceph-common (for `rbd map`) only installed on-demand inside the script
     # when STYPE=rbd, since most clusters don't use Ceph.
+    #
+    # MK Sep 2026 — this list used to carry qemu-utils and the probe used to require
+    # qemu-nbd. On PVE that package conflicts with pve-qemu-kvm, so apt proposes to
+    # remove it and takes proxmox-ve with it; pve-apt-hook aborts the whole run, which
+    # is the only reason nodes survived this and also why python3-hivex and ntfs-3g
+    # never got installed either. The #520 preflight 1700 lines up already tells
+    # operators not to do exactly this — that fix never reached this call site. PVE
+    # ships qemu-nbd via pve-qemu-kvm anyway, and the one branch that needs it checks
+    # for it itself (file-based storage, below), so neither belongs here.
+    #
+    # hivexsh went the other way: used, never installed, and its failure swallowed by
+    # 2>/dev/null — so VER_BUILD came back empty, the build table matched nothing and
+    # every guest silently got the w11 driver variant with INJECTION_OK on top.
     rc, _, _ = _pve_node_exec(pve_mgr, node,
         "python3 -c 'import hivex' 2>/dev/null && command -v ntfs-3g >/dev/null "
-        "&& command -v ntfsfix >/dev/null && command -v qemu-nbd >/dev/null",
+        "&& command -v ntfsfix >/dev/null",
         timeout=10)
     if rc != 0:
-        task.log("[VirtIO] Installing python3-hivex / ntfs-3g / qemu-utils (one-time)...")
+        task.log("[VirtIO] Installing python3-hivex / ntfs-3g / libhivex-bin (one-time)...")
         rc_apt, out_apt, _ = _pve_node_exec(pve_mgr, node,
             "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
-            "python3-hivex ntfs-3g qemu-utils 2>&1 | tail -5",
+            "python3-hivex ntfs-3g libhivex-bin 2>&1 | tail -25",
             timeout=180)
         if rc_apt != 0:
-            task.log(f"[VirtIO] ✗ apt install failed: {str(out_apt or '')[-200:]}")
+            # tail -5 used to cut the reason off — an apt refusal on PVE is several
+            # lines of hook output and the operator got "✗ apt install failed:" with
+            # nothing after the colon.
+            task.log(f"[VirtIO] ✗ apt install failed: {str(out_apt or '').strip()[-600:]}")
             return False
+
+    # hivexsh is checked separately and is NOT fatal. It only feeds the version probe,
+    # and the script falls back to a driver variant without it — which for a Windows 11
+    # guest is even the right one. Making it a hard requirement would abort migrations
+    # on air-gapped nodes that worked before. Try to fetch it, then let the script say
+    # NO_HIVEXSH and pick a fallback if it is still missing.
+    rc_hv, _, _ = _pve_node_exec(pve_mgr, node, "command -v hivexsh >/dev/null", timeout=10)
+    if rc_hv != 0:
+        task.log("[VirtIO] hivexsh missing — installing libhivex-bin for the version probe...")
+        rc_hv2, out_hv, _ = _pve_node_exec(pve_mgr, node,
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
+            "libhivex-bin 2>&1 | tail -25",
+            timeout=180)
+        if rc_hv2 != 0:
+            task.log("[VirtIO] ! libhivex-bin not installed — the guest's Windows build "
+                     "can't be read, so the driver variant is a guess: "
+                     f"{str(out_hv or '').strip()[-300:]}")
 
     # 2) Locate ISO. User-set path wins.
     iso_candidates = []
@@ -2310,6 +2343,9 @@ def _inject_virtio_drivers(pve_mgr, task):
         "echo \"WDIR=$WDIR\"\n"
         # Detect version via SOFTWARE hive
         "SOFTWARE=\"$WIN_MNT/$WDIR/System32/config/SOFTWARE\"\n"
+        # Say so rather than falling through to the default variant with a straight face.
+        "command -v hivexsh >/dev/null || echo 'NO_HIVEXSH (install libhivex-bin) "
+        "— cannot read the guest Windows build, driver variant will be a guess'\n"
         "VER_NAME=$(hivexsh \"$SOFTWARE\" <<HEOF 2>/dev/null\n"
         "cd \\\\Microsoft\\\\Windows NT\\\\CurrentVersion\n"
         "lsval ProductName\n"
@@ -2351,7 +2387,11 @@ def _inject_virtio_drivers(pve_mgr, task):
         # Copy SYS / INF / CAT for each driver — try PRIMARY first, then FALLBACKS
         "DRV_DEST=\"$WIN_MNT/$WDIR/System32/drivers\"\n"
         "INF_DEST=\"$WIN_MNT/$WDIR/INF\"\n"
-        "mkdir -p \"$INF_DEST\" 2>/dev/null||true\n"
+        # Windows reads .cat from the catalogue store, not from beside the .sys. The
+        # GUID is the driver-package class store and is fixed.
+        "CAT_DEST=\"$WIN_MNT/$WDIR/System32/CatRoot/"
+        "{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\"\n"
+        "mkdir -p \"$INF_DEST\" \"$CAT_DEST\" 2>/dev/null||true\n"
         "COPIED=0\n"
         "for D in $DRIVERS; do "
         "SRC=\"\"; "
@@ -2362,7 +2402,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         "[ -n \"$SRC\" ] || { echo \"SKIP $D (none of: $PRIMARY $FALLBACKS)\"; continue; }; "
         "if cp -f \"$SRC\"/*.sys \"$DRV_DEST/\" 2>/dev/null; then "
         "  cp -f \"$SRC\"/*.inf \"$INF_DEST/\" 2>/dev/null||true; "
-        "  cp -f \"$SRC\"/*.cat \"$DRV_DEST/\" 2>/dev/null||true; "
+        "  cp -f \"$SRC\"/*.cat \"$CAT_DEST/\" 2>/dev/null||true; "
         "  COPIED=$((COPIED+1)); "
         "  echo \"COPIED $D ($SRC)\"; "
         "else "

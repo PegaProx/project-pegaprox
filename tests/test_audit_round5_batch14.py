@@ -126,11 +126,16 @@ def test_update_schedule_denied_to_backup_schedule_holder(api, seed):
 
 
 def test_update_schedule_allowed_for_node_update_holder(api, seed):
+    # include_reboot is spelled out because the route defaults it to True, and arming a
+    # node reboot needs node.reboot since Sep 2026 (test_node_reboot_permission.py). What
+    # this pair is about is the permission FAMILY that owns the route - backup.schedule
+    # refused above, node.update accepted here - so it stays on the update-only case.
     _sched_cluster(api, seed)
     u = seed.user('opsguy', role='user', tenant_id='acme',
                   permissions=['node.update', 'cluster.view'])
     r = api.as_user(u).post('/api/clusters/cluster_1/updates/schedule',
-                            json={'enabled': True, 'day': 'sunday', 'time': '03:00'})
+                            json={'enabled': True, 'day': 'sunday', 'time': '03:00',
+                                  'include_reboot': False})
     assert r.status_code == 200, r.get_data(as_text=True)
 
 

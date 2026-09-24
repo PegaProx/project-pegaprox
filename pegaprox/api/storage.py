@@ -6,6 +6,7 @@ import json
 import time
 import logging
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
+from pegaprox.utils.sanitization import redact_url
 import threading
 import uuid
 import hashlib
@@ -26,6 +27,7 @@ from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection
 from pegaprox import globals as _g
+from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('storage', __name__)
 
@@ -171,7 +173,17 @@ def connect_esxi_host(cluster_id):
     host = data.get('host', '').strip()
     username = data.get('username', 'root')
     password = data.get('password', '')
-    skip_verify = data.get('skip_cert_verification', True)
+    # NS Sep 2026 (Aikido 469089274) — this defaulted to True, so an omitted field turned OFF
+    # certificate checking on the storage PVE creates. The UI's own checkbox renders unchecked
+    # and does not send the key until it is touched, i.e. the dialog said "verify" while the
+    # storage was created with skip-cert-verification=1. Default to verifying; a self-signed
+    # ESXi still works, the operator just has to tick the box they are already being shown.
+    # The bool() that stood here read like it sanitised the value and did not: bool("false") is
+    # True, so a client sending the JSON *string* "false" would have turned verification off.
+    # Only a real true / 1 / "true" counts as opt-out; anything else verifies.
+    _skip_raw = data.get('skip_cert_verification', False)
+    skip_verify = _skip_raw is True or _skip_raw == 1 or \
+        (isinstance(_skip_raw, str) and _skip_raw.strip().lower() in ('true', '1', 'yes', 'on'))
     
     if not host or not password:
         return jsonify({'error': 'Host and password required'}), 400
@@ -1257,6 +1269,39 @@ def run_auto_storage_balance():
                                 if mig.get('active'):
                                     actively_migrating_vmids.add(mig.get('vmid'))
 
+                        # MK Sep 2026 - this worker moves disks, and the interactive route that
+                        # does the same thing (execute_storage_migration, ~300 lines up) requires
+                        # vm.config on that specific VM. The worker runs USERLESS, so it has no
+                        # identity to check and simply moved anything. A guest that somebody
+                        # deliberately fenced off with a VM ACL or a pool grant is exactly the
+                        # guest that should not be moved by a job nobody authorized. Built once
+                        # per cycle, like the two skip-sets above.
+                        restricted_vmids = set()
+                        try:
+                            from pegaprox.utils.rbac import get_vm_acls, get_pool_membership_cache
+                            for _v in (get_vm_acls().get(cluster_id, {}) or {}):
+                                try:
+                                    restricted_vmids.add(int(_v))
+                                except (TypeError, ValueError):
+                                    pass
+                            _granted_pools = {r.get('pool_id') for r
+                                              in (get_db().get_pool_permissions(cluster_id) or [])}
+                            if _granted_pools:
+                                _members = get_pool_membership_cache(cluster_id) or {}
+                                for _pool, _vmids in _members.items():
+                                    if _pool in _granted_pools:
+                                        for _v in (_vmids or []):
+                                            try:
+                                                restricted_vmids.add(int(_v))
+                                            except (TypeError, ValueError):
+                                                pass
+                        except Exception as e:
+                            # a skip-set we could not build is not a reason to move MORE, so
+                            # sit this cycle out rather than run unrestricted
+                            logging.warning(f"Auto-balance: cannot determine protected VMs, "
+                                            f"skipping this cycle: {e}")
+                            continue
+
                         for vm in all_vms:
                             if migration_done or vms_checked >= max_vms_per_cycle:
                                 break
@@ -1271,6 +1316,11 @@ def run_auto_storage_balance():
 
                             # NS: Feb 2026 - skip VMs with active efficient snapshots
                             if vmid in eff_snap_vmids:
+                                continue
+
+                            # somebody fenced this guest off; only a human with vm.config on it
+                            # may move its disks
+                            if vmid in restricted_vmids:
                                 continue
 
                             # Check if target storage is available on this VM's node
@@ -1846,7 +1896,7 @@ def rescan_storage(cluster_id, storage_id):
                                         'else echo "no_multipath"; fi',
                                         timeout=30
                                     )
-                                    mp_output = stdout.read().decode().strip()
+                                    mp_output = _read_capped(stdout).strip()
                                     mp_exit_code = stdout.channel.recv_exit_status()
                                     if mp_output != "no_multipath":
                                         node_result['actions'].append({
@@ -1865,7 +1915,7 @@ def rescan_storage(cluster_id, storage_id):
                                         'else echo "no_multipath"; fi',
                                         timeout=60
                                     )
-                                    resize_output = stdout.read().decode().strip()
+                                    resize_output = _read_capped(stdout).strip()
                                     resize_exit_code = stdout.channel.recv_exit_status()
                                     if resize_output != "no_multipath":
                                         node_result['actions'].append({
@@ -1884,7 +1934,7 @@ def rescan_storage(cluster_id, storage_id):
                                         f'pvs --noheadings -o pv_name -S vgname={shlex.quote(vgname)} 2>/dev/null | xargs -r -n1 pvresize 2>&1',
                                         timeout=60
                                     )
-                                    output = stdout.read().decode()
+                                    output = _read_capped(stdout)
                                     exit_code = stdout.channel.recv_exit_status()
                                     node_result['actions'].append({
                                         'action': 'pvresize',
@@ -2394,7 +2444,7 @@ def download_from_url(cluster_id, node, storage):
                 download_data['checksum-algorithm'] = algo
                 download_data['checksum'] = hash_value
         
-        logging.info(f"Downloading {_sl(url)} as {_sl(filename)} to {_sl(storage)}")
+        logging.info(f"Downloading {_sl(redact_url(url))} as {_sl(filename)} to {_sl(storage)}")
         resp = manager._create_session().post(download_url, data=download_data, timeout=60)
         
         if resp.status_code == 200:
@@ -2414,7 +2464,8 @@ def download_from_url(cluster_id, node, storage):
             return jsonify({'error': error_msg}), resp.status_code
             
     except Exception as e:
-        logging.error(f"Error downloading from URL: {e}")
+        # the exception text repeats the URL, pre-signed query and all
+        logging.error(f"Error downloading from URL: {redact_url(str(e))}")
         return jsonify({'error': safe_error(e, 'Failed to download from URL')}), 500
 
 

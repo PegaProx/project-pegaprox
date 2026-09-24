@@ -3604,7 +3604,14 @@
             const rfbRef = useRef(null);
             const containerRef = useRef(null);
             const retryCount = useRef(0);
-            const maxRetries = 3;
+            // LW Sep 2026 — was 3 tries at a flat 2s, so any disruption lasting longer than
+            // about six seconds burned the whole budget and left the console dead until the
+            // user reopened it by hand. Worse, those three attempts land in exactly the seconds
+            // the backend is least able to answer. Back off instead, and give it long enough to
+            // ride out a congestion window rather than a hiccup. Cap the wait so a console that
+            // does come back doesn't sit on a two-minute timer.
+            const maxRetries = 8;
+            const retryDelayMs = (n) => Math.min(1000 * Math.pow(2, Math.max(0, n - 1)), 15000);
             const { getAuthHeaders, sessionId, reverseProxyEnabled } = useAuth();
             // NS May 2026 — view-mode toggle. 'vnc' = noVNC graphical (default,
             // existing behaviour); 'term' = xterm.js via PVE termproxy. Per-modal
@@ -3869,10 +3876,11 @@
                                 setConnectionStatus('disconnected');
                             } else if (!cancelled && retryCount.current < maxRetries) {
                                 retryCount.current++;
-                                console.log(`VNC: Reconnecting (${retryCount.current}/${maxRetries})...`);
+                                const wait = retryDelayMs(retryCount.current);
+                                console.log(`VNC: Reconnecting (${retryCount.current}/${maxRetries}) in ${wait}ms...`);
                                 setConnectionStatus('reconnecting');
                                 rfbRef.current = null;
-                                setTimeout(() => { if (!cancelled) startVNC(); }, 2000);
+                                setTimeout(() => { if (!cancelled) startVNC(); }, wait);
                             } else {
                                 setConnectionStatus('error');
                             }

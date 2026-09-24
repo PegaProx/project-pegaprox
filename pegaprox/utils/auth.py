@@ -333,13 +333,23 @@ def build_authz_user(username: str, session: dict) -> dict:
         # re-floors the numeric role every request. A BUILTIN token role is still floored numerically.
         if token_role and token_role not in _h:
             user['effective_role'] = token_role
-            # SPEC-011 multi-key (FIX3): a key pinned to a tenant CUSTOM role
+            # MK Sep 2026 - a CUSTOM token role keeps its name (see above), and the numeric
+            # floor above therefore never runs for it. So the token kept resolving through
+            # that role's permission list no matter what happened to its owner afterwards:
+            # demote the owner to viewer, strip a permission from their account, and a token
+            # they minted while they still held it carried on working. Mark the identity so
+            # get_user_permissions can intersect with what the owner holds TODAY - it has to
+            # happen there, not here, because the answer is per-tenant.
+            user['_token_owner_capped'] = True
+            # SPEC-011 multi-key (FIX3, 110lymph): a key pinned to a tenant CUSTOM role
             # adopts THAT role's tenant as its own — cluster visibility for the
             # key comes from the role's tenant, NOT the owner's home tenant or
             # the owner's membership union (D5 single-role visibility for
             # tokens). _tenant_defining_role only remaps default-tenant
             # callers, so without this pin an owner sitting in tenant A with a
-            # tenant-B role key saw tenant A's clusters.
+            # tenant-B role key saw tenant A's clusters. Composes with the
+            # owner-cap above: the cap intersects permissions for the CURRENT
+            # owner; this pin decides WHICH tenant the key operates in.
             try:
                 _rrow = get_db().conn.execute(
                     'SELECT tenant_id FROM custom_roles WHERE name = ?',
@@ -354,25 +364,59 @@ def build_authz_user(username: str, session: dict) -> dict:
     return user
 
 
-def is_initialized() -> bool:
-    """True if first-run setup has been completed.
+# Answers of initialization_state(). "unknown" is the one that matters: it is
+# what every caller used to see as "uninitialised" and act on.
+INIT_INITIALIZED = 'initialized'
+INIT_UNINITIALIZED = 'uninitialized'
+INIT_UNKNOWN = 'unknown'
 
-    Two ways an install becomes initialised:
+
+def initialization_state() -> str:
+    """Whether first-run setup has run, with "could not tell" as its own answer.
+
+    Two ways an install counts as initialised:
       1. /api/auth/setup ran successfully and wrote ADMIN_INITIALIZED_FILE
       2. backfill_initialized_marker() observed pre-existing users on an
          upgrade from a pre-setup-wizard build
 
+    MK Sep 2026 - this used to be a bare bool, and an unreadable user store
+    collapsed into False, i.e. into "fresh install". A wrong SQLCipher key, a
+    half-restored config volume or a permissions slip therefore re-opened
+    /api/auth/setup on a *production* install while /login was refusing
+    everyone: the operator is locked out and whoever reaches the port first
+    becomes the administrator. Report the difference and let callers decide.
+
     Pure read, no side effects.
     """
-    if os.path.exists(ADMIN_INITIALIZED_FILE):
-        return True
+    try:
+        os.stat(ADMIN_INITIALIZED_FILE)
+        return INIT_INITIALIZED
+    except FileNotFoundError:
+        pass                      # genuinely absent - ask the DB below
+    except OSError as e:
+        # os.path.exists() answers False for a marker that is there but cannot be
+        # stat()ed (config/ not readable), which reads as "no marker" and hands the
+        # decision to a store we almost certainly cannot read either.
+        logging.error(f"cannot stat the initialisation marker: {e}")
+        return INIT_UNKNOWN
     # second-opinion against the DB in case the marker file was wiped but
     # the user table survived (volume mount oddities, manual restore, etc.)
     try:
         db = get_db()
-        return bool(db.get_all_users())
-    except Exception:
-        return False
+        return INIT_INITIALIZED if db.get_all_users() else INIT_UNINITIALIZED
+    except Exception as e:
+        logging.error(f"cannot read the user store to decide first-run state: {e}")
+        return INIT_UNKNOWN
+
+
+def is_initialized() -> bool:
+    """True unless this is *certainly* a fresh install.
+
+    Fails closed on purpose: an unreadable user store answers True here, so the
+    setup wizard stays shut. Callers that need to tell "fresh" from "broken"
+    apart - the setup and login endpoints - ask initialization_state().
+    """
+    return initialization_state() != INIT_UNINITIALIZED
 
 
 def backfill_initialized_marker():
@@ -437,6 +481,51 @@ def save_users(users: dict):
         # logging.debug(f"saved {len(users)} users")
     except Exception as e:
         logging.error(f"save failed: {e}")
+
+def claim_admin_initialization() -> bool:
+    """Create the marker atomically. True only for the caller that created it.
+
+    O_EXCL makes this the mutual exclusion for first-run setup. Two concurrent
+    POSTs to /api/auth/setup both passed the is_initialized() check and both ran
+    through to save_users(), which upserts - so a racing attacker ended up with a
+    second, persistent administrator sitting next to the operator's, on an
+    install the operator believes they just set up alone. MK Sep 2026
+    """
+    try:
+        fd = os.open(ADMIN_INITIALIZED_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except Exception as e:
+        logging.error(f"couldnt claim admin init: {e}")
+        return False
+    try:
+        # os.write/os.close rather than fdopen(): if fdopen() itself raises it never
+        # takes ownership of the descriptor and we would leak it on every failure.
+        os.write(fd, datetime.now().isoformat().encode())
+    except Exception as e:
+        # the claim is what counts; a missing timestamp is cosmetic
+        logging.error(f"couldnt write admin init marker: {e}")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return True
+
+
+def release_admin_initialization():
+    """Give the claim back after a setup that failed to create the admin.
+
+    Without this a failed save leaves the marker behind and the install is
+    bricked: setup says "already initialised", login has nobody to log in as.
+    """
+    try:
+        os.unlink(ADMIN_INITIALIZED_FILE)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logging.error(f"couldnt release admin init: {e}")
+
 
 def mark_admin_initialized():
     """mark admin as customized so we dont recreate it"""

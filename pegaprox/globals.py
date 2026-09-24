@@ -39,9 +39,16 @@ _auth_action_lock = threading.Lock()
 # Session secret
 SESSION_SECRET = None
 
-# API rate limiting state
+# API rate limiting state. MK Sep 2026 - the plain dict was keyed by an unauthenticated
+# remote IP and only ever grew; the bounded counter replaces it. The old names stay so
+# nothing that still reads them breaks, but the live state is api_rate_window.
+from pegaprox.utils.ratelimit import SlidingWindow as _SlidingWindow
+from pegaprox.constants import API_RATE_LIMIT as _API_RATE_LIMIT, API_RATE_WINDOW as _API_RATE_WINDOW
+
 api_request_counts = {}
 api_rate_limit_lock = threading.Lock()
+api_rate_window = _SlidingWindow(limit=max(1, _API_RATE_LIMIT), window=_API_RATE_WINDOW,
+                                 max_keys=8192, name='api')
 
 # SSH connection management
 # NS: was 'BoundedSemaphore' because regular Semaphore doesn't raise on over-release

@@ -18,7 +18,9 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import (
     hash_password, verify_password, needs_password_rehash,
     validate_password_policy, load_users, save_users, save_single_user,
-    create_initial_admin, is_initialized,
+    create_initial_admin, is_initialized, initialization_state,
+    INIT_UNINITIALIZED, INIT_UNKNOWN,
+    claim_admin_initialization, release_admin_initialization,
     create_session, validate_session, invalidate_session,
     invalidate_all_user_sessions, cleanup_expired_sessions,
     generate_api_token, create_api_token, validate_api_token, revoke_user_api_tokens,
@@ -32,7 +34,7 @@ from pegaprox.utils.ldap import get_ldap_settings, ldap_authenticate, ldap_provi
 from pegaprox.utils.oidc import (
     get_oidc_settings, get_oidc_endpoints, oidc_build_auth_url,
     oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info,
-    oidc_get_user_groups, oidc_map_groups_to_role, oidc_provision_user,
+    oidc_get_user_groups, oidc_get_user_groups_ex, oidc_map_groups_to_role, oidc_provision_user,
     oidc_derive_username,
 )
 from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID
@@ -207,8 +209,11 @@ def oidc_callback():
         return jsonify({'error': 'Could not retrieve user information from provider'}), 401
     
     # Step 4: Get group memberships for role mapping
-    groups = oidc_get_user_groups(config, access_token)
-    role_mapping = oidc_map_groups_to_role(config, groups, id_claims)
+    # NS Sep 2026 - _ex also reports whether the group set is complete. That decides
+    # whether this login may revoke or only grant; see oidc_provision_user.
+    groups, groups_complete = oidc_get_user_groups_ex(config, access_token)
+    role_mapping = oidc_map_groups_to_role(config, groups, id_claims,
+                                           groups_complete=groups_complete)
     
     # Step 5: Provision/update local user
     if not config['auto_create_users']:
@@ -240,7 +245,15 @@ def oidc_callback():
     # Step 6: Create session via create_session() for proper session rotation + limits
     # MK: create_session() handles max 3 sessions per user, session rotation, save_sessions()
     session_token = create_session(username, user.get('role', ROLE_VIEWER))
-    
+
+    # KG Aug 2026 — stamp last_login here, mirroring auth_login(). Only the password/LDAP
+    # handler ever wrote this field, so every OIDC/Entra account showed "Never" in User
+    # Management however often it signed in — misleading when reviewing dormant accounts.
+    # Placed after create_session and after the disabled-account gate above, so a rejected
+    # attempt is not recorded as a login.
+    user['last_login'] = datetime.now().isoformat()
+    save_single_user(username, user)
+
     log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {client_ip}")
     
     # NS: Apr 2026 - include portal_only so client portal can validate OIDC users
@@ -425,12 +438,27 @@ def oidc_test_connection():
 # is uninitialised; closes itself once the first admin is created. Replaces
 # the old auto-bootstrapped `pegaprox/admin` default that exposed every
 # fresh install to a network-attacker race.
-_setup_attempts_by_ip = {}  # very light rate-limit, IP → list[ts]
+from pegaprox.utils.ratelimit import SlidingWindow as _SlidingWindow
+
+# very light rate-limit, keyed by an UNAUTHENTICATED remote IP - so it needs the
+# ceiling the plain dict never had (MK Sep 2026)
+_setup_attempts_by_ip = _SlidingWindow(limit=5, window=60, max_keys=2048, name='setup')
 
 
 @bp.route('/api/auth/setup', methods=['POST'])
 def auth_setup():
-    if is_initialized():
+    state = initialization_state()
+    if state == INIT_UNKNOWN:
+        # MK Sep 2026 - the user store did not answer. That used to read as "fresh
+        # install" and opened this endpoint on a running deployment whose DB had
+        # simply become unreadable. Say what is actually wrong instead.
+        logging.error("[SETUP] refused: the user store is unreadable, cannot tell "
+                      "whether this install already has an administrator")
+        return jsonify({
+            'error': 'Cannot read the user store - refusing setup. Check the server logs.',
+            'code': 'USER_STORE_UNAVAILABLE',
+        }), 503
+    if state != INIT_UNINITIALIZED:
         # already done, no replay
         return jsonify({
             'error': 'PegaProx is already initialised',
@@ -442,12 +470,9 @@ def auth_setup():
     # crude per-IP rate-limit: max 5 attempts / 60s. Mostly hygiene; the real
     # race-window protection is the operator firewalling 5000 until setup
     # completes. Document that in the install guide.
-    window = [t for t in _setup_attempts_by_ip.get(client_ip, []) if now - t < 60]
-    if len(window) >= 5:
+    if not _setup_attempts_by_ip.allow(client_ip):
         logging.warning(f"[SETUP] rate-limited setup attempt from {client_ip}")
         return jsonify({'error': 'Too many attempts, slow down'}), 429
-    window.append(now)
-    _setup_attempts_by_ip[client_ip] = window
 
     data = request.get_json() or {}
     username = sanitize_username(str(data.get('username', '')).strip().lower(), max_length=64)
@@ -467,14 +492,39 @@ def auth_setup():
     if not ok:
         return jsonify({'error': err}), 400
 
-    # build, save, mark — order matters: if mark fails the next request
-    # would re-allow setup and double-create, so the audit log catches it.
+    # Claim first, create second. The is_initialized() check above and the write
+    # below used to be two separate steps with a JSON body read, a password policy
+    # check and an argon2 hash in between - all of which yield under gevent. Two
+    # concurrent requests both passed the check and both created an administrator,
+    # because save_users() upserts. O_EXCL settles who owns this install before any
+    # account exists.
+    if not claim_admin_initialization():
+        logging.warning(f"[SETUP] lost the initialisation race to a concurrent request "
+                        f"from {client_ip}")
+        return jsonify({
+            'error': 'PegaProx is already initialised',
+            'code': 'ALREADY_INITIALIZED',
+        }), 409
+
     try:
         admin = create_initial_admin(username, password, display_name=display_name, email=email)
         save_users(admin)
-        mark_admin_initialized()
+        # save_users() logs its own failure and returns normally, so "it came back" is
+        # not evidence that anything was written. Read the account back before telling
+        # the operator the install is theirs - otherwise setup answers "Setup complete",
+        # the marker is in place, and the install has no account to log in with.
+        _persisted = load_users().get(username) or {}
+        if not _persisted.get('password_hash'):
+            raise RuntimeError("the administrator record was not persisted")
     except Exception as e:
+        # Hand the claim back, otherwise the install is bricked: setup says
+        # "already initialised" and login has nobody to authenticate. This does
+        # re-open the first-run window, so it is an ERROR the operator must see -
+        # the alternative is an install nobody can ever finish setting up.
+        release_admin_initialization()
         logging.error(f"[SETUP] failed to create initial admin: {e}")
+        logging.error("[SETUP] first-run setup is OPEN again after that failure - "
+                      "restrict access to this port until it completes")
         return jsonify({'error': 'Setup failed, check server logs'}), 500
 
     log_audit(username, 'admin.initial_setup',
@@ -515,7 +565,16 @@ def auth_login():
     # is no admin to authenticate against; refusing /login here closes the old
     # hardcoded-creds path (`pegaprox/admin` was bootstrapped automatically
     # which let any network-reachable fresh install be taken over).
-    if not is_initialized():
+    _init_state = initialization_state()
+    if _init_state == INIT_UNKNOWN:
+        # Not "wrong password" - the store this would authenticate against is gone.
+        # Saying so is what tells the operator to look at the DB instead of at the
+        # user, and it keeps the setup wizard shut while they do.
+        return jsonify({
+            'error': 'Cannot read the user store - check the server logs',
+            'code': 'USER_STORE_UNAVAILABLE',
+        }), 503
+    if _init_state == INIT_UNINITIALIZED:
         return jsonify({
             'error': 'PegaProx is not initialised — run the setup wizard first',
             'code': 'NOT_INITIALIZED',
@@ -759,8 +818,16 @@ def auth_login():
             'SELECT COUNT(*) AS n FROM webauthn_credentials WHERE username = ?', (username,)
         )
         has_webauthn = bool(_cnt_row and _cnt_row['n'] > 0)
-    except Exception:
-        has_webauthn = False
+    except Exception as e:
+        # MK Sep 2026 - this used to swallow the error into "no key enrolled". For an
+        # account whose ONLY second factor is a security key that silently dropped the
+        # second factor and let the password alone through. We cannot tell whether a key
+        # is required, so we refuse rather than guess downwards.
+        logging.error(f"[LOGIN] cannot read WebAuthn enrolment for '{username}': {e}")
+        return jsonify({
+            'error': 'Cannot verify second-factor enrolment - check the server logs',
+            'code': 'MFA_STATE_UNAVAILABLE',
+        }), 503
 
     if has_totp or has_webauthn:
         # Path A: caller submitted a WebAuthn proof (from /api/webauthn/auth/finish)
@@ -1233,10 +1300,19 @@ def get_cluster_creds_internal(cluster_id):
     mgr = cluster_managers[cluster_id]
 
     # NS Mar 2026: use standard cluster access check (validates user's cluster assignments + tenant)
-    from pegaprox.api.helpers import check_cluster_access
+    from pegaprox.api.helpers import check_cluster_access, require_unconfined
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # MK Sep 2026 - what this hands back is a root shell on a hypervisor node, which is as
+    # whole-cluster as an operation gets. check_cluster_access deliberately admits a caller
+    # who only reached the cluster through a VM ACL or a pool grant (#248/#555), and deferring
+    # the real decision downstream is right for a per-VM route - this is not one. node.shell is
+    # an admin-only builtin, so nothing but a custom role can arrive here confined in the first
+    # place, and for that caller the answer is no.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     # Check permissions - NS Feb 2026
     users_db = load_users()
@@ -1254,7 +1330,10 @@ def get_cluster_creds_internal(cluster_id):
         return jsonify({'error': 'Account disabled'}), 403
     # MK 2026-06-10 (RBAC): gate on node.shell only — admin holds it via all-perms, so the
     # explicit admin bypass was redundant; a custom role with node.shell now works too.
-    user_perms = get_user_permissions(user_data)
+    # ...and at the authority of whoever is actually calling: user_data is the stored account,
+    # so an admin-owned token capped at viewer used to be handed its owner's node.shell.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    user_perms = get_user_permissions(_bau(session['user'], session))
     if 'node.shell' not in user_perms:
         logging.warning(f"[CLUSTER-CREDS] User {session['user']} lacks node.shell permission")
         return jsonify({'error': 'Permission denied'}), 403
@@ -1426,8 +1505,16 @@ def verify_password_api():
             db = get_db()
             wa_row = db.query('SELECT COUNT(*) AS n FROM webauthn_credentials WHERE username = ?', (username,))
             has_webauthn = bool(wa_row and wa_row[0]['n'] > 0)
-        except Exception:
-            has_webauthn = False
+        except Exception as e:
+            # Same trap as the login path: swallowing this into False drops the whole
+            # WebAuthn rung of the ladder below, and the session fallback then waves the
+            # caller straight through. That turns a database hiccup into a re-auth bypass
+            # for exactly the admins who secured themselves with a key. Refuse instead.
+            logging.error(f"[AUTH] OIDC re-auth cannot read WebAuthn enrolment for '{username}': {e}")
+            return jsonify({
+                'error': 'Cannot verify second-factor enrolment - check the server logs',
+                'code': 'MFA_STATE_UNAVAILABLE',
+            }), 503
 
         if has_webauthn:
             if not webauthn_proof:
@@ -1749,6 +1836,27 @@ def get_2fa_status():
 # LW: Admins can see all tokens, users can only manage their own
 # =============================================================================
 
+def _api_token_admin_scope():
+    """The tenant an admin.api holder may act in, or None for a global admin.
+
+    MK Sep 2026 - admin.api was the whole gate on "list every token" and "revoke any
+    token". It is an admin-only builtin, so a non-admin only ever holds it through a
+    custom role, which is by definition a tenant delegation - and that delegate could
+    read every other tenant's token inventory (owner, prefix, role, permissions, last
+    used IP) and revoke any of it. Same rule the user-management routes use.
+    """
+    from pegaprox.utils.auth import build_authz_user
+    u = build_authz_user(request.session.get('user', ''), request.session)
+    if u.get('effective_role', u.get('role')) == ROLE_ADMIN:
+        return None
+    return u.get('tenant_id', DEFAULT_TENANT_ID)
+
+
+def _token_owner_tenant(owner, users=None):
+    users = users if users is not None else load_users()
+    return (users.get(owner) or {}).get('tenant_id', DEFAULT_TENANT_ID)
+
+
 @bp.route('/api/auth/tokens', methods=['GET'])
 @require_auth()
 def list_api_tokens():
@@ -1772,6 +1880,11 @@ def list_api_tokens():
                 FROM api_tokens ORDER BY created_at DESC
             ''')
             tokens = [dict(row) for row in cursor.fetchall()]
+            _scope = _api_token_admin_scope()
+            if _scope is not None:
+                _users = load_users()
+                tokens = [t for t in tokens
+                          if _token_owner_tenant(t.get('username'), _users) == _scope]
             return jsonify({'tokens': tokens})
         except Exception as e:
             return jsonify({'error': safe_error(e, 'Failed to list tokens')}), 500
@@ -1896,6 +2009,10 @@ def revoke_api_token_endpoint(token_id):
             cursor.execute('SELECT username, name FROM api_tokens WHERE id = ?', (token_id,))
             row = cursor.fetchone()
             if row:
+                _scope = _api_token_admin_scope()
+                if (_scope is not None
+                        and _token_owner_tenant(dict(row)['username']) != _scope):
+                    return jsonify({'error': 'Token not found'}), 404
                 cursor.execute('UPDATE api_tokens SET revoked = 1 WHERE id = ?', (token_id,))
                 db.conn.commit()
                 token_owner = dict(row)['username']

@@ -3,7 +3,14 @@
 
 services:
   pegaprox:
-    image: ghcr.io/pegaprox/pegaprox:latest
+    # MK Sep 2026 - `latest` is a moving target: every `docker compose pull` takes
+    # whatever it points at now, with nothing to compare against. That is fine for a
+    # lab and wrong for anything that manages a production estate, so the tag is a
+    # variable. Default unchanged, and an operator pins with one line:
+    #   PEGAPROX_VERSION=1.2.0 docker compose up -d
+    # Strictest is a digest, which cannot be repointed at all:
+    #   PEGAPROX_VERSION=1.2.0@sha256:<digest from `docker buildx imagetools inspect`>
+    image: ghcr.io/pegaprox/pegaprox:${PEGAPROX_VERSION:-latest}
     # build: .  # uncomment to build locally
     container_name: pegaprox
     ports:

@@ -8,7 +8,6 @@ Original PR by gyptazy, adapted to fit PegaProx architecture.
 import os
 import time
 import logging
-import sqlite3  # kept for type re-exports
 import threading
 from datetime import datetime
 
@@ -35,6 +34,25 @@ import queue as _queue
 _LOG_QUEUE = _queue.Queue(maxsize=20000)
 _DROPPED = 0
 
+# MK Sep 2026 - a 20000-entry cap is a cap on COUNT, and the receiver is unauthenticated,
+# so the sender picks the size. _MAX_LINE is 64 KB, which makes the honest worst case
+# 20000 x 64 KB = about 1.2 GB of resident memory that anyone able to reach :1514 can
+# demand, on a box whose job is to keep clusters running. Count the bytes as well and stop
+# at whichever bound is reached first. 64 MB is roomy for the real traffic (a syslog line
+# is a couple of hundred bytes, so this is ~300k of them) and survivable on a small VM.
+_QUEUE_MAX_BYTES = int(os.environ.get('PEGAPROX_SYSLOG_QUEUE_MB', '64')) * 1024 * 1024
+_QUEUE_BYTES = 0
+_QUEUE_BYTES_LOCK = threading.Lock()
+
+
+def _entry_bytes(entry):
+    """Rough resident size of one queued entry. The message dominates; the rest is
+    small fixed fields, so a flat allowance beats summing every one of them."""
+    try:
+        return len(entry.get('message') or '') + 200
+    except Exception:
+        return 200
+
 # Runtime start/stop so the Settings → Syslog toggle can open/close the port live
 # (not only on restart). The listeners track their socket here so stop can close it.
 _stop_event = threading.Event()
@@ -43,13 +61,37 @@ _tcp_sock = None
 
 
 def _enqueue_log(entry):
-    global _DROPPED
+    global _DROPPED, _QUEUE_BYTES
+    _sz = _entry_bytes(entry)
+    if _QUEUE_MAX_BYTES > 0:
+        with _QUEUE_BYTES_LOCK:
+            if _QUEUE_BYTES + _sz > _QUEUE_MAX_BYTES:
+                _DROPPED += 1
+                if _DROPPED % 1000 == 1:
+                    logging.warning(f"[Syslog] ingest queue at its byte ceiling "
+                                    f"({_QUEUE_MAX_BYTES // (1024*1024)}MB) - dropped "
+                                    f"{_DROPPED} messages (flood?)")
+                return
+            _QUEUE_BYTES += _sz
     try:
         _LOG_QUEUE.put_nowait(entry)
     except _queue.Full:
+        if _QUEUE_MAX_BYTES > 0:
+            with _QUEUE_BYTES_LOCK:
+                _QUEUE_BYTES -= _sz          # never queued, so give the budget back
         _DROPPED += 1
         if _DROPPED % 1000 == 1:
             logging.warning(f"[Syslog] ingest queue full — dropped {_DROPPED} messages (flood / slow disk?)")
+
+
+def _release_queue_bytes(entries):
+    """Hand the budget back once a batch has left the queue."""
+    global _QUEUE_BYTES
+    if _QUEUE_MAX_BYTES <= 0:
+        return
+    _freed = sum(_entry_bytes(e) for e in entries)
+    with _QUEUE_BYTES_LOCK:
+        _QUEUE_BYTES = max(0, _QUEUE_BYTES - _freed)
 
 
 def _flush_batch(batch):
@@ -90,6 +132,47 @@ def _prune_old_logs():
             conn.commit()
             if n and n > 0:
                 logging.info(f"[Syslog] retention prune: deleted {n} rows older than {days}d")
+
+            # MK Sep 2026 - the retention window is the ONLY bound on this file, and the
+            # receiver is unauthenticated: anyone who can reach :1514 decides how much
+            # arrives inside those 30 days. syslog.db sits in config/, beside the main
+            # encrypted database and the master key, so filling that volume takes the
+            # whole installation down, not just the log viewer. Cap the size too, and
+            # drop the oldest rows until it fits.
+            #
+            # No VACUUM: reclaiming the pages would mean copying a multi-gigabyte file
+            # on a server that is by then short of disk, which is the worst possible
+            # moment. The freed pages are reused, so the file stops GROWING, which is
+            # what actually matters here.
+            try:
+                from pegaprox.api.helpers import load_server_settings as _lss
+                _max_mb = int(_lss().get('syslog_max_db_mb', 2048) or 2048)
+            except Exception:
+                _max_mb = 2048
+            if _max_mb > 0:
+                _limit = _max_mb * 1024 * 1024
+                for _round in range(12):
+                    try:
+                        _size = os.path.getsize(DB_FILE)
+                    except OSError:
+                        break
+                    if _size <= _limit:
+                        break
+                    # oldest 10% by id, which is insertion order
+                    cur.execute("SELECT COUNT(*) FROM logs")
+                    _total = cur.fetchone()[0] or 0
+                    if _total < 1000:
+                        break          # nothing left worth deleting; the file is bloat
+                    cur.execute("DELETE FROM logs WHERE id IN "
+                                "(SELECT id FROM logs ORDER BY id LIMIT ?)",
+                                (max(1000, _total // 10),))
+                    _gone = cur.rowcount
+                    conn.commit()
+                    logging.warning(
+                        f"[Syslog] size cap: {_size // (1024*1024)}MB exceeds "
+                        f"{_max_mb}MB, dropped the {_gone} oldest rows")
+                    if not _gone:
+                        break
         finally:
             try:
                 conn.close()
@@ -128,6 +211,10 @@ def _drain_loop():
                         batch.append(_LOG_QUEUE.get_nowait())
                     except _queue.Empty:
                         break
+                # give the byte budget back the moment the batch leaves the queue -
+                # NOT after the write. The write runs off-hub and can be slow or fail;
+                # tying the budget to it would let one stuck flush stall ingestion.
+                _release_queue_bytes(batch)
                 _offhub(_flush_batch, (batch,))
             if time.monotonic() - last_prune > 3600:
                 last_prune = time.monotonic()
@@ -217,7 +304,10 @@ def _init_fts(cur):
                 FROM logs
             """)
         return True
-    except sqlite3.OperationalError as exc:
+    # dbcrypto's, not sqlite3's — _open_db() goes through dbcrypto.connect() and the
+    # sqlcipher3 build raises its own OperationalError, so the sqlite3 one matched
+    # nothing and this fallback couldn't fall back on the installs that have SQLCipher.
+    except dbcrypto.OperationalError as exc:
         logging.info(f"[Syslog] FTS disabled for syslog DB: {exc}")
         return False
 
@@ -406,6 +496,10 @@ def _tcp_listener(host, port):
             time.sleep(0.1)
 
 
+SYSLOG_SETTINGS_ATTEMPTS = 10      # 10 x 30s = 5 min, dann bleibt der Port zu
+SYSLOG_SETTINGS_RETRY_S = 30
+
+
 def _syslog_loop():
     """Main syslog server loop — runs UDP + TCP in gevent greenlets"""
     import gevent
@@ -414,13 +508,36 @@ def _syslog_loop():
     # enabled. Default True keeps existing behaviour (the receiver has always
     # been on); operators who don't ingest syslog can close the port. The
     # per-packet DoS is fixed regardless by the queue+batched-drain above.
-    try:
-        from pegaprox.api.helpers import load_server_settings
-        if not load_server_settings().get('syslog_enabled', True):
-            logging.info("[Syslog] disabled (syslog_enabled=false) — not binding 1514")
-            return
-    except Exception:
-        pass  # settings unreadable at boot → fall through to default-on
+    # MK Sep 2026 - the old version swallowed a failed settings read and fell through to
+    # default-on, which binds an UNAUTHENTICATED port on a box whose operator may have
+    # switched it off on purpose. An error must not overrule an explicit choice. The
+    # default-on only applies when we actually managed to read and found nothing, so on a
+    # read failure keep retrying rather than guessing - a transient problem at boot heals
+    # itself within a few minutes, and a persistent one leaves the port closed and says so.
+    _settings = None
+    for _attempt in range(SYSLOG_SETTINGS_ATTEMPTS):
+        try:
+            from pegaprox.api.helpers import load_server_settings
+            _settings = load_server_settings()
+            break
+        except Exception as _e:
+            logging.warning(
+                "[Syslog] cannot read server settings (attempt %d/%d): %s - not binding "
+                "1514 until we know whether it is wanted",
+                _attempt + 1, SYSLOG_SETTINGS_ATTEMPTS, _e)
+            gevent.sleep(SYSLOG_SETTINGS_RETRY_S)
+
+    if _settings is None:
+        logging.error(
+            "[Syslog] server settings still unreadable after %ds - receiver stays down. "
+            "It is not starting an unauthenticated listener it cannot confirm is wanted; "
+            "fix the settings store and restart.",
+            SYSLOG_SETTINGS_ATTEMPTS * SYSLOG_SETTINGS_RETRY_S)
+        return
+
+    if not _settings.get('syslog_enabled', True):
+        logging.info("[Syslog] disabled (syslog_enabled=false) — not binding 1514")
+        return
 
     _init_db()
 

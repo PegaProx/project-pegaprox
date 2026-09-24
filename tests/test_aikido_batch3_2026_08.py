@@ -68,12 +68,18 @@ def test_dr_drill_require_plan_access_fails_closed_on_missing_plan(api):
 # ---------------------------------------------------------------------------
 
 def test_user_perms_cross_tenant_denied_for_tenant_admin(api, seed):
+    """NS Sep 2026 — this asserted 403, and 403 was the wrong shape for what the section
+    header asks for: the missing-user branch answered 404, so the pair of codes still told
+    alice whether the name existed in tenant_b. The route now answers 404 for both, which is
+    what "must not disclose" means. Indistinguishability itself is covered in
+    tests/test_aikido_medium_low_sep2026.py."""
     seed.tenant('tenant_a', clusters=['cluster_1'])
     seed.tenant('tenant_b', clusters=['cluster_2'])
     alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['admin.users'])
     seed.user('bob', role='user', tenant_id='tenant_b')
     r = api.as_user(alice).get('/api/users/bob/permissions')
-    assert r.status_code == 403, r.get_data(as_text=True)
+    assert r.status_code == 404, r.get_data(as_text=True)
+    assert 'bob' not in r.get_data(as_text=True)
 
 
 def test_user_perms_same_tenant_allowed(api, seed):

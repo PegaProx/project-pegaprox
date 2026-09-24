@@ -34,6 +34,7 @@ from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
 from pegaprox.api.helpers import check_cluster_access, scope_vm_rows
 from pegaprox.core.db import get_db
+from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('templates_lib', __name__)
 
@@ -266,7 +267,12 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
         return
 
     img_basename = tpl['image_url'].rsplit('/', 1)[-1]
-    img_path = f"/tmp/pegaprox-ci-{template_id}-{img_basename}"
+    # MK Sep 2026 - this used to be /tmp/pegaprox-ci-<template>-<image>, which any local
+    # account on the node can work out from the template list and pre-create as a symlink.
+    # `wget -O` follows one, so a root download landed wherever the symlink pointed. A random
+    # name inside a 0700 directory of our own removes both halves of that.
+    _img_dir = f"/tmp/pegaprox-ci-{uuid.uuid4().hex}"
+    img_path = f"{_img_dir}/{img_basename}"
 
     # use management IP if we have one, otherwise cluster host
     try:
@@ -290,8 +296,8 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
             _update_dep(dep_id, log_append=f"$ {cmd}")
             stdin, stdout, stderr = ssh.exec_command(cmd, get_pty=False, timeout=900)
             rc = stdout.channel.recv_exit_status()
-            out = stdout.read().decode('utf-8', errors='replace').strip()
-            err = stderr.read().decode('utf-8', errors='replace').strip()
+            out = _read_capped(stdout).strip()
+            err = _read_capped(stderr).strip()
             if out:
                 _update_dep(dep_id, log_append=out[:1000])
             if err and rc != 0:
@@ -310,7 +316,12 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
         # never fetches a URL that skipped it. allow_private=True keeps air-gapped mirrors working.
         from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
         try:
-            sanitize_outbound_url(tpl['image_url'], allowed_schemes=('https', 'http'), allow_private=True)
+            # NS Sep 2026 — allow_loopback=False: an internal mirror lives on the LAN, never on
+            # the fetching node's own 127.0.0.1, and the bytes wget pulls become a disk image the
+            # requester can boot and read. That turns a blind SSRF into a read of whatever is
+            # bound to the node's loopback, which no guest could otherwise reach.
+            sanitize_outbound_url(tpl['image_url'], allowed_schemes=('https', 'http'),
+                                  allow_private=True, allow_loopback=False)
         except SsrfError as _se:
             raise RuntimeError(f"image_url rejected by SSRF guard: {_se}")
 
@@ -322,6 +333,7 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
 
         # 1. download
         # MK: -nc skip if exists, -q quiet output. show-progress would flood log
+        run(f"mkdir -m 700 -p {shlex.quote(_img_dir)}", 'staging dir', weight=1)
         run(f"wget -q -O {q_img_path} {q_url}", 'download')
         _update_dep(dep_id, progress=35, log_append='download done')
 
@@ -360,7 +372,7 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
         _update_dep(dep_id, progress=95, log_append='converted to template')
 
         # 6. cleanup downloaded img
-        run(f"rm -f {q_img_path}", 'cleanup', weight=2)
+        run(f"rm -rf {shlex.quote(_img_dir)}", 'cleanup', weight=2)
 
         _update_dep(dep_id, status='completed', progress=100,
                     log_append=f"template {vm_name} (vmid {vmid}) ready",
@@ -418,7 +430,8 @@ def add_custom_template():
     # image mirrors working while cloud-metadata endpoints stay blocked).
     from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
     try:
-        sanitize_outbound_url(image_url, allowed_schemes=('https', 'http'), allow_private=True)
+        sanitize_outbound_url(image_url, allowed_schemes=('https', 'http'),
+                              allow_private=True, allow_loopback=False)
     except SsrfError as _se:
         return jsonify({'error': f'image_url rejected by SSRF guard: {_se}'}), 400
 
@@ -488,7 +501,12 @@ def delete_custom_template(tpl_id):
             return jsonify({'error': 'not found'}), 404
         _owner = (_row['created_by'] if hasattr(_row, 'keys') else _row[0]) or ''
         from pegaprox.models.permissions import ROLE_ADMIN
-        if _owner != _current_user() and request.session.get('role') != ROLE_ADMIN:
+        # sec (audit): resolve the role live rather than reading the value cached when the session
+        # was minted — same drift the role-template path in users.py had, and build_authz_user also
+        # applies an API token's floor here.
+        from pegaprox.utils.auth import build_authz_user
+        _caller = build_authz_user(_current_user(), request.session)
+        if _owner != _current_user() and _caller.get('effective_role', _caller.get('role')) != ROLE_ADMIN:
             return jsonify({'error': 'Access denied'}), 403
         c.execute('DELETE FROM custom_cloud_templates WHERE id = ?', (tpl_id,))
         get_db().conn.commit()
@@ -544,6 +562,35 @@ def deploy(cluster_id):
 
     if not name:
         name = f"tpl-{tpl['distro']}-{tpl['version']}".replace('.', '')
+
+    # MK Sep 2026 - deploying a template CREATES a guest, on a node and under a VMID the
+    # caller picks, and this route asked neither of the two questions vms.py asks on
+    # create. A caller confined to their own VMs by an ACL or a pool grant has no
+    # cluster-level standing to place a new guest at all, and a tenant with a configured
+    # VMID range must not land outside it - a collision there surfaces at restore time,
+    # long after anyone can tell which guest was meant. The PBS restore-into-a-new-VMID
+    # path was closed the same way earlier this month.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.api.helpers import require_unconfined as _runc
+    from pegaprox.models.permissions import ROLE_ADMIN as _RA
+    _caller = _bau(request.session.get('user', ''), request.session)
+    if _caller.get('effective_role', _caller.get('role')) != _RA:
+        _cerr = _runc(cluster_id)
+        if _cerr:
+            return _cerr
+        # CodeAnt, same day: erring open here would undo the paragraph above. The range is
+        # the boundary that stops two tenants colliding on an id, and a check that could not
+        # run has not cleared anything - refuse and say why, rather than deploy and find out
+        # at restore time.
+        try:
+            from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID as _DT
+            _rok, _rmsg = check_tenant_vmid(_caller.get('tenant_id') or _DT, vmid)
+        except Exception as _re:
+            logging.error(f"[vmid-range] template deploy: range check failed, refusing: {_re}")
+            _rok, _rmsg = False, ('Cannot verify the tenant VMID range right now - '
+                                  'check the server logs')
+        if not _rok:
+            return jsonify({'error': _rmsg}), 403
 
     user = _current_user()
 

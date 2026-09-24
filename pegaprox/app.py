@@ -388,39 +388,17 @@ def create_app():
     return app
 
 
+# MK Sep 2026 - the sweep this used to carry ran whenever the map passed 1024 entries
+# and removed only EXPIRED windows. Keep the map just above the threshold with LIVE
+# windows and you get a full scan on every single request that frees nothing: O(n) per
+# request with n still climbing, which is a better attack than the one it was added to
+# stop. The shared counter sweeps on a clock and evicts the oldest keys once the ceiling
+# is genuinely breached, so neither the map nor the work per request can run away.
 def _check_api_rate_limit(client_ip: str) -> bool:
     """Simple sliding window rate limiter."""
     if API_RATE_LIMIT <= 0:
         return True
-
-    current_time = time.time()
-
-    with g.api_rate_limit_lock:
-        # sec (audit): this map is keyed by an unauthenticated remote IP and entries were only
-        # ever added — a rotating source (an IPv6 /64 costs nothing) grew it without bound.
-        # Sweep windows that have already expired; the check below resets a live one anyway.
-        if len(g.api_request_counts) > 1024:
-            _stale = [ip for ip, i in g.api_request_counts.items()
-                      if current_time - i.get('window_start', 0) > API_RATE_WINDOW]
-            for _ip in _stale:
-                g.api_request_counts.pop(_ip, None)
-
-        if client_ip not in g.api_request_counts:
-            g.api_request_counts[client_ip] = {'count': 1, 'window_start': current_time}
-            return True
-
-        info = g.api_request_counts[client_ip]
-
-        if current_time - info['window_start'] > API_RATE_WINDOW:
-            info['count'] = 1
-            info['window_start'] = current_time
-            return True
-
-        if info['count'] >= API_RATE_LIMIT:
-            return False
-
-        info['count'] += 1
-        return True
+    return g.api_rate_window.allow(client_ip)
 
 
 def download_static_files():
@@ -827,7 +805,8 @@ def _resolve_ssl_context(reverse_proxy, domain='', app_name='PegaProx',
 
 def main(debug_mode=False):
     """Main entry point - starts PegaProx server."""
-    from pegaprox.utils.auth import load_users, load_sessions, backfill_initialized_marker, is_initialized
+    from pegaprox.utils.auth import (load_users, load_sessions, backfill_initialized_marker,
+                                     initialization_state, INIT_UNINITIALIZED, INIT_UNKNOWN)
     from pegaprox.utils.audit import load_audit_log
     from pegaprox.core.config import load_config
     from pegaprox.core.pbs import load_pbs_servers
@@ -865,6 +844,13 @@ def main(debug_mode=False):
         format='%(asctime)s [%(name)s] %(levelname)s: %(message)s' if debug_mode else '%(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
+    # MK Sep 2026 - CWE-117 at the sink. Names, URLs and error strings the caller chose
+    # reach log lines all over this tree; CR/LF forges a line and ESC repaints the
+    # operator's terminal. Guarding the call sites means seventy-five edits and a
+    # seventy-sixth somebody forgets, so it goes on the handlers instead. Tracebacks
+    # arrive via exc_info and keep their newlines.
+    from pegaprox.utils.sanitization import install_log_injection_filter
+    install_log_injection_filter()
 
     if not debug_mode:
         logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -972,13 +958,23 @@ def main(debug_mode=False):
     # /login path's is_initialized() doesn't fall through to NOT_INITIALIZED).
     backfill_initialized_marker()
 
-    if not is_initialized():
+    _init_state = initialization_state()
+    if _init_state == INIT_UNINITIALIZED:
         print("\n" + "=" * 50)
         print("FIRST-RUN SETUP REQUIRED")
         print("  No admin account exists yet — open the PegaProx URL")
         print("  in a browser to create the first administrator via the")
         print("  setup wizard. /api/auth/login is disabled until that")
         print("  is done.")
+        print("=" * 50 + "\n")
+    elif _init_state == INIT_UNKNOWN:
+        # not a fresh install - the store simply did not answer. Both login and
+        # setup refuse in this state, so say which one the operator is looking at.
+        print("\n" + "=" * 50)
+        print("USER STORE UNREADABLE")
+        print("  Could not read the user table. Login and the setup wizard")
+        print("  are BOTH refused until this is resolved - check the")
+        print("  encryption key and the permissions on config/.")
         print("=" * 50 + "\n")
 
     # Load existing configuration
@@ -1436,12 +1432,47 @@ def _create_listener(bind_host, port_num):
 # streams, uploads, websocket upgrades) is never touched. PEGAPROX_KEEPALIVE_TIMEOUT=0 restores the
 # old unbounded behaviour.
 _KEEPALIVE_IDLE_TIMEOUT = float(os.environ.get('PEGAPROX_KEEPALIVE_TIMEOUT', '75'))
+# MK Sep 2026 - how long a connection may take to finish saying hello. The keepalive
+# timeout above covers the wait for the NEXT request line on an idle connection; these two
+# cover the two phases before that where a client can simply stop and hold a pool slot
+# forever: the TLS handshake, and the headers after the request line. Generous on purpose -
+# a phone on a bad train connection still completes both inside a second - but finite,
+# because `workers` slots held open is the whole server.
+_HANDSHAKE_TIMEOUT = float(os.environ.get('PEGAPROX_HANDSHAKE_TIMEOUT', '30'))
+_HEADER_TIMEOUT = float(os.environ.get('PEGAPROX_HEADER_TIMEOUT', '30'))
 
 
 class _IdleTimeoutMixin:
-    """Bound the idle wait for the next request line. Compose ahead of a gevent pywsgi handler
-    class in the MRO so `super().read_requestline()` reaches the real handler."""
+    """Bound the idle wait for the next request line, and the header read after it.
+
+    Compose ahead of a gevent pywsgi handler class in the MRO so `super().read_requestline()`
+    reaches the real handler.
+
+    MK Sep 2026 - read_requestline was the only bounded phase, so `GET / HTTP/1.1` followed by
+    headers dribbled one byte at a time held a slot indefinitely: the request line arrived
+    promptly, and everything after it was unbounded. Note this bounds the HEADERS only - the
+    body is read later, by the application, and a WebSocket upgrade completes its headers in
+    one packet like any other request, so a live console is unaffected.
+    """
     _idle_timeout = _KEEPALIVE_IDLE_TIMEOUT
+    _header_timeout = _HEADER_TIMEOUT
+
+    def read_request(self, raw_requestline):
+        to = self._header_timeout
+        if not to or to <= 0:
+            return super().read_request(raw_requestline)
+        import gevent
+        t = gevent.Timeout(to)
+        t.start()
+        try:
+            return super().read_request(raw_requestline)
+        except gevent.Timeout as ex:
+            if ex is t:
+                # pywsgi turns a falsy return into a clean 400 and closes the connection
+                return False
+            raise
+        finally:
+            t.close()
 
     def read_requestline(self):
         to = self._idle_timeout
@@ -1583,9 +1614,35 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
     # Custom error handler to suppress SSL errors (from bots/scanners/disconnects)
     class QuietWSGIServer(WSGIServer):
         def wrap_socket_and_handle(self, client_socket, address):
-            """Override to catch SSL errors and the shutdown GreenletExit during handshake"""
+            """Override to catch SSL errors and the shutdown GreenletExit during handshake.
+
+            MK Sep 2026 - and to put a clock on the handshake. This method already runs
+            inside the spawned greenlet, so a TCP connection that opens and then never
+            completes its TLS handshake holds a pool slot for as long as it likes; `workers`
+            of those and the server answers nobody, no login required. A real handshake is
+            a couple of round trips.
+            """
+            # A socket timeout, not a gevent.Timeout around the call: the handshake does
+            # not necessarily happen inside wrap_socket(). With an stdlib SSLContext it can
+            # be deferred to the first read, which lands in the handler - outside any timer
+            # we start here. A timeout on the socket travels with it and bounds that read
+            # too. handle() clears it the moment the connection is up, so keep-alive and
+            # long-lived console sockets are untouched.
+            if _HANDSHAKE_TIMEOUT > 0:
+                try:
+                    client_socket.settimeout(_HANDSHAKE_TIMEOUT)
+                except Exception:
+                    pass
             try:
                 return super().wrap_socket_and_handle(client_socket, address)
+            except (socket.timeout, OSError) as e:
+                if isinstance(e, socket.timeout) or 'timed out' in str(e).lower():
+                    try:
+                        client_socket.close()
+                    except Exception:
+                        pass
+                    return
+                raise
             except GreenletExit:
                 # gevent cancels connection greenlets on stop(); expected at exit, and it
                 # is a BaseException so the handler below would never see it. Its siblings
@@ -1595,6 +1652,19 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                 if 'ssl' in str(type(e).__name__).lower() or 'ssl' in str(e).lower():
                     return
                 raise
+
+        def handle(self, sock, address):
+            """The handshake is done by the time we get here, so lift its deadline.
+
+            Everything after this point has its own bounds: _IdleTimeoutMixin for the
+            request line and the headers, and the application for the body. A console
+            WebSocket lives here for hours and must not inherit a 30s socket timeout.
+            """
+            try:
+                sock.settimeout(None)
+            except Exception:
+                pass
+            return super().handle(sock, address)
 
         def handle_error(self, *args):
             """Suppress SSL errors - they're normal with self-signed certs"""

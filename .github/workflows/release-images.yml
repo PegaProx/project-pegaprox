@@ -10,8 +10,10 @@ on:
         required: false
         default: ""
 
+# NS Sep 2026 - only the publish job attaches assets to the release. Everything else
+# just builds, so the token it gets does not need to be able to write to the repo.
 permissions:
-  contents: write
+  contents: read
 
 env:
   PVE_PORT: "5000"
@@ -49,6 +51,20 @@ jobs:
           else
             V="dev-$(date +%Y%m%d-%H%M%S)"
             REL="false"
+          fi
+          # NS Sep 2026 - the env-var quoting above only protects THIS step. Once $V
+          # is in GITHUB_OUTPUT the later steps read it back as a bare expression inside
+          # their run blocks (the gyptazy poll below, and the artifact names in
+          # build-lxc/build-vm), where a single quote in the tag breaks straight out of
+          # the surrounding shell string. Cheaper to refuse a tag we would never cut
+          # than to chase every sink: semver with an optional v, or our dev stamp.
+          # And note what broke this file for a day: the expression braces are evaluated
+          # inside a run block too, comment or not. Only a YAML-level comment is safe to
+          # write them in - which is exactly what the note at the top of this step says,
+          # and I wrote the example into the wrong kind of comment anyway.
+          if ! printf '%s' "$V" | grep -qE '^(v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*(\+[A-Za-z0-9.-]+)?|dev-[0-9]{8}-[0-9]{6})$'; then
+            echo "::error::refusing version '$V' - expected v1.2.3 / 1.2.3-rc1 or dev-YYYYMMDD-HHMMSS"
+            exit 1
           fi
           echo "Version: $V (is_release=$REL)"
           echo "version=$V"      >> "$GITHUB_OUTPUT"
@@ -828,6 +844,8 @@ jobs:
     needs: [prepare, build-lxc, build-vm]
     if: ${{ always() && needs.build-lxc.result == 'success' && needs.build-vm.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

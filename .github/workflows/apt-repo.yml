@@ -34,6 +34,15 @@ concurrency:
 
 jobs:
   build:
+    # NS Sep 2026 - workflow_dispatch can be fired from ANY branch, and this job hands
+    # APT_GPG_PRIVATE_KEY to a build script that lives in the checkout. A dispatch from a
+    # branch carrying a doctored packaging/apt/build-apt-repo.sh therefore reads the
+    # signing key, or publishes packages signed with it. Pin the dispatch to main; push is
+    # already main-only via the trigger, and a published release is a deliberate act that
+    # needs repo write anyway. Deliberately keyed on the EVENT, not on github.ref: a ref
+    # test has to allow refs/tags/* to keep the release leg working, and tags are not
+    # immutable - we force-moved v1.1.0 ourselves in September.
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

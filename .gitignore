@@ -39,3 +39,6 @@ archive/
 .zed/
 *.swp
 *.swo
+
+# codeant CLI scratch output — tool state, never source
+.codeant/

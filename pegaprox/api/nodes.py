@@ -19,6 +19,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
+from pegaprox.utils.ssh import read_capped as _read_capped
 from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined
 
 bp = Blueprint('nodes', __name__)
@@ -610,8 +611,12 @@ if command -v ipmitool >/dev/null 2>&1; then
     echo "PP_OK already_installed $ver"; exit 0
 fi
 if ! command -v apt-get >/dev/null 2>&1; then echo 'PP_ERR no-apt-get'; exit 3; fi
-apt-get update -o Acquire::Retries=2 >/tmp/pp_ipmitool_apt.log 2>&1 || true
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ipmitool >>/tmp/pp_ipmitool_apt.log 2>&1; then
+# a fixed log path in /tmp is a symlink target like any other; mktemp -d gives us a
+# 0700 directory nobody else can have pre-created
+PP_LOGDIR="$(mktemp -d /tmp/pp-ipmitool-XXXXXXXX)" || exit 4
+trap 'rm -rf "$PP_LOGDIR"' EXIT
+apt-get update -o Acquire::Retries=2 >"$PP_LOGDIR/apt.log" 2>&1 || true
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ipmitool >>"$PP_LOGDIR/apt.log" 2>&1; then
     echo 'PP_ERR apt-install-failed'; exit 5
 fi
 command -v ipmitool >/dev/null 2>&1 || { echo 'PP_ERR not-installed-after-apt'; exit 6; }
@@ -677,12 +682,7 @@ def install_ipmitool_api(cluster_id):
                     time.sleep(1.5)
             if not ssh:
                 return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
-            _ssh_write_file(ssh, '/tmp/pegaprox-ipmitool-install.sh', IPMITOOL_INSTALL_SCRIPT, 0o755)
-            out, _e = _ssh_run_checked(ssh, 'bash /tmp/pegaprox-ipmitool-install.sh', timeout=180)
-            try:
-                ssh.exec_command('rm -f /tmp/pegaprox-ipmitool-install.sh')
-            except Exception:
-                pass
+            out, _e = _ssh_run_script(ssh, IPMITOOL_INSTALL_SCRIPT, timeout=180)
             last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
             if 'PP_OK already_installed' in out:
                 return {'node': node, 'success': True, 'already_installed': True, 'detail': last}
@@ -1240,7 +1240,7 @@ def _ssh_sudo_prefix(ssh):
         return cached
     try:
         stdin, stdout, _ = ssh.exec_command('id -u', timeout=10)
-        uid = stdout.read().decode().strip()
+        uid = _read_capped(stdout).strip()
         prefix = '' if uid == '0' else 'sudo -n '
     except Exception:
         prefix = ''
@@ -1249,6 +1249,34 @@ def _ssh_sudo_prefix(ssh):
     except Exception:
         pass
     return prefix
+
+
+def _ssh_run_script(ssh, script, timeout=180):
+    """Run a script on the node WITHOUT ever writing it to a file.
+
+    The installers used to land on a fixed path - /tmp/pegaprox-starlvm-install.sh and
+    friends - and then run it as root. /tmp is world-writable and sticky, and sticky only
+    stops you deleting somebody else's file, not creating a symlink under a name nobody has
+    taken yet. So any local account on a managed node could point that name at, say,
+    /etc/cron.d/x, wait for an operator to click install, and have root write their content.
+    The same went for the apt log each script redirected into a fixed /tmp path.
+
+    Piping over stdin removes the artifact entirely: no path, nothing to pre-create, nothing
+    to clean up afterwards. Base64 so quoting, newlines and heredocs inside the script
+    survive the shell. MK Sep 2026
+    """
+    import base64 as _b64
+    prefix = _ssh_sudo_prefix(ssh)
+    enc = _b64.b64encode(script.encode('utf-8')).decode('ascii')
+    runner = 'sudo -n bash' if prefix else 'bash'
+    full = f"echo {enc} | base64 -d | {runner}"
+    stdin, stdout, stderr = ssh.exec_command(full, timeout=timeout)
+    out = _read_capped(stdout)
+    rc = stdout.channel.recv_exit_status()
+    err = _read_capped(stderr).strip()
+    if rc != 0:
+        raise RuntimeError(f"script failed (rc={rc}): {err or out[:200] or 'no output'}")
+    return out, err
 
 
 def _ssh_run_checked(ssh, cmd, timeout=30):
@@ -1266,9 +1294,9 @@ def _ssh_run_checked(ssh, cmd, timeout=30):
     else:
         full = f"{prefix}{cmd}"
     stdin, stdout, stderr = ssh.exec_command(full, timeout=timeout)
-    out = stdout.read().decode('utf-8', errors='replace')
+    out = _read_capped(stdout)
     rc = stdout.channel.recv_exit_status()
-    err = stderr.read().decode('utf-8', errors='replace').strip()
+    err = _read_capped(stderr).strip()
     if rc != 0:
         raise RuntimeError(f"`{cmd}` failed (rc={rc}): {err or out[:200] or 'no output'}")
     return out, err
@@ -1294,7 +1322,7 @@ def _ssh_write_file(ssh, path, content, mode=None):
     stdin, stdout, stderr = ssh.exec_command(f"{prefix}mkdir -p {q_parent}")
     rc = stdout.channel.recv_exit_status()
     if rc != 0:
-        err = stderr.read().decode('utf-8', errors='replace').strip()
+        err = _read_capped(stderr).strip()
         raise RuntimeError(f"mkdir -p {parent} failed (rc={rc}): {err or 'permission denied?'}")
 
     if not prefix:
@@ -1313,7 +1341,7 @@ def _ssh_write_file(ssh, path, content, mode=None):
             stdin.channel.shutdown_write()
             rc = stdout.channel.recv_exit_status()
             if rc != 0:
-                err = stderr.read().decode('utf-8', errors='replace').strip()
+                err = _read_capped(stderr).strip()
                 raise RuntimeError(f"write {path} failed (rc={rc}): {err or 'unknown'}")
             if mode is not None:
                 _ssh_run_checked(ssh, f"chmod {oct(mode)[2:]} {q_path}")
@@ -1341,7 +1369,7 @@ def _ssh_write_file(ssh, path, content, mode=None):
         stdin, stdout, stderr = ssh.exec_command(mv_cmd)
         rc = stdout.channel.recv_exit_status()
         if rc != 0:
-            err = stderr.read().decode('utf-8', errors='replace').strip()
+            err = _read_capped(stderr).strip()
             # best-effort cleanup so /tmp doesn't stay littered on failure
             try: ssh.exec_command(f"rm -f {q_tmp}")
             except Exception: pass
@@ -1679,16 +1707,16 @@ def get_smbios_autoconfig_status(cluster_id, node):
         
         # Check if script exists
         stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
-        installed = 'exists' in stdout.read().decode()
+        installed = 'exists' in _read_capped(stdout)
         
         # Check if service is running
         stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
-        status = stdout.read().decode().strip()
+        status = _read_capped(stdout).strip()
         running = status == 'active'
         
         # Get last log entries
         stdin, stdout, stderr = ssh.exec_command('tail -5 /var/log/pegaprox-smbios.log 2>/dev/null || echo "No logs yet"')
-        logs = stdout.read().decode().strip()
+        logs = _read_capped(stdout).strip()
         
         ssh.close()
         
@@ -1761,12 +1789,12 @@ def deploy_smbios_autoconfig(cluster_id, node):
 
         # confirm it actually became active (systemctl start/restart can succeed even when unit fails)
         stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig')
-        active = stdout.read().decode('utf-8', errors='replace').strip()
+        active = _read_capped(stdout).strip()
         stdout.channel.recv_exit_status()
         if active != 'active':
             # grab last log lines for context
             stdin, stdout, stderr = ssh.exec_command('journalctl -u pegaprox-smbios-autoconfig -n 10 --no-pager 2>/dev/null | tail -10')
-            log_tail = stdout.read().decode('utf-8', errors='replace').strip()
+            log_tail = _read_capped(stdout).strip()
             raise RuntimeError(f"service not active (state={active}). Last log: {log_tail[:400]}")
 
         usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1955,11 +1983,11 @@ def get_smbios_autoconfig_status_all(cluster_id):
                 try:
                     # Check if script exists
                     stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
-                    installed = 'exists' in stdout.read().decode()
+                    installed = 'exists' in _read_capped(stdout)
                     
                     # Check if service is running
                     stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
-                    status = stdout.read().decode().strip()
+                    status = _read_capped(stdout).strip()
                     running = status == 'active'
                     
                     results[node_name] = {
@@ -2063,7 +2091,7 @@ def deploy_smbios_autoconfig_all(cluster_id):
 
             # verify active
             stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig')
-            active = stdout.read().decode('utf-8', errors='replace').strip()
+            active = _read_capped(stdout).strip()
             stdout.channel.recv_exit_status()
             if active != 'active':
                 raise RuntimeError(f"service not active (state={active})")
@@ -2156,12 +2184,14 @@ EOF
 # scrub any legacy unsigned config a previous StarWind install may have left
 rm -f /etc/apt/sources.list.d/starwind-proxmox.list /etc/apt/trusted.gpg.d/starwind-proxmox.gpg 2>/dev/null || true
 
-apt-get update -o Acquire::Retries=2 >/tmp/pp_starlvm_apt.log 2>&1 || true
+PP_LOGDIR="$(mktemp -d /tmp/pp-starlvm-XXXXXXXX)" || exit 4
+trap 'rm -rf "$PP_LOGDIR"' EXIT
+apt-get update -o Acquire::Retries=2 >"$PP_LOGDIR/apt.log" 2>&1 || true
 # on PVE9 drop the old bookworm package (StarWind's documented 8->9 upgrade step)
 if [ "$pv" -ge 9 ]; then DEBIAN_FRONTEND=noninteractive apt-get remove -y starwind-proxmox-plugin >/dev/null 2>&1 || true; fi
 
 # apt refuses an unverifiable Signed-By source, so this is the real security gate
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$PKG" >>/tmp/pp_starlvm_apt.log 2>&1; then
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$PKG" >>"$PP_LOGDIR/apt.log" 2>&1; then
     echo 'PP_ERR apt-install-failed'; exit 5
 fi
 
@@ -2219,6 +2249,19 @@ def install_starlvm_plugin(cluster_id):
         return jsonify({'error': 'StarWind plugin install is Proxmox-only'}), 400
 
     body = request.get_json(silent=True) or {}
+    # MK Sep 2026 - the key URL is the TRUST ANCHOR for a root apt-install on every node
+    # in the cluster, so overriding it is "run my code as root here", not a setting. The
+    # SSRF guard below decides where the request may go, not whose key it fetches.
+    # admin.settings is an admin-only builtin, which means a non-admin only ever holds it
+    # through a hand-built custom role - a delegation of settings, and nobody delegates
+    # settings meaning to hand over the hypervisors. The default StarWind repo stays open
+    # to that delegate; pointing it somewhere else is the global admin's call.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _caller = _bau(request.session.get('user', ''), request.session)
+    if (_caller.get('effective_role', _caller.get('role')) != ROLE_ADMIN
+            and (body.get('repo_url') or body.get('key_url'))):
+        return jsonify({'error': 'Only a global admin can install from a repository or '
+                                 'signing key other than the default'}), 403
     try:
         repo_url = _safe_repo_url(body.get('repo_url'), STARWIND_REPO_DEFAULT)
         key_url = _safe_repo_url(body.get('key_url'), STARWIND_KEY_DEFAULT)
@@ -2252,12 +2295,7 @@ def install_starlvm_plugin(cluster_id):
                     time.sleep(1.5)
             if not ssh:
                 return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
-            _ssh_write_file(ssh, '/tmp/pegaprox-starlvm-install.sh', script, 0o755)
-            out, _e = _ssh_run_checked(ssh, 'bash /tmp/pegaprox-starlvm-install.sh', timeout=200)
-            try:
-                ssh.exec_command('rm -f /tmp/pegaprox-starlvm-install.sh')
-            except Exception:
-                pass
+            out, _e = _ssh_run_script(ssh, script, timeout=200)
             last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
             if 'PP_OK already_installed' in out:
                 return {'node': node, 'success': True, 'already_installed': True, 'detail': last}
@@ -2465,6 +2503,19 @@ def cleanup_orphaned_excluded_vms():
             # Check if VM still exists
             try:
                 vms = mgr.get_vm_resources()
+                # MK Sep 2026 - an enumeration that FAILS does not raise here, it answers
+                # with an empty list: XcpngManager.get_vms returns [] when _api() is
+                # unavailable, and the Proxmox one does the same when the session is gone.
+                # Read literally that means "every VM on this cluster is gone", and the very
+                # next line deletes the exclusions for all of them - the operator's
+                # deliberate do-not-balance list, wiped by a connection blip. A cluster that
+                # genuinely holds zero VMs has no exclusions worth cleaning either, so
+                # skipping on empty costs nothing and only ever defers a stale row by a day.
+                if not vms:
+                    logging.debug(
+                        f"[CLEANUP] {cluster_id} enumerated no VMs - leaving its exclusions "
+                        "alone rather than treating that as 'they all went away'")
+                    continue
                 vm_exists = any(vm.get('vmid') == vmid for vm in vms)
                 
                 if not vm_exists:
@@ -2722,7 +2773,12 @@ def run_custom_script(cluster_id, script_id):
             if not ssh:
                 return {'node': node, 'success': False, 'error': 'SSH connection failed', 'output': ''}
 
-            script_path = f'/tmp/pegaprox_script_{script_id}{script_ext}'
+            # MK Sep 2026 - the name used to be /tmp/pegaprox_script_<id><ext>, and the id
+            # comes straight out of the script library, so anyone with a local account on the
+            # node could work it out and pre-create it as a symlink. SFTP follows one, and
+            # this write runs as root and then chmods the result 0755. A random name per run
+            # closes it; the id stays in the audit log where it belongs.
+            script_path = f'/tmp/pegaprox_script_{uuid.uuid4().hex}{script_ext}'
             sftp = ssh.open_sftp()
             with sftp.file(script_path, 'w') as f:
                 f.write(script['content'])
@@ -2730,7 +2786,7 @@ def run_custom_script(cluster_id, script_id):
             sftp.close()
 
             stdin, stdout, stderr = ssh.exec_command(f'{interpreter} {script_path} 2>&1', timeout=300)
-            output = stdout.read().decode('utf-8', errors='replace')
+            output = _read_capped(stdout)
             exit_code = stdout.channel.recv_exit_status()
 
             ssh.exec_command(f'rm -f {script_path}')

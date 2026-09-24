@@ -108,6 +108,18 @@ def _is_private_or_special(ip: ipaddress._BaseAddress) -> bool:
     )
 
 
+def _is_loopback(ip: ipaddress._BaseAddress) -> bool:
+    """Loopback on its own, transition addresses unwrapped like _is_private_or_special does.
+    The outer address is judged FIRST: ::1 falls inside the ::/96 compat range, so unwrapping
+    it first would hand back 0.0.0.1 and lose the loopback that was staring at us."""
+    if ip.is_loopback or ip.is_unspecified:
+        return True
+    embedded = _embedded_ipv4(ip)
+    if embedded is not None:
+        return _is_loopback(embedded)
+    return False
+
+
 def _resolve_all(host: str) -> Iterable[ipaddress._BaseAddress]:
     """Resolve hostname to all A/AAAA records as ip_address objects.
 
@@ -137,6 +149,7 @@ def is_safe_outbound_url(
     *,
     allowed_schemes: Iterable[str] = ('https',),
     allow_private: bool = False,
+    allow_loopback: bool = True,
     require_resolution: bool = True,
 ) -> Tuple[bool, str]:
     """Return (ok, reason).
@@ -150,6 +163,12 @@ def is_safe_outbound_url(
             Used for purely-internal outbound (cluster API on
             corporate LAN). Default False — most call sites want
             internal blocked.
+        allow_loopback: Only consulted when allow_private is True. NS Sep 2026 — the
+            private-LAN call sites need RFC1918 but not 127.0.0.0/8: a caller who can
+            steer the URL and then read what came back gets at services bound to the
+            fetching host's own loopback, which nothing else on the network can reach.
+            Sites where the target is admin-configured (PBS, a node URL, a BMC) leave
+            this True; a site that fetches a user-supplied URL passes False.
         require_resolution: When True, resolve DNS and reject if any
             returned IP is private / metadata / loopback. When False
             we only reject IP-literal hosts that are obviously bad
@@ -192,6 +211,8 @@ def is_safe_outbound_url(
             return False, f'IP {ip_literal} is metadata endpoint'
         if not allow_private and _is_private_or_special(ip_literal):
             return False, f'IP {ip_literal} is private / loopback / metadata'
+        if not allow_loopback and _is_loopback(ip_literal):
+            return False, f'IP {ip_literal} is loopback'
         return True, 'ok (ip literal)'
 
     if not require_resolution:
@@ -210,6 +231,8 @@ def is_safe_outbound_url(
             return False, f'host {host!r} resolves to metadata IP {ip}'
         if not allow_private and _is_private_or_special(ip):
             return False, f'host {host!r} resolves to private/loopback {ip}'
+        if not allow_loopback and _is_loopback(ip):
+            return False, f'host {host!r} resolves to loopback {ip}'
 
     return True, 'ok'
 

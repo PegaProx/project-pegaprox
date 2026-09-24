@@ -61,6 +61,12 @@ def get_ldap_settings() -> dict:
     return config
 
 
+# auth_source values an LDAP login owns and may therefore refresh. Mirrors
+# OIDC_AUTH_SOURCES in oidc.py: 'local', 'oidc' and 'entra' rows belong to somebody
+# else and must never be adopted by a directory login. MK Sep 2026
+LDAP_AUTH_SOURCES = ('ldap',)
+
+
 def ldap_authenticate(username: str, password: str) -> dict:
     """Authenticate user against LDAP/Active Directory
     
@@ -120,6 +126,20 @@ def ldap_authenticate(username: str, password: str) -> dict:
             if validate == ssl_module.CERT_NONE:
                 logging.warning("[LDAP] TLS certificate verification disabled - MITM risk")
             tls_config = Tls(validate=validate)
+        else:
+            # MK Sep 2026 - the warning above only fires INSIDE the TLS branch, so the one
+            # configuration that has no protection at all was the only one that said nothing.
+            # Both toggles default to off, which makes this the state an operator lands in by
+            # filling in a server and a bind DN and touching nothing else. Three binds follow
+            # on this connection and the middle one carries the END USER'S password, not just
+            # ours. Refusing outright would break installs that run LDAP on a trusted segment
+            # on purpose, so this says it loudly instead and leaves that call to a release.
+            logging.warning(
+                "[LDAP] neither ldap_use_ssl nor ldap_use_starttls is set for %s:%s - the "
+                "service-account bind DN and password, every user password checked against "
+                "this directory, and the group lookup all cross the network in plaintext. "
+                "Enable LDAPS or STARTTLS in Settings unless this link is physically trusted.",
+                server_url, port)
         
         server = Server(server_url, port=port, use_ssl=ldap_config['use_ssl'], 
                        tls=tls_config, get_info=ALL, connect_timeout=10)
@@ -322,13 +342,26 @@ def ldap_provision_user(ldap_result: dict) -> dict:
     users = load_users()
     
     if username in users:
-        # NS: SECURITY - Don't overwrite local-only accounts with LDAP
+        # MK Sep 2026 - this asked two questions and got both slightly wrong.
+        #
+        # `existing_source == 'local'` let an OIDC or Entra row be adopted by an LDAP
+        # login. The comment above OIDC_AUTH_SOURCES states the rule from the other
+        # side - 'local' and 'ldap' rows must never be adopted by an OIDC login - and
+        # the same holds mirrored: whoever controls the directory should not be able
+        # to take over an account that belongs to a different identity provider by
+        # creating a matching name in it. Only rows this login already owns.
+        #
+        # `and users[username].get('password_hash')` meant a local account WITHOUT a
+        # stored password was adopted: an account whose only credential is a security
+        # key has no password_hash, and neither does one created but never given a
+        # password. Both were takeable.
         existing_source = users[username].get('auth_source', 'local')
-        if existing_source == 'local' and users[username].get('password_hash'):
-            logging.warning(f"[LDAP] Rejected provisioning for '{username}' - local account with password exists")
+        if existing_source not in LDAP_AUTH_SOURCES:
+            logging.warning(f"[LDAP] Rejected provisioning for '{username}' - the account "
+                            f"belongs to '{existing_source}', not to this directory")
             return None  # Caller should handle None return
-        
-        # Update existing LDAP/OIDC user with fresh LDAP info
+
+        # Update the existing LDAP user with fresh LDAP info
         user = users[username]
         user['display_name'] = ldap_result.get('display_name', username)
         user['email'] = ldap_result.get('email', user.get('email', ''))
@@ -338,8 +371,27 @@ def ldap_provision_user(ldap_result: dict) -> dict:
         user['last_ldap_sync'] = datetime.now().isoformat()
         
         # MK: Sync tenant assignment from LDAP group mapping
-        if ldap_result.get('tenant'):
-            user['tenant_id'] = ldap_result['tenant']  # NS: Must be tenant_id (not tenant) for code compatibility
+        #
+        # MK Sep 2026 - `if tenant:` only ever ASSIGNED. Take a user out of the mapped
+        # group and the mapping produces nothing, so the old tenant stayed put and with
+        # it access to that tenant's clusters - the same one-way sync the permissions
+        # below had before August.
+        #
+        # But clearing it outright would be wrong too: an admin can set tenant_id by
+        # hand, and that is not LDAP's to take away. So track what LDAP itself assigned,
+        # exactly like ldap_permissions right below, and only ever revoke our own.
+        _new_tenant = ldap_result.get('tenant') or ''
+        _prev_tenant = user.get('ldap_tenant') or ''
+        if _new_tenant:
+            user['tenant_id'] = _new_tenant   # NS: Must be tenant_id (not tenant) for code compatibility
+            user['ldap_tenant'] = _new_tenant
+        elif _prev_tenant and user.get('tenant_id') == _prev_tenant:
+            # LDAP put them there and LDAP no longer says so
+            from pegaprox.utils.rbac import DEFAULT_TENANT_ID as _DT
+            user['tenant_id'] = _DT
+            user['ldap_tenant'] = ''
+            logging.info(f"[LDAP] '{username}' is no longer mapped to tenant "
+                         f"'{_prev_tenant}' - moved back to the default tenant")
         
         # NS Aug 2026 (Aikido pentest) — LDAP is authoritative on each sync. The old code only
         # ever UNIONED group perms in, so dropping a user from a mapped group never revoked the

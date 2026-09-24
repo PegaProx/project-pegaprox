@@ -25,8 +25,12 @@ RUN groupadd -r pegaprox && useradd -r -g pegaprox -d /app -s /bin/false pegapro
 WORKDIR /app
 
 # Install Python dependencies first (better layer caching)
+# MK Sep 2026 — upgrade pip before the install. The base image pins whatever pip shipped
+# with that python:3.12-slim build, and `apt-get upgrade` above can't touch it (it isn't a
+# dpkg package), so a pip advisory sat in the published image until the base digest moved.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY --chown=pegaprox:pegaprox pegaprox_multi_cluster.py .

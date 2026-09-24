@@ -129,10 +129,38 @@ def secure_ssh_client(paramiko):
 def persist_host_keys(client):
     """Persist any newly-learned host keys so the next connection verifies against
     them. Best-effort: the config dir may be read-only. Serialized to avoid two
-    greenlets clobbering the file."""
+    greenlets clobbering the file.
+
+    MK Sep 2026 - this used to be a bare ``client.save_host_keys()``, which writes the
+    set the client loaded when it was BUILT and truncates the file. Anything pinned in
+    between was erased: a keyboard-interactive login going through
+    verify_transport_host_key, or simply a second client that learned a host first. The
+    host then reads as unknown on its next connect and gets trust-on-first-use again -
+    silently, and for exactly the hosts that had just been pinned. So merge instead, and
+    let the file win wherever it already has a key for that host and type: an entry on
+    disk is either a deliberate pin or newer than what this client is carrying.
+    """
     try:
+        import paramiko as _pk
         with _persist_lock:
-            client.save_host_keys(_KNOWN_HOSTS)
+            merged = _pk.hostkeys.HostKeys()
+            try:
+                if os.path.exists(_KNOWN_HOSTS):
+                    merged.load(_KNOWN_HOSTS)
+            except Exception:
+                # unreadable/corrupt file: fall back to writing what we hold rather
+                # than losing this client's keys too
+                merged = _pk.hostkeys.HostKeys()
+            added = 0
+            for hostname, keys in (client.get_host_keys() or {}).items():
+                on_disk = merged.lookup(hostname)
+                for keytype, key in keys.items():
+                    if on_disk is not None and keytype in on_disk:
+                        continue
+                    merged.add(hostname, keytype, key)
+                    added += 1
+            if added:
+                merged.save(_KNOWN_HOSTS)
     except Exception:
         pass  # config dir might not be writable — non-fatal
 

@@ -3,6 +3,7 @@
 PegaProx Input Sanitization - Layer 2
 """
 
+import logging
 import re
 import html
 
@@ -165,6 +166,24 @@ def validate_snapshot_name(value) -> bool:
     return bool(_SNAPSHOT_NAME_RE.match(value))
 
 
+# MK Sep 2026 - SDN object ids arrive as a URL path segment and are then interpolated into
+# the PVE API path, which we speak with the cluster's stored root credential. requests
+# resolves dot segments before it sends, so an id of ".." moves the whole PUT or DELETE one
+# level up the SDN tree - the same shape as the snapshot-name traversal, caught earlier this
+# time because the router will not pass a slash. Proxmox publishes the grammar itself
+# (pve-sdn-vnet-id is [a-zA-Z][a-zA-Z0-9]*[a-zA-Z0-9]); dash and underscore are allowed here
+# too so an id someone already created is not suddenly refused. A dot never is.
+_SDN_ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_\-]{0,62}$')
+
+
+def validate_sdn_id(value) -> bool:
+    """True if `value` is usable as a single PVE SDN path segment (zone, vnet, fabric,
+    controller, ipam, dns). Rejects dot segments, empties and anything with a separator."""
+    if not value or not isinstance(value, str):
+        return False
+    return bool(_SDN_ID_RE.match(value))
+
+
 def sanitize_csv_field(value) -> str:
     """Sanitize field for CSV export to prevent formula injection.
     
@@ -193,6 +212,11 @@ def sanitize_csv_field(value) -> str:
     return s
 
 
+# everything in C0 except tab, DEL, and the C1 range - ESC among them, which is what
+# every ANSI sequence starts with
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]')
+
+
 def sanitize_log_message(value) -> str:
     """Strip CR/LF from a value before writing it to the text audit log.
 
@@ -213,6 +237,137 @@ def sanitize_log_message(value) -> str:
     s = str(value)
     s = s.replace('\r', ' ').replace('\n', ' ')
     s = s.replace('\u2028', ' ').replace('\u2029', ' ')
-    return s
+    # MK Sep 2026 - and the rest of the control range. A name carrying \x1b[2K\r does not
+    # just add a line, it rewrites what the operator sees in their terminal: erase the
+    # line, move the cursor, repaint something else, set the window title. Stripping CR
+    # and LF stopped the forged LINE and left the forged SCREEN. Tab stays: it is
+    # legitimate in action strings and cannot move a cursor about.
+    return _CONTROL_CHARS_RE.sub(' ', s)
 
 
+
+
+def bounded_list(value, max_items=256, max_length=253, dedupe=True, name='list'):
+    """A list that came out of a request body, bounded in both directions.
+
+    Ten endpoints took a list from the caller, checked at most that it WAS a list, and
+    persisted it: fallback hosts, excluded nodes, cluster reorder, affinity-rule members,
+    multipath nodes, PBS cluster links, template metadata, pool members, VM tags. None of
+    them bounded the item count or the item length, so one request could store a million
+    entries of a megabyte each - durably, and then reload them into memory on every start.
+    Duplicates matter too: several of these fan out one request per entry.
+
+    Returns (cleaned, error). `error` is None when it is fine, otherwise a sentence for
+    the 400. MK Sep 2026
+    """
+    if value is None:
+        return [], None
+    if not isinstance(value, (list, tuple)):
+        return None, f'{name} must be a list'
+    if len(value) > max_items:
+        return None, f'{name} accepts at most {max_items} entries ({len(value)} given)'
+    out, seen = [], set()
+    for item in value:
+        if item is None or isinstance(item, (dict, list, tuple, bool)):
+            return None, f'{name} entries must be plain strings or numbers'
+        text = str(item).strip()
+        if not text:
+            continue
+        if len(text) > max_length:
+            return None, f'{name} entries are limited to {max_length} characters'
+        if dedupe:
+            if text in seen:
+                continue
+            seen.add(text)
+        out.append(text)
+    return out, None
+
+
+# Query parameters that carry a credential in practice. Matched case-insensitively
+# against the parameter NAME, so `?api_key=` and `?X-Amz-Signature=` both go.
+_SECRET_PARAM_HINTS = ('token', 'key', 'secret', 'password', 'passwd', 'pwd',
+                       'sig', 'signature', 'credential', 'auth')
+
+
+def redact_url(value):
+    """Make a URL safe to write into a log line.
+
+    Eight findings said the same thing from different files: a URL gets logged when a
+    request fails, and the URL is the credential. `https://user:pass@host/` keeps the
+    password in netloc - urlsplit().netloc includes userinfo, which is how the SIEM TLS
+    warning ended up printing one. A Slack or Teams webhook URL has no userinfo at all;
+    the secret IS the path. And a pre-signed download URL carries it in the query.
+
+    So all three go: userinfo, the query values of anything that looks like a secret,
+    and any path beyond the first segment. Enough is left to tell which endpoint failed,
+    which is what the operator reading the log actually needs.
+
+    Anything that does not parse as a URL is returned unchanged - callers pass whole
+    exception strings through here. MK Sep 2026
+    """
+    if not value:
+        return value
+    text = str(value)
+
+    def _one(m):
+        scheme, userinfo, host, rest = m.group(1), m.group(2), m.group(3), m.group(4) or ''
+        out = f'{scheme}://'
+        if userinfo:
+            out += '[REDACTED]@'
+        out += host
+        path, sep, query = rest.partition('?')
+        segments = [s for s in path.split('/') if s]
+        if segments:
+            out += '/' + segments[0]
+            if len(segments) > 1:
+                out += '/[REDACTED]'
+        if sep:
+            parts = []
+            for pair in query.split('&'):
+                name, eq, _val = pair.partition('=')
+                if eq and any(h in name.lower() for h in _SECRET_PARAM_HINTS):
+                    parts.append(f'{name}=[REDACTED]')
+                else:
+                    parts.append(pair)
+            out += '?' + '&'.join(parts)
+        return out
+
+    return re.sub(
+        r'(https?)://(?:([^/@\s]+)@)?([A-Za-z0-9_.\-:\[\]]+)([^\s\'"<>]*)',
+        _one, text)
+
+
+class LogInjectionFilter(logging.Filter):
+    """Neutralise control characters on every log record, at the sink.
+
+    Fourteen findings named fourteen files for the same thing: a name, a URL, an error
+    string the caller chose ends up in a log line, and CR/LF lets them forge a line
+    while ESC lets them repaint the operator's terminal. Wrapping the call sites means
+    seventy-five edits and a seventy-sixth that somebody forgets next month, so this
+    sits on the root logger instead and covers the ones written after today too.
+
+    Deliberately only `msg` and `args`. A traceback arrives through exc_info and is
+    appended by the formatter afterwards, so it keeps its newlines - it is ours, not
+    the caller's, and an unreadable traceback helps nobody. MK Sep 2026
+    """
+
+    def filter(self, record):
+        if isinstance(record.msg, str):
+            record.msg = sanitize_log_message(record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: (sanitize_log_message(v) if isinstance(v, str) else v)
+                               for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(sanitize_log_message(a) if isinstance(a, str) else a
+                                    for a in record.args)
+        return True
+
+
+def install_log_injection_filter(logger=None):
+    """Attach the filter to a logger's handlers (root by default). Idempotent."""
+    target = logger if logger is not None else logging.getLogger()
+    for handler in target.handlers:
+        if not any(isinstance(f, LogInjectionFilter) for f in handler.filters):
+            handler.addFilter(LogInjectionFilter())
+    return target

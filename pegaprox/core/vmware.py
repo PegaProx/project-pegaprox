@@ -32,7 +32,7 @@ class VMwareManager:
     
     def __init__(self, vmware_id: str, config: dict):
         self.id = vmware_id
-        self.name = config.get('name', 'vCenter')
+        self.name = config.get('name', 'ESXi server')
         self.host = config.get('host', '')
         self.port = int(config.get('port', 443))
         self.username = config.get('username', 'administrator@vsphere.local')
@@ -1911,7 +1911,7 @@ def load_vmware_servers():
             logging.warning(f"[VMware:{vmware_id}] Connecting as '{username}' to {row_dict.get('host', '?')}")
             
             config = {
-                'name': row_dict.get('name', 'vCenter'),
+                'name': row_dict.get('name', 'ESXi server'),
                 'host': row_dict.get('host', ''),
                 'port': row_dict.get('port', 443),
                 'username': username,
@@ -1950,7 +1950,19 @@ def save_vmware_server(vmware_id: str, config: dict):
     pass_encrypted = ''
     if config.get('password') and config['password'] != '********':
         pass_encrypted = db._encrypt(config['password'])
-    
+
+    # MK Sep 2026 - linked_clusters decides who may reach this server (check_vmware_access),
+    # and an EMPTY list means "reachable by everyone" for backwards compatibility. Writing
+    # config.get('linked_clusters', []) turned an update that simply did not mention the
+    # field into a silent grant of the whole ESXi server to every tenant. Same rule and same
+    # reason as the PBS side: omission preserves, only an explicit list replaces.
+    _prev = cursor.execute("SELECT linked_clusters FROM vmware_servers WHERE id = ?",
+                           (vmware_id,)).fetchone()
+    if 'linked_clusters' in config:
+        linked_json = json.dumps(list(config.get('linked_clusters') or []))
+    else:
+        linked_json = (_prev[0] if _prev else None) or '[]'
+
     cursor.execute('''
         INSERT OR REPLACE INTO vmware_servers 
         (id, name, host, port, username, pass_encrypted, server_type,
@@ -1958,12 +1970,12 @@ def save_vmware_server(vmware_id: str, config: dict):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 COALESCE((SELECT created_at FROM vmware_servers WHERE id = ?), ?), ?)
     ''', (
-        vmware_id, config.get('name', 'vCenter'), config.get('host', ''), int(config.get('port', 443)),
+        vmware_id, config.get('name', 'ESXi server'), config.get('host', ''), int(config.get('port', 443)),
         config.get('username', 'administrator@vsphere.local'),
         pass_encrypted or (cursor.execute("SELECT pass_encrypted FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone() or [''])[0],
         config.get('server_type', 'vcenter'),
         int(config.get('ssl_verify', False)),
-        int(config.get('enabled', True)), json.dumps(config.get('linked_clusters', [])),
+        int(config.get('enabled', True)), linked_json,
         config.get('notes', ''),
         vmware_id, datetime.now().isoformat(), datetime.now().isoformat(),
     ))

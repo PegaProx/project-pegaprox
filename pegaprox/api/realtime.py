@@ -176,6 +176,24 @@ def ws_live_updates(ws):
         logging.info(f"WebSocket client disconnected: {client_id}")
 
 
+def narrow_stream_scope(previous, fresh_allowed):
+    """What an open stream may still see, given what it saw before and what its owner
+    is allowed now. Pure, so the rule can be tested without a live stream.
+
+      previous       what this stream subscribed to. None = no restriction was expressed.
+      fresh_allowed  get_user_clusters() for the identity as it stands. None = admin,
+                     [] = we could not tell, and could-not-tell is not permission.
+
+    Narrows only. The client chose its subset and keeping it is theirs; widening a
+    stream because its owner gained a cluster is not this loop's business. MK Sep 2026
+    """
+    if fresh_allowed is None:
+        return previous                       # unrestricted now: leave the subset alone
+    if previous is None:
+        return list(fresh_allowed)            # was unrestricted, now is not
+    return [c for c in previous if c in fresh_allowed]
+
+
 def _floor_by_token_role(user, token_role):
     """Cap a stored user record at the role its ws/API token was issued with, so a token can
     never out-rank itself through its owner's account. Mirrors build_authz_user / the inline
@@ -311,7 +329,7 @@ def validate_ws_token_api():
     if requested_cluster:
         try:
             from pegaprox.utils.auth import load_users
-            from pegaprox.utils.rbac import get_user_clusters, load_vm_acls
+            from pegaprox.utils.rbac import get_user_clusters, load_vm_acls, acl_grants_user
             from pegaprox.core.db import get_db
             # MK Aug 2026 — resolve the token's user by its indexed row, not a whole-table
             # load_users() reload. That read decrypts every user's TOTP; on a transient
@@ -346,7 +364,7 @@ def validate_ws_token_api():
                 # VM-ACL fallback (mirrors api/helpers.py check_cluster_access)
                 cluster_acls = load_vm_acls().get(requested_cluster, {}) or {}
                 for _vmid, acl in cluster_acls.items():
-                    if data['user'] in (acl.get('users') or []) or '*' in (acl.get('users') or []):
+                    if acl_grants_user(acl, data['user']):
                         access_ok = True
                         break
             if not access_ok:
@@ -572,11 +590,40 @@ def sse_updates():
                     # gates whether the filters RUN; effective_role is what they decide with.
                     _acct_role = _acct.get('effective_role') or _acct.get('role')
                     _token_restricts = _token_role not in (None, ROLE_ADMIN)
+
+                    # MK Sep 2026 - and the CLUSTER set, which this block did not touch.
+                    # allowed_clusters was resolved once when the token was minted and the
+                    # stream copied it at connect, so taking a cluster away from a tenant
+                    # did nothing at all to an open dashboard: the frames kept arriving
+                    # until the user reconnected. The role was already being refreshed here
+                    # every 30s; the list belongs in the same tick.
+                    #
+                    # Re-intersect rather than replace: the client subscribed to a subset
+                    # and that choice is theirs to keep. Widening a stream because its
+                    # owner gained a cluster is not this loop's job.
+                    try:
+                        _fresh_allowed = get_user_clusters(
+                            _floor_by_token_role(dict(_acct), _token_role))
+                    except Exception as _ce:
+                        logging.error(f"[SSE] cannot refresh cluster scope for "
+                                      f"'{_sl(user)}': {_ce}")
+                        _fresh_allowed = []          # unknown -> narrow, never widen
                     with sse_clients_lock:
                         _ci = sse_clients.get(client_id)
                         if _ci is not None:
                             _ci['effective_role'] = _token_role if _token_restricts else _acct_role
                             _ci['is_admin'] = (_acct_role == ROLE_ADMIN) and not _token_restricts
+                            _prev = _ci.get('clusters')
+                            _now_allowed = narrow_stream_scope(_prev, _fresh_allowed)
+                            if _now_allowed != _prev:
+                                _lost = [c for c in (_prev or []) if c not in (_now_allowed or [])]
+                                logging.info(f"[SSE] '{_sl(user)}' lost access to "
+                                             f"{len(_lost)} cluster(s) - stream narrowed")
+                                _ci['clusters'] = _now_allowed
+                            if _now_allowed is not None and not _now_allowed:
+                                logging.info(f"[SSE] closing stream for '{_sl(user)}' - "
+                                             f"no cluster left in scope")
+                                return
         except GeneratorExit:
             pass
         finally:

@@ -35,3 +35,5 @@ assignees: ''
 
 ## Checklist
 - [ ] I have searched existing issues and discussions to make sure this hasn't been requested before
+- [ ] I understand this is a wishlist and not a work order — volunteers decide what gets built, and when
+- [ ] I'm aware that "this should be easy, it's only a few lines" has never once turned out to be true 🪄

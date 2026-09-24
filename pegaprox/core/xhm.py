@@ -138,6 +138,13 @@ class XHMigrationTask:
     def __init__(self, mid, direction, source_cluster, source_node, source_vmid,
                  target_cluster, target_node, target_storage, vm_name='', config=None):
         self.id = mid
+        # MK Sep 2026 - the scratch paths used to be /tmp/xhm-<id>-... , and `id` is eight
+        # hex characters that the migrations API hands out. /tmp is world-writable on both
+        # the PegaProx host and the PVE node, and the sticky bit does not stop anyone
+        # creating a name nobody has taken yet - so a local account could point the disk
+        # image we are about to write as root at something else. A private directory with
+        # a full random name, created 0700, removes the guessing and the shared parent.
+        self.scratch = f"/tmp/xhm-{mid}-{uuid.uuid4().hex}"
         self.direction = direction  # 'pve_to_xcpng' or 'xcpng_to_pve'
         self.source_cluster = source_cluster
         self.source_node = source_node
@@ -660,11 +667,10 @@ def _run_xcpng_to_pve(task):
         task.log(f"Found {len(vdi_list)} disk(s), total {sum(v['size'] for v in vdi_list) / (1024**3):.1f} GB")
 
         # get next VMID on target
-        try:
-            nxt = tgt_mgr._api_get(f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/cluster/nextid")
-            new_vmid = int(nxt.json().get('data', 100))
-        except:
-            new_vmid = 100
+        new_vmid = _next_pve_vmid(tgt_mgr)
+        if not new_vmid:
+            task.set_phase('failed', 'Cannot allocate VMID on the target cluster')
+            return
         task.log(f"Target VMID: {new_vmid}")
         task.target_vmid = new_vmid
         task.progress = 5
@@ -1515,6 +1521,23 @@ def _run_pve_to_xcpng(task):
 # helpers
 # ============================================================
 
+def _next_pve_vmid(pve_mgr):
+    """Ask the target cluster for the next free VMID.
+
+    MK Sep 2026 - the ESXi->PVE leg called this by name since 0.9.2 but nobody ever
+    wrote it, so that migration died on a NameError before it transferred a byte. The
+    XCP-ng->PVE leg had the same three lines inline; both use this now.
+    """
+    try:
+        nxt = pve_mgr._api_get(
+            f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/cluster/nextid")
+        if nxt.status_code == 200:
+            return int(nxt.json().get('data', 100))
+    except Exception as e:
+        logger.warning(f"nextid lookup on {pve_mgr.host} failed: {e}")
+    return None
+
+
 def _resolve_pve_node_ip(pve_mgr, node_name):
     """Get the SSH-reachable IP of a Proxmox node. Tries API, then cluster host."""
     try:
@@ -1834,7 +1857,7 @@ def _run_esxi_to_pve(task):
         pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
 
         imported_volumes = []
-        mount_base = f"/tmp/xhm-esxi-{task.id}"
+        mount_base = f"{task.scratch}/mnt"
 
         for idx, disk in enumerate(disks):
             if task.cancel_event.is_set():
@@ -1897,9 +1920,23 @@ def _run_esxi_to_pve(task):
 
                 # create SSHFS mount on PVE node to ESXi datastore
                 mount_dir = f"{mount_base}-{idx}"
+                # MK Sep 2026 - these two commands run on the PVE NODE and reach the ESXi
+                # host from there, so the host-key policy the operator configured here has
+                # to travel with them. They were hardcoded to accept-new, which is
+                # trust-on-first-use: with strict host keys switched on, every other SSH
+                # path in the product refuses an unknown host and these two did not. The
+                # known_hosts file cannot come along (it is ours, not the node's), so the
+                # node uses its own and the operator seeds it the way they seed any other.
+                from pegaprox.utils.ssh_security import strict_host_keys_enabled
+                _hk = 'yes' if strict_host_keys_enabled() else 'accept-new'
                 mount_cmds = [
-                    f"mkdir -p {_q_local(mount_dir)}",
-                    f"sshfs -o StrictHostKeyChecking=accept-new,password_stdin "
+                    # 0700 on the scratch root, not just the leaf: `mkdir -p` would create
+                    # the parent with the default mode and that is the directory whose
+                    # contents we care about. Two steps because -m only applies to the last
+                    # component.
+                    f"mkdir -m 700 -p {_q_local(task.scratch)}",
+                    f"mkdir -m 700 -p {_q_local(mount_dir)}",
+                    f"sshfs -o StrictHostKeyChecking={_hk},password_stdin "
                     f"{_q_local(esxi_user + '@' + esxi_host + ':/vmfs/volumes/' + datastore_name)} "
                     f"{_q_local(mount_dir)} <<< {_q_local(esxi_pass)}",
                 ]
@@ -1919,14 +1956,21 @@ def _run_esxi_to_pve(task):
                     # cleanup failed mount
                     ssh_pve.exec_command(
                         f"fusermount -u {_q_local(mount_dir)} 2>/dev/null; "
-                        f"rmdir {_q_local(mount_dir)} 2>/dev/null",
+                        f"rmdir {_q_local(mount_dir)} 2>/dev/null; "
+                        # and the scratch root once its last child is gone - rmdir
+                        # refuses a non-empty directory, which is exactly right here
+                        f"rmdir {_q_local(task.scratch)} 2>/dev/null",
                         timeout=10,
                     )
 
                     # fallback: scp the flat vmdk to temp, then import
                     # remote source path needs single-quoting on top of local
                     # quoting because scp invokes a remote shell.
-                    tmp_path = f"/tmp/xhm-{task.id}-disk{idx}.vmdk"
+                    tmp_path = f"{task.scratch}/disk{idx}.vmdk"
+                    # the scratch root has to exist on the node before scp writes into it
+                    _si, _so, _se = ssh_pve.exec_command(
+                        f"mkdir -m 700 -p {_q_local(task.scratch)}", timeout=30)
+                    _so.channel.recv_exit_status()
                     remote_src = f"{esxi_user}@{esxi_host}:" + _q_remote('/vmfs/volumes/' + datastore_name + '/' + flat_path)
                     # MK Jul 2026 — this scp runs on the PVE node, so `sshpass -p <pw>`
                     # would leak the ESXi password in that node's `ps`/proc for up to
@@ -1934,7 +1978,7 @@ def _run_esxi_to_pve(task):
                     # (same idiom as the HA-sync/smbios fixes).
                     scp_cmd = (
                         f"IFS= read -r SSHPASS; export SSHPASS; sshpass -e "
-                        f"scp -o StrictHostKeyChecking=accept-new "
+                        f"scp -o StrictHostKeyChecking={_hk} "
                         f"{_q_local(remote_src)} {_q_local(tmp_path)}"
                     )
                     scp_in, scp_out, scp_err = ssh_pve.exec_command(scp_cmd, timeout=7200)
@@ -2033,7 +2077,9 @@ def _run_esxi_to_pve(task):
                 conv_exit = conv_out.channel.recv_exit_status()
 
                 # unmount SSHFS
-                ssh_pve.exec_command(f"fusermount -u {mount_dir} 2>/dev/null; rmdir {mount_dir} 2>/dev/null", timeout=10)
+                ssh_pve.exec_command(
+                    f"fusermount -u {mount_dir} 2>/dev/null; rmdir {mount_dir} 2>/dev/null; "
+                    f"rmdir {task.scratch} 2>/dev/null", timeout=10)
 
                 if conv_exit != 0:
                     err_msg = conv_err.read().decode()[:200]
@@ -2241,8 +2287,9 @@ def _run_esxi_to_xcpng(task):
 
             # strategy: SCP flat vmdk to /tmp on PegaProx, then qemu-img convert | HTTP PUT
             # this uses local temp space but avoids SSHFS complexity
-            tmp_vmdk = f"/tmp/xhm-esxi-{task.id}-{idx}-flat.vmdk"
-            tmp_raw = f"/tmp/xhm-esxi-{task.id}-{idx}.raw"
+            os.makedirs(task.scratch, mode=0o700, exist_ok=True)
+            tmp_vmdk = f"{task.scratch}/{idx}-flat.vmdk"
+            tmp_raw = f"{task.scratch}/{idx}.raw"
 
             try:
                 # SCP from ESXi
@@ -2294,6 +2341,10 @@ def _run_esxi_to_xcpng(task):
                                     headers={'Content-Type': 'application/octet-stream'},
                                     timeout=7200)
                 os.remove(tmp_raw)
+                try:
+                    os.rmdir(task.scratch)      # only when the last disk is done
+                except OSError:
+                    pass
 
                 if resp.status_code not in (200, 204):
                     try:

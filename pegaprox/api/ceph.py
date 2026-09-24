@@ -12,6 +12,7 @@ from pegaprox.models.permissions import ROLE_ADMIN
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, require_unconfined
+from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('ceph', __name__)
 
@@ -117,8 +118,8 @@ def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
 
         stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
         exit_code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode('utf-8', errors='replace').strip()
-        err = stderr.read().decode('utf-8', errors='replace').strip()
+        out = _read_capped(stdout).strip()
+        err = _read_capped(stderr).strip()
 
         # NS: exit code 22 = EINVAL, usually means mirroring not enabled on pool
         if exit_code == 22:
@@ -178,8 +179,8 @@ def _rbd_batch(manager, node_ip, arg_list, timeout=30, expect_json=True):
                 logging.debug(f"rbd cmd on {node_ip}: {cmd}")
                 stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
                 exit_code = stdout.channel.recv_exit_status()
-                out = stdout.read().decode('utf-8', errors='replace').strip()
-                err = stderr.read().decode('utf-8', errors='replace').strip()
+                out = _read_capped(stdout).strip()
+                err = _read_capped(stderr).strip()
                 if exit_code == 22:  # EINVAL — mirroring not enabled on pool
                     results.append(({} if expect_json else '', None))
                     continue

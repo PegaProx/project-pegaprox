@@ -723,6 +723,19 @@ def delete_alert(alert_id):
 # MK Apr 2026 — webhook alert channels (Slack, Discord, Teams, ntfy, generic)
 # ─────────────────────────────────────────────────────────
 
+def _require_settings_admin():
+    """Writing to an installation-wide list is a settings-admin act, not a tenant one.
+
+    Returns an error response to `return`, or None. MK Sep 2026
+    """
+    from pegaprox.utils.rbac import has_permission
+    from pegaprox.utils.auth import build_authz_user
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if not has_permission(_caller, 'admin.settings'):
+        return jsonify({'error': 'Permission denied: admin.settings'}), 403
+    return None
+
+
 @bp.route('/api/alert-channels', methods=['GET'])
 @require_auth(perms=['alert.manage'])
 def list_alert_channels():
@@ -745,6 +758,14 @@ def list_alert_channels():
 @bp.route('/api/alert-channels', methods=['POST'])
 @require_auth(perms=['alert.manage'])
 def create_alert_channel():
+    # MK Sep 2026 - alert_webhooks is ONE installation-wide list, and alert.manage is a
+    # delegable, tenant-scoped permission. So a tenant delegate could edit the URL of the
+    # channel another tenant receives their alerts on and point it at their own endpoint,
+    # or simply delete it. The read path already draws this line for the unmasked view
+    # (?full=1 requires admin.settings); writing a global object is at least as sensitive.
+    _serr = _require_settings_admin()
+    if _serr:
+        return _serr
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     from pegaprox.utils.webhooks import new_channel
     settings = load_server_settings()
@@ -762,6 +783,9 @@ def create_alert_channel():
 @bp.route('/api/alert-channels/<cid>', methods=['PUT'])
 @require_auth(perms=['alert.manage'])
 def update_alert_channel(cid):
+    _serr = _require_settings_admin()      # see create_alert_channel
+    if _serr:
+        return _serr
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     settings = load_server_settings()
     channels = list(settings.get('alert_webhooks') or [])
@@ -789,6 +813,9 @@ def update_alert_channel(cid):
 @bp.route('/api/alert-channels/<cid>', methods=['DELETE'])
 @require_auth(perms=['alert.manage'])
 def delete_alert_channel(cid):
+    _serr = _require_settings_admin()      # see create_alert_channel
+    if _serr:
+        return _serr
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     settings = load_server_settings()
     before = settings.get('alert_webhooks') or []

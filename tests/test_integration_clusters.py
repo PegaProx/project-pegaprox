@@ -100,8 +100,19 @@ def test_resources_restricted_user_gets_filtered_list_200(api, seed):
     assert 100 not in vmids       # ACL VM hidden from non-whitelisted user
 
 
-def test_resources_whitelisted_user_sees_acl_vm_200(api, seed):
-    """The mirror of the above: whitelist carol on VM 100 and she now sees it too."""
+def test_resources_whitelisted_user_is_confined_to_their_acl_200(api, seed):
+    """Holding an ACL CONFINES you — it is not a grant added on top of the role.
+
+    This used to assert [100, 101]: carol saw her ACL'd VM plus every VM that had no ACL
+    of its own, because the generic vm.view fallback still applied to her. That was
+    reported privately against 1.1.0 as an information leak (a user scoped to one VM saw
+    names, node placement, power state and sizing of the whole cluster) and it is what the
+    old expectation here had frozen in place — which is likely why it went unfixed: the
+    fix makes this test go red and reads like a regression.
+
+    The rule now matches the one helpers.caller_is_scoped applies everywhere else: any
+    per-object grant (pool OR ACL) confines the caller to exactly what it grants. A plain
+    operator with neither keeps the whole-cluster view — the test above still asserts that."""
     seed.tenant('tenant_x', clusters=['cluster_1'])
     carol = seed.user('carol', role='user', tenant_id='tenant_x')
     seed.vm_acl('cluster_1', 100, users=['carol'])
@@ -111,7 +122,7 @@ def test_resources_whitelisted_user_sees_acl_vm_200(api, seed):
     assert resp.status_code == 200, resp.get_data(as_text=True)
     body = resp.get_json()
     vmids = sorted(v['vmid'] for v in body)
-    assert vmids == [100, 101]
+    assert vmids == [100], "an ACL-scoped caller must not also get the un-ACLd VMs"
 
 
 def test_resources_cross_tenant_user_denied_at_cluster_level_403(api, seed):

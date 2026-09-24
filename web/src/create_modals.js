@@ -391,7 +391,12 @@
             // ZFS/LVM/RBD only do raw, file-based storages support all
             const STORAGE_FORMATS = {
                 zfspool: ['raw'], zfs: ['raw'],
-                lvm: ['raw'], lvmthin: ['raw'],
+                // NS Sep 2026 (#785) — PVE 9 does qcow2 on LVM and LVM-thin (volume-chain
+                // snapshots). This table still had them raw-only, and with a single entry the
+                // select renders disabled and hard-coded to RAW, so the format could not be
+                // picked at all in the create wizard. vm_config.js already knew this; the two
+                // tables had drifted. Same order as there.
+                lvm: ['qcow2', 'raw'], lvmthin: ['qcow2', 'raw'],
                 rbd: ['raw'],
                 iscsi: ['raw'], iscsidirect: ['raw'],
                 dir: ['raw', 'qcow2', 'vmdk'],
@@ -1932,6 +1937,33 @@
         // Add Cluster Modal
         // LW: Wizard for adding new Proxmox clusters
         // Defaults are pretty sensible, most users just need host + credentials
+        // Fresh Add Cluster form values, one factory per connection type. The modal stays
+        // mounted while closed and resets every field (including credentials) from these.
+        const emptyProxmoxConfig = () => ({
+            name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
+            ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
+            auto_migrate: false, balance_containers: false, balance_local_disks: false,
+            dry_run: false, ssh_key: '', ha_enabled: false, proxlb_tags_enabled: false,
+            predictive_balancing: false, predictive_threshold: 75,
+            balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
+            cpu_baseline: null,
+        });
+        const emptyXcpConfig = () => ({
+            name: '', host: '', user: 'root', pass: '',
+            ssl_verification: false, migration_threshold: 20, check_interval: 300,
+            auto_migrate: false, dry_run: false, cluster_type: 'xcpng',
+        });
+        const emptyPbsConfig = () => ({
+            name: '', host: '', port: 8007, user: 'root@pam', password: '',
+            api_token_id: '', api_token_secret: '', fingerprint: '',
+            ssl_verify: false, linked_clusters: [], notes: '',
+            ssh_user: '', ssh_port: 22, ssh_key: '',
+        });
+        const emptyVmwareConfig = () => ({
+            name: '', host: '', port: 443, username: 'root', password: '',
+            ssl_verify: false, notes: '',
+        });
+
         function AddClusterModal({ isOpen, onClose, onSubmit, onAddPBS, onAddVMware, loading, error, initialType = 'proxmox', reconfigureConfig = null }) {
             const { t } = useTranslation();
             const { isCorporate } = useLayout();
@@ -1957,38 +1989,30 @@
             }, [isOpen, initialType, reconfigureConfig]);
             
             // Proxmox config
-            const [config, setConfig] = useState({
-                name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
-                ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
-                auto_migrate: false, balance_containers: false, balance_local_disks: false,
-                dry_run: false, ssh_key: '',
-                predictive_balancing: false, predictive_threshold: 75,
-                balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
-                cpu_baseline: null,
-            });
+            const [config, setConfig] = useState(emptyProxmoxConfig);
             const [showSshSettings, setShowSshSettings] = useState(false);
 
             // XCP-ng config
-            const [xcpConfig, setXcpConfig] = useState({
-                name: '', host: '', user: 'root', pass: '',
-                ssl_verification: false, migration_threshold: 20, check_interval: 300,
-                auto_migrate: false, dry_run: false, cluster_type: 'xcpng',
-            });
+            const [xcpConfig, setXcpConfig] = useState(emptyXcpConfig);
 
             // PBS config
-            const [pbsConfig, setPbsConfig] = useState({
-                name: '', host: '', port: 8007, user: 'root@pam', password: '',
-                api_token_id: '', api_token_secret: '', fingerprint: '',
-                ssl_verify: false, linked_clusters: [], notes: '',
-                ssh_user: '', ssh_port: 22, ssh_key: '',
-            });
+            const [pbsConfig, setPbsConfig] = useState(emptyPbsConfig);
             const [showPbsSshSettings, setShowPbsSshSettings] = useState(false);
 
             // VMware config
-            const [vmwConfig, setVmwConfig] = useState({
-                name: '', host: '', port: 443, username: 'root', password: '',
-                ssl_verify: false, notes: '',
-            });
+            const [vmwConfig, setVmwConfig] = useState(emptyVmwareConfig);
+
+            // Clear every form on close so a later Add does not inherit the previous
+            // cluster's name, host or password, and no credential lingers in state.
+            useEffect(() => {
+                if (isOpen) return;
+                setConfig(emptyProxmoxConfig());
+                setXcpConfig(emptyXcpConfig());
+                setPbsConfig(emptyPbsConfig());
+                setVmwConfig(emptyVmwareConfig());
+                setShowSshSettings(false);
+                setShowPbsSshSettings(false);
+            }, [isOpen]);
 
             if (!isOpen) return null;
 

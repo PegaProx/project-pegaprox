@@ -51,3 +51,5 @@ assignees: ''
 ## Checklist
 - [ ] I have searched existing issues to make sure this is not a duplicate
 - [ ] I am using the latest version of PegaProx
+- [ ] I've put enough in here that someone can start on it without asking me three questions first
+- [ ] I understand PegaProx is maintained by volunteers in their free time. Nobody is on call, and writing URGENT doesn't get anyone out of bed 🪄

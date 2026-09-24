@@ -35,6 +35,7 @@ import socket
 import uuid
 import base64
 import logging
+from pegaprox.utils.sanitization import redact_url
 import threading
 import urllib.request
 import urllib.parse
@@ -242,7 +243,10 @@ _TLS_DOWNGRADE_WARNED = set()
 
 def _warn_tls_downgrade(url):
     from urllib.parse import urlsplit
-    host = (urlsplit(url).netloc or url)
+    # MK Sep 2026 - netloc INCLUDES userinfo, so this printed user:pass@host verbatim
+    # for any target configured with credentials in the URL.
+    _netloc = urlsplit(url).netloc or ''
+    host = _netloc.rpartition('@')[2] or redact_url(url)
     if host in _TLS_DOWNGRADE_WARNED:
         return
     _TLS_DOWNGRADE_WARNED.add(host)

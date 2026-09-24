@@ -41,7 +41,8 @@ class _NoHostnameCheckAdapter(HTTPAdapter):
         kwargs['ssl_context'] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
-from pegaprox.constants import SSH_MAX_CONCURRENT, LOG_DIR
+from pegaprox.constants import (SSH_MAX_CONCURRENT, LOG_DIR,
+                               HA_MIGRATE_SETTLE_SECONDS, HA_MIGRATE_SETTLE_POLL)
 from pegaprox import globals as _g
 from pegaprox.globals import (
     cluster_managers, _ssh_active_connections,
@@ -53,6 +54,7 @@ from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
 from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection
 from pegaprox.utils.concurrent import GEVENT_PATCHED
 from pegaprox.core.db import get_db
+from pegaprox.utils.ssh import read_capped as _read_capped
 
 # Lazy paramiko import
 def get_paramiko():
@@ -280,6 +282,22 @@ def _ssh_auth_hint(stderr):
                     "— add an authorized SSH key for this cluster; the password/token only "
                     "covers the PVE API, not SSH")
         return "SSH password rejected — check the node credentials or add an SSH key"
+    # MK Sep 2026 — sudo, not ssh. For a non-root cluster user every node command goes
+    # through `sudo -n bash` (see _wrap_with_sudo), so a node that logs us in perfectly
+    # still answers nothing when that user has no passwordless sudo. Without a branch
+    # here the hint machinery stayed silent and the caller's only error string blamed
+    # the SSH connection, which the operator can see working in their own sshd log.
+    if 'sudo:' in low or 'sudoers' in low:
+        if 'password is required' in low or 'askpass' in low or 'no tty' in low:
+            return ("SSH works, sudo does not: the cluster SSH user needs passwordless "
+                    "sudo on the node (NOPASSWD), because non-root cluster users run "
+                    "node commands through `sudo -n bash`")
+        if 'not in the sudoers' in low:
+            return ("SSH works, but this cluster's user is not in sudoers on the node — "
+                    "node-level checks need root there")
+        if 'command not found' in low:
+            return "SSH works, but sudo is not installed on the node"
+        return "SSH works, sudo refused the command — see the node's sudoers configuration"
     return None
 
 
@@ -1760,12 +1778,15 @@ class PegaProxManager:
                         native_ha_nodes.add(node['node'])
 
                 # Method 2: HA status endpoint (catches cases where /nodes still says "online"
-                # during early maintenance transition) - may fail with 401 on limited tokens
+                # during maintenance — on PVE 9 that is ALWAYS, /nodes never reports
+                # "maintenance") - may fail with 401 on limited tokens
+                ha_poll_ok = True
                 try:
                     ha_nodes = self._get_native_ha_maintenance_nodes()
                     native_ha_nodes.update(ha_nodes)
+                    ha_poll_ok = getattr(self, '_ha_maint_poll_ok', True)
                 except Exception:
-                    pass
+                    ha_poll_ok = False
 
                 for nm in native_ha_nodes:
                     if nm not in self.nodes_in_maintenance:
@@ -1778,11 +1799,21 @@ class PegaProxManager:
                         self.nodes_in_maintenance[nm] = t
                         self.logger.info(f"[MAINT] Detected native HA maintenance on {nm} (set externally)")
 
-                # cleanup stale entries — only ones discovered externally, not ones we set
-                for nm in [n for n, tsk in self.nodes_in_maintenance.items()
-                           if getattr(tsk, '_discovered_by_refresh', False) and n not in native_ha_nodes]:
-                    del self.nodes_in_maintenance[nm]
-                    self.logger.info(f"[MAINT] {nm} left native HA maintenance")
+                # cleanup stale entries — only ones discovered externally, not ones we set or
+                # restored from the DB. Skipped entirely when the HA poll could not be read:
+                # an unreadable poll looks exactly like an empty one, and acting on it would
+                # drop a node that is still draining.
+                if ha_poll_ok:
+                    # snapshot + conditional pop under the lock: exit_maintenance_mode() may be
+                    # removing the same entry concurrently, so an unguarded del would race to a
+                    # KeyError (review).
+                    with self.maintenance_lock:
+                        _stale = [n for n, tsk in self.nodes_in_maintenance.items()
+                                  if getattr(tsk, '_discovered_by_refresh', False)
+                                  and n not in native_ha_nodes]
+                        for nm in _stale:
+                            if self.nodes_in_maintenance.pop(nm, None) is not None:
+                                self.logger.info(f"[MAINT] {nm} left native HA maintenance")
 
                 # Process results
                 for result in results:
@@ -3258,12 +3289,33 @@ class PegaProxManager:
                         # Before declaring failure, verify the VM is still on the source node —
                         # if it's moved anywhere else, the evacuation goal is met even if the
                         # specific task we kicked off didn't land on its chosen target.
-                        try:
-                            current_vms = self.get_vm_resources()
-                            post = next((v for v in current_vms if v.get('vmid') == vmid), None)
-                            actual_node = post.get('node') if post else None
-                        except Exception as _e:
-                            actual_node = None
+                        # MK Sep 2026 (#647) — the look-up above used to happen once, the
+                        # instant the task reported failure, and that is too early to mean
+                        # anything. `ha-manager migrate` exits as soon as the CRM has taken
+                        # the request; the guest moves seconds later. Reported case: migration
+                        # started 09:24:06.904, task failed 09:24:10.957 — four seconds, on a
+                        # move that had not begun. We looked, saw the guest still on its source
+                        # node, called it a failed evacuation, and it migrated fine right after.
+                        # /cluster/resources is itself refreshed on a cycle, so even a completed
+                        # move can read stale for a moment.
+                        #
+                        # So give it a window. A genuine failure costs the extra wait once, on a
+                        # path that is already the exception; a false one used to be reported to
+                        # the operator as a broken evacuation on a host that had in fact drained.
+                        actual_node = None
+                        _deadline = time.time() + HA_MIGRATE_SETTLE_SECONDS
+                        while True:
+                            try:
+                                current_vms = self.get_vm_resources()
+                                post = next((v for v in current_vms if v.get('vmid') == vmid), None)
+                                actual_node = post.get('node') if post else None
+                            except Exception:
+                                actual_node = None
+                            if actual_node and actual_node != source_node:
+                                break
+                            if time.time() >= _deadline:
+                                break
+                            time.sleep(HA_MIGRATE_SETTLE_POLL)
                         if actual_node and actual_node != source_node:
                             self.logger.info(
                                 f"[OK] Migration task reported failure, but {vm.get('name', 'unnamed')} "
@@ -3474,13 +3526,27 @@ class PegaProxManager:
             t.daemon = True
             t.start()
 
-        # #720 — persist SOFT (non-HA) maintenance so it survives a PegaProx restart. Native HA
-        # maintenance is re-derived from PVE on each poll (#78), so we don't store that here.
-        if not getattr(task, 'native_ha', False):
-            try:
-                get_db().save_node_maintenance(self.id, node_name)
-            except Exception as _e:
-                self.logger.debug(f"[MAINT] persist failed for {node_name}: {_e}")
+        # #720 — persist maintenance so it survives a PegaProx restart.
+        # This used to skip native-HA nodes on the theory that #78 re-derives them from PVE on
+        # every poll. It does not: on PVE 9 the HA flag surfaces only as a type=lrm entry whose
+        # status is free text ("<node> (maintenance mode, watchdog standby, ...)"), which no
+        # branch of _get_native_ha_maintenance_nodes matched, and /nodes still says "online".
+        # So a restart silently dropped exactly the nodes PVE had accepted into maintenance, and
+        # the balancer then scored those freshly-drained nodes as the emptiest targets in the
+        # cluster and migrated guests back onto them. The parser is fixed below, but correctness
+        # must not hinge on it: persist both kinds, and carry native_ha so a restored entry can
+        # still clear the upstream flag on exit.
+        # Persist under maintenance_lock and only if this task is still the active maintenance
+        # entry for the node. A concurrent exit_maintenance_mode() can pop the node while we set
+        # up evacuation above; without this guard the save would re-create a row exit already
+        # deleted, and it would come back as phantom maintenance on the next restart (review).
+        with self.maintenance_lock:
+            if self.nodes_in_maintenance.get(node_name) is task:
+                try:
+                    get_db().save_node_maintenance(self.id, node_name,
+                                                   native_ha=bool(getattr(task, 'native_ha', False)))
+                except Exception as _e:
+                    self.logger.debug(f"[MAINT] persist failed for {node_name}: {_e}")
 
         return task
 
@@ -3637,9 +3703,10 @@ class PegaProxManager:
         """Force-refresh native HA maintenance state from PVE. Call before rolling update checks. (#141)"""
         try:
             native_ha_nodes = set()
-            # re-poll /cluster/ha/status/current
+            # re-poll PVE's HA maintenance view
             ha_nodes = self._get_native_ha_maintenance_nodes()
             native_ha_nodes.update(ha_nodes)
+            ha_poll_ok = getattr(self, '_ha_maint_poll_ok', True)
 
             # also check /nodes status
             host = self.host
@@ -3661,54 +3728,161 @@ class PegaProxManager:
                     self.nodes_in_maintenance[nm] = t
                     self.logger.info(f"[MAINT] refresh: detected maintenance on {nm}")
 
-            # NS Mar 2026 - only clean up nodes that were DISCOVERED by refresh (not ones we put there).
-            # PVE drops the HA maintenance flag fast, but we want to keep tracking until user exits.
-            for nm in [n for n, tsk in self.nodes_in_maintenance.items()
-                       if getattr(tsk, '_discovered_by_refresh', False) and n not in native_ha_nodes]:
-                del self.nodes_in_maintenance[nm]
-                self.logger.info(f"[MAINT] refresh: {nm} no longer in maintenance")
+            # NS Mar 2026 - only clean up nodes that were DISCOVERED by refresh (not ones we put
+            # there, and not ones restored from the DB). PVE drops the HA maintenance flag fast,
+            # but we want to keep tracking until user exits. Skipped when the HA poll was
+            # unreadable — see the same gate in the daemon poll loop.
+            if ha_poll_ok:
+                with self.maintenance_lock:
+                    _stale = [n for n, tsk in self.nodes_in_maintenance.items()
+                              if getattr(tsk, '_discovered_by_refresh', False)
+                              and n not in native_ha_nodes]
+                    for nm in _stale:
+                        if self.nodes_in_maintenance.pop(nm, None) is not None:
+                            self.logger.info(f"[MAINT] refresh: {nm} no longer in maintenance")
 
             return native_ha_nodes
         except Exception as e:
             self.logger.debug(f"[MAINT] refresh failed: {e}")
             return set()
 
-    def _get_native_ha_maintenance_nodes(self):
-        # MK Mar 2026 - polls /cluster/ha/status/current for nodes in native maintenance (#78)
-        # The HA status response has two relevant entry types:
-        #   type=node with status="maintenance"
-        #   id=manager_status with multi-line text "node1 master\nnode2 maintenance\n..."
-        # We check both because single-node clusters only have manager_status
-        try:
-            host = self.host
-            resp = self._api_get(f"https://{host}:{self.api_port}/api2/json/cluster/ha/status/current")
-            if resp.status_code != 200:
-                self.logger.debug(f"[MAINT] HA status endpoint returned {resp.status_code}")
-                return set()
+    @staticmethod
+    def _ha_lrm_mode_from_status(text):
+        """Pull the LRM mode word out of a /cluster/ha/status/current lrm entry.
 
-            data = resp.json().get('data', [])
-            result = set()
-            for entry in data:
-                # type=node entries (PVE 8.x with HA resources)
-                if entry.get('type') == 'node' and entry.get('status') == 'maintenance':
-                    result.add(entry.get('node', ''))
-                # manager_status entry (always present when HA is active)
-                elif entry.get('id') == 'manager_status':
-                    # "pve1 master\npve2 maintenance\npve3 online\n"
-                    for line in entry.get('status', '').split('\n'):
-                        parts = line.strip().split()
-                        if len(parts) >= 2 and parts[1] == 'maintenance':
-                            result.add(parts[0])
-                # NS: some PVE versions use quorum/manager with "node" field
-                elif entry.get('status') == 'maintenance' and entry.get('node'):
+        PVE renders these as "<node> (<mode>, <watchdog>, <timestamp>)", e.g.
+        "pve1 (maintenance mode, watchdog standby, Thu Sep 10 19:48:45 2026)". Returns the
+        lower-cased mode field ("maintenance mode", "active", "idle") or '' if unparseable.
+        """
+        if not isinstance(text, str) or '(' not in text:
+            return ''
+        return text.split('(', 1)[1].split(',', 1)[0].strip().rstrip(')').lower()
+
+    def _ha_maintenance_from_manager_status(self):
+        """Structured read of /cluster/ha/status/manager_status. Returns a set, or None if the
+        endpoint gave us nothing usable (old PVE, restricted token, HA never configured)."""
+        host = self.host
+        resp = self._api_get(
+            f"https://{host}:{self.api_port}/api2/json/cluster/ha/status/manager_status")
+        if resp is None or resp.status_code != 200:
+            code = getattr(resp, 'status_code', 'no response')
+            self.logger.debug(f"[MAINT] HA manager_status endpoint returned {code}")
+            return None
+        data = resp.json().get('data') or {}
+        if not isinstance(data, dict):
+            return None
+
+        ms = data.get('manager_status') or {}
+        lrm = data.get('lrm_status') or {}
+        if not isinstance(ms, dict) or not isinstance(lrm, dict):
+            return None
+        # node_status is the CRM's own view; node_request carries a pending
+        # {"maintenance": 1} before the CRM has applied it; lrm_status[n].mode is what the
+        # node itself reports. Any of the three counts — we want the node off the target list
+        # from the moment maintenance is requested.
+        if not ms and not lrm:
+            return None
+
+        result = set()
+        for node, state in (ms.get('node_status') or {}).items():
+            if str(state).lower() == 'maintenance':
+                result.add(node)
+        for node, req in (ms.get('node_request') or {}).items():
+            if isinstance(req, dict) and req.get('maintenance'):
+                result.add(node)
+        for node, info in lrm.items():
+            if isinstance(info, dict) and str(info.get('mode', '')).lower().startswith('maintenance'):
+                result.add(node)
+        return result
+
+    def _ha_maintenance_from_status_current(self):
+        """Fallback read of /cluster/ha/status/current. Returns a set, or None if the poll
+        itself failed (so callers can tell "nothing in maintenance" from "we couldn't look")."""
+        host = self.host
+        resp = self._api_get(f"https://{host}:{self.api_port}/api2/json/cluster/ha/status/current")
+        if resp is None or resp.status_code != 200:
+            code = getattr(resp, 'status_code', 'no response')
+            self.logger.debug(f"[MAINT] HA status endpoint returned {code}")
+            return None
+
+        data = resp.json().get('data', [])
+        result = set()
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            # type=node entries (some PVE 8.x builds with HA resources)
+            if entry.get('type') == 'node' and entry.get('status') == 'maintenance':
+                result.add(entry.get('node', ''))
+            # PVE 9: the flag surfaces ONLY here, as a type=lrm entry whose status is free text
+            # "<node> (maintenance mode, watchdog standby, <ts>)". The old parser had no branch
+            # for this shape, so it returned an empty set on a cluster with two drained nodes.
+            elif entry.get('type') == 'lrm':
+                mode = entry.get('mode') or self._ha_lrm_mode_from_status(entry.get('status', ''))
+                if str(mode).lower().startswith('maintenance') and entry.get('node'):
                     result.add(entry['node'])
+            # manager_status entry (older PVE embedded a multi-line node/state blob here)
+            elif entry.get('id') == 'manager_status':
+                # "pve1 master\npve2 maintenance\npve3 online\n"
+                for line in entry.get('status', '').split('\n'):
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == 'maintenance':
+                        result.add(parts[0])
+            # NS: some PVE versions use quorum/manager with "node" field
+            elif entry.get('status') == 'maintenance' and entry.get('node'):
+                result.add(entry['node'])
+        result.discard('')
+        return result
 
-            if result:
-                self.logger.debug(f"[MAINT] HA poll found maintenance nodes: {result}")
-            return result
+    def _get_native_ha_maintenance_nodes(self):
+        """Nodes PVE currently holds in native HA maintenance (#78).
+
+        Prefers the structured /cluster/ha/status/manager_status map and falls back to parsing
+        /cluster/ha/status/current. Sets self._ha_maint_poll_ok so callers can distinguish
+        "PVE reports nobody in maintenance" from "we could not ask" — those two used to look
+        identical, and the cleanup pass below acts on the difference.
+        """
+        result = None
+        source = 'manager_status'
+        try:
+            result = self._ha_maintenance_from_manager_status()
         except Exception as e:
-            self.logger.debug(f"[MAINT] HA status poll failed: {e}")
-            return set()
+            self.logger.debug(f"[MAINT] HA manager_status poll failed: {e}")
+        if result is None:
+            source = 'status/current'
+            try:
+                result = self._ha_maintenance_from_status_current()
+            except Exception as e:
+                self.logger.debug(f"[MAINT] HA status poll failed: {e}")
+
+        self._ha_maint_poll_ok = result is not None
+        self._log_ha_maintenance_poll(result, source)
+        return result if result is not None else set()
+
+    def _log_ha_maintenance_poll(self, result, source):
+        """Say something whenever the HA maintenance picture changes.
+
+        An empty result is a real answer and used to be logged as nothing at all, which is how
+        two drained nodes stayed invisible across hundreds of polls. Log every transition —
+        including "-> none" and "-> unreadable" — exactly once, at INFO.
+        """
+        prev = getattr(self, '_ha_maint_last', '__unset__')
+        if result is None:
+            current = None
+        else:
+            current = frozenset(result)
+        if prev != '__unset__' and prev == current:
+            return
+        self._ha_maint_last = current
+        if current is None:
+            self.logger.warning(
+                "[MAINT] HA maintenance state is UNREADABLE (both manager_status and "
+                "status/current failed) — treating as 'no change'; externally-detected "
+                "maintenance nodes will NOT be cleaned up while this persists.")
+        elif current:
+            self.logger.info(f"[MAINT] HA poll ({source}): nodes in native maintenance: "
+                             f"{', '.join(sorted(current))}")
+        else:
+            self.logger.info(f"[MAINT] HA poll ({source}): no nodes in native maintenance")
 
     # NS feb 2026 - try ha-manager crm-command node-maintenance enable (#78)
     # returns True if proxmox takes over, False = we do our own evacuation
@@ -3940,12 +4114,15 @@ class PegaProxManager:
 
         # only now drop the local state — we either disabled HA upstream or
         # never had native_ha set in the first place
+        # Drop in-memory and persisted state together under the lock, so a concurrent
+        # enter_maintenance_mode() persist (guarded by the same lock) cannot slip a stale row
+        # in between the pop and the delete (review).
         with self.maintenance_lock:
             self.nodes_in_maintenance.pop(node_name, None)
-        try:
-            get_db().remove_node_maintenance(self.id, node_name)   # #720 — drop persisted soft state
-        except Exception:
-            pass
+            try:
+                get_db().remove_node_maintenance(self.id, node_name)   # #720 — drop persisted state
+            except Exception:
+                pass
         self.logger.info(f"[OK] Exited maintenance mode for {node_name}")
 
         # unset ceph flags after maintenance (#141)
@@ -6623,11 +6800,27 @@ echo "AGENT_INSTALLED_OK"
         
         return result
     
+    def _last_ssh_stderr(self, host):
+        """stderr of the most recent failed SSH attempt against this host, or ''.
+
+        MK Sep 2026 — kept so a caller can tell an auth failure from a sudo refusal
+        after the fact. Bounded to the last message per host; this is a diagnostic
+        crumb, not a log.
+        """
+        return self.__dict__.get('_ssh_last_stderr', {}).get(host, '')
+
     def _note_ssh_auth_hint(self, host, stderr):
         """#717: surface an actionable SSH-auth hint ONCE per host, at INFO level so it
         shows without DEBUG. The per-command sites only DEBUG the raw stderr; this lifts
         the conclusion ('add an SSH key' / 'host key changed') into normal logs where a
         user staring at a compliance 502 will actually see it."""
+        # Keep the raw text around for _ssh_node_output_ex — the hint is deduplicated
+        # per host below, but a caller asking "why did this command come back empty"
+        # needs the reason every time, not only the first.
+        store = self.__dict__.setdefault('_ssh_last_stderr', {})
+        store[host] = (stderr or '')[-2000:]
+        if len(store) > 512:          # estate-sized clusters: don't let this grow forever
+            store.pop(next(iter(store)), None)
         hint = _ssh_auth_hint(stderr)
         if not hint:
             return
@@ -8893,7 +9086,7 @@ echo "AGENT_INSTALLED_OK"
             exit_code = stdout.channel.recv_exit_status()
             
             # Also capture any stderr
-            stderr_output = stderr.read().decode('utf-8').strip()
+            stderr_output = _read_capped(stderr).strip()
             if stderr_output and task:
                 for line in stderr_output.split('\n'):
                     if line.strip():
@@ -9021,7 +9214,7 @@ echo "AGENT_INSTALLED_OK"
             
             # Check if we're root (common on Proxmox) - if so, no sudo needed
             stdin, stdout, stderr = ssh.exec_command('id -u')
-            uid = stdout.read().decode().strip()
+            uid = _read_capped(stdout).strip()
             sudo_prefix = '' if uid == '0' else 'sudo '
             
             if uid == '0':
@@ -9090,7 +9283,7 @@ echo "AGENT_INSTALLED_OK"
                     try:
                         # Check if root
                         stdin, stdout, stderr = ssh.exec_command('id -u')
-                        uid = stdout.read().decode().strip()
+                        uid = _read_capped(stdout).strip()
                         is_root = (uid == '0')
 
                         # Check if related node requires a reboot
@@ -9744,6 +9937,13 @@ echo "AGENT_INSTALLED_OK"
                     if cursor.rowcount > 0:
                         self.logger.info(f"Removed VM {vmid} from balancing exclusion list")
                     db.conn.commit()
+                    # MK Sep 2026 - and the authorization objects pointing at this vmid.
+                    # PVE hands out the LOWEST free id, so the number comes back quickly,
+                    # and a VM-ACL row or a scheduled action left behind then applies to
+                    # whichever guest takes it next. The client portal's teardown route
+                    # has cleaned up after itself since #556; the ordinary delete path
+                    # never did, and it is the one most deletions go through.
+                    db.purge_vm_grants(self.id, vmid)
                 except Exception as cleanup_err:
                     self.logger.warning(f"Failed to cleanup balancing exclusion for VM {vmid}: {cleanup_err}")
 
@@ -11272,7 +11472,7 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-    def mint_console_auth_ticket(self):
+    def mint_console_auth_ticket(self, with_csrf: bool = False):
         """Mint a FRESH PVE session ticket (PVEAuthCookie) for the console WS proxy.
 
         NS 2026-06-05 (security audit C-1): the cluster-wide PVE ticket must NOT
@@ -11287,29 +11487,73 @@ echo "AGENT_INSTALLED_OK"
         pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
         usr = getattr(self.config, 'user', None) or 'root@pam'
         if not pwd:
-            return None
-        try:
-            import ssl as _ssl
-            import urllib.request as _ur
-            from urllib.parse import urlencode as _ue
-            ctx = _ssl.create_default_context()
-            # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag,
-            # matching the VNC/termproxy paths (default off: PVE self-signed).
-            if not getattr(self, '_ssl_verify', False):
-                ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
-            req = _ur.Request(
-                f"https://{self.auth_host}:{self.api_port}/api2/json/access/ticket",
-                data=_ue({'username': usr, 'password': pwd}).encode('utf-8'),
-                method='POST',
-            )
-            with _ur.urlopen(req, context=ctx, timeout=10) as resp:
-                import json as _json
-                res = _json.loads(resp.read().decode('utf-8'))
-            return res['data']['ticket']
-        except Exception as e:
-            self.logger.warning(f"[CONSOLE] auth-ticket mint failed: {type(e).__name__}")
-            return None
+            return (None, None) if with_csrf else None
+
+        # MK Sep 2026 — this used to hit auth_host and nothing else. auth_host is pinned to
+        # the REGISTERED node on purpose (#740.2: @pam is node-local, so minting against an
+        # arbitrary node answers 401), but "registered" and "alive" are different things. Once
+        # a cluster fails over, `host` follows current_host and every other call keeps working
+        # while this one sits on a dead box until the timeout — so console and the RFB
+        # screenshot fallback break, silently, and stay broken.
+        #
+        # Walk the same candidates connect() does. A REFUSED CONNECTION means "not this node,
+        # try the next"; a 401 means the account genuinely isn't valid and we stop, which keeps
+        # #740.2's behaviour instead of spraying failed logins across the cluster.
+        candidates = []
+        for h in (self.auth_host, self.current_host, self.config.host):
+            if h and h not in candidates:
+                candidates.append(h)
+        for h in (getattr(self.config, 'fallback_hosts', None) or []):
+            if h and h not in candidates:
+                candidates.append(h)
+
+        import ssl as _ssl
+        import urllib.request as _ur
+        import urllib.error as _uerr
+        from urllib.parse import urlencode as _ue
+        import json as _json
+
+        ctx = _ssl.create_default_context()
+        # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag,
+        # matching the VNC/termproxy paths (default off: PVE self-signed).
+        if not getattr(self, '_ssl_verify', False):
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+
+        last = None
+        for idx, host in enumerate(candidates):
+            try:
+                req = _ur.Request(
+                    f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json/access/ticket",
+                    data=_ue({'username': usr, 'password': pwd}).encode('utf-8'),
+                    method='POST',
+                )
+                # short per-host budget: a dead node should cost seconds, not the whole
+                # request. Four candidates at 10s each is how a tile poll reached 50s.
+                with _ur.urlopen(req, context=ctx, timeout=6) as resp:
+                    res = _json.loads(resp.read().decode('utf-8'))
+                ticket = res['data']['ticket']
+                if idx:
+                    self.logger.info(f"[CONSOLE] auth-ticket minted on fallback {host} "
+                                     f"(registered host {self.auth_host} did not answer)")
+                if with_csrf:
+                    # PVE binds a vncproxy ticket to whoever asked for it, so the caller that
+                    # POSTs vncproxy has to present THIS cookie — and a cookie-auth POST needs
+                    # the matching CSRF token. Handing back only the ticket is how the
+                    # websocket leg ended up authenticating as somebody else.
+                    return ticket, res['data'].get('CSRFPreventionToken')
+                return ticket
+            except _uerr.HTTPError as he:
+                # the node answered and said no — credentials, not reachability
+                self.logger.warning(f"[CONSOLE] auth-ticket rejected by {host}: HTTP {he.code}")
+                return (None, None) if with_csrf else None
+            except Exception as e:
+                last = e
+                continue
+
+        self.logger.warning(f"[CONSOLE] auth-ticket mint failed on all "
+                            f"{len(candidates)} host(s): {type(last).__name__ if last else 'no candidates'}")
+        return (None, None) if with_csrf else None
 
     def create_privileged_session(self):
         """Return a requests.Session authenticated with a FRESH password-based
@@ -15311,7 +15555,17 @@ echo "AGENT_INSTALLED_OK"
         # token, not an SSH password — _ssh_node_output will happily offer it to sshd and
         # get nowhere. Treating it as a credential is what made this report "connection
         # failed" on exactly the setup it was written for.
-        has_password = bool(getattr(self.config, 'pass_', '')) and not getattr(self, '_using_api_token', False)
+        #
+        # MK Sep 2026 — but `_using_api_token` is the wrong question. It is also True for a
+        # cluster the operator gave a username and password, where we then minted our own
+        # token on first connect (#110) — and that path says so in as many words: "switch
+        # REST to token auth, keep password for SSH". For those, pass_ is still the account
+        # password and perfectly usable. The secret only lives in pass_ when the OPERATOR
+        # typed a token id as the username, which is what the '!' marks (see the detection
+        # at connect time). Asking _using_api_token instead reported "no SSH credentials"
+        # for the most ordinary setup there is.
+        _pass_is_token_secret = '!' in (getattr(self.config, 'user', '') or '')
+        has_password = bool(getattr(self.config, 'pass_', '')) and not _pass_is_token_secret
         if not getattr(self.config, 'ssh_key', '') and not has_password:
             return ('SSH_NO_CREDENTIALS',
                     "this cluster authenticates with an API token and has no SSH key or "
@@ -15329,30 +15583,58 @@ echo "AGENT_INSTALLED_OK"
         and fails with Permission denied. The base64 path preserves the full command
         intact and hands it to a root bash.
         """
+        out, _ = self._ssh_node_output_ex(node_name, cmd, timeout=timeout)
+        return out
+
+    def _ssh_node_output_ex(self, node_name, cmd, timeout=60):
+        """Same as _ssh_node_output, but also says WHY when there is no output.
+
+        MK Sep 2026 — every failure in here used to collapse into a bare None, and the
+        callers each had one error string to show for it, usually naming SSH. That is
+        wrong for the most common case on a non-root cluster user: the login succeeds
+        and `sudo -n bash` is what gets refused, so the operator reads "SSH connection
+        failed" next to an sshd log showing an accepted password and a clean session.
+
+        Returns (stdout, reason) where reason is None on success and otherwise a short
+        human-readable sentence.
+        """
         node_ip = self._get_node_ip(node_name)
         if not node_ip:
-            return None
+            return None, f"no reachable IP resolved for node '{node_name}'"
 
         ssh_user = (self.config.user or 'root').split('@')[0]
         # Sudo wrap is handled inside the _ssh_run_command_* helpers so we don't
         # double-wrap when the call chain goes through multiple layers.
 
+        # Drop anything an earlier call left behind for this host: a timeout never
+        # records stderr, and reporting the previous run's reason for it would be a
+        # confidently wrong diagnosis, which is worse than the vague one we had.
+        self.__dict__.setdefault('_ssh_last_stderr', {}).pop(node_ip, None)
+        last_err = ''
         ssh_key = getattr(self.config, 'ssh_key', '')
         if ssh_key:
             out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key, timeout=timeout)
             if out is not None:
-                return out
+                return out, None
+            last_err = self._last_ssh_stderr(node_ip) or last_err
 
         out = self._ssh_run_command_output(node_ip, ssh_user, cmd, timeout=timeout)
         if out is not None:
-            return out
+            return out, None
+        last_err = self._last_ssh_stderr(node_ip) or last_err
 
         if self.config.pass_:
             out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, self.config.pass_, timeout=timeout)
             if out is not None:
-                return out
+                return out, None
+            last_err = self._last_ssh_stderr(node_ip) or last_err
 
-        return None
+        hint = _ssh_auth_hint(last_err)
+        if hint:
+            # _ssh_auth_hint has no idea who we connected as; name them here.
+            hint = hint.replace('the cluster SSH user', f"'{ssh_user}'")
+            return None, hint
+        return None, "SSH connection failed"
 
     def scan_node_packages(self, node_name):
         """Scan node for CVEs and outdated packages via SSH.
@@ -15369,22 +15651,32 @@ echo "AGENT_INSTALLED_OK"
             "echo '---DEBSECAN---' && "
             "if test -x /usr/bin/debsecan || command -v debsecan >/dev/null 2>&1; then "
             "  SUITE=$(lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release 2>/dev/null | cut -d= -f2 || echo bookworm); "
-            "  RESULT=$(debsecan --suite $SUITE --only-fixed 2>/dev/null | head -500); "
-            "  if [ -z \"$RESULT\" ] && [ \"$SUITE\" = \"trixie\" ]; then "
-            "    RESULT=$(debsecan --suite bookworm --only-fixed 2>/dev/null | head -500); "
-            "  fi; "
-            "  if [ -z \"$RESULT\" ]; then "
-            "    RESULT=$(debsecan --suite $SUITE 2>/dev/null | head -500); "
-            "  fi; "
-            "  if [ -z \"$RESULT\" ]; then echo 'NO_RESULTS'; else echo \"$RESULT\"; fi; "
+            "  echo \"SUITE=$SUITE\"; "
+            # Actionable first: CVEs with a fix available for THIS suite. A short list,
+            # so the cap is generous — silently dropping something a node could patch
+            # today is the one truncation that actually costs somebody.
+            "  FULL=$(debsecan --suite $SUITE --only-fixed 2>/dev/null); "
+            "  MODE=fixed; "
+            "  if [ -z \"$FULL\" ]; then "
+            "    FULL=$(debsecan --suite $SUITE 2>/dev/null); MODE=all; CAP=500; "
+            "  else CAP=4000; fi; "
+            "  echo \"MODE=$MODE\"; "
+            "  if [ -n \"$FULL\" ]; then "
+            "    TOTAL=$(printf '%s\\n' \"$FULL\" | grep -c '^CVE-\\|^TEMP-'); "
+            "    echo \"TOTAL=$TOTAL\"; "
+            "    if [ \"$TOTAL\" -gt \"$CAP\" ]; then echo \"TRUNCATED=$CAP\"; fi; "
+            "    printf '%s\\n' \"$FULL\" | head -$CAP; "
+            "  else echo 'NO_RESULTS'; fi; "
             "else echo 'NOT_INSTALLED'; fi ; "
             "echo '---UPDATES---' && apt-get -s dist-upgrade 2>/dev/null | grep '^Inst' ; "
             "echo '---END---'"
         )
 
-        output = self._ssh_node_output(node_name, scan_cmd, timeout=120)
+        output, reason = self._ssh_node_output_ex(node_name, scan_cmd, timeout=120)
         if not output:
-            return {'error': 'SSH connection failed', 'node': node_name}
+            # Was 'SSH connection failed' for every cause there is, including the common
+            # one where SSH worked perfectly and sudo said no.
+            return {'error': reason or 'SSH connection failed', 'node': node_name}
 
         result = {
             'node': node_name,
@@ -15395,6 +15687,13 @@ echo "AGENT_INSTALLED_OK"
             'cves': [],           # real CVE entries from debsecan
             'packages': [],       # pending updates from apt
             'cve_count': 0,
+            # MK Sep 2026 — say which suite the numbers were computed against, whether
+            # they are the actionable (fixed) set or the informational one, and whether
+            # the list was cut. Reported Sep 2026: the old block fell back to bookworm
+            # on a trixie node, so a fully patched PVE 9 box was shown five CVEs from a
+            # distro it isn't running, and head -500 dropped the rest of a 1000-entry
+            # list without a word.
+            'suite': '', 'cve_mode': '', 'cve_total': 0, 'cve_truncated': False,
             'security_count': 0, 'total_count': 0
         }
 
@@ -15419,6 +15718,18 @@ echo "AGENT_INSTALLED_OK"
             elif section == 'DEBSECAN':
                 if line == 'NOT_INSTALLED':
                     result['debsecan_available'] = False
+                elif line.startswith('SUITE='):
+                    result['suite'] = line.split('=', 1)[1].strip()
+                elif line.startswith('MODE='):
+                    result['cve_mode'] = line.split('=', 1)[1].strip()
+                    result['debsecan_available'] = True
+                elif line.startswith('TOTAL='):
+                    try:
+                        result['cve_total'] = int(line.split('=', 1)[1].strip())
+                    except ValueError:
+                        pass
+                elif line.startswith('TRUNCATED='):
+                    result['cve_truncated'] = True
                 elif line.startswith('CVE-'):
                     result['debsecan_available'] = True
                     # default format: "CVE-2024-1234 package urgency (status info)"
@@ -15581,7 +15892,7 @@ echo DONE""",
 echo DONE""",
         },
         'journald': {
-            'check': """grep -q '^SystemMaxUse' /etc/systemd/journald.conf.d/99-cis-hardening.conf 2>/dev/null && echo OK || echo FAIL""",
+            'check': """{ systemd-analyze cat-config systemd/journald.conf 2>/dev/null || cat /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null; } | grep -qE '^[[:space:]]*SystemMaxUse[[:space:]]*=[[:space:]]*[^[:space:]]' && echo OK || echo FAIL""",
             'verbose_check': """grep -hE '^(Storage|SystemMaxUse|SystemKeepFree)' /etc/systemd/journald.conf.d/99-cis-hardening.conf 2>/dev/null || echo '  (no pegaprox journald config)' ; echo '--- current journal usage ---' ; journalctl --disk-usage 2>/dev/null""",
             'apply': """mkdir -p /etc/systemd/journald.conf.d
 cat > /etc/systemd/journald.conf.d/99-cis-hardening.conf << 'JDEOF'
@@ -15610,7 +15921,7 @@ chown root:root /etc/ssh/ssh_host_*_key.pub 2>/dev/null
 echo DONE""",
         },
         'ssh_crypto': {
-            'check': """grep -q 'CIS SSH Cryptographic Hardening' /etc/ssh/sshd_config 2>/dev/null && echo OK || echo FAIL""",
+            'check': """{ /usr/sbin/sshd -T 2>/dev/null || sshd -T 2>/dev/null; } | awk '/^ciphers /{seen=1; if ($0 ~ /cbc|arcfour|3des/) bad=1} /^macs /{if ($0 ~ /md5|-96/) bad=1} /^gssapiauthentication yes/{bad=1} /^hostbasedauthentication yes/{bad=1} /^ignorerhosts no/{bad=1} /^permituserenvironment yes/{bad=1} END{print (seen && !bad) ? \"OK\" : \"FAIL\"}'""",
             'verbose_check': """grep -E '^(Ciphers|KexAlgorithms|MACs|GSSAPIAuthentication|HostbasedAuthentication|IgnoreRhosts|PermitUserEnvironment|Banner) ' /etc/ssh/sshd_config 2>/dev/null || echo '(no hardening directives found)'""",
             'apply': """cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.cis
 # remove existing crypto directives to avoid conflicts
@@ -16266,7 +16577,7 @@ done
 echo DONE""",
         },
         'sysctl_hardening': {
-            'check': """grep -q 'net.ipv4.conf.all.rp_filter = 1' /etc/sysctl.d/99-pegaprox-hardening.conf 2>/dev/null && echo OK || echo FAIL""",
+            'check': """bad=0; for kv in net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.all.accept_redirects=0 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.all.accept_source_route=0 net.ipv4.tcp_syncookies=1 kernel.randomize_va_space=2 kernel.dmesg_restrict=1 kernel.kptr_restrict=2 fs.protected_hardlinks=1 fs.protected_symlinks=1 fs.suid_dumpable=0; do k=${kv%%=*}; want=${kv#*=}; have=$(sysctl -n "$k" 2>/dev/null); [ "$have" = "$want" ] || bad=1; done; [ "$bad" = 0 ] && echo OK || echo FAIL""",
             'verbose_check': """if [ -f /etc/sysctl.d/99-pegaprox-hardening.conf ]; then echo 'file exists:' ; grep -E '^[a-z]' /etc/sysctl.d/99-pegaprox-hardening.conf 2>/dev/null | head -10 ; echo '...' ; else echo 'file missing' ; fi ; echo '---live kernel values---' ; for k in net.ipv4.conf.all.rp_filter net.ipv4.tcp_syncookies kernel.randomize_va_space kernel.kptr_restrict ; do v=$(sysctl -n $k 2>/dev/null) ; echo "$k = $v" ; done""",
             'apply': """cat > /etc/sysctl.d/99-pegaprox-hardening.conf << 'SYSEOF'
 # PegaProx Security Hardening - sysctl parameters
@@ -16452,7 +16763,15 @@ echo DONE""",
     # the existing apply UI — not auto-applied.
     _HARDENING_PROFILES = {
         'cis-l1': None,  # None = all CIS_CHECKS (default behaviour)
-        'cis-l2': None,  # alias for now — same surface as cis-l1, kept for future split
+        # MK Sep 2026 — 'cis-l2' still resolves, because API callers and saved links use it,
+        # but it runs the SAME control set as cis-l1 and there is no honest way to label the
+        # result "Level 2". The benchmark defines L1 as the smaller set and L2 as additions
+        # on top; ours had L1 = everything and L2 = the same, so the name was backwards AND
+        # empty. Splitting it properly means sorting 44 controls against the published
+        # benchmark, which wants someone who has it in front of them - until then the
+        # effective profile is reported (see _effective_profile), so a report cannot claim a
+        # level that was never checked.
+        'cis-l2': None,
         'vs-nfd': {
             # Proxmox-safe subset of existing CIS controls
             'fs_modules', 'core_dumps', 'mount_options', 'cron_hardening', 'journald',
@@ -16595,6 +16914,15 @@ echo DONE""",
         if members is None:
             return None
         return set(members)
+
+    @staticmethod
+    def _effective_profile(profile):
+        """The profile whose controls actually ran, which is what a report may name.
+
+        cis-l2 is accepted but carries no distinct control set, so it resolves to cis-l1.
+        Anything else is returned as given.
+        """
+        return 'cis-l1' if (profile or 'cis-l1') == 'cis-l2' else (profile or 'cis-l1')
 
     def _all_hardening_controls(self):
         """Merged dict of CIS_CHECKS + VS-NfD extras (id → control)."""
@@ -16962,22 +17290,31 @@ echo DONE""",
             self.stop_event.wait(30 + random.uniform(0, 10))
 
     def _restore_persisted_maintenance(self):
-        """#720 — repopulate SOFT (non-HA) node maintenance from the DB after a restart, so a node
-        left in maintenance still shows as such. Native HA maintenance is re-derived from PVE on the
-        first poll (#78), so only the soft entries we persisted are restored here."""
+        """#720 — repopulate node maintenance from the DB after a restart, so a node left in
+        maintenance still shows as such (and stays off the balancer's target list).
+
+        Restores native-HA entries too: re-deriving those from PVE was unreliable (see
+        _get_native_ha_maintenance_nodes), and dropping them silently re-armed the node as the
+        emptiest migration target. native_ha is carried through so exit_maintenance_mode still
+        clears the upstream `ha-manager node-maintenance` flag on a restored entry.
+
+        Restored entries are deliberately NOT marked _discovered_by_refresh, so the poll's
+        cleanup pass (which only drops externally-discovered nodes) cannot remove them — only an
+        explicit exit_maintenance_mode does."""
         try:
             from pegaprox.models.tasks import MaintenanceTask
-            for node_name, _entered_at in get_db().get_node_maintenance(self.id):
+            for node_name, _entered_at, native_ha in get_db().get_node_maintenance(self.id):
                 with self.maintenance_lock:
                     if node_name in self.nodes_in_maintenance:
                         continue
                     t = MaintenanceTask(node_name)
-                    t.native_ha = False
+                    t.native_ha = bool(native_ha)
                     t.status = 'completed'
                     t.total_vms = 0
                     t._restored = True
                     self.nodes_in_maintenance[node_name] = t
-                self.logger.info(f"[MAINT] Restored soft maintenance for {node_name} after restart (#720)")
+                self.logger.info(f"[MAINT] Restored {'native HA' if native_ha else 'soft'} "
+                                 f"maintenance for {node_name} after restart (#720)")
         except Exception as e:
             self.logger.debug(f"[MAINT] maintenance restore failed: {e}")
 

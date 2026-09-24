@@ -17,7 +17,7 @@ from pegaprox.utils.audit import log_audit
 # log lines.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import (
-    get_user_permissions, get_vm_acls,
+    get_user_permissions, get_vm_acls, acl_grants_user,
     get_pool_membership_cache, invalidate_pool_cache,
     get_user_effective_role, get_role_permissions_for_user,
     DEFAULT_TENANT_ID,
@@ -104,104 +104,11 @@ def create_pool(cluster_id):
         return jsonify({'error': 'Failed to create pool'}), 500
 
 
-@bp.route('/api/clusters/<cluster_id>/pools/<pool_id>', methods=['PUT'])
-@require_auth(perms=['admin.users'])
-def update_pool(cluster_id, pool_id):
-    """Update a pool's comment"""
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    # sec (audit): duplicate of users.create_pool_api / update_pool_api — that blueprint wins
-    # at registration so this is currently unreachable, but an unguarded second implementation
-    # of a grant-level action is not something to leave lying around.
-    _perr = _pool_write_denied(cluster_id)
-    if _perr:
-        return _perr
-    
-    data = request.get_json() or {}
-    comment = data.get('comment', '')
-    
-    manager = cluster_managers.get(cluster_id)
-    if not manager:
-        return jsonify({'error': 'Cluster not found'}), 404
-    
-    # Ensure connected
-    if not manager.is_connected:
-        if not manager.connect_to_proxmox():
-            return jsonify({'error': 'Failed to connect to Proxmox cluster'}), 503
-    
-    try:
-        host, port = manager.host, manager.api_port
-        url = f"https://{host}:{port}/api2/json/pools/{pool_id}"
-        response = manager._api_put(url, data={'comment': comment})
-        
-        if response.status_code != 200:
-            return jsonify({'error': f'Proxmox API error: {parse_pve_error(response.text)}'}), 500
-        
-        log_audit(request.session.get('user'), 'pool.update', f'Updated pool {pool_id}', cluster=cluster_id)
-        
-        return jsonify({'success': True, 'message': f'Pool "{pool_id}" updated successfully'})
-    except Exception as e:
-        logging.error(f"[API] Failed to update pool: {e}")
-        return jsonify({'error': 'Failed to update pool'}), 500
-
-
-@bp.route('/api/clusters/<cluster_id>/pools/<pool_id>', methods=['DELETE'])
-@require_auth(perms=['admin.users'])
-def delete_pool(cluster_id, pool_id):
-    """Delete a resource pool"""
-    ok, err = check_cluster_access(cluster_id)
-    if not ok: return err
-    
-    manager = cluster_managers.get(cluster_id)
-    if not manager:
-        return jsonify({'error': 'Cluster not found'}), 404
-    
-    # Ensure connected
-    if not manager.is_connected:
-        if not manager.connect_to_proxmox():
-            return jsonify({'error': 'Failed to connect to Proxmox cluster'}), 503
-    
-    try:
-        host, port = manager.host, manager.api_port
-        # MK Jun 2026 (#555 follow-up) — PVE refuses to delete a non-empty pool
-        # ("pool 'X' is not empty (contains VM ...)"), which surfaced as an opaque
-        # 500. Un-pool any members first (the VMs themselves are untouched), so the
-        # delete just works the way operators expect.
-        try:
-            members = (manager.get_pool_members(pool_id) or {}).get('members', []) or []
-            member_ids = [str(m.get('vmid')) for m in members if m.get('vmid') is not None]
-            if member_ids:
-                manager._api_put(f"https://{host}:{port}/api2/json/pools/{pool_id}",
-                                 data={'vms': ','.join(member_ids), 'delete': 1})
-        except Exception as _me:
-            logging.warning(f"[POOL] pre-delete member cleanup for {pool_id} failed: {_me}")
-        url = f"https://{host}:{port}/api2/json/pools/{pool_id}"
-        response = manager._api_delete(url)
-
-        if response.status_code != 200:
-            error_text = response.text or ''
-            if 'not empty' in error_text.lower() or 'contains' in error_text.lower():
-                return jsonify({'error': 'Cannot delete pool - it still contains VMs or storage. Remove all members first.'}), 400
-            return jsonify({'error': f'Proxmox API error: {parse_pve_error(error_text)}'}), 500
-        
-        # Invalidate cache
-        invalidate_pool_cache(cluster_id)
-        
-        # Also remove any PegaProx permissions for this pool
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM pool_permissions WHERE cluster_id = ? AND pool_id = ?', (cluster_id, pool_id))
-        conn.commit()
-        conn.close()
-        
-        log_audit(request.session.get('user'), 'pool.delete', f'Deleted pool {pool_id}', cluster=cluster_id)
-        
-        return jsonify({'success': True, 'message': f'Pool "{pool_id}" deleted successfully'})
-    except Exception as e:
-        error_msg = str(e)
-        if 'not empty' in error_msg.lower() or 'contains' in error_msg.lower():
-            return jsonify({'error': 'Cannot delete pool - it still contains VMs or storage. Remove all members first.'}), 400
-        return jsonify({'error': f'Failed to delete pool: {error_msg}'}), 500
+# sec (private disclosure Sep 2026): PUT and DELETE on /pools/<id> were registered here AND in
+# users.py. The users blueprint registers first, so these copies never served a request — and
+# they lacked the per-object write + pool-visibility checks the live handlers carry, so the two
+# could drift apart with nobody able to tell which was in force. Removed; users.py owns both
+# verbs. The members routes below stay here, they have no twin.
 
 
 def _authorize_pool_assignment(cluster_id, pool_id, vmid, vm_type=None):
@@ -213,8 +120,7 @@ def _authorize_pool_assignment(cluster_id, pool_id, vmid, vm_type=None):
     manages the target pool — admins and plain cluster-wide operators manage all pools on an owned
     cluster; a pool-scoped caller only pools they hold a grant on. Returns (ok, error_response)."""
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import (user_can_access_vm, _pool_perms_for,
-                                     get_user_clusters, user_has_any_pool_access)
+    from pegaprox.utils.rbac import user_can_access_vm, _pool_perms_for, get_user_clusters
     from pegaprox.models.permissions import ROLE_ADMIN
     try:
         _vid = int(vmid)
@@ -479,7 +385,7 @@ def get_user_vm_access(username):
     
     for cluster_id, cluster_acls in acls.items():
         for vmid, acl in cluster_acls.items():
-            if username in acl.get('users', []) or '*' in acl.get('users', []):
+            if acl_grants_user(acl, username):
                 access.append({
                     'cluster_id': cluster_id,
                     'vmid': int(vmid),
@@ -497,18 +403,20 @@ def get_user_vm_access(username):
 def get_user_perms(username):
     """Get effective permissions for a user"""
     users = load_users()
-    
-    if username not in users:
-        return jsonify({'error': 'User not found'}), 404
-    
-    user = users[username]
+
     # NS Aug 2026 (AI-pentest) — a tenant-scoped admin.users holder must not read RBAC metadata for a
     # user in ANOTHER tenant (cross-tenant disclosure + existence oracle). Mirror the user PUT/DELETE
     # siblings; a global admin (session role ROLE_ADMIN) still sees everyone.
-    if request.session.get('role') != ROLE_ADMIN:
+    # NS Sep 2026 — and answer 404, not 403, for a user outside the caller's tenant: the missing-user
+    # branch used to run first, so 404-vs-403 still told a tenant admin whether a name existed
+    # elsewhere. Both cases now look identical from outside.
+    user = users.get(username)
+    if user is not None and request.session.get('role') != ROLE_ADMIN:
         _caller = users.get(request.session.get('user', ''), {})
         if user.get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
-            return jsonify({'error': 'Access denied'}), 403
+            user = None
+    if user is None:
+        return jsonify({'error': 'User not found'}), 404
     tenant_id = request.args.get('tenant_id', user.get('tenant_id', DEFAULT_TENANT_ID))
     
     effective = get_user_permissions(user, tenant_id)
@@ -570,7 +478,36 @@ def set_user_perms(username):
         for p in extra + denied:
             if p not in PERMISSIONS:
                 return jsonify({'error': f'Invalid permission: {p}'}), 400
-        
+
+        # MK Sep 2026 - the admin.* prefix check above stops the obvious escalation and
+        # nothing else. Two ways past it were left:
+        #   1. any permission WITHOUT that prefix - vm.delete, storage.edit, cluster.edit -
+        #      could be granted by a delegate who does not hold it. The sibling route
+        #      create_custom_role has asked _caller_can_grant_perms this since August;
+        #      this one never did.
+        #   2. `role` was only compared against ROLE_ADMIN, never resolved. A custom role
+        #      carrying admin.* permissions (legitimately created by a global admin) set as
+        #      a tenant role walks straight past the prefix test.
+        # Resolve what the request would actually confer and weigh all of it.
+        if request.session.get('role') != ROLE_ADMIN:
+            from pegaprox.utils.rbac import get_role_permissions_for_user, has_permission
+            from pegaprox.utils.auth import build_authz_user
+            # the caller's OWN effective permissions, token-floored like everywhere else
+            _caller = build_authz_user(request.session.get('user', ''), request.session)
+            _conferred = list(extra)
+            if role:
+                _conferred += get_role_permissions_for_user({'role': role}, tenant_id)
+            _over = [p for p in _conferred if not has_permission(_caller, p)]
+            if _over:
+                log_audit(request.session.get('user', ''), 'security.grant_ceiling_denied',
+                          f"Denied granting {len(_over)} permission(s) beyond own to {username}")
+                return jsonify({'error': 'Cannot grant permissions you do not hold: '
+                                         + ', '.join(sorted(set(_over))[:8])}), 403
+            # and nobody edits their own grants
+            if username == request.session.get('user', ''):
+                return jsonify({'error': 'Access denied: you cannot change your own '
+                                         'permissions'}), 403
+
         if 'tenant_permissions' not in users_db[username]:
             users_db[username]['tenant_permissions'] = {}
         

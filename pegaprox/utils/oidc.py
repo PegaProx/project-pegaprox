@@ -15,7 +15,7 @@ from datetime import datetime
 from urllib.parse import urlencode, urlparse, urlunparse
 
 # NS May 2026 — SSRF guard for admin-supplied OIDC URLs (discovery / token / userinfo).
-from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError, resolve_and_pin_url
 
 # auth_source values that mean "this row is owned by an OIDC-family IdP", i.e.
 # the ones whose oidc_sub is meaningful. 'local' and 'ldap' rows are excluded on
@@ -198,7 +198,21 @@ def get_oidc_endpoints(config: dict) -> dict:
                 # MK May 2026 (#412): pass allow_private through so internal
                 # IdPs at 10.x / 192.168.x can be used when the operator
                 # explicitly opted in. Metadata blocklist still binds.
-                sanitize_outbound_url(discovery_url, allow_private=allow_private_ip)
+                #
+                # MK Sep 2026 - the guard only CHECKED the host and then requests.get below
+                # resolved it a second time, which is the rebinding window senti-man reported
+                # against the shared guard (GHSA-hmcf-9q7f-vx35). Same treatment the webhook,
+                # SIEM and download paths already got: pin the address we vetted. For plain
+                # https this returns the URL untouched, because the certificate check already
+                # defeats a rebind - it only rewrites for the installs that turned
+                # oidc_skip_ssl_verify on, which are exactly the ones with nothing else
+                # catching it. allowed_schemes stays at the default https-only on purpose:
+                # the one thing NOT to do here is let discovery run over plain http, where
+                # whoever answers picks the authorization and token endpoints.
+                discovery_url = resolve_and_pin_url(
+                    discovery_url,
+                    allow_private=allow_private_ip,
+                    tls_verified=not skip_ssl)
             except SsrfError as guard_err:
                 logging.warning(f"[OIDC] discovery_url rejected by SSRF guard: {guard_err}")
                 # MK May 2026 (#188 follow-up): never return None — callers
@@ -219,7 +233,25 @@ def get_oidc_endpoints(config: dict) -> dict:
                                      f"Authority/issuer URL is probably empty, malformed, or pointing at a "
                                      f"local/private address. Fix the OIDC settings and retry.{hint}",
                 }
-            resp = requests.get(discovery_url, timeout=15, verify=not skip_ssl)
+            # NS Sep 2026 - allow_redirects=False. The authority URL is validated hard
+            # before we get here (build_validated_discovery_url + sanitize_outbound_url),
+            # and then requests would happily follow a 302 to 169.254.169.254 or any
+            # internal host, with none of that validation applied to the second hop. We
+            # guard the front door and left the back one open. A discovery endpoint that
+            # redirects is unusual enough that refusing it is the right default; the log
+            # line names the target so an admin can point the setting at it directly.
+            resp = requests.get(discovery_url, timeout=15, verify=not skip_ssl,
+                                allow_redirects=False)
+            if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                # CWE-117: Location comes from whatever answered the request, so it is
+                # remote-controlled and must not reach the log raw - same treatment the
+                # login path gives attacker-supplied usernames.
+                from pegaprox.utils.sanitization import sanitize_log_message as _sl
+                _loc = _sl(str(resp.headers.get('Location', '(no Location header)')))[:200]
+                logging.warning(
+                    f"[OIDC] discovery URL redirected to {_loc!r} - not following it. "
+                    f"Set the authority/issuer to the final URL instead.")
+                raise requests.RequestException('discovery redirect refused')
             if resp.status_code == 200:
                 try:
                     disco = resp.json()
@@ -387,7 +419,7 @@ def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
                 # UNVERIFIED decode, so a raise here would DOWNGRADE signature verification.
                 # allow_private=True keeps internal IdPs (RFC1918) working while cloud-metadata
                 # endpoints stay blocked (always) + control chars/bad schemes rejected.
-                from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError
+                from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError, resolve_and_pin_url
                 try:
                     sanitize_outbound_url(jwks_uri, allow_private=True)
                 except SsrfError as _se:
@@ -524,28 +556,68 @@ def oidc_get_user_info(config: dict, access_token: str) -> dict:
 
 
 def oidc_get_user_groups(config: dict, access_token: str) -> list:
-    """Fetch user's group memberships from OIDC provider
-    
-    MK: For Entra, uses Graph API /me/memberOf
-    Returns list of group IDs (Entra) or group names (generic)
+    """Fetch user's group memberships from OIDC provider.
+
+    Kept for callers (incl. plugins) that only want the list. Use
+    oidc_get_user_groups_ex() when the answer drives an authorization decision -
+    this one cannot tell you whether the list is complete.
+    """
+    groups, _complete = oidc_get_user_groups_ex(config, access_token)
+    return groups
+
+
+def oidc_get_user_groups_ex(config: dict, access_token: str):
+    """Fetch group memberships AND say whether the answer can be trusted.
+
+    Returns (groups, complete). `complete` is False when we could not establish the
+    full set - the Graph call failed, a page was lost mid-pagination, or the provider
+    is a generic one that puts groups in the ID token instead of here.
+
+    NS Sep 2026 - this split exists because the old function returned [] for three very
+    different situations: the user genuinely has no groups, the Graph call failed, and
+    "generic provider, ask the ID token". Provisioning then treated all three as "no
+    groups". That was survivable while permissions could only ever grow; it is not
+    survivable now that an empty mapping revokes, because one Graph hiccup would strip
+    every Entra user on their next login. A failure has to look different from an empty
+    answer, so callers can keep what they have and complain loudly instead.
+
+    Note the partial case specifically: Entra pages at 100 groups, and the old loop broke
+    out on a non-200 keeping whatever it had. Revoking against half a group list is worse
+    than not revoking at all.
     """
     if config.get('provider') != 'entra':
-        # Generic OIDC: groups should be in ID token claims
-        return []
-    
+        # Generic OIDC: groups live in the ID token claims, which the caller reads
+        # separately. Nothing fetched here, so nothing authoritative here either.
+        return [], False
+
     endpoints = get_oidc_endpoints(config)
     headers = {'Authorization': f'Bearer {access_token}'}
     groups = []
-    
+    # Start pessimistic. `complete` is what lets a caller REVOKE, so every way out of
+    # this function that is not a finished walk has to leave it False. Initialising it
+    # True was wrong for one specific reason: graph_groups is set to '' on five separate
+    # discovery/config fallback paths in get_oidc_endpoints, and with an empty URL the
+    # loop below never runs. That returned ([], True) - authoritative, zero groups - and
+    # would have stripped every Entra user's permissions on their next login whenever
+    # discovery had a bad morning.
+    complete = False
+
+    url = endpoints.get('graph_groups') or ''
+    if not url:
+        logging.warning("[OIDC] no Graph group endpoint resolved for this config "
+                        "(discovery fallback?) - group membership is unknown, so this "
+                        "login can grant but not revoke")
+        return groups, False
+
     try:
         # NS: Entra Graph API for group memberships
-        url = endpoints['graph_groups']
         while url:
             resp = requests.get(url, headers=headers, timeout=10)
             if resp.status_code != 200:
                 logging.warning(f"[OIDC] Group fetch failed: {resp.status_code}")
+                complete = False
                 break
-            
+
             data = resp.json()
             for member in data.get('value', []):
                 if member.get('@odata.type') == '#microsoft.graph.group':
@@ -553,29 +625,64 @@ def oidc_get_user_groups(config: dict, access_token: str) -> list:
                         'id': member.get('id', ''),
                         'name': member.get('displayName', ''),
                     })
-            
+
             # LW: Handle pagination (Entra paginates at 100 groups)
             url = data.get('@odata.nextLink')
-        
-        logging.info(f"[OIDC] Fetched {len(groups)} group memberships")
+        else:
+            # while/else: only reached when the loop ran out of pages on its own, i.e.
+            # no break, no exception. That is the one path that saw the whole set.
+            complete = True
+
+        logging.info(f"[OIDC] Fetched {len(groups)} group memberships"
+                     f"{'' if complete else ' (INCOMPLETE - fetch failed part way)'}")
     except Exception as e:
         logging.warning(f"[OIDC] Group fetch error: {e}")
-    
-    return groups
+        complete = False
+
+    return groups, complete
 
 
-def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = None) -> dict:
+def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = None,
+                            groups_complete: bool = None) -> dict:
     """Map OIDC groups to PegaProx role, tenant, and permissions
-    
+
     LW: Works with Entra group IDs and generic OIDC group claims
-    Returns: {'role': str, 'tenant': str, 'permissions': [], 'tenant_permissions': {}}
+    Returns: {'role': str, 'tenant': str, 'permissions': [], 'tenant_permissions': {},
+              '_authoritative': bool}
+
+    NS Sep 2026 - `_authoritative` says whether this mapping may be used to REVOKE, not
+    just to grant. It is true only when we know the full group set: either the Entra
+    fetch completed (groups_complete=True), or the validated ID token actually carried a
+    `groups` claim. A provider that sends no groups claim at all is indistinguishable
+    from a user who lost every group, so that case stays non-authoritative and
+    provisioning leaves existing grants alone.
     """
     result = {
         'role': config.get('default_role', ROLE_VIEWER),
         'tenant': '',
         'permissions': [],
         'tenant_permissions': {},
+        '_authoritative': False,
     }
+    if groups_complete:
+        result['_authoritative'] = True
+    elif id_token_claims is not None and 'groups' in id_token_claims:
+        # The ID token is signature-checked before it gets here, so a groups claim in it
+        # is as good a source as the Graph call - including when it is an empty list.
+        #
+        # Except when the provider says it truncated it. Entra stops embedding the full
+        # list once a user is in more groups than fit the token and emits _claim_names /
+        # _claim_sources pointing at Graph instead ("groups overage"). The claim is then
+        # present but partial, and deciding a revocation on a partial list is the thing
+        # this whole mechanism exists to avoid. Grant from it, never revoke.
+        _names = id_token_claims.get('_claim_names')
+        if isinstance(_names, dict) and 'groups' in _names:
+            logging.warning(
+                "[OIDC] the ID token signals a groups overage - the claim is truncated, "
+                "so this login can grant but not revoke. Give the app Graph group-read "
+                "permission if you need memberships to be authoritative.")
+        else:
+            result['_authoritative'] = True
     
     # Build list of group identifiers (IDs for Entra, names for generic)
     group_ids = set()
@@ -635,7 +742,23 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
 
     for mapping in config.get('group_mappings', []):
         map_group = (mapping.get('group_id') or mapping.get('group_dn') or '').strip().lower()
-        if map_group and (map_group in group_ids or map_group in group_names):
+        _by_id = bool(map_group) and map_group in group_ids
+        _by_name = bool(map_group) and map_group in group_names
+        if _by_name and not _by_id:
+            # MK Sep 2026 - a group's display name is not a stable identifier. In an Entra
+            # tenant where users may create security groups (the default in plenty of them),
+            # anyone can make a group called whatever a mapping names and inherit the role it
+            # grants. The id cannot be squatted that way. Removing name matching outright
+            # would break every install that configured mappings by name - the field is even
+            # called group_dn, so it was meant to be used that way - so for now say so, loudly
+            # and per match, and leave the decision about a migration to a release.
+            logging.warning(
+                "[OIDC] group mapping '%s' matched on display NAME, not on group id, and "
+                "granted role '%s'. Display names are not unique and are not stable - anyone "
+                "who can create a group in the directory can claim this mapping. Re-point it "
+                "at the group's object id.",
+                map_group, mapping.get('role') or '(no role)')
+        if _by_id or _by_name:
             if mapping.get('role') and mapping['role'] not in _role_prio:
                 matched_custom_roles.append(mapping['role'])
             # The configured default stands for "no group matched" (that is how the setting
@@ -734,30 +857,68 @@ def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 
     if username in users:
         # NS: SECURITY - Don't allow OIDC to overwrite a local-only user
         # This prevents account takeover if someone creates an IdP account matching a local username
+        # NS Sep 2026 - this checked only 'local', while the comment on OIDC_AUTH_SOURCES
+        # says local AND ldap must never be adopted by an OIDC login. An LDAP row with a
+        # matching username fell straight through to the update path below and had its
+        # role and auth_source rewritten - the account takeover the local check was added
+        # to prevent, one directory over. Reject anything this login does not own.
         existing_source = users[username].get('auth_source', 'local')
-        if existing_source == 'local':
-            logging.warning(f"[OIDC] Rejected login for '{username}' - local account exists, cannot overwrite with OIDC")
+        if existing_source not in OIDC_AUTH_SOURCES:
+            logging.warning(f"[OIDC] Rejected login for '{username}' - a {existing_source} "
+                            f"account of that name exists and cannot be taken over by OIDC")
             return None  # Caller should handle None return
         
-        # Update existing OIDC/LDAP user
+        # Update existing OIDC user
         user = users[username]
         user['display_name'] = display_name
         user['email'] = email
-        user['role'] = role_mapping.get('role', user.get('role', ROLE_VIEWER))
         user['auth_source'] = auth_source
         user['oidc_sub'] = user_info.get('sub', '')
         user['last_oidc_sync'] = datetime.now().isoformat()
-        
-        # Sync tenant/permissions from group mappings
-        if role_mapping.get('tenant'):
-            user['tenant_id'] = role_mapping['tenant']  # NS: Must be tenant_id
-        if role_mapping.get('permissions'):
-            existing_perms = user.get('permissions', [])
-            user['permissions'] = list(set(existing_perms + role_mapping['permissions']))
-        if role_mapping.get('tenant_permissions'):
-            if 'tenant_permissions' not in user:
-                user['tenant_permissions'] = {}
-            user['tenant_permissions'].update(role_mapping['tenant_permissions'])
+
+        # NS Sep 2026 - this block used to be grant-only. `permissions` was a union with
+        # what was already there, `tenant_permissions` was a dict .update(), and `role`
+        # fell back to the stored one - all three guarded by `if role_mapping.get(...)`,
+        # so an empty mapping did not even enter them. The effect: taking a user out of a
+        # group in the IdP revoked nothing here. Someone who left the company kept every
+        # permission they had until an admin noticed by hand, which is the opposite of
+        # what wiring PegaProx to an IdP is for.
+        #
+        # The IdP is now authoritative - but only when we actually know the full group
+        # set (see oidc_map_groups_to_role). On a failed or partial Graph fetch, or a
+        # provider that sends no groups claim, we keep what is stored and say so at
+        # WARNING level. Revoking on a network hiccup would turn a privilege bug into an
+        # outage, and half a group list is worse to decide on than none.
+        #
+        # tenant_id is deliberately NOT cleared when unmapped: admins also set it by hand,
+        # and dropping someone out of their tenant is a different decision from taking a
+        # permission away. Assign when mapped, leave alone otherwise - as before.
+        if role_mapping.get('_authoritative'):
+            user['role'] = role_mapping.get('role', ROLE_VIEWER)
+            user['permissions'] = list(role_mapping.get('permissions') or [])
+            user['tenant_permissions'] = dict(role_mapping.get('tenant_permissions') or {})
+            if role_mapping.get('tenant'):
+                user['tenant_id'] = role_mapping['tenant']  # NS: Must be tenant_id
+        else:
+            logging.warning(
+                f"[OIDC] group set for '{username}' is not authoritative (fetch failed, "
+                f"partial, or provider sends no groups claim) - keeping the stored role "
+                f"and permissions. Nothing was revoked this login.")
+            # Still honour anything the mapping DID produce, so a working grant path is
+            # not broken by an unrelated fetch problem. NOT the role, though: the mapping
+            # always carries one (default_role when nothing matched), so applying it here
+            # would demote an admin on a failed fetch - the same outage this branch exists
+            # to prevent, one field over. Permissions and tenant only appear when a group
+            # actually matched, so those are safe to add.
+            if role_mapping.get('tenant'):
+                user['tenant_id'] = role_mapping['tenant']
+            if role_mapping.get('permissions'):
+                user['permissions'] = list(set((user.get('permissions') or [])
+                                               + role_mapping['permissions']))
+            if role_mapping.get('tenant_permissions'):
+                if 'tenant_permissions' not in user:
+                    user['tenant_permissions'] = {}
+                user['tenant_permissions'].update(role_mapping['tenant_permissions'])
         
         logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source})")
     else:

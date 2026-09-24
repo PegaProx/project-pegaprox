@@ -1672,32 +1672,44 @@
                         body: JSON.stringify({ snapname: snapName, description: snapDesc, vmstate: snapRam ? 1 : 0 })
                     });
                     if (r?.ok) { addToast?.(t('snapshotCreated') || 'Snapshot created'); setShowCreateSnap(false); setSnapName(''); setSnapDesc(''); setSnapRam(false); fetchSnapshots(); }
-                    else addToast?.('Snapshot failed', 'error');
-                } catch(e) { addToast?.(e.message, 'error'); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('snapshotFailed')), 'error');
+                } catch { addToast?.(t('snapshotFailed'), 'error'); }
             };
 
             const handleDeleteSnap = async (name) => {
                 if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}`, { method: 'DELETE' });
-                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('deleteFailed')), 'error');
+                } catch { addToast?.(t('deleteFailed'), 'error'); }
             };
 
             const handleRollbackSnap = async (name) => {
                 if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}/rollback`, { method: 'POST' });
-                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}/rollback`, { method: 'POST' });
+                    if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                    else addToast?.(await PegaProxApiErrors.message(r, t('rollbackFailed')), 'error');
+                } catch { addToast?.(t('rollbackFailed'), 'error'); }
             };
 
             const handleDeleteEfficientSnap = async (id, name) => {
                 if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}`, { method: 'DELETE' });
-                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('deleteFailed')), 'error');
+                } catch { addToast?.(t('deleteFailed'), 'error'); }
             };
 
             const handleRollbackEfficientSnap = async (id, name) => {
                 if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
-                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}/rollback`, { method: 'POST' });
-                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}/rollback`, { method: 'POST' });
+                    if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                    else addToast?.(await PegaProxApiErrors.message(r, t('rollbackFailed')), 'error');
+                } catch { addToast?.(t('rollbackFailed'), 'error'); }
             };
 
             const formatBytes = b => {
@@ -3512,7 +3524,7 @@
                                     <div>
                                         <div className="font-medium text-white">{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</div>
                                         <div className="text-xs text-gray-400">
-                                            ID {vm.vmid} · {vm.node} · {sourceCluster.name}
+                                            ID {vm.vmid} · {vm.node} · {clusterLabel(sourceCluster)}
                                         </div>
                                     </div>
                                 </div>
@@ -3600,7 +3612,7 @@
                                 >
                                     <option value="">{t('selectCluster')}</option>
                                     {availableClusters.map(c => (
-                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                     ))}
                                 </select>
                             </div>
@@ -3949,7 +3961,7 @@
                 };
                 return map[s] || 'bg-gray-500/20 text-gray-400';
             };
-            const clusterName = (cid) => (clusters.find(c => c.id === cid) || {}).name || (clusters.find(c => c.id === cid) || {}).display_name || cid;
+            const clusterName = (cid) => clusterLabel(clusters.find(c => c.id === cid)) || cid;
 
             const load = async () => {
                 setLoading(true);
@@ -4187,7 +4199,7 @@
                                                         <span className="text-[11px] text-gray-500">{t('mcevpnAddMember') || 'Add cluster to span'}:</span>
                                                         <select disabled={busy} value="" onChange={e => { if (e.target.value) addMember(v.id, e.target.value); }} className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs">
                                                             <option value="">{t('mcevpnPickCluster') || '— pick a cluster —'}</option>
-                                                            {nonMembers.map(c => <option key={c.id} value={c.id}>{c.name || c.display_name || c.id}</option>)}
+                                                            {nonMembers.map(c => <option key={c.id} value={c.id}>{clusterLabel(c)}</option>)}
                                                         </select>
                                                     </div>
                                                 ) : null;
@@ -4246,7 +4258,7 @@
                                             {evpnClusters.map(c => (
                                                 <label key={c.id} className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-lg border cursor-pointer ${form.cluster_ids.includes(c.id) ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'bg-proxmox-dark border-proxmox-border text-gray-300'}`}>
                                                     <input type="checkbox" checked={form.cluster_ids.includes(c.id)} onChange={() => toggleMember(c.id)} className="rounded" />
-                                                    <span className="truncate">{c.name || c.display_name || c.id}</span>
+                                                    <span className="truncate">{clusterLabel(c)}</span>
                                                 </label>
                                             ))}
                                         </div>
@@ -6732,7 +6744,7 @@
                                                                     >
                                                                         <div className="flex items-center gap-2">
                                                                             <Icons.Server className="w-3.5 h-3.5 text-proxmox-orange" />
-                                                                            <span className="text-sm text-white">{cluster.name}</span>
+                                                                            <span className="text-sm text-white">{clusterLabel(cluster)}</span>
                                                                             {excluded.length > 0 && (
                                                                                 <span className="text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">{excluded.length}</span>
                                                                             )}
@@ -6853,9 +6865,9 @@
                                                         <div className="flex-1 min-w-0">
                                                             <div className="flex items-center gap-2 flex-wrap">
                                                                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${job.enabled ? 'bg-green-500' : 'bg-gray-500'}`} />
-                                                                <span className="text-sm text-white truncate">{srcCluster?.name || job.source_cluster}</span>
+                                                                <span className="text-sm text-white truncate">{clusterLabel(srcCluster) || job.source_cluster}</span>
                                                                 <Icons.ArrowRight className="w-3.5 h-3.5 text-gray-500 flex-shrink-0" />
-                                                                <span className="text-sm text-white truncate">{tgtCluster?.name || job.target_cluster}</span>
+                                                                <span className="text-sm text-white truncate">{clusterLabel(tgtCluster) || job.target_cluster}</span>
                                                                 <span className="text-xs bg-proxmox-dark px-1.5 py-0.5 rounded text-gray-400 border border-proxmox-border">
                                                                     {job.vm_type === 'lxc' ? 'CT' : 'VM'} {job.vmid}
                                                                 </span>
@@ -6905,7 +6917,7 @@
                                                     >
                                                         <option value="">{t('selectCluster') || 'Select cluster...'}</option>
                                                         {groupClusters.filter(c => c.connected).map(c => (
-                                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                                            <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                         ))}
                                                     </select>
                                                 </div>
@@ -6950,7 +6962,7 @@
                                                     >
                                                         <option value="">{t('selectCluster') || 'Select cluster...'}</option>
                                                         {groupClusters.filter(c => c.connected && c.id !== xReplForm.source_cluster).map(c => (
-                                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                                            <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                         ))}
                                                     </select>
                                                 </div>
@@ -7082,7 +7094,7 @@
                                                     return (
                                                         <div key={cid} className="bg-proxmox-dark rounded-lg border border-proxmox-border overflow-hidden">
                                                             <div className="px-3 py-2 border-b border-proxmox-border bg-purple-500/5">
-                                                                <span className="text-xs font-medium text-purple-300">{cluster?.name || cid}</span>
+                                                                <span className="text-xs font-medium text-purple-300">{clusterLabel(cluster) || cid}</span>
                                                             </div>
                                                             {jobs.map((job, idx) => {
                                                                 const hasErr = job.fail_count > 0 || job.error;

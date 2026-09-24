@@ -20,6 +20,7 @@ from pegaprox.constants import LOG_DIR
 from pegaprox import globals as _g
 from pegaprox.core.db import get_db
 from pegaprox.utils.realtime import broadcast_sse
+from pegaprox.utils.ssh import read_capped as _read_capped
 
 # XenAPI is optional - only needed for XCP-ng clusters
 try:
@@ -888,12 +889,22 @@ class XcpngManager:
 
             api.VM.destroy(ref)
 
-            # cleanup vmid mapping
+            # MK Sep 2026 - retire the mapping instead of deleting it. The allocator
+            # takes MAX(vmid)+1 from this very table, so removing the row lowers the
+            # high-water mark and hands the id straight to the next VM created here.
+            # Anything still pointing at it - a VM-ACL row, a pool grant, a scheduled
+            # action - would then apply to a completely different guest, possibly
+            # another tenant's. Blanking the uuid keeps the id spent: the lookup by
+            # uuid never matches a retired row, and resolve returns nothing for it.
             db = get_db()
-            cursor = db.conn.cursor()
-            cursor.execute('DELETE FROM xcpng_vmid_map WHERE cluster_id = ? AND vmid = ?',
-                          (self.id, int(vmid)))
-            db.conn.commit()
+            db.xcpng_retire_vmid(self.id, int(vmid))
+
+            # and drop what pointed at it, so nothing is left to inherit even if the
+            # id is somehow reused by a path we have not thought of
+            try:
+                db.purge_vm_grants(self.id, int(vmid))
+            except Exception as e:
+                self.logger.warning(f"could not purge grants for retired VM {vmid}: {e}")
 
             # invalidate cache
             self._cached_vms = None
@@ -1810,13 +1821,20 @@ class XcpngManager:
 
             # console URL is like https://host/console?ref=OpaqueRef:xxxx
             location = api.console.get_location(rfb_console)
-            # extract session ID for auth
-            session_ref = api.xenapi._session
+            # MK Sep 2026 - `session_ref` used to travel in this response. That is the POOL
+            # management session: whoever holds it can call the XenAPI directly with our
+            # service account's rights, which is every VM in the pool, not the one console
+            # they opened. Both callers hand this dict straight to the browser, so every
+            # console user - including a client-portal customer with one guest - was handed
+            # it. Nothing consumes it: no relay, no frontend path reads the field.
+            #
+            # When the XCP-ng console is finished, the ticket belongs on the SERVER side of
+            # the relay (the pattern the PVE console already uses) and must never reach the
+            # client. Deliberately not returned here.
             return {
                 'success': True,
                 'type': 'xcpng_vnc',
                 'url': location,
-                'session_ref': session_ref,
                 'host': self.host,
                 'port': 443,
             }
@@ -3151,8 +3169,8 @@ class XcpngManager:
         try:
             _, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
             rc = stdout.channel.recv_exit_status()
-            out = stdout.read().decode('utf-8', errors='replace')
-            err = stderr.read().decode('utf-8', errors='replace')
+            out = _read_capped(stdout)
+            err = _read_capped(stderr)
             return rc, out, err
         except Exception as e:
             return -1, '', str(e)
@@ -3566,7 +3584,7 @@ class XcpngManager:
             task.add_output("Running yum update -y ...")
             _, stdout, stderr = ssh.exec_command("yum update -y 2>&1", timeout=600)
             rc = stdout.channel.recv_exit_status()
-            output = stdout.read().decode('utf-8', errors='replace')
+            output = _read_capped(stdout)
 
             pkg_count = 0
             for line in output.splitlines():
@@ -3921,8 +3939,32 @@ echo DONE""",
         },
     }
 
-    def check_node_hardening(self, node_name):
-        """Run CIS checks on XCP-ng host and return status per control."""
+    @staticmethod
+    def _effective_profile(profile):
+        """Names the control set that ran, which here is always this manager's own.
+
+        MK Sep 2026 - XCP-ng has ten checks of its own and no profile sets, so it ignores
+        the profile argument. Echoing 'cis-l1' back would put a PVE profile name on an
+        XCP-ng result. Returning None would be honest but changes the field from string to
+        null for every existing API consumer, so name the set instead: 'xcpng-cis' is what
+        _CIS_CHECKS on this class is, not a claim about any published benchmark. The route
+        also returns requested_profile so a caller can see what it asked for.
+        """
+        return 'xcpng-cis'
+
+    def check_node_hardening(self, node_name, verbose=False, profile=None):
+        """Run CIS checks on XCP-ng host and return status per control.
+
+        MK Sep 2026 - the signature used to be (self, node_name) while the shared route in
+        api/reports.py calls it with verbose= and profile= for every cluster in
+        cluster_managers, XCP-ng included. Opening the hardening panel on an XCP-ng host
+        therefore raised TypeError and answered 500. Found by the daily scan flagging an
+        api mismatch at the call site.
+
+        `profile` is accepted and ignored: this manager has its own ten checks and no
+        profile sets, so there is nothing to filter. The caller is responsible for not
+        labelling the result with a PVE profile name - see _effective_profile there.
+        """
         parts = []
         for cid, spec in self._CIS_CHECKS.items():
             parts.append(f"echo '---{cid}---'")
@@ -3942,6 +3984,14 @@ echo DONE""",
                 continue
             if current_id and stripped in ('OK', 'FAIL'):
                 results[current_id] = (stripped == 'OK')
+        if verbose:
+            # Same shape the PVE manager returns for audit reports, so the report builder
+            # does not have to special-case the hypervisor. No separate evidence command
+            # exists here, so the evidence is the verdict line itself.
+            return {cid: {'status': ok,
+                          'evidence': 'OK' if ok else 'FAIL',
+                          'command': self._CIS_CHECKS.get(cid, {}).get('check', '')}
+                    for cid, ok in results.items()}
         return results
 
     def apply_node_hardening(self, node_name, controls):
@@ -4332,8 +4382,14 @@ echo DONE""",
             vm_ref = self._resolve_vm(vmid)
             power = api.VM.get_power_state(vm_ref)
 
-            # connect to remote pool to get session
-            remote_session = XenAPI.Session(target_endpoint, ignore_ssl=True)
+            # connect to remote pool to get session. The TLS setting is the source
+            # cluster's - we have no config object for the target here, only its URL,
+            # and this call already logs into the target with the SOURCE credentials
+            # below, so the source's setting is the one that is actually meaningful.
+            # MK Sep 2026 - was pinned to ignore_ssl=True, which quietly ignored an
+            # operator who had turned verification ON for this cluster.
+            remote_session = XenAPI.Session(target_endpoint,
+                                            ignore_ssl=not self.config.ssl_verification)
             remote_session.xenapi.login_with_password(
                 self.config.user, self.config.pass_, '1.0', 'PegaProx')
 

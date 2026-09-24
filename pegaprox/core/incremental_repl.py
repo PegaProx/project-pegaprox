@@ -53,7 +53,12 @@ def _relay_pipe(src_ssh, src_cmd, tgt_ssh, tgt_cmd, chunk=4 * 1024 * 1024,
     # and the importer's stdout+stderr would otherwise fill their SSH-channel
     # windows, block the remote process, and deadlock the pipe. Park those
     # streams in files on the respective node and slurp them back at the end.
-    tok = f"/tmp/pegaprox-repl-{os.getpid()}-{int(time.time() * 1000) % 100000}"
+    # MK Sep 2026 - pid plus milliseconds is a small, guessable space, and these three
+    # paths are written by the remote SSH account on both nodes. Pre-creating them as
+    # symlinks aims a privileged redirect wherever the attacker wants; spraying the whole
+    # space is cheap. Random names cost nothing and end it.
+    import uuid as _uuid
+    tok = f"/tmp/pegaprox-repl-{_uuid.uuid4().hex}"
     full_src = f"{src_cmd} 2>{tok}.serr"
     full_tgt = f"{tgt_cmd} >{tok}.tout 2>{tok}.terr"
     _emit(f"exec[src]: {src_cmd}")

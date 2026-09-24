@@ -445,7 +445,11 @@ def _create_incident():
         conn.close()
         return {'success': True, 'id': iid}
     except Exception as e:
-        return {'error': str(e)}, 500
+        # MK Sep 2026 - str(e) on a DB failure is the query, the column names and
+        # sometimes the values. Admin-only is not a reason to hand it back over HTTP;
+        # the operator who needs it is reading the log anyway.
+        logging.exception("[status-page] incident mutation failed")
+        return {'error': 'Could not update the incident - see the server log'}, 500
 
 
 def _update_incident():
@@ -475,7 +479,11 @@ def _update_incident():
         conn.close()
         return {'success': True}
     except Exception as e:
-        return {'error': str(e)}, 500
+        # MK Sep 2026 - str(e) on a DB failure is the query, the column names and
+        # sometimes the values. Admin-only is not a reason to hand it back over HTTP;
+        # the operator who needs it is reading the log anyway.
+        logging.exception("[status-page] incident mutation failed")
+        return {'error': 'Could not update the incident - see the server log'}, 500
 
 
 def _delete_incident():
@@ -492,7 +500,11 @@ def _delete_incident():
         conn.close()
         return {'success': True}
     except Exception as e:
-        return {'error': str(e)}, 500
+        # MK Sep 2026 - str(e) on a DB failure is the query, the column names and
+        # sometimes the values. Admin-only is not a reason to hand it back over HTTP;
+        # the operator who needs it is reading the log anyway.
+        logging.exception("[status-page] incident mutation failed")
+        return {'error': 'Could not update the incident - see the server log'}, 500
 
 
 def _uptime_history():

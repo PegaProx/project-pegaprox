@@ -302,7 +302,12 @@ def test_push_unsubscribe_is_owner_scoped(api, seed, db):
 # ── webhook secrets must not come back on ANY response path ───────────────────
 def test_alert_channel_update_does_not_echo_the_secret(api, seed, monkeypatch):
     seed.tenant('acme', clusters=['cluster_1'])
-    u = seed.user('chanmgr2', role='user', tenant_id='acme', permissions=['alert.manage'])
+    # MK Sep 2026 - alert_webhooks is an installation-wide list, so writing one now needs
+    # admin.settings on top of alert.manage (see test_alert_channel_writes_are_settings_admin
+    # below). This test is about the SECRET never coming back, so give the caller the access
+    # it needs and keep asserting that property.
+    u = seed.user('chanmgr2', role='user', tenant_id='acme',
+                  permissions=['alert.manage', 'admin.settings'])
     secret = 'https://hooks.slack.com/services/T0/B0/VERYSECRETTOKENVALUE'
     store = {'alert_webhooks': [{'id': 'c1', 'name': 'ops', 'url': secret, 'token': 'abc'}]}
     import pegaprox.api.helpers as helpers_mod

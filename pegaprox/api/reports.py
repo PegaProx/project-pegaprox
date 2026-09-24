@@ -110,6 +110,57 @@ def _syslog_cluster_hostnames(cluster_id):
     return hostnames
 
 
+_AMBIGUOUS_HOSTS = {'at': 0.0, 'tokens': frozenset()}
+_AMBIGUOUS_HOSTS_TTL = 60.0
+_AMBIGUOUS_HOSTS_LOCK = threading.Lock()
+
+
+def _syslog_ambiguous_hostnames():
+    """Host tokens that more than one cluster claims.
+
+    MK Sep 2026 - _syslog_hostname_tokens derives a short form from every node name, so
+    two clusters with a node called pve1 both claim the token "pve1". The gate below
+    turns each token into `= token` OR `LIKE 'token.%'`, and that second half is the
+    leak: tenant A's "pve1" matches tenant B's "pve1.b.example" and hands over its
+    syslog. A token two clusters claim also cannot attribute a bare "pve1" line to
+    either of them, so it is dropped rather than guessed - the same answer every other
+    ambiguous authorization question in this tree gets.
+
+    Memoised for a minute: node names change on the timescale of a reinstall, and
+    working them out walks every cluster's node list.
+    """
+    now = time.time()
+    cached = _AMBIGUOUS_HOSTS
+    if cached['tokens'] is not None and (now - cached['at']) < _AMBIGUOUS_HOSTS_TTL:
+        return cached['tokens']
+    with _AMBIGUOUS_HOSTS_LOCK:
+        if (time.time() - _AMBIGUOUS_HOSTS['at']) < _AMBIGUOUS_HOSTS_TTL:
+            return _AMBIGUOUS_HOSTS['tokens']
+        claims = {}
+        for _cid in list(cluster_managers.keys()):
+            for _tok in _syslog_cluster_hostnames(_cid):
+                claims.setdefault(_tok, set()).add(_cid)
+        tokens = frozenset(t for t, cids in claims.items() if len(cids) > 1)
+        if tokens:
+            logging.info(f"[Syslog] {len(tokens)} host name(s) claimed by more than one "
+                         f"cluster - excluded from syslog scoping: {sorted(tokens)[:5]}")
+        _AMBIGUOUS_HOSTS['tokens'] = tokens
+        _AMBIGUOUS_HOSTS['at'] = time.time()
+        return tokens
+
+
+def _syslog_host_clause(values, params):
+    """`(host = x OR host LIKE 'x.%' OR ...)` over the tokens that identify one cluster."""
+    _ambiguous = _syslog_ambiguous_hostnames()
+    parts = []
+    for value in sorted(set(values) - _ambiguous):
+        parts.append("LOWER(logs.hostname) = ?")
+        params.append(value)
+        parts.append("LOWER(logs.hostname) LIKE ?")
+        params.append(f"{value}.%")
+    return f"({' OR '.join(parts)})" if parts else "1 = 0"
+
+
 @bp.route('/api/reports/summary', methods=['GET'])
 @require_auth()
 def get_reports_summary():
@@ -329,17 +380,7 @@ def get_integrated_syslog_events():
         ok, err = check_cluster_access(cluster_id)
         if not ok:
             return err
-        cluster_hostnames = sorted(_syslog_cluster_hostnames(cluster_id))
-        if cluster_hostnames:
-            cluster_hostname_where = []
-            for value in cluster_hostnames:
-                cluster_hostname_where.append("LOWER(logs.hostname) = ?")
-                params.append(value)
-                cluster_hostname_where.append("LOWER(logs.hostname) LIKE ?")
-                params.append(f"{value}.%")
-            where.append(f"({' OR '.join(cluster_hostname_where)})")
-        else:
-            where.append("1 = 0")
+        where.append(_syslog_host_clause(_syslog_cluster_hostnames(cluster_id), params))
 
     # NS Aug 2026 (AI-pentest) — always confine a non-all-cluster caller to the hostnames of the
     # clusters they can actually reach, independent of the syslog_filter_by_selected_cluster flag and
@@ -352,14 +393,7 @@ def get_integrated_syslog_events():
         _allowed_hosts = set()
         for _cid in _acc:
             _allowed_hosts.update(_syslog_cluster_hostnames(_cid))
-        if _allowed_hosts:
-            _hw = []
-            for _h in sorted(_allowed_hosts):
-                _hw.append("LOWER(logs.hostname) = ?"); params.append(_h)
-                _hw.append("LOWER(logs.hostname) LIKE ?"); params.append(f"{_h}.%")
-            where.append(f"({' OR '.join(_hw)})")
-        else:
-            where.append("1 = 0")
+        where.append(_syslog_host_clause(_allowed_hosts, params))
 
     where_sql = f"WHERE {' AND '.join(where)}" if where else ''
     joins_sql = f"{' '.join(joins)}" if joins else ''
@@ -786,7 +820,12 @@ def check_hardening(cluster_id, node):
     if result is None:
         return _ssh_unavailable(mgr, node)
 
-    return jsonify({'node': node, 'controls': result, 'verbose': verbose, 'profile': profile or 'cis-l1'})
+    # Report the profile that actually ran, not the one that was asked for - cis-l2 has no
+    # control set of its own and a PDF naming it would be claiming a level nobody checked.
+    _eff = mgr._effective_profile(profile) if hasattr(mgr, '_effective_profile') else None
+    _eff = _eff or (profile or 'cis-l1')   # always a string - consumers indexed on it before
+    return jsonify({'node': node, 'controls': result, 'verbose': verbose,
+                    'profile': _eff, 'requested_profile': profile or 'cis-l1'})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardening', methods=['POST'])

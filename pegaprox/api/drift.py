@@ -26,6 +26,7 @@ get drift notifications without extra plumbing.
 """
 import json
 import time
+import hashlib
 import uuid
 import logging
 import threading
@@ -58,12 +59,33 @@ _NETWORK_VOLATILE = {'active'}
 # stable.
 _CSV_NORMALIZE_KEYS = {'content', 'tags', 'nodes'}
 
+# NS Sep 2026 (Aikido 469089254) — raising the read gate to admin.audit stopped a plain cluster
+# viewer reading these, but the value was still being written to the baseline and the event diff
+# in the clear, where it outlives the VM and lands in every DB backup. Nothing about drift needs
+# the value itself — only whether it CHANGED — so store a digest instead. Diffs stay accurate
+# (a new password produces a new digest) and there is no secret left to leak. Storage state runs
+# through the same helper, which also covers a CIFS password and a Ceph keyring.
+_SECRET_KEYS = {'cipassword', 'password', 'smbpassword', 'keyring', 'encryption-key'}
+
+
+def _redact_secret(value):
+    """Stable stand-in for a secret: same value in, same marker out, so a change is still a
+    change. Existing baselines hold the old cleartext, so the first scan after an upgrade
+    reports one drift event per affected VM — acknowledge and it settles."""
+    if value in (None, ''):
+        return value
+    digest = hashlib.sha256(str(value).encode('utf-8', 'replace')).hexdigest()
+    return f"<redacted:{digest[:16]}>"
+
 
 def _strip_volatile(d, volatile_keys):
     if not isinstance(d, dict): return d
     out = {}
     for k, v in d.items():
         if k in volatile_keys: continue
+        if k in _SECRET_KEYS:
+            out[k] = _redact_secret(v)
+            continue
         if k in _CSV_NORMALIZE_KEYS and isinstance(v, str) and ',' in v:
             parts = [p.strip() for p in v.split(',') if p.strip()]
             v = ','.join(sorted(parts))
@@ -341,6 +363,18 @@ def _scan_cluster(cluster_id, autobaseline=False):
             for h in alerts_mod._notification_handlers:
                 try: h(payload)
                 except Exception: pass
+            # MK Sep 2026 (#815) — that list is the PLUGIN hook (web-push and whatever
+            # else registered itself); it is not the webhook channels. alerts.py fires
+            # both, this path only ever fired the first, so a drift event reached push
+            # and nothing else no matter how many webhooks were configured — and the
+            # Test button still worked, because it dispatches directly.
+            # Drift has no per-event channel picker the way a metric alert does, so
+            # every enabled channel gets it, which is send_to_channels' own default.
+            try:
+                from pegaprox.utils.webhooks import send_to_channels
+                send_to_channels(payload)
+            except Exception as _we:
+                logging.warning(f"[DRIFT] webhook dispatch failed: {_we}")
         except Exception:
             pass
 
@@ -447,6 +481,13 @@ def drift_status(cluster_id):
 def list_events(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Sep 2026 - a drift event carries the cluster's configuration diff: node config,
+    # storage definitions, network. There is no per-VM notion to filter on, so an
+    # ACL/pool-scoped caller reading this gets the whole cluster's configuration history
+    # - including every other tenant's. The scan and baseline routes below already treat
+    # drift as whole-cluster; reading it is the same scope.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr: return _cerr
     status = request.args.get('status', 'open')
     limit = max(1, min(int(request.args.get('limit', '100')), 500))
     try:
@@ -492,6 +533,11 @@ def acknowledge_event(eid):
         ok, err = check_cluster_access(ev['cluster_id'])
         if not ok:
             return err
+        # acknowledging - and especially promoting, which rewrites the baseline the next
+        # scan compares against - is a whole-cluster act for the same reason
+        _cerr = require_unconfined(ev['cluster_id'])
+        if _cerr:
+            return _cerr
         c.execute('''UPDATE drift_events SET status='acknowledged',
                      acknowledged_at=?, acknowledged_by=? WHERE id=?''',
                   (datetime.now().isoformat(), user, eid))

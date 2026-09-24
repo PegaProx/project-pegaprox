@@ -106,7 +106,7 @@ def _caller_can_grant_perms(permissions):
     return all(has_permission(caller, p) for p in (permissions or []))
 
 
-def _authz_object_write(cluster_id, subjects=(), permissions=()):
+def _authz_object_write(cluster_id, subjects=(), permissions=(), groups=()):
     """sec (audit): vm-acls, pool permissions and the pools themselves are the authorization
     objects the per-VM gate
     consults — writing them IS granting access, so cluster reach is nowhere near enough. Every
@@ -125,11 +125,25 @@ def _authz_object_write(cluster_id, subjects=(), permissions=()):
         return jsonify({'error': 'Access denied: you cannot manage access rules on this cluster'}), 403
     _ct = _caller_tenant_or_none()
     if _ct is not None:
+        # MK Sep 2026 - a GROUP subject is the wildcard case wearing a different hat. Group
+        # names come from LDAP or OIDC and carry no tenant association at all; the grant is
+        # matched by name, so a delegate can hand pool permissions to a group whose members
+        # sit in somebody else's tenant, and neither they nor we can see how far it reaches.
+        # Members who have never logged in are not even in our user table, so counting them
+        # would only look like a check. Same answer as the wildcard below: not a tenant-scoped
+        # decision.
+        for g in groups:
+            if g:
+                return jsonify({'error': 'Access denied: group-based grants require a '
+                                         'global admin'}), 403
         _users = load_users()
         for s in subjects:
             if not s or s == '*':
-                # a wildcard grant reaches every account, including other tenants'
-                return jsonify({'error': 'Access denied: wildcard grants require a global admin'}), 403
+                # A wildcard row reaches every account, including other tenants'. That
+                # holds whichever direction the write goes: creating one grants across the
+                # boundary, deleting one revokes across it. Either way it is not a
+                # tenant-scoped decision.
+                return jsonify({'error': 'Access denied: wildcard rules require a global admin'}), 403
             _t = (_users.get(s) or {}).get('tenant_id', DEFAULT_TENANT_ID)
             if _t != _ct:
                 return jsonify({'error': f'Access denied: {s} is not in your tenant'}), 403
@@ -1186,6 +1200,35 @@ def delete_user(username):
 # on Reddit. MSPs use this to manage multiple customers separately.
 # ============================================
 
+# NS Sep 2026 — the tenant limit fields are all "non-negative int, 0 = unlimited/none". They used
+# to be read as int(data.get(k, 0) or 0), which raises on a non-numeric value and returns a bare
+# 500; the update path swallowed it to 0 instead, which is worse for a LIMIT — a typo silently
+# removed the ceiling. Parse once, refuse loudly. Found by the scan on this change: both routes
+# were reachable with {"vmid_range_start": "abc"} and answered 500.
+_TENANT_INT_FIELDS = ('quota_max_vms', 'quota_max_cores', 'quota_max_memory_gb',
+                      'quota_max_disk_gb', 'vmid_range_start', 'vmid_range_end')
+
+
+def _tenant_ints(data):
+    """Return (values, error_response). values holds only the keys actually present."""
+    out = {}
+    for k in _TENANT_INT_FIELDS:
+        if k not in data:
+            continue
+        v = data[k]
+        if v in (None, ''):
+            out[k] = 0
+            continue
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            return None, (jsonify({'error': f'{k} must be a whole number'}), 400)
+        if iv < 0:
+            return None, (jsonify({'error': f'{k} must not be negative'}), 400)
+        out[k] = iv
+    return out, None
+
+
 @bp.route('/api/tenants', methods=['GET'])
 @require_auth()
 def get_tenants():
@@ -1213,7 +1256,10 @@ def get_tenants():
                 'quota_max_vms': t.get('quota_max_vms', 0),
                 'quota_max_cores': t.get('quota_max_cores', 0),
                 'quota_max_memory_gb': t.get('quota_max_memory_gb', 0),
+                'quota_max_disk_gb': t.get('quota_max_disk_gb', 0),
                 'quota_enforcement': t.get('quota_enforcement', 'block'),
+                'vmid_range_start': t.get('vmid_range_start', 0),
+                'vmid_range_end': t.get('vmid_range_end', 0),
                 'user_count': sum(1 for u in load_users().values() if u.get('tenant_id') == tid)
             })
         return jsonify(result)
@@ -1242,11 +1288,54 @@ def get_tenants():
             'quota_max_vms': t.get('quota_max_vms', 0),
             'quota_max_cores': t.get('quota_max_cores', 0),
             'quota_max_memory_gb': t.get('quota_max_memory_gb', 0),
+            'quota_max_disk_gb': t.get('quota_max_disk_gb', 0),
             'quota_enforcement': t.get('quota_enforcement', 'block'),
+            'vmid_range_start': t.get('vmid_range_start', 0),
+            'vmid_range_end': t.get('vmid_range_end', 0),
             'user_count': sum(1 for u in users.values() if u.get('tenant_id') == tid)
         })
-    
+
     return jsonify(result)
+
+
+@bp.route('/api/me/tenants', methods=['GET'])
+@require_auth()
+def get_my_tenants():
+    """The tenants the caller can act in — home tenant plus any they hold tenant_permissions for.
+
+    NS Sep 2026 — /api/tenants answers "which tenants exist that you may SEE", and for a non-admin
+    that is their home tenant plus default. It does not know about tenant_permissions, so someone
+    delegated into a second tenant had no way to tell the UI about it. This is that list.
+
+    Presentational ONLY. It grants nothing and no endpoint consumes it for a decision: everything
+    downstream still derives the acting tenant from the session user, as it did before. Read this
+    as "what should the switcher offer", never as "what is this caller allowed to do" — the moment
+    something authorises off a client-chosen tenant id we are back to the class of bug the pool
+    and ACL scoping already cost us twice."""
+    from pegaprox.utils.auth import build_authz_user
+    tenants = load_tenants() or {}
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    home = user.get('tenant_id') or DEFAULT_TENANT_ID
+    is_admin = user.get('effective_role', user.get('role')) == ROLE_ADMIN
+
+    if is_admin:
+        ids = list(tenants.keys())
+    else:
+        ids = [home] + [t for t in (user.get('tenant_permissions') or {}) if t != home]
+
+    out = []
+    for tid in ids:
+        t = tenants.get(tid)
+        if t is None:
+            continue          # a stale tenant_permissions entry must not invent a tenant
+        out.append({
+            'id': tid,
+            'name': t.get('name', tid),
+            'is_home': tid == home,
+            'effective_role': get_user_effective_role(user, tid),
+        })
+    return jsonify({'tenants': out, 'home': home})
+
 
 @bp.route('/api/tenants', methods=['POST'])
 @require_auth(perms=['admin.tenants'])
@@ -1263,7 +1352,11 @@ def create_tenant():
     
     if not name:
         return jsonify({'error': 'Name required'}), 400
-    
+
+    _ints, _ierr = _tenant_ints(data)
+    if _ierr:
+        return _ierr
+
     # generate ID from name
     import re
     base_tid = re.sub(r'[^a-z0-9]', '-', name.lower())
@@ -1289,10 +1382,14 @@ def create_tenant():
         'clusters': clusters,
         'created': datetime.now().isoformat(),
         # NS #502 — resource quotas (0 = unlimited); enforcement 'block' | 'warn'
-        'quota_max_vms': int(data.get('quota_max_vms', 0) or 0),
-        'quota_max_cores': int(data.get('quota_max_cores', 0) or 0),
-        'quota_max_memory_gb': int(data.get('quota_max_memory_gb', 0) or 0),
+        'quota_max_vms': _ints.get('quota_max_vms', 0),
+        'quota_max_cores': _ints.get('quota_max_cores', 0),
+        'quota_max_memory_gb': _ints.get('quota_max_memory_gb', 0),
+        'quota_max_disk_gb': _ints.get('quota_max_disk_gb', 0),
         'quota_enforcement': data.get('quota_enforcement') or 'block',
+        # NS Sep 2026 — 0/0 = no range, which is every tenant that does not ask for one
+        'vmid_range_start': _ints.get('vmid_range_start', 0),
+        'vmid_range_end': _ints.get('vmid_range_end', 0),
     }
     
     save_tenants(tenants_db)
@@ -1314,6 +1411,10 @@ def update_tenant(tenant_id):
     if tenant_id not in tenants_db:
         return jsonify({'error': 'Tenant not found'}), 404
 
+    # snapshot before anything below writes into the dict — the range guard further down has to
+    # compare against the STORED value, not against what the quota loop just put there
+    _before = dict(tenants_db[tenant_id])
+
     # NS Aug 2026 (Aikido pentest) — mirror get_tenant_quota: a tenant-scoped admin.tenants holder
     # may only edit its OWN tenant, else one tenant rewrites another's name/clusters/quota.
     if request.session.get('role') != ROLE_ADMIN:
@@ -1322,6 +1423,19 @@ def update_tenant(tenant_id):
             return jsonify({'error': 'Access denied to this tenant'}), 403
 
     data = request.json
+
+    # NS Sep 2026 — the VMID range is a boundary the PROVIDER draws between customers, so it sits
+    # with `clusters` below rather than with the quotas: only a global admin may move it. A tenant
+    # admin who could widen their own slice to 100-999999 would simply erase the separation the
+    # range exists for. Checked BEFORE anything is written, so a refusal leaves the in-memory
+    # tenants_db untouched rather than half-updated.
+    _ints, _ierr = _tenant_ints(data)
+    if _ierr:
+        return _ierr
+    for _rk in ('vmid_range_start', 'vmid_range_end'):
+        if _rk in _ints and _ints[_rk] != int(_before.get(_rk, 0) or 0):
+            if request.session.get('effective_role', request.session.get('role')) != ROLE_ADMIN:
+                return jsonify({'error': 'Only a global admin can change a tenant\'s VMID range'}), 403
 
     if 'name' in data:
         tenants_db[tenant_id]['name'] = data['name']
@@ -1338,12 +1452,18 @@ def update_tenant(tenant_id):
                 return jsonify({'error': 'Only a global admin can change a tenant\'s clusters'}), 403
             tenants_db[tenant_id]['clusters'] = _new
     # NS #502 — quota fields
-    for _qk in ('quota_max_vms', 'quota_max_cores', 'quota_max_memory_gb'):
-        if _qk in data:
-            try:
-                tenants_db[tenant_id][_qk] = int(data[_qk] or 0)
-            except (ValueError, TypeError):
-                tenants_db[tenant_id][_qk] = 0
+    for _qk, _qv in _ints.items():
+        tenants_db[tenant_id][_qk] = _qv
+    # NS Sep 2026 — reject an inverted or reserved range rather than storing it: tenant_vmid_range
+    # treats anything malformed as "no range", so a silently accepted 5000-100 would look saved in
+    # the UI while enforcing nothing. PVE keeps VMIDs below 100 for itself.
+    _rs = int(tenants_db[tenant_id].get('vmid_range_start', 0) or 0)
+    _re_ = int(tenants_db[tenant_id].get('vmid_range_end', 0) or 0)
+    if (_rs or _re_):
+        if _rs < 100 or _re_ < 100:
+            return jsonify({'error': 'VMID range must start at 100 or above'}), 400
+        if _re_ < _rs:
+            return jsonify({'error': 'VMID range end must not be below its start'}), 400
     if 'quota_enforcement' in data:
         tenants_db[tenant_id]['quota_enforcement'] = data['quota_enforcement'] or 'block'
 
@@ -1570,8 +1690,17 @@ def create_custom_role():
             'created': datetime.now().isoformat()
         }
     
-    save_custom_roles(custom)
+    _saved = save_custom_roles(custom)
+    # `custom` IS the live cached dict (get_custom_roles hands it back by reference)
+    # and the edits above already went into it, so the cache has to go either way -
+    # otherwise a refused write leaves a role that was never persisted sitting in
+    # memory, granting permissions.
     invalidate_roles_cache()
+    if not _saved:
+        # save_custom_roles clears the table before rewriting it, so it refuses a
+        # snapshot that never loaded. Do not audit this as done or report success.
+        return jsonify({'error': 'Could not save the role - check the server logs',
+                        'code': 'ROLE_WRITE_FAILED'}), 500
     
     usr = request.session['user']
     scope = f"tenant:{tenant_id}" if tenant_id else "global"
@@ -1630,8 +1759,11 @@ def update_custom_role(role_id):
         roles[role_id]['permissions'] = permissions
     roles[role_id]['modified'] = datetime.now().isoformat()
     
-    save_custom_roles(custom)
-    invalidate_roles_cache()
+    _saved = save_custom_roles(custom)
+    invalidate_roles_cache()   # `custom` is the live cache - drop it either way
+    if not _saved:
+        return jsonify({'error': 'Could not save the role - check the server logs',
+                        'code': 'ROLE_WRITE_FAILED'}), 500
     
     log_audit(request.session['user'], 'role.updated', f"Updated role: {role_id}")
     return jsonify({'success': True})
@@ -1695,8 +1827,11 @@ def delete_custom_role(role_id):
     else:
         del custom['global'][role_id]
 
-    save_custom_roles(custom)
-    invalidate_roles_cache()
+    _saved = save_custom_roles(custom)
+    invalidate_roles_cache()   # `custom` is the live cache - drop it either way
+    if not _saved:
+        return jsonify({'error': 'Could not save the role - check the server logs',
+                        'code': 'ROLE_WRITE_FAILED'}), 500
     
     log_audit(request.session['user'], 'role.deleted', f"Deleted role: {role_id}")
     return jsonify({'success': True})
@@ -1741,7 +1876,11 @@ def apply_role_template(template_id):
     # must not inject a role into another tenant, create a global role, or mint a role granting
     # perms it doesn't hold (templates carry admin.* perms). create_custom_role guards this; the
     # template path did not.
-    if request.session.get('role') != ROLE_ADMIN:
+    # sec (audit): read the role the way the create sibling does. request.session['role'] is the
+    # value cached when the session was minted, so a demoted admin kept the old answer here until
+    # they logged out — build_authz_user resolves it live and applies a token's floor.
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if _caller.get('effective_role', _caller.get('role')) != ROLE_ADMIN:
         _caller_tenant = _caller_tenant_or_none()
         if tenant_id and tenant_id != _caller_tenant:
             return jsonify({'error': 'Access denied - cannot create roles in other tenants'}), 403
@@ -1775,8 +1914,11 @@ def apply_role_template(template_id):
             return jsonify({'error': 'Role already exists'}), 400
         custom['global'][role_id] = role_data
     
-    save_custom_roles(custom)
-    invalidate_roles_cache()
+    _saved = save_custom_roles(custom)
+    invalidate_roles_cache()   # `custom` is the live cache - drop it either way
+    if not _saved:
+        return jsonify({'error': 'Could not save the role - check the server logs',
+                        'code': 'ROLE_WRITE_FAILED'}), 500
     
     usr = request.session['user']
     scope = f"tenant:{tenant_id}" if tenant_id else "global"
@@ -1848,7 +1990,13 @@ def set_vm_acl(cluster_id, vmid):
         if p not in PERMISSIONS:
             return jsonify({'error': f'Invalid permission: {p}'}), 400
 
-    _err = _authz_object_write(cluster_id, subjects=users, permissions=permissions)
+    # sec (Sep 2026): weigh what the row ACTUALLY hands out. inherit_role is the default
+    # and grants a fixed ten-permission set (vm.config and vm.migrate among them) while
+    # `permissions` goes unused - so the ceiling check was reading the wrong list, and a
+    # delegate holding only vm.view could grant full VM control by leaving the default on.
+    from pegaprox.utils.rbac import ACL_INHERITED_VM_PERMISSIONS
+    _effective = list(ACL_INHERITED_VM_PERMISSIONS) if inherit_role else list(permissions)
+    _err = _authz_object_write(cluster_id, subjects=users, permissions=_effective)
     if _err:
         return _err
     # and the caller must actually control the VM they are writing a rule for
@@ -1870,8 +2018,11 @@ def set_vm_acl(cluster_id, vmid):
         'modified_by': request.session['user']
     }
     
-    save_vm_acls(acls)
+    _saved = save_vm_acls(acls)
     invalidate_vm_acls_cache()
+    if not _saved:
+        return jsonify({'error': 'Could not save the VM ACL - check the server logs',
+                        'code': 'ACL_WRITE_FAILED'}), 500
     
     cluster_name = cluster_managers[cluster_id].config.name if cluster_id in cluster_managers else cluster_id
     log_audit(request.session['user'], 'vm.acl_updated', 
@@ -1885,11 +2036,15 @@ def set_vm_acl(cluster_id, vmid):
 @require_auth(perms=['admin.users'])
 def delete_vm_acl(cluster_id, vmid):
     """Remove VM-specific ACL (use default permissions)"""
-    _err = _authz_object_write(cluster_id)
-    if _err:
-        return _err
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (Sep 2026): same gap as the pool-permission delete - the row's own members were
+    # never weighed, so a tenant-scoped admin could drop an ACL granting access to another
+    # tenant's user. Read the row first and hand its members to the gate.
+    _existing = (get_vm_acls().get(cluster_id, {}) or {}).get(str(vmid), {}) or {}
+    _err = _authz_object_write(cluster_id, subjects=list(_existing.get('users') or []))
+    if _err:
+        return _err
     
     # NS: Fixed - was only deleting from dict, not from DB!
     # Now we delete directly from DB
@@ -1936,7 +2091,7 @@ def _pool_visibility(cluster_id):
 
     Returns (confined, granted_pools): confined=True means restrict to granted_pools."""
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import _pool_perms_for, user_has_any_pool_access
+    from pegaprox.utils.rbac import _pool_perms_for
     user = build_authz_user(request.session.get('user', ''), request.session)
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
         return False, set()
@@ -2057,9 +2212,13 @@ def add_pool_permission_api(cluster_id, pool_id):
     # pool.admin, which short-circuits the per-VM gate for every VM in the pool — this is the
     # strongest grant primitive in the product and it had no object gate. _pool_visibility (the
     # H3 fix, ~100 lines up) gates pool READS; apply the same confinement to the write.
+    # sec (Sep 2026): `permissions=[]` meant the ceiling check ran over nothing, so a
+    # delegate could hand out pool permissions they do not hold - pool.admin included,
+    # which short-circuits the per-VM gate for every VM in the pool.
     _err = _authz_object_write(cluster_id,
                                subjects=[subject_id] if subject_type == 'user' else [],
-                               permissions=[])
+                               groups=[subject_id] if subject_type == 'group' else [],
+                               permissions=permissions)
     if _err:
         return _err
     _confined, _granted = _pool_visibility(cluster_id)
@@ -2085,7 +2244,12 @@ def delete_pool_permission_api(cluster_id, pool_id, subject_type, subject_id):
     """Delete pool permission"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    _err = _authz_object_write(cluster_id)
+    # sec (Sep 2026): the subject was not passed, so a tenant-scoped admin could revoke
+    # a grant belonging to another tenant's principal. Revoking is not granting, but it
+    # is still reaching across the boundary - and it is how you lock a rival out.
+    _err = _authz_object_write(cluster_id,
+                               subjects=[subject_id] if subject_type == 'user' else [],
+                               groups=[subject_id] if subject_type == 'group' else [])
     if _err:
         return _err
     _confined, _granted = _pool_visibility(cluster_id)

@@ -294,7 +294,10 @@
 
         function UserAvatar({ user, sizeClass = 'w-8 h-8', textClass = 'text-sm', className = '' }) {
             const initials = getUserInitials(user);
-            const classes = `${sizeClass} rounded-full overflow-hidden flex items-center justify-center ${className}`.trim();
+            // LW Sep 2026 (#795) - shrink-0 belongs here, not at one call site: a fixed circle is
+            // what an avatar IS, and as a flex child next to a long username it was being squeezed
+            // to a sliver with the initials bleeding into the text.
+            const classes = `${sizeClass} flex-shrink-0 rounded-full overflow-hidden flex items-center justify-center ${className}`.trim();
 
             if (user?.avatar_url) {
                 return (
@@ -1197,7 +1200,7 @@
                     setProgress(prev => [
                         ...prev.slice(0, -1),
                         { text: 'Removed from current cluster' + (cleanupOk ? ' (config cleaned)' : ''), status: 'done' },
-                        { text: `Getting join info from ${targetCluster.name}...`, status: 'running' }
+                        { text: `Getting join info from ${clusterLabel(targetCluster)}...`, status: 'running' }
                     ]);
                     
                     // Get join info from target cluster
@@ -1213,8 +1216,8 @@
                     
                     setProgress(prev => [
                         ...prev.slice(0, -1),
-                        { text: `Got join info from ${targetCluster.name}`, status: 'done' },
-                        { text: `Joining node to ${targetCluster.name}...`, status: 'running' }
+                        { text: `Got join info from ${clusterLabel(targetCluster)}`, status: 'done' },
+                        { text: `Joining node to ${clusterLabel(targetCluster)}...`, status: 'running' }
                     ]);
                     
                     // Resolve node IP from current cluster knowledge
@@ -1251,9 +1254,9 @@
                     if (joinData.success) {
                         setProgress(prev => [
                             ...prev.slice(0, -1),
-                            { text: `Successfully joined ${targetCluster.name}!`, status: 'done' }
+                            { text: `Successfully joined ${clusterLabel(targetCluster)}!`, status: 'done' }
                         ]);
-                        if (addToast) addToast(`Node ${nodeName} moved to ${targetCluster.name}`, 'success');
+                        if (addToast) addToast(`Node ${nodeName} moved to ${clusterLabel(targetCluster)}`, 'success');
                         setTimeout(() => { if (onSuccess) onSuccess(); onClose(); }, 2000);
                     } else {
                         setProgress(prev => [
@@ -1312,7 +1315,7 @@
                                                 >
                                                     <span className="flex items-center gap-2">
                                                         <Icons.Server className="w-4 h-4" />
-                                                        {c.name}
+                                                        {clusterLabel(c)}
                                                     </span>
                                                     {targetCluster?.id === c.id && <Icons.CheckCircle className="w-4 h-4 text-blue-400" />}
                                                 </button>

@@ -596,9 +596,13 @@ def check_update_available_alert():
         import requests  # local import — background threads shouldn't block module load
         for url in (GITHUB_VERSION_URL, MIRROR_VERSION_URL):
             try:
-                r = requests.get(url, timeout=10)
+                # MK Sep 2026 - version.json is a few hundred bytes. Without stream=True
+                # requests buffers whatever the far end sends before .json() ever runs,
+                # so a hostile mirror (or anyone on the path) sizes our memory for us.
+                r = requests.get(url, timeout=10, stream=True)
                 if r.status_code == 200:
-                    remote = r.json()
+                    _body = r.raw.read(256 * 1024, decode_content=True)
+                    remote = json.loads(_body.decode('utf-8', errors='replace'))
                     break
             except Exception:
                 continue

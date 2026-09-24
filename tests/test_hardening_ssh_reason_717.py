@@ -34,7 +34,17 @@ def _mgr(api, **kw):
     m = api.make_fake_manager(CLUSTER, check_node_hardening=None)
     m.is_connected = True
     m._is_node_blocked = lambda n: (False, 0)
+    # MK Sep 2026 — api_token=True used to set only the _using_api_token flag. That flag
+    # is ALSO true for a cluster we minted a token for ourselves on first connect (#110),
+    # which keeps its real password for SSH — so it never distinguished the setup this
+    # file is about. In production the token id goes in the USERNAME (root@pam!tokenid)
+    # and the secret in the password field; that is what makes pass_ the secret, and what
+    # ssh_diagnose keys on. Say it here the way the cluster actually says it.
     m._using_api_token = kw.get('api_token', False)
+    if kw.get('api_token'):
+        m.config.user = kw.get('user', 'root@pam!pegaprox')
+    elif 'user' in kw:
+        m.config.user = kw['user']
     m.config.ssh_key = kw.get('ssh_key', '')
     m.config.pass_ = kw.get('password', '')
     m.ssh_diagnose = PegaProxManager.ssh_diagnose.__get__(m, PegaProxManager)
@@ -149,3 +159,16 @@ def test_the_new_strings_exist_in_every_language(key):
     for i, (lang, pos) in enumerate(order):
         end = order[i + 1][1] if i + 1 < len(order) else len(src)
         assert re.search(r'^ +%s: ' % key, src[pos:end], re.M), f'{key} missing from {lang}'
+
+
+def test_a_cluster_whose_token_we_minted_still_counts_its_password(api, admin):
+    """MK Sep 2026 — the other half of the same distinction, and a regression this file
+    would not have caught. #110 mints an API token on first connect for a cluster the
+    operator gave a username and password, sets _using_api_token, and keeps the password
+    for SSH. Reading the flag as "pass_ is a token secret" told those clusters they had no
+    SSH credentials at all — the most common setup there is."""
+    _mgr(api, api_token=True, user='root@pam', password='realpassword')
+
+    body = _hardening(admin).get_json()
+    assert body.get('code') != 'SSH_NO_CREDENTIALS', \
+        "a minted token does not make the account password disappear"

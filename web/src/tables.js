@@ -1620,9 +1620,22 @@
                             </span>
                             <div style={{flex: 1}} />
                             {selectedVms.length > 0 && (
-                                <span className="text-[11px]" style={{color: '#49afd9'}}>
-                                    {selectedVms.length} {t('selectedItems') || 'selected'}
-                                </span>
+                                <>
+                                    <span className="text-[11px]" style={{color: '#49afd9'}}>
+                                        {selectedVms.length} {t('selectedItems') || 'selected'}
+                                    </span>
+                                    {/* LW Sep 2026 (#798) - the bulk bar below is suppressed in corporate
+                                        because it was meant to live up here, but only the count ever made
+                                        it across, so selecting rows in this layout did nothing at all. */}
+                                    <button onClick={() => setShowBulkMigrate(true)}
+                                        className="corp-toolbar-filter" style={{color: '#49afd9'}}>
+                                        {t('migrate')}
+                                    </button>
+                                    <button onClick={() => setSelectedVms([])}
+                                        className="corp-toolbar-filter">
+                                        {t('clearSelection') || 'Clear selection'}
+                                    </button>
+                                </>
                             )}
                         </div>
                     ) : (

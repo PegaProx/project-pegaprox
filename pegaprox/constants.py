@@ -8,8 +8,8 @@ import os
 from pathlib import Path
 
 # Version
-PEGAPROX_VERSION = "1.1.1"
-PEGAPROX_BUILD = "2026.08.30"
+PEGAPROX_VERSION = "1.2.0"
+PEGAPROX_BUILD = "2026.09.20"
 
 # File Paths & Directories
 CONFIG_DIR = 'config'
@@ -62,6 +62,7 @@ LOG_DIR = 'logs'
 #   PEGAPROX_FILE_LOG_LEVEL   — level for the per-cluster logs/<id>.log handler
 #   PEGAPROX_DISABLE_FILE_LOG — '1'/'true' to skip attaching the FileHandler
 import logging as _logging
+import math as _math
 def _parse_log_level(s: str, default):
     if not isinstance(s, str) or not s.strip():
         return default
@@ -194,3 +195,45 @@ PREDICTIVE_ENGINE_TAG = 'pega-wma-v2'
 # threshold where pointer motion reads as steady, and costs only more timed-out wakeups
 # (~100/s per OPEN CONSOLE — a human-bounded number, unrelated to how many guests exist).
 VNC_PVE_RECV_SLICE = float(os.environ.get('PEGAPROX_VNC_RECV_SLICE', '0.01'))
+
+# MK Sep 2026 (#647) — how long to keep asking where a guest ended up after an HA
+# migrate task reported failure. `ha-manager migrate` returns once the CRM has the
+# request, not once the guest has moved, so an immediate look-up answers "still on the
+# source" for a migration that is about to succeed. 90s covers the reported gap with
+# room to spare; a real failure pays it once, on a path that is already the exception.
+def _bounded_float_env(name, default, lo, hi):
+    """Read a float from the environment without letting a typo take the app down.
+
+    MK Sep 2026 — a bare float(os.environ.get(...)) raises at IMPORT time, so
+    PEGAPROX_HA_MIGRATE_SETTLE=90s (or an empty value from a half-written unit file)
+    stops PegaProx from starting at all rather than doing something sensible. And the
+    poll interval is slept on inside a loop: a 0 there turns a 90-second settle window
+    into ninety seconds of hammering /cluster/resources as fast as the API answers.
+    Fall back on garbage, clamp on out-of-range, say so either way.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == '':
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        _logging.warning(f"[config] {name}={raw!r} is not a number — using {default}")
+        return default
+    # float('nan') parses happily, and every comparison against NaN is False — so it
+    # walks straight through the range check below and comes out the other side intact.
+    # A NaN settle window makes `time.time() + val` NaN too, which makes the loop's
+    # `time.time() >= deadline` false forever: the evacuation never returns and polls
+    # the cluster until the process dies. That check clamps inf and -inf fine on its own;
+    # NaN is the one it cannot see, so this takes all three and says so in the log.
+    if not _math.isfinite(val):
+        _logging.warning(f"[config] {name}={raw!r} is not a finite number — using {default}")
+        return default
+    if val < lo or val > hi:
+        clamped = min(max(val, lo), hi)
+        _logging.warning(f"[config] {name}={val} outside {lo}..{hi} — using {clamped}")
+        return clamped
+    return val
+
+
+HA_MIGRATE_SETTLE_SECONDS = _bounded_float_env('PEGAPROX_HA_MIGRATE_SETTLE', 90.0, 0.0, 3600.0)
+HA_MIGRATE_SETTLE_POLL = _bounded_float_env('PEGAPROX_HA_MIGRATE_SETTLE_POLL', 3.0, 0.5, 60.0)

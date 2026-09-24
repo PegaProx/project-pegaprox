@@ -26,6 +26,7 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immedi
 from pegaprox.core.config import load_config, save_config
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
+from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
                                   safe_error, scope_vm_rows, require_unconfined, parse_pve_error)
 
@@ -48,11 +49,11 @@ def get_clusters():
     # #248: users without cluster.view can still see clusters where they have VM ACLs
     acl_cluster_ids = set()
     if not has_cluster_view:
-        from pegaprox.utils.rbac import load_vm_acls
+        from pegaprox.utils.rbac import load_vm_acls, acl_grants_user
         all_acls = load_vm_acls()
         for cid, vm_acls in all_acls.items():
             for vmid, acl in vm_acls.items():
-                if user['username'] in acl.get('users', []) or '*' in acl.get('users', []):
+                if acl_grants_user(acl, user['username']):
                     acl_cluster_ids.add(cid)
                     break
         # #555: also surface clusters where the user holds pool perms
@@ -149,7 +150,13 @@ def get_clusters():
             })
 
     # MK: Sort clusters by sort_order first, then by name for consistent ordering
-    clusters.sort(key=lambda c: (c.get('sort_order', 0), c.get('name', '').lower()))
+    # MK Sep 2026 - coerce in the key: rows written before the validation above exist,
+    # and one of them must not be able to 500 the cluster list for everyone.
+    def _order_key(c):
+        v = c.get('sort_order', 0)
+        return (v if isinstance(v, int) and not isinstance(v, bool) else 0,
+                str(c.get('name', '')).lower())
+    clusters.sort(key=_order_key)
 
     return jsonify(clusters)
 
@@ -593,9 +600,29 @@ def delete_cluster(cluster_id):
                     hosts_to_clean.add(ip)
         except Exception:
             pass
+        # NS Sep 2026 (Aikido 469089277) — a host can be reachable through more than one
+        # configured cluster (shared management IP, a node moved between clusters, two entries
+        # for the same box). Dropping its pin here would silently re-TOFU it for the OTHER
+        # cluster on its next SSH connection, which is exactly the window reject-on-change
+        # exists to close. Keep any host another manager still points at; only local state is
+        # consulted, no per-cluster network calls.
+        still_pinned = set()
+        for _cid, _other in list(cluster_managers.items()):
+            if _cid == cluster_id:
+                continue
+            v = getattr(_other, 'host', None) or getattr(getattr(_other, 'config', None), 'host', None)
+            if v:
+                still_pinned.add(v)
+        for (_cid, _node), val in list(_node_ip_cache.items()):
+            if _cid != cluster_id and val and val[0]:
+                still_pinned.add(val[0])
+        hosts_to_clean -= still_pinned
+
         n_removed = remove_host_keys(hosts_to_clean)
         if n_removed:
             logging.info(f"Removed {n_removed} SSH host-key pin(s) for deleted cluster {cluster_id}")
+        if still_pinned:
+            logging.debug(f"Kept {len(still_pinned)} host-key pin(s) still referenced by another cluster")
     except Exception as e:
         logging.debug(f"known_hosts cleanup on cluster delete failed (non-critical): {e}")
 
@@ -648,12 +675,26 @@ def reorder_clusters():
     NS: Allows admins to reorder clusters via drag-and-drop in UI
     Request body: { "order": ["cluster_id_1", "cluster_id_2", ...] }
     """
-    data = request.get_json()
-    order = data.get('order', [])
-    
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Body must be an object'}), 400
+    # MK Sep 2026 - this ran one UPDATE per element of a caller-supplied array inside a
+    # single transaction, with nothing bounding the array. And it reordered by id without
+    # asking whose cluster that is; sidebar order is cosmetic, but it is still somebody
+    # else's row.
+    order, _lerr = bounded_list(data.get('order'), max_items=512, max_length=64,
+                                name='order')
+    if _lerr:
+        return jsonify({'error': _lerr}), 400
     if not order:
         return jsonify({'error': 'No order provided'}), 400
-    
+
+    _own = get_user_clusters(build_authz_user(request.session.get('user', ''), request.session))
+    if _own is not None:
+        order = [c for c in order if c in _own]
+        if not order:
+            return jsonify({'error': 'No order provided'}), 400
+
     db = get_db()
     cursor = db.conn.cursor()
     
@@ -683,8 +724,19 @@ def update_cluster_sort_order(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
-    data = request.get_json()
-    sort_order = data.get('sort_order', 0)
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Body must be an object'}), 400
+    # MK Sep 2026 - this went to the DB unchecked, and GET /api/clusters sorts on the
+    # column. One string in one row and the cluster list raises TypeError comparing str
+    # to int - for everybody, durably, until somebody finds the row. bool is excluded on
+    # purpose: it is an int subclass and `True` is not a position.
+    _raw = data.get('sort_order', 0)
+    if isinstance(_raw, bool) or not isinstance(_raw, int):
+        return jsonify({'error': 'sort_order must be an integer'}), 400
+    if not (-100000 <= _raw <= 100000):
+        return jsonify({'error': 'sort_order is out of range'}), 400
+    sort_order = _raw
 
     db = get_db()
     cursor = db.conn.cursor()
@@ -710,7 +762,10 @@ def update_cluster_sort_order(cluster_id):
 # cluster.config could otherwise hammer this endpoint to flood the HMAC-signed
 # audit log (each location update writes one entry). 30 updates/min is way more
 # than any legitimate UI flow needs — operators set lat/lon once and move on.
-_location_put_attempts = {}  # (ip, cluster_id) → list[ts]
+from pegaprox.utils.ratelimit import SlidingWindow as _SlidingWindow
+
+# keyed by (ip, cluster_id): the IP half is caller-chosen, so this needs a ceiling
+_location_put_attempts = _SlidingWindow(limit=30, window=60, max_keys=4096, name='cluster-location')
 
 
 @bp.route('/api/clusters/<cluster_id>/location', methods=['PUT'])
@@ -729,14 +784,9 @@ def update_cluster_location(cluster_id):
     from pegaprox.utils.audit import get_client_ip
     import time as _t
     client_ip = get_client_ip()
-    key = (client_ip, cluster_id)
-    now = _t.time()
-    window = [t for t in _location_put_attempts.get(key, []) if now - t < 60]
-    if len(window) >= 30:
+    if not _location_put_attempts.allow((client_ip, cluster_id)):
         logging.warning(f"[CLUSTER-LOC] rate-limited update on {cluster_id} from {client_ip}")
         return jsonify({'error': 'Too many location updates — slow down'}), 429
-    window.append(now)
-    _location_put_attempts[key] = window
 
     data = request.get_json() or {}
     lat = data.get('latitude')
@@ -1133,8 +1183,7 @@ def get_cluster_resources(cluster_id):
 
     # NS Aug 2026 — build the authz user so an admin-owned scoped API token is floored to its
     # effective_role (the stored-role fast-path let such a token see everything).
-    from pegaprox.utils.rbac import (user_can_access_vm as _ucav, get_user_clusters as _guc,
-                                     user_has_any_pool_access as _uhpa)
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
     from pegaprox.utils.auth import build_authz_user
     user = build_authz_user(request.session['user'], request.session)
     user['username'] = request.session['user']
@@ -1147,8 +1196,6 @@ def get_cluster_resources(cluster_id):
     # pool / #248 ACL fallback (tenant does NOT own it) must NOT get that blanket vm.view fallback —
     # confine them to exactly the VMs their pool/ACL grants, via user_can_access_vm (which enforces
     # the tenant gate). None => admin/default-tenant (unscoped).
-    _tenant_clusters = _guc(user, include_pools=False)
-    _is_tenant_owner = _tenant_clusters is None or cluster_id in _tenant_clusters
     # MK Sep 2026 (#773, mbo-nw) — a caller with an explicit POOL grant is confined to their pool's
     # (+ any ACL'd) VMs even on a cluster their tenant owns. The restrictive-ACL listing below would
     # otherwise fall a pool-scoped operator through to the blanket vm.view branch and hand back the
@@ -1157,7 +1204,15 @@ def get_cluster_resources(cluster_id):
     # callers, like non-owners, through the same per-VM user_can_access_vm check (which confines
     # them to exactly their ACL + pool VMs), so the list matches per-VM access. Pure operators with no
     # pool/ACL grant keep the restrictive tenant-owner listing below unchanged.
-    if (not _is_tenant_owner) or _uhpa(user, cluster_id):
+    # sec (private disclosure Sep 2026): this predicate was open-coded here as
+    # `(not owner) or user_has_any_pool_access(...)`, which asks about POOL grants only. A caller
+    # whose tenant OWNS the cluster and who is confined by a VM-ACL instead of a pool has neither
+    # condition true, so they fell past this into the restrictive listing below — where the
+    # `elif has_general_view` arm hands back every VM that has no ACL entry of its own. helpers
+    # .caller_is_scoped was written for exactly this miss and the other endpoints moved onto it;
+    # this one kept its copy. Use the shared predicate so the two cannot drift again.
+    from pegaprox.api.helpers import caller_is_scoped as _scoped
+    if _scoped(user, cluster_id):
         filtered = []
         for vm in all_resources:
             _vmid = vm.get('vmid')
@@ -1359,11 +1414,11 @@ def set_excluded_nodes(cluster_id):
     data = request.get_json() or {}
     excluded_nodes = data.get('excluded_nodes', [])
     
-    # Validate it's a list of strings
-    if not isinstance(excluded_nodes, list):
-        return jsonify({'error': 'excluded_nodes must be a list'}), 400
-    
-    excluded_nodes = [str(n) for n in excluded_nodes]  # Ensure strings
+    # same shape as fallback_hosts above: durable, reloaded at start, previously unbounded
+    excluded_nodes, _lerr = bounded_list(excluded_nodes, max_items=512, max_length=253,
+                                         name='excluded_nodes')
+    if _lerr:
+        return jsonify({'error': _lerr}), 400
     
     mgr = cluster_managers[cluster_id]
     mgr.config.excluded_nodes = excluded_nodes
@@ -1703,10 +1758,13 @@ def set_fallback_hosts(cluster_id):
     data = request.get_json() or {}
     fallback_hosts = data.get('fallback_hosts', [])
     
-    if not isinstance(fallback_hosts, list):
-        return jsonify({'error': 'fallback_hosts must be a list'}), 400
-    
-    fallback_hosts = [str(h) for h in fallback_hosts if h]
+    # MK Sep 2026 - the type check was the whole validation, so one request could store
+    # a million entries of a megabyte each. They are durable and get loaded back into
+    # mgr.config on every start.
+    fallback_hosts, _lerr = bounded_list(fallback_hosts, max_items=32, max_length=253,
+                                         name='fallback_hosts')
+    if _lerr:
+        return jsonify({'error': _lerr}), 400
     
     mgr = cluster_managers[cluster_id]
     mgr.config.fallback_hosts = fallback_hosts
@@ -2137,8 +2195,19 @@ def disable_ha(cluster_id):
     # Flip the flag + clear in-memory ha_config bookkeeping last so the
     # state we report back to the UI matches what's actually on disk.
     mgr.config.ha_enabled = False
+    # MK Sep 2026 - this used to clear the whole map, including the nodes whose teardown had
+    # just failed. The audit line below already says "manual cleanup required" for those, but
+    # our own bookkeeping said the opposite, and the next HA-enable cycle reads the
+    # bookkeeping. A node we believe has no agent, still running one, is a self-fence agent
+    # acting on heartbeat state nobody is maintaining any more - it can reboot the node.
+    # Keep the ones that did not come off; drop only what actually went.
     if isinstance(mgr.ha_config.get('node_agent_installed'), dict):
-        mgr.ha_config['node_agent_installed'] = {}
+        _still_there = {n: True for n, ok in (uninstall_results or {}).items() if not ok}
+        if _still_there:
+            logging.warning(
+                "[HA disable] agent still installed on %s - keeping it in node_agent_installed "
+                "so the next enable does not assume a clean slate", sorted(_still_there))
+        mgr.ha_config['node_agent_installed'] = _still_there
     save_config()
 
     nodes_ok = sum(1 for v in uninstall_results.values() if v)

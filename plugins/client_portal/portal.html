@@ -284,7 +284,15 @@ async function login(u,p,totpCode){
 function logout(){
     // MK May 2026 (#396): disconnect any active VNC ws before tearing down state
     try{if(window._portalRfb){window._portalRfb.disconnect();window._portalRfb=null;}}catch(e){}
-    S.sid=null;S.user=null;S.vms=[];S.screen='login';S.err=null;S.modal=null;S.pending2fa=null;S.searchQuery='';S.filterStatus='all';sessionStorage.removeItem('portal-sid');render();
+    // sec (private disclosure Sep 2026): this only ever cleared the CLIENT. The session stayed
+    // valid on the server, so a reload still answered /api/auth/check with authenticated:true and
+    // the cookie kept working until it timed out on its own. Tell the server first — the same
+    // endpoint this file already calls when a non-portal account is rejected at login. Local state
+    // is torn down regardless of whether the call succeeds, so a network failure cannot leave the
+    // user looking signed in.
+    fetch(`${API}/api/auth/logout`,{method:'POST',credentials:'include'}).catch(function(){}).then(function(){
+        S.sid=null;S.user=null;S.vms=[];S.screen='login';S.err=null;S.modal=null;S.pending2fa=null;S.searchQuery='';S.filterStatus='all';sessionStorage.removeItem('portal-sid');render();
+    });
 }
 
 // NS: Apr 2026 - check if OIDC/LDAP available for portal login

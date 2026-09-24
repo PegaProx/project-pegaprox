@@ -436,9 +436,32 @@ def _is_internal_or_metadata_host(host):
         return True   # fail closed
 
 
+def _reject_api_token(what):
+    """Refuse an API-token session on the routes that carry alert CONTENT.
+
+    MK Sep 2026 - a Web Push subscription is registered under the caller's username,
+    and _alert_handler decides what to deliver from that account's stored record. An
+    API token presents its owner's name, so a token deliberately capped at viewer could
+    register an https endpoint of its choosing and have every cluster the OWNER can see
+    delivered to it - cluster, node and guest names plus live metrics, none of which the
+    token itself may read. The inbox is the same content through a different door.
+
+    A push subscription comes out of a service worker in a browser. A token has no
+    browser, so there is nothing legitimate to break here. Returns an error response,
+    or None.
+    """
+    if not (getattr(request, 'session', None) or {}).get('api_token'):
+        return None
+    return jsonify({'error': f'{what} is not available to API tokens - '
+                             'use an interactive session'}), 403
+
+
 @bp.route('/api/push/subscribe', methods=['POST'])
 @require_auth()
 def subscribe():
+    _terr = _reject_api_token('Push subscription')
+    if _terr:
+        return _terr
     body = request.get_json(silent=True) or {}
     endpoint = body.get('endpoint')
     keys = body.get('keys') or {}
@@ -542,6 +565,9 @@ def send_test():
 @bp.route('/api/push/inbox', methods=['GET'])
 @require_auth()
 def inbox():
+    _terr = _reject_api_token('The notification inbox')
+    if _terr:
+        return _terr
     user = _current_user()
     if not user:
         return jsonify({'items': []})
@@ -568,6 +594,9 @@ def inbox():
 @bp.route('/api/push/inbox/clear', methods=['POST'])
 @require_auth()
 def inbox_clear():
+    _terr = _reject_api_token('The notification inbox')
+    if _terr:
+        return _terr
     user = _current_user()
     try:
         c = get_db().conn.cursor()
