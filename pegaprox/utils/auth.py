@@ -1133,8 +1133,8 @@ def require_auth(roles: list = None, perms: list = None):
                 # 2026-09-08: zero denial rows in audit_log). Loopback requests are
                 # skipped so health probes and internal polls cannot flood the table.
                 try:
-                    _src = request.headers.get('X-Forwarded-For', request.remote_addr or '')
-                    if not _src.startswith('127.') and _src != '::1':
+                    _src = request.remote_addr or ''
+                    if _src and not _src.startswith('127.') and _src != '::1':
                         log_audit(session.get('user'), 'access.denied',
                                   json.dumps({'via': 'roles', 'required': list(roles),
                                               'role': fresh_role, 'path': request.path}),
@@ -1182,8 +1182,8 @@ def require_auth(roles: list = None, perms: list = None):
                     if not has_permission(perm_user, p):
                         # SRK (SPEC-2026-010 D9): audit the denial (see roles-403 note).
                         try:
-                            _src = request.headers.get('X-Forwarded-For', request.remote_addr or '')
-                            if not _src.startswith('127.') and _src != '::1':
+                            _src = request.remote_addr or ''
+                            if _src and not _src.startswith('127.') and _src != '::1':
                                 log_audit(session.get('user'), 'access.denied',
                                           json.dumps({'via': 'perms', 'required': p,
                                                       'role': fresh_role, 'path': request.path}),
