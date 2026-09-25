@@ -419,9 +419,10 @@ def get_role_grants(role_name: str, tenant_id: str = None) -> list:
 def _effective_tenant_ids(user: dict) -> list:
     """Tenants whose resources the user may see: tenants of primary+granted roles.
 
-    DEFAULT_TENANT_ID semantics are decided by the caller (get_user_clusters
-    returns None = all clusters for a default leg) -- same contract as the
-    single-role path."""
+    Default-tenant semantics follow the same rule as the single-role path:
+    an EMPTY default tenant answers None (= all clusters) via the bottom rule;
+    a configured (confined) default tenant contributes its cluster list like
+    any other tenant."""
     tenants = []
     base = user.get('tenant_id', DEFAULT_TENANT_ID)
     if base and base not in tenants:
@@ -642,9 +643,14 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     # (= all clusters), preserving existing default-tenant semantics. Sessions
     # only: effective_role (token auth) keeps single-role visibility (spec D5).
     if not user.get('effective_role'):
+        # Union every tenant the role set spans. NO special case for the default
+        # leg: forcing None here bypassed two rules below it — a confined default
+        # tenant (clusters configured) was force-widened to all clusters, and the
+        # contested-custom-role refusal (_AMBIGUOUS_ROLE_TENANT) was overridden.
+        # The legacy answer survives where it belongs: an EMPTY default tenant
+        # still returns None (= all clusters) via the bottom rule, so installs
+        # that never configured the default tenant keep their semantics.
         for _tid in _effective_tenant_ids(user):
-            if _tid == DEFAULT_TENANT_ID:
-                return None  # default-tenant leg sees all (unchanged semantics)
             _t = tenants_db.get(_tid, {})
             for _c in _t.get('clusters', []):
                 if _c not in clusters:
