@@ -4027,6 +4027,24 @@ def check_cluster_updates(cluster_id):
         })
     
     for node_name in node_names:
+        # NS (Sep 2026): Proxmox's GET /nodes/{node}/apt/update only ever returns the
+        # output of the LAST `apt update` that ran, and yum's `check-update` reads a
+        # local cache — so a bare GET reports stale / uncached data. Force a fresh
+        # refresh FIRST (POST for Proxmox, `yum makecache` for XCP-ng), wait for it to
+        # finish, and only then read the results.
+        try:
+            refreshed = mgr.refresh_node_apt(node_name)
+            task_ref = refreshed.get('task') if isinstance(refreshed, dict) else None
+            if task_ref:
+                # Proxmox: the POST returns a UPID; wait on the apt-update task so the
+                # GET below is guaranteed to reflect the refresh we just triggered.
+                mgr._wait_for_task(node_name, task_ref, timeout=300)
+            else:
+                # Yum (XCP-ng) has no task to await; give `makecache` a moment to settle.
+                time.sleep(10)
+        except Exception as refresh_err:
+            logging.warning(f"[UpdateCheck] refresh failed for {node_name}: {refresh_err}")
+
         # MK: Feb 2026 - Retry up to 2 times on failure, with clear error reporting
         max_retries = 2
         last_error = None
