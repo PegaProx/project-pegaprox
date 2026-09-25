@@ -39,7 +39,7 @@ from pegaprox.core.config import get_fernet
 from pegaprox.models.permissions import ROLE_ADMIN, ROLE_USER, ROLE_VIEWER, PERMISSIONS, ROLE_PERMISSIONS
 # MK: record the real client IP (XFF/X-Real-IP via trusted-proxy) for sessions/tokens,
 # not request.remote_addr which is the reverse-proxy/Docker IP behind a proxy (#583)
-from pegaprox.utils.audit import get_client_ip
+from pegaprox.utils.audit import get_client_ip, log_audit
 
 
 def get_session_timeout():
@@ -333,6 +333,20 @@ def apply_token_role(user: dict, token_role: str) -> dict:
         # _token_owner_capped then has to do about the missing numeric floor
         out['effective_role'] = token_role
         out['_token_owner_capped'] = True
+        # SPEC-011 multi-key (FIX3, 110lymph): a key pinned to a tenant CUSTOM role
+        # adopts THAT role's tenant as its own - cluster visibility for the key comes
+        # from the role's tenant, NOT the owner's home tenant or the owner's membership
+        # union (D5 single-role visibility for tokens). Lives here in the shared
+        # apply_token_role so both call sites (build_authz_user + check_cluster_access)
+        # get it and cannot drift apart - which is the whole point of this function.
+        try:
+            _rrow = get_db().conn.execute(
+                'SELECT tenant_id FROM custom_roles WHERE name = ?',
+                (token_role,)).fetchone()
+            if _rrow and _rrow[0]:
+                out['tenant_id'] = _rrow[0]
+        except Exception:
+            pass
     else:
         eff = min(_h.get(token_role, 1), _h.get(user.get('role'), 1))
         out['effective_role'] = next((r for r, lvl in _h.items() if lvl == eff), ROLE_VIEWER)
@@ -356,18 +370,6 @@ def build_authz_user(username: str, session: dict) -> dict:
         # scope the token to the role's tenant and lets its real permissions resolve. It can't outrank
         # the owner: create_api_token binds a token at/below the owner's level and require_auth
         # re-floors the numeric role every request. A BUILTIN token role is still floored numerically.
-        #
-        # MK Sep 2026 - a CUSTOM token role keeps its name, so the numeric floor never runs for
-        # it. The token therefore kept resolving through that role's permission list no matter
-        # what happened to its owner afterwards: demote the owner to viewer, strip a permission
-        # from their account, and a token they minted while they still held it carried on
-        # working. _token_owner_capped marks the identity so get_user_permissions can intersect
-        # with what the owner holds TODAY - it has to happen there, not here, because the
-        # answer is per-tenant.
-        #
-        # MK Sep 2026 - the body moved into apply_token_role because check_cluster_access
-        # carries the same decision on a path that must not load the whole users table, and
-        # the two copies had already drifted apart once.
         user = apply_token_role(user, session.get('role'))
     return user
 
@@ -853,7 +855,25 @@ def create_api_token(username: str, token_name: str, role: str = None,
             # carried the elevated set.
             _tid = _owner.get('tenant_id') or DEFAULT_TENANT_ID
             _owner_perms = set(get_user_permissions(_owner, _tid))
-            _token_perms = set(get_role_permissions_for_user(dict(_owner, role=role), _tid))
+            # SRK (SPEC-2026-010 P4/D2): roles are tenant-pure — resolve the
+            # requested role in its OWN tenant, not the owner's. Otherwise a
+            # cross-tenant granted role falls through to the viewer fallback
+            # (31 phantom perms incl. pbs.*) and legitimately-granted users can
+            # never mint a token for it. The union in get_user_permissions already
+            # covers the owner side (granted roles included), so this only fixes
+            # the token side's tenant resolution. Mint stays ceiling-limited:
+            # roles NOT in the user's union still fail this check.
+            from pegaprox.core.db import get_db as _get_db
+            _r_tenant = None
+            try:
+                _rrow = _get_db().conn.execute(
+                    'SELECT tenant_id FROM custom_roles WHERE name = ?', (role,)).fetchone()
+                if _rrow and _rrow[0]:
+                    _r_tenant = _rrow[0]
+            except Exception:
+                pass
+            _token_perms = set(get_role_permissions_for_user(
+                dict(_owner, role=role), _r_tenant or _tid))
             _extra = _token_perms - _owner_perms
             if _extra:
                 return {'error': 'Cannot create token with permissions beyond your own role: '
@@ -1120,6 +1140,20 @@ def require_auth(roles: list = None, perms: list = None):
 
             # Check role if specified
             if roles and fresh_role not in roles:
+# SRK (SPEC-2026-010 D9): audit the denial -- M2 revocation proof needs the
+                # enforcing layer to RECORD denials ("it failed" proves nothing). Until
+                # P1 this path returned 403 with no audit write at all (verified
+                # 2026-09-08: zero denial rows in audit_log). Loopback requests are
+                # skipped so health probes and internal polls cannot flood the table.
+                try:
+                    _src = request.remote_addr or ''
+                    if _src and not _src.startswith('127.') and _src != '::1':
+                        log_audit(session.get('user'), 'access.denied',
+                                  json.dumps({'via': 'roles', 'required': list(roles),
+                                              'role': fresh_role, 'path': request.path}),
+                                  get_client_ip())
+                except Exception:
+                    pass
                 return jsonify({'error': 'Forbidden', 'code': 'INSUFFICIENT_PERMISSIONS'}), 403
             
             # check permissions if specified
@@ -1159,6 +1193,16 @@ def require_auth(roles: list = None, perms: list = None):
                     perm_user = user
                 for p in perms:
                     if not has_permission(perm_user, p):
+                        # SRK (SPEC-2026-010 D9): audit the denial (see roles-403 note).
+                        try:
+                            _src = request.remote_addr or ''
+                            if _src and not _src.startswith('127.') and _src != '::1':
+                                log_audit(session.get('user'), 'access.denied',
+                                          json.dumps({'via': 'perms', 'required': p,
+                                                      'role': fresh_role, 'path': request.path}),
+                                          get_client_ip())
+                        except Exception:
+                            pass
                         return jsonify({'error': 'Permission denied', 'code': 'MISSING_PERMISSION', 'required': p}), 403
             
             # Add session info to request context

@@ -1933,10 +1933,12 @@ def create_api_token_endpoint():
     if token_name in active_names:
         return jsonify({'error': f'Token name "{token_name}" already exists'}), 400
     
-    # NS: Max 10 active tokens per user
+    # SPEC-011 multi-key (Ray 09-09): one key per tenant-role. Ceiling raised
+    # 1 -> 10 active tokens. A9 unchanged: each key stays pinned to ONE role and
+    # inherits nothing from tenant membership (ceiling check below still caps).
     active_count = sum(1 for t in existing if not t.get('revoked'))
-    if active_count >= 1:
-        return jsonify({'error': 'You already have an active token. Revoke it first to create a new one.'}), 400
+    if active_count >= 10:
+        return jsonify({'error': 'Maximum of 10 active tokens reached. Revoke one to create a new one.'}), 400
     
     role = data.get('role')
     expires_days = data.get('expires_days')
@@ -1958,6 +1960,56 @@ def create_api_token_endpoint():
     log_audit(username, 'token.created', f"API token '{token_name}' created")
     
     return jsonify(result)
+
+
+@bp.route('/api/auth/tokens/mintable-roles', methods=['GET'])
+@require_auth()
+def list_mintable_token_roles():
+    """SPEC-011 multi-key: tenant-scoped roles the caller may pin a new key to.
+
+    Self-service: computed from the caller's OWN effective tenant set
+    (scalar home + user_tenants rows, SPEC-011 P5). A9 intact — this only
+    lists pin choices; create_api_token's permission-ceiling check still
+    guards every mint. Builtin-role picking stays admin-only in the UI.
+    """
+    username = request.session['user']
+    try:
+        from pegaprox.utils.auth import load_users, ROLE_ADMIN
+        from pegaprox.core.db import get_db
+        users = load_users()
+        user = users.get(username)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        is_admin = user.get('role') == ROLE_ADMIN
+        # SPEC-011 multi-key FIX2: list exactly the roles the mint ceiling
+        # would ACCEPT — i.e. replicate create_api_token's own check
+        # (role perms must be a subset of the owner's permission union).
+        # One code path for admin and non-admin: admin holds all perms, so
+        # every custom role passes; a viewer only sees roles they can mint.
+        # (scalar col is `tenant`; load_users dicts carry that key.)
+        from pegaprox.utils.rbac import (get_user_permissions,
+                                         get_role_permissions_for_user,
+                                         DEFAULT_TENANT_ID)
+        owner = dict(user, username=username)
+        owner_t = user.get('tenant') or user.get('tenant_id') or DEFAULT_TENANT_ID
+        owner_perms = set(get_user_permissions(owner, owner_t))
+        roles = []
+        rrows = get_db().conn.execute(
+            'SELECT name, tenant_id FROM custom_roles '
+            'ORDER BY tenant_id, name').fetchall()
+        for _name, _tid in rrows:
+            _role_t = _tid or owner_t
+            try:
+                _tok_perms = set(get_role_permissions_for_user(
+                    dict(owner, role=_name), _role_t))
+            except Exception:
+                continue
+            if _tok_perms - owner_perms:
+                continue  # mint ceiling would deny this pin
+            roles.append({'name': _name, 'tenant_id': _tid})
+        return jsonify({'roles': roles, 'is_admin': is_admin})
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Failed to list mintable roles')}), 500
 
 
 @bp.route('/api/auth/tokens/<int:token_id>', methods=['DELETE'])
