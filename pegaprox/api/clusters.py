@@ -28,7 +28,8 @@ from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
-                                  safe_error, scope_vm_rows, require_unconfined, parse_pve_error)
+                                  safe_error, scope_vm_rows, require_unconfined, parse_pve_error,
+                                  bounded_limit)
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
@@ -120,6 +121,12 @@ def get_clusters():
                 # the sshd_hardening control (PermitRootLogin prohibit-password) cuts off PegaProx's
                 # own access on a cluster we reach by root password with no key deployed.
                 'has_ssh_key': bool(getattr(mgr.config, 'ssh_key', '')),
+                # MK Sep 2026 (#941) — the listing is what the cluster dialog reads back, so
+                # a field missing here is a toggle that reverts on refresh. Same trap as
+                # proxlb_tags_enabled below (#628); the round-trip test I wrote went through
+                # save_cluster/get_cluster and never touched this serializer, so only the
+                # live E2E caught it.
+                'ssh_disabled': bool(getattr(mgr.config, 'ssh_disabled', False)),
                 'migration_threshold': mgr.config.migration_threshold,
                 'migration_tolerance': getattr(mgr.config, 'migration_tolerance', 10),
                 'check_interval': mgr.config.check_interval,
@@ -249,6 +256,7 @@ def export_cluster_config(cluster_id):
         'dry_run': c.dry_run,
         'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
         'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
+        'ssh_disabled': bool(getattr(c, 'ssh_disabled', False)),  # MK Sep 2026 (#941)
         # secrets intentionally omitted: pass, ssh_key, api_token_secret
     })
 
@@ -1267,6 +1275,7 @@ ALLOWED_CONFIG_FIELDS = {
     'balance_cpu_weight', 'balance_mem_weight', 'balance_io_weight',
     'cpu_baseline',
     'vnc_tunnel',  # MK Apr 2026 — SSH-tunnel-mode for VNC console
+    'ssh_disabled',  # MK Sep 2026 (#941) — no SSH to this cluster's nodes at all
     'proxlb_tags_enabled',  # MK Jul 2026 (#426) — derive placement from ProxLB VM tags
     'node_ui_suffix',  # MK Aug 2026 (#689) — FQDN suffix for "Open in Proxmox" node links
 }
@@ -1820,7 +1829,7 @@ def get_cluster_tasks(cluster_id):
     if not mgr.is_connected:
         return jsonify([])
 
-    limit = request.args.get('limit', 50, type=int)
+    limit = bounded_limit(request.args.get('limit'), 50, 1000)
     tasks = mgr.get_tasks(limit=limit) or []
 
     # sec (private disclosure Sep 2026 — audit M3): the task log carries per-VM UPIDs (vmid/node/type,

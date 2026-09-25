@@ -594,6 +594,7 @@ class PegaProxManager:
         self._csrf_token = None
         self._api_token = None  # NS: for API token auth (user@realm!tokenid=secret)
         self._using_api_token = False
+        self._last_ssh_block_logged = None  # #941 — say it once, not once per probe
         self.current_host = None  # Track which host we're connected to (resolved IP after #279)
         self._original_host = None  # original hostname before DNS resolution
         self._ssl_verify = False
@@ -6835,6 +6836,15 @@ echo "AGENT_INSTALLED_OK"
 
         NS: Jan 2026 - HA status checks bypass semaphore for immediate execution
         """
+        # #941 — this family is a second SSH ladder that never went through
+        # _ssh_connect, so gating that one reached one of five ways out of this process.
+        # Live E2E is what caught it: the switch read True in the cluster listing and the
+        # hardening report still came back full of real results.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked:
+            self.logger.debug(f"SSH suppressed ({_blocked}) for {host}")
+            return None
+
         # NS 2026-04-24 — auto-sudo for non-root SSH users (pegaprox@pam etc).
         # Wrap multi-line/shell-redirect commands through base64 → `sudo bash`.
         if user and user != 'root':
@@ -6871,6 +6881,15 @@ echo "AGENT_INSTALLED_OK"
 
         NS: Jan 2026 - HA operations bypass semaphore
         """
+        # #941 — this family is a second SSH ladder that never went through
+        # _ssh_connect, so gating that one reached one of five ways out of this process.
+        # Live E2E is what caught it: the switch read True in the cluster listing and the
+        # hardening report still came back full of real results.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked:
+            self.logger.debug(f"SSH suppressed ({_blocked}) for {host}")
+            return None
+
         # NS 2026-04-24 — auto-sudo for non-root SSH users (pegaprox@pam etc).
         # Wrap multi-line/shell-redirect commands through base64 → `sudo bash`.
         if user and user != 'root':
@@ -6925,6 +6944,15 @@ echo "AGENT_INSTALLED_OK"
 
         NS: Jan 2026 - HA operations bypass semaphore
         """
+        # #941 — this family is a second SSH ladder that never went through
+        # _ssh_connect, so gating that one reached one of five ways out of this process.
+        # Live E2E is what caught it: the switch read True in the cluster listing and the
+        # hardening report still came back full of real results.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked:
+            self.logger.debug(f"SSH suppressed ({_blocked}) for {host}")
+            return None
+
         # NS 2026-04-24 — auto-sudo for non-root SSH users (pegaprox@pam etc).
         # Wrap multi-line/shell-redirect commands through base64 → `sudo bash`.
         if user and user != 'root':
@@ -7756,6 +7784,15 @@ echo "AGENT_INSTALLED_OK"
         2. They are short (< 5 seconds typically)
         3. They are rare (only during actual failures)
         """
+        # #941 — this family is a second SSH ladder that never went through
+        # _ssh_connect, so gating that one reached one of five ways out of this process.
+        # Live E2E is what caught it: the switch read True in the cluster listing and the
+        # hardening report still came back full of real results.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked:
+            self.logger.debug(f"SSH suppressed ({_blocked}) for {host}")
+            return False
+
         # NS 2026-04-24 — auto-sudo for non-root SSH users (pegaprox@pam etc).
         # Wrap multi-line/shell-redirect commands through base64 → `sudo bash`.
         if user and user != 'root':
@@ -7798,6 +7835,15 @@ echo "AGENT_INSTALLED_OK"
         MK: Security fix - writes key to temp file with strict permissions,
         uses it for SSH, then immediately deletes it.
         """
+        # #941 — this family is a second SSH ladder that never went through
+        # _ssh_connect, so gating that one reached one of five ways out of this process.
+        # Live E2E is what caught it: the switch read True in the cluster listing and the
+        # hardening report still came back full of real results.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked:
+            self.logger.debug(f"SSH suppressed ({_blocked}) for {host}")
+            return False
+
         # NS 2026-04-24 — auto-sudo for non-root SSH users (pegaprox@pam etc).
         # Wrap multi-line/shell-redirect commands through base64 → `sudo bash`.
         if user and user != 'root':
@@ -7854,6 +7900,15 @@ echo "AGENT_INSTALLED_OK"
 
         NS: Jan 2026 - HA operations bypass semaphore for immediate execution
         """
+        # #941 — this family is a second SSH ladder that never went through
+        # _ssh_connect, so gating that one reached one of five ways out of this process.
+        # Live E2E is what caught it: the switch read True in the cluster listing and the
+        # hardening report still came back full of real results.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked:
+            self.logger.debug(f"SSH suppressed ({_blocked}) for {host}")
+            return False
+
         # NS 2026-04-24 — auto-sudo for non-root SSH users (pegaprox@pam etc).
         # Wrap multi-line/shell-redirect commands through base64 → `sudo bash`.
         if user and user != 'root':
@@ -8946,6 +9001,39 @@ echo "AGENT_INSTALLED_OK"
             return None
 
 
+    def ssh_blocked_reason(self):
+        """Why SSH to this cluster's nodes must not be attempted — a code, or None.
+
+        MK Sep 2026 (#941) — reported by an operator whose security team noticed SSH
+        arriving at PVE nodes from a cluster configured with an API token and nothing
+        else. Two separate problems sat behind that.
+
+        The loud one: with no ssh_key stored, _ssh_connect fell through to
+        `password = self.config.pass_`. On a cluster where the operator typed a token id
+        as the username, pass_ IS the token secret — it is what connect() concatenates
+        into `PVEAPIToken=user@realm!tokenid=<secret>`. So every one of these attempts
+        offered the Proxmox API token to the node's sshd as a password, where it lands in
+        the auth log and is visible to whatever sits in the PAM stack. That is not a
+        failed login, it is a credential disclosure on a path nobody asked for.
+
+        The quiet one: it happened on plain browsing. Opening a VM runs the LVM snapshot
+        probe, which reads the volume group over SSH.
+
+        `'!' in config.user` is the marker, not `_using_api_token`. The latter is also
+        true for a cluster the operator gave a username and password where we minted our
+        own token on first connect (#110) — there pass_ is still the account password and
+        perfectly good for SSH. Asking the wrong one refuses the most ordinary setup there
+        is; ssh_diagnose learned that the hard way and this is the same rule, in one place.
+        """
+        if bool(getattr(self.config, 'ssh_disabled', False)):
+            return 'SSH_DISABLED'
+        if getattr(self.config, 'ssh_key', ''):
+            return None
+        _pass_is_token_secret = '!' in (getattr(self.config, 'user', '') or '')
+        if getattr(self.config, 'pass_', '') and not _pass_is_token_secret:
+            return None
+        return 'SSH_NO_CREDENTIALS'
+
     def _ssh_connect(self, host: str, retries: int = 3, retry_delay: float = 2.0):
         """SSH connect with retry logic and connection rate limiting
 
@@ -8956,6 +9044,21 @@ echo "AGENT_INSTALLED_OK"
 
         HA operations use separate methods without any rate limiting.
         """
+        # #941 — decide before we open a socket. Every SSH path to a PVE node comes
+        # through here, so refusing here is what stops the traffic AND stops the token
+        # secret being offered as a password. Callers all handle None already.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked:
+            if _blocked != getattr(self, '_last_ssh_block_logged', None):
+                self._last_ssh_block_logged = _blocked
+                if _blocked == 'SSH_DISABLED':
+                    self.logger.info("SSH is switched off for this cluster - not connecting "
+                                     "to its nodes")
+                else:
+                    self.logger.info("No SSH credentials for this cluster (an API token is "
+                                     "not one) - not connecting to its nodes")
+            return None
+
         # strip URL brackets from IPv6 if someone passes host property
         if host and host.startswith('[') and host.endswith(']'):
             host = host[1:-1]
@@ -9694,8 +9797,11 @@ echo "AGENT_INSTALLED_OK"
             self.logger.info(f"Remote migrating {vm_type}/{vmid} from {node} to target cluster (target vmid: {actual_target_vmid})")
             # NS Jul 2026 (pentest HIGH) — data['target-endpoint'] carries a cleartext,
             # full-rights, non-expiring PVEAPIToken secret; never write it to the log.
-            _safe_data = {k: ('***REDACTED***' if k == 'target-endpoint' else v) for k, v in data.items()}
-            self.logger.debug(f"Migration data: {_safe_data}")
+            # MK Sep 2026 — was a comprehension for that one key. The storage-create route
+            # had the same problem with `password` and went on leaking for months because
+            # this fix reached one line; both now go through the shared rule.
+            from pegaprox.utils.sanitization import redact_secrets
+            self.logger.debug(f"Migration data: {redact_secrets(data)}")
             response = self._api_post(url, data=data)
             
             if response.status_code == 200:
@@ -10864,6 +10970,19 @@ echo "AGENT_INSTALLED_OK"
             'has_guest_agent': False,
             'warnings': []
         }
+
+        # MK Sep 2026 (#941) — this is the probe that made plain VM browsing open an SSH
+        # connection: it reads the volume group's free space off the node. When SSH is not
+        # available at all there is nothing to measure, and saying so is the honest answer.
+        # Falling through left vg_free_gb at its 0.0 default and the user was told
+        # "Not enough VG free space (0.0 GB free)" — a measurement we never took.
+        _ssh_blocked = self.ssh_blocked_reason()
+        if _ssh_blocked:
+            result['warnings'].append(
+                'Efficient snapshots need to read the volume group over SSH, and SSH is '
+                + ('switched off for this cluster' if _ssh_blocked == 'SSH_DISABLED'
+                   else 'not configured for this cluster'))
+            return result
 
         try:
             lvm_disks = self._get_vm_lvm_disks(node, vmid, vm_type)
@@ -15551,22 +15670,16 @@ echo "AGENT_INSTALLED_OK"
             return ('NODE_BACKOFF',
                     f"{node_name} is in reachability backoff for another {remaining}s "
                     f"after repeated failures")
-        # config.pass_ holds the TOKEN SECRET when the cluster authenticates with an API
-        # token, not an SSH password — _ssh_node_output will happily offer it to sshd and
-        # get nowhere. Treating it as a credential is what made this report "connection
-        # failed" on exactly the setup it was written for.
-        #
-        # MK Sep 2026 — but `_using_api_token` is the wrong question. It is also True for a
-        # cluster the operator gave a username and password, where we then minted our own
-        # token on first connect (#110) — and that path says so in as many words: "switch
-        # REST to token auth, keep password for SSH". For those, pass_ is still the account
-        # password and perfectly usable. The secret only lives in pass_ when the OPERATOR
-        # typed a token id as the username, which is what the '!' marks (see the detection
-        # at connect time). Asking _using_api_token instead reported "no SSH credentials"
-        # for the most ordinary setup there is.
-        _pass_is_token_secret = '!' in (getattr(self.config, 'user', '') or '')
-        has_password = bool(getattr(self.config, 'pass_', '')) and not _pass_is_token_secret
-        if not getattr(self.config, 'ssh_key', '') and not has_password:
+        # MK Sep 2026 (#941) — this function used to carry its own copy of the
+        # "is pass_ actually an SSH password?" rule. _ssh_connect needed the same answer
+        # and did not have it, which is how the token secret ended up being offered to
+        # sshd. One predicate now, used by both.
+        _blocked = self.ssh_blocked_reason()
+        if _blocked == 'SSH_DISABLED':
+            return ('SSH_DISABLED',
+                    "SSH to this cluster's nodes is switched off in its settings, and these "
+                    "checks read the node over SSH")
+        if _blocked == 'SSH_NO_CREDENTIALS':
             return ('SSH_NO_CREDENTIALS',
                     "this cluster authenticates with an API token and has no SSH key or "
                     "password stored, and these checks read the node over SSH")

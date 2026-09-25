@@ -360,6 +360,14 @@ def _save_result(status):
 
 def get_verification_history(cluster_id=None, vmid=None, limit=50):
     """Get verification history from database."""
+    # NS Sep 2026 (audit) — the route clamps this too, but the cap belongs here as well:
+    # the limit goes straight into a SQL LIMIT and this function has callers that never
+    # pass through the HTTP boundary. A bound that only exists at one of two entrances
+    # is the shape of most of what this audit turned up.
+    try:
+        limit = max(1, min(int(limit), 1000))
+    except (TypeError, ValueError):
+        limit = 50
     try:
         db = get_db()
         if cluster_id and vmid:

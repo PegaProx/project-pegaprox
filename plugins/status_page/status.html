@@ -250,10 +250,17 @@ function nowTimeStr() {
 }
 
 function escapeHtml(str) {
+    // LW Sep 2026 - textContent -> innerHTML escapes &, < and >, but NOT quotes: the HTML
+    // fragment serialiser only escapes " inside attribute values, and a text node is not
+    // one. Every other call here lands in text content, where that is fine, but the logo
+    // goes into src="..." - so a custom_logo_url containing a double quote broke out of
+    // the attribute and planted persistent script on the PUBLIC status page. Escaping the
+    // quotes here fixes that call site and any future one; in text content it is a no-op
+    // that only changes how the character is spelled in the markup.
     if (!str) return '';
     var div = document.createElement('div');
     div.textContent = str;
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // NS May 2026: single audit point for all HTML insertion. Uses a detached

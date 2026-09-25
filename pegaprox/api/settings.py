@@ -36,6 +36,19 @@ from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
 bp = Blueprint('settings', __name__)
 
 
+def _live_sessions():
+    """The session store as it stands right now.
+
+    `active_sessions` is created in globals.py and pulled in here by name, but
+    utils.auth.load_sessions() replaces its own global with a fresh dict once the
+    database has been read at boot. Every module that grabbed the name earlier
+    keeps the empty original. Resolving the attribute off the module at call time
+    is what api/auth.py does for the session-listing route; do the same here.
+    """
+    from pegaprox.utils import auth as _authmod
+    return _authmod.active_sessions
+
+
 def _sanitize_acme_dns_settings(settings, data):
     dns_provider = str(data.get('acme_dns_provider', settings.get('acme_dns_provider', 'manual')) or 'manual').strip()
     settings['acme_dns_provider'] = dns_provider if dns_provider in ('manual', 'rfc2136', 'cloudflare') else 'manual'
@@ -155,7 +168,11 @@ def get_security_status():
         },
         'session_management': {
             'timeout_minutes': get_session_timeout() // 60,
-            'active_sessions': len(active_sessions),
+            # MK: read through the module, not the star-import. load_sessions()
+            # rebinds utils.auth's global at startup, so this file's imported name
+            # stays pointed at the pre-boot empty dict and the panel reported 0
+            # sessions on a box with a hundred people logged in.
+            'active_sessions': len(_live_sessions()),
             'encrypted_storage': True,
             'secure_cookies': True,
         },
@@ -3634,8 +3651,9 @@ def generate_support_bundle():
             zf.writestr(f"{bundle_prefix}/sse_connections.json", json.dumps(sse_info, indent=2))
             
             # 5. Active Sessions (anonymized)
-            sessions_info = {'total_active': len(active_sessions), 'sessions': []}
-            for sid, sess in list(active_sessions.items())[:50]:
+            _sessions = _live_sessions()
+            sessions_info = {'total_active': len(_sessions), 'sessions': []}
+            for sid, sess in list(_sessions.items())[:50]:
                 sessions_info['sessions'].append({
                     'user': sess.get('user', 'unknown'),
                     'role': sess.get('role', 'unknown'),

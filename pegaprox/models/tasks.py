@@ -105,6 +105,10 @@ class PegaProxConfig:
         self.ssh_user = cluster_data.get('ssh_user', '')
         self.ssh_key = cluster_data.get('ssh_key', '')
         self.ssh_port = cluster_data.get('ssh_port', 22)
+        # MK Sep 2026 (#941) — hard off switch. Everything that reaches a node over SSH
+        # goes through PegaProxManager._ssh_connect, so this turns the lot off for this
+        # cluster: node shell, VNC tunnel, the LVM snapshot probe, the hardening checks.
+        self.ssh_disabled = bool(cluster_data.get('ssh_disabled', False))
         # MK May 2026 — Proxmox API port. Default :8006 covers ~all installs,
         # but ops running PVE on a non-standard port (firewall constraint,
         # multi-tenant single-IP, hardened jumpbox) need to override this.

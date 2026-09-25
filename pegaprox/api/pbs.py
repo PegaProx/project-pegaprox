@@ -13,7 +13,7 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
-from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined, bounded_limit
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server
 
 bp = Blueprint('pbs', __name__)
@@ -153,6 +153,29 @@ def update_pbs_server(pbs_id):
     if not ok:
         return err
     data = request.json or {}
+
+    # MK Sep 2026 (audit) — linked_clusters is the authorization list check_pbs_access reads,
+    # and an EMPTY one means "reachable by everybody" (the backward-compatibility arm). Omitting
+    # the field was already made safe at the storage layer, but sending it EXPLICITLY empty was
+    # not: any user who reached this server through one of its links could hand the whole backup
+    # server — every tenant's snapshots on it — to every tenant, in one PUT. Widening the list is
+    # the same move at half speed, so a non-admin may only ever narrow it, and only to clusters
+    # they can reach themselves.
+    if 'linked_clusters' in data:
+        from pegaprox.utils.auth import build_authz_user as _bau
+        from pegaprox.utils.rbac import get_user_clusters as _guc
+        _caller = _bau(request.session.get('user', ''), request.session)
+        if _caller.get('effective_role', _caller.get('role')) != ROLE_ADMIN:
+            _new_links = list(data.get('linked_clusters') or [])
+            if not _new_links:
+                return jsonify({'error': 'Access denied: only a global admin may unlink a PBS '
+                                         'server from every cluster'}), 403
+            _reachable = _guc(_caller)
+            if _reachable is not None:
+                _beyond = [c for c in _new_links if c not in set(_reachable)]
+                if _beyond:
+                    return jsonify({'error': 'Access denied: cannot link this PBS server to '
+                                             + ', '.join(_beyond)}), 403
 
     # Resolve the CURRENT stored config (in-memory manager preferred, else DB row) so we can detect
     # a host/port change BEFORE persisting anything.
@@ -969,7 +992,7 @@ def get_pbs_tasks(pbs_id):
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
-    limit = int(request.args.get('limit', 50))
+    limit = bounded_limit(request.args.get('limit'), 50, 1000)
     typefilter = request.args.get('typefilter', None)
     running = request.args.get('running', None)
     result = mgr.get_tasks(limit=limit, typefilter=typefilter,
@@ -1304,7 +1327,7 @@ def get_pbs_syslog(pbs_id):
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
-    limit = request.args.get('limit', 100, type=int)
+    limit = bounded_limit(request.args.get('limit'), 100, 1000)
     since = request.args.get('since')
     result = mgr.get_syslog(limit=limit, since=since)
     failed = pbs_upstream_error(result)
@@ -2557,7 +2580,7 @@ def get_backup_verification_history(cluster_id):
         return err
 
     vmid = request.args.get('vmid', type=int)
-    limit = request.args.get('limit', 50, type=int)
+    limit = bounded_limit(request.args.get('limit'), 50, 1000)
 
     results = get_verification_history(cluster_id, vmid, limit)
     return jsonify(_verification_rows_visible(cluster_id, results))

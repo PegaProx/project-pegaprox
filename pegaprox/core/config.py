@@ -153,6 +153,7 @@ def save_config():
                     'api_token_secret': getattr(manager.config, 'api_token_secret', ''),
                     'cluster_type': getattr(manager, 'cluster_type', 'proxmox'),
                     'vnc_tunnel': bool(getattr(manager.config, 'vnc_tunnel', False)),  # MK Apr 2026
+                    'ssh_disabled': bool(getattr(manager.config, 'ssh_disabled', False)),  # MK Sep 2026 (#941)
                     'node_ui_suffix': getattr(manager.config, 'node_ui_suffix', '') or '',  # MK Aug 2026 (#689)
                     # NS May 2026 (#364) — load-balancer settings used to be set
                     # on the in-memory config object but never made it into the

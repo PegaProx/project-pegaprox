@@ -20,7 +20,7 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ssh import read_capped as _read_capped
-from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined
+from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined, bounded_limit
 
 bp = Blueprint('nodes', __name__)
 
@@ -947,7 +947,7 @@ def get_node_syslog_api(cluster_id, node):
     
     manager = cluster_managers[cluster_id]
     start = request.args.get('start', 0, type=int)
-    limit = request.args.get('limit', 500, type=int)
+    limit = bounded_limit(request.args.get('limit'), 500, 5000)
     return jsonify(manager.get_node_syslog(node, start, limit))
 
 
@@ -1067,7 +1067,7 @@ def get_node_tasks_api(cluster_id, node):
     
     manager = cluster_managers[cluster_id]
     start = request.args.get('start', 0, type=int)
-    limit = request.args.get('limit', 50, type=int)
+    limit = bounded_limit(request.args.get('limit'), 50, 1000)
     errors = request.args.get('errors', 'false').lower() == 'true'
     vmid = request.args.get('vmid', None, type=int)
     
@@ -1130,7 +1130,7 @@ def get_node_task_log_api(cluster_id, node, upid):
             return jsonify({'error': 'Access denied to this task'}), 403
 
     start = request.args.get('start', 0, type=int)
-    limit = request.args.get('limit', 500, type=int)
+    limit = bounded_limit(request.args.get('limit'), 500, 5000)
 
     log_lines = manager.get_node_task_log(node, upid, start, limit)
     # Join lines into a single string for display

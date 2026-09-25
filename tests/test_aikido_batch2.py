@@ -40,7 +40,13 @@ def test_tenant_admin_groups_holder_cannot_delete_global_group(api, seed):
     seed.tenant('tenant_a', clusters=['cluster_home'])
     alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['admin.groups'])
     r = api.as_user(alice).delete(f'/api/cluster-groups/{gid}')
-    assert r.status_code == 403, r.get_data(as_text=True)
+    # 404 since the group routes stopped confirming existence to a caller who may not
+    # act on the group (toggle_group_collapse has answered that way since its own
+    # review). The property is unchanged: the global group survives.
+    assert r.status_code == 404, r.get_data(as_text=True)
+    from pegaprox.core.db import get_db
+    assert get_db().query_one('SELECT id FROM cluster_groups WHERE id = ?', (gid,)), \
+        'the global group was deleted anyway'
 
 
 def test_tenant_cluster_config_holder_cannot_balance_global_group(api, seed):
@@ -48,7 +54,8 @@ def test_tenant_cluster_config_holder_cannot_balance_global_group(api, seed):
     seed.tenant('tenant_a', clusters=['cluster_home'])
     alice = seed.user('alice', role='user', tenant_id='tenant_a', permissions=['cluster.config'])
     r = api.as_user(alice).post(f'/api/cluster-groups/{gid}/balance-now')
-    assert r.status_code == 403, r.get_data(as_text=True)
+    # as above - refused, and reported the same way a missing group is
+    assert r.status_code == 404, r.get_data(as_text=True)
 
 
 def test_admin_can_delete_global_group(api, seed):

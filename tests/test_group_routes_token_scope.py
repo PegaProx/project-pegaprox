@@ -115,14 +115,20 @@ def test_a_capped_token_cannot_edit_another_tenants_group(api, estate):
     with _as(api, _token('taylor'), body={'name': 'stolen'}):
         resp = _handler('update_cluster_group')('g_b')
 
-    assert resp[1] == 403
+    # denial is now reported as 404, same as a group that is not there;
+    # what matters is that the call did not go through
+    assert resp[1] == 404
 
 
 def test_a_capped_token_cannot_delete_a_global_group(api, estate):
     with _as(api, _token('taylor')):
         resp = _handler('delete_cluster_group')('g_glob')
 
-    assert resp[1] == 403
+    # 404 rather than 403 since the group routes stopped confirming existence; the
+    # property is that the group is still there afterwards
+    assert resp[1] == 404
+    assert estate.query_one("SELECT id FROM cluster_groups WHERE id = 'g_glob'"), \
+        'the group was deleted anyway'
 
 
 def test_a_capped_token_cannot_regroup_a_cluster_it_does_not_own(api, estate):
@@ -148,7 +154,9 @@ def test_a_capped_token_cannot_trigger_balancing_on_a_global_group(api, estate):
     with _as(api, _token('taylor')):
         resp = _handler('trigger_xclb_balance_now')('g_glob')
 
-    assert resp[1] == 403
+    # denial is now reported as 404, same as a group that is not there;
+    # what matters is that the call did not go through
+    assert resp[1] == 404
 
 
 def test_the_owner_can_still_do_all_of_it_from_their_own_session(api, estate):

@@ -763,6 +763,9 @@ _SSH_ERRORS = {
     'SSH_NO_CREDENTIALS': (412, 'Add an SSH key or a password to this cluster under '
                                 'Settings > Clusters. An API token alone cannot open a '
                                 'shell, which these checks need.'),
+    'SSH_DISABLED':       (412, 'SSH to this cluster is switched off in its settings. '
+                                'These checks read the node over SSH, so they cannot '
+                                'run until it is switched back on.'),
     'NODE_BACKOFF':       (503, 'The node stopped answering and is being retried with a '
                                 'backoff. Check that it is up and reachable from PegaProx.'),
     'SSH_FAILED':         (502, 'Credentials are configured but the connection did not '

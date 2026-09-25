@@ -272,3 +272,15 @@ def test_the_real_call_sites_still_get_their_own_window():
     sshmod.check_auth_action_rate_limit('webauthn_begin:1.2.3.4', 20, 300)
 
     assert set(sshmod._auth_action_windows) == {(5, 300), (3, 120), (20, 300)}
+
+
+def test_the_integration_harness_starts_each_test_with_a_clean_window(api):
+    """The harness looks like ONE client to a limiter budgeted at 1200 requests per
+    60 seconds, and nothing used to clear it between tests. A long run therefore
+    spent the budget partway through and every later integration test failed with a
+    429 instead of whatever it was asserting — which is how Testing CI went red on
+    ae8674d while the same tree was green on a slower machine. The `api` fixture now
+    resets it; this pins that so the next person to grow the suite does not spend an
+    afternoon on it. MK"""
+    import pegaprox.globals as ppglobals
+    assert len(ppglobals.api_rate_window) == 0

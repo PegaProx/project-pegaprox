@@ -70,16 +70,27 @@ def _role_at_or_below_caller(target_role):
 
 
 def _role_permissions(role):
-    """All permissions a role grants — builtin (ROLE_PERMISSIONS) or custom (load_custom_roles)."""
+    """All permissions a role grants — builtin (ROLE_PERMISSIONS) or custom (load_custom_roles).
+
+    MK Sep 2026 (audit) — a custom role id can live in BOTH namespaces, and the two
+    functions that resolve one walked them in opposite orders: this one took the global
+    definition first, while rbac.get_role_permissions_for_user — the one that decides what
+    the account may actually do — takes the tenant's. So with a harmless global `ops` and a
+    powerful tenant `ops`, the ceiling check in _caller_can_grant_role weighed ['vm.view']
+    and the account received admin.users and admin.settings.
+
+    For a ceiling check the only safe reading of an ambiguous name is the UNION: cover both
+    or assign neither. That holds however the runtime resolves it downstream, which is the
+    point — matching the other order would just move the disagreement.
+    """
     if role in ROLE_PERMISSIONS:
         return list(ROLE_PERMISSIONS.get(role, []))
     cr = load_custom_roles()
-    if role in cr.get('global', {}):
-        return list((cr['global'].get(role) or {}).get('permissions', []))
+    perms = set((cr.get('global', {}).get(role) or {}).get('permissions', []) or [])
     for _tid, _roles in cr.get('tenants', {}).items():
         if role in _roles:
-            return list((_roles.get(role) or {}).get('permissions', []))
-    return []
+            perms.update((_roles.get(role) or {}).get('permissions', []) or [])
+    return sorted(perms)
 
 
 def _caller_can_grant_role(target_role):
@@ -566,7 +577,11 @@ def unlock_ip(ip_address):
     if ip_address in login_attempts_by_ip:
         del login_attempts_by_ip[ip_address]
         logging.info(f"Admin manually unlocked IP: {_sl(ip_address)}")
-        log_audit(request.headers.get('X-Username', 'admin'), 'security.unlock_ip', f"Manually unlocked IP: {ip_address}")
+        # MK Sep 2026 (audit) — the actor used to come from an X-Username REQUEST HEADER,
+        # which the caller sets and which app.py even lists in the CORS allow-list. The other
+        # 24 log_audit calls in this file read request.session. Practical effect without any
+        # attacker: every "manually unlocked IP" line in the trail said 'admin', the default.
+        log_audit(request.session.get('user', 'admin'), 'security.unlock_ip', f"Manually unlocked IP: {ip_address}")
         return jsonify({'success': True, 'message': f'IP {ip_address} unlocked'})
     else:
         return jsonify({'error': 'IP not found in locked list'}), 404
@@ -602,10 +617,12 @@ def unlock_user(username):
 @require_auth(perms=['security.lockout.manage'])
 def unlock_all_ips():
     """Unlock all IP addresses (admin only)"""
-    global login_attempts_by_ip
-    
+    # MK: clear() the store, never rebind it. `global` here names THIS module's
+    # copy of the import, so `= {}` left api/auth.py — the module the login path
+    # reads — holding the old dict with every lockout still in it, and pointed the
+    # listing and single-unlock routes at a detached empty one.
     count = len(login_attempts_by_ip)
-    login_attempts_by_ip = {}
+    login_attempts_by_ip.clear()
     
     logging.info(f"Admin manually unlocked all IPs ({count} entries cleared)")
     log_audit(request.session.get('user', 'admin'), 'security.unlock_all_ips', f"Cleared all {count} locked IPs")
@@ -620,10 +637,8 @@ def unlock_all_users():
     
     MK: New endpoint for clearing all username lockouts
     """
-    global login_attempts_by_user
-    
     count = len(login_attempts_by_user)
-    login_attempts_by_user = {}
+    login_attempts_by_user.clear()
     
     logging.info(f"Admin manually unlocked all users ({count} entries cleared)")
     log_audit(request.session.get('user', 'admin'), 'security.unlock_all_users', f"Cleared all {count} locked users")
@@ -685,6 +700,15 @@ def get_security_audit(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # MK Sep 2026 (audit) — and reachability is not enough for this one. It enumerates every
+    # online node, the cluster firewall state, pending security updates, sshd findings and
+    # fail2ban bans: whole-cluster posture with no per-object notion, which is exactly what
+    # require_unconfined() exists for. A pool-/ACL-scoped caller holding admin.audit reached
+    # it through the #248/#555 fallbacks.
+    from pegaprox.api.helpers import require_unconfined
+    _uerr = require_unconfined(cluster_id)
+    if _uerr:
+        return _uerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -987,6 +1011,14 @@ def update_user(username):
             return jsonify({'error': 'Cannot assign a role with higher privileges than your own'}), 403
         if not _caller_can_grant_role(data['role']):
             return jsonify({'error': 'Cannot assign a role that grants permissions beyond your own'}), 403
+        # MK Sep 2026 (audit) — and the caller has to outrank the target AS IT STANDS, not as
+        # it will stand. Disabling an account already asks this question; re-roling one is the
+        # stronger operation and asked nothing, so a delegate could demote an administrator it
+        # could not touch and then reset that account's password on the next request. The same
+        # gap in one request: the `enabled` branch below calls _caller_can_manage_user on the
+        # dict this block has already mutated, and so does the last-admin check under it.
+        if not _caller_can_manage_user(user):
+            return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
         # Prevent last admin from losing admin role
         if user['role'] == ROLE_ADMIN and data['role'] != ROLE_ADMIN:
             admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
@@ -1162,6 +1194,14 @@ def delete_user(username):
     # NS: Fix - actually delete from database! Jan 2026
     try:
         db = get_db()
+        # MK Sep 2026 (audit) — revoke the API tokens FIRST and treat a failure as a failed
+        # deletion. This used to run after the account row was already gone, inside a
+        # try/except that only warned, so a revocation error left live pgx_ bearer tokens
+        # behind for a username that no longer existed. Tokens are keyed by username, and
+        # the name is free again the moment the row goes: recreating it re-activated
+        # somebody else's old tokens against the new account. Failing here leaves an
+        # account whose tokens are revoked, which is the harmless direction.
+        db.execute('UPDATE api_tokens SET revoked = 1 WHERE username = ?', (username,))
         db.delete_user(username)
         logging.info(f"Deleted user '{_sl(username)}' from database")
     except Exception as e:
@@ -1183,10 +1223,6 @@ def delete_user(username):
     invalidate_all_user_sessions(username)
     invalidate_user_ws_tokens(username)   # drop any pre-minted console/shell ws_token too
     invalidate_user_sse_tokens(username)  # and the SSE stream token (audit)
-    try:
-        db.execute('UPDATE api_tokens SET revoked = 1 WHERE username = ?', (username,))
-    except Exception as e:
-        logging.warning(f"Failed to revoke API tokens for deleted user '{_sl(username)}': {e}")
 
     logging.info(f"Admin '{_sl(request.session['user'])}' deleted user '{_sl(username)}'")
     log_audit(request.session['user'], 'user.deleted', f"Deleted user: {username}")
@@ -1554,10 +1590,22 @@ def get_all_permissions():
 @require_auth()
 def get_role_permissions():
     """Get all roles - builtin + custom"""
+    # MK Sep 2026 (audit) — this handed back the whole custom-roles tree to ANY authenticated
+    # caller: every tenant's roles, their full permission lists, and the username that created
+    # each one. list_all_roles() right below has filtered tenant roles to the caller's own
+    # tenant since the multi-tenancy work; this endpoint never learned about tenants at all.
+    custom = get_custom_roles()
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    if _u.get('effective_role', _u.get('role')) != ROLE_ADMIN:
+        _ut = _u.get('tenant_id', DEFAULT_TENANT_ID)
+        custom = {
+            'global': custom.get('global', {}),
+            'tenants': {t: r for t, r in (custom.get('tenants', {}) or {}).items() if t == _ut},
+        }
     # builtin
     result = {
         'builtin': ROLE_PERMISSIONS,
-        'custom': get_custom_roles()
+        'custom': custom
     }
     return jsonify(result)
 
@@ -1808,12 +1856,27 @@ def delete_custom_role(role_id):
     # longer resolve. So removing a deliberately narrow role WIDENED its holders — a role
     # granting vm.view left them with 31 permissions including the whole node, cluster and PBS
     # read surface. An admin deleting a role means "revoke this", never "promote them".
-    _holders = sorted(
-        u for u, rec in (load_users() or {}).items()
-        if (rec or {}).get('role') == role_id
-        or any((_ov or {}).get('role') == role_id
-               for _ov in ((rec or {}).get('tenant_permissions', {}) or {}).values())
-    )
+    # MK Sep 2026 (audit) — ask who holds THIS role, not who holds a role by this name.
+    # The bare string was matched across every account, so deleting tenant A's 'ops' listed
+    # the holders of tenant B's unrelated 'ops' — other tenants' usernames handed to the
+    # caller, and a 409 blocking the delete over accounts they cannot see.
+    def _holds(rec):
+        rec = rec or {}
+        _tp = rec.get('tenant_permissions', {}) or {}
+        if tenant_id:
+            # A tenant role lives in one namespace, so there are exactly two ways to hold
+            # it: sit in that tenant, or carry an explicit override FOR that tenant from
+            # anywhere else. The override is the one that is easy to miss — the account's
+            # own tenant_id says nothing about it.
+            if (_tp.get(tenant_id) or {}).get('role') == role_id:
+                return True
+            return (rec.get('tenant_id', DEFAULT_TENANT_ID) == tenant_id
+                    and rec.get('role') == role_id)
+        # a global role resolves for anyone, by role or by any override
+        return (rec.get('role') == role_id
+                or any((_ov or {}).get('role') == role_id for _ov in _tp.values()))
+
+    _holders = sorted(u for u, rec in (load_users() or {}).items() if _holds(rec))
     if _holders:
         return jsonify({
             'error': 'Role still assigned',
@@ -1949,7 +2012,16 @@ def get_cluster_vm_acls(cluster_id):
             'permissions': acl.get('permissions', []),
             'inherit_role': acl.get('inherit_role', True)
         })
-    
+
+    # MK Sep 2026 (audit) — set_vm_acl got the per-VM gate; the reads beside it did not, and
+    # this one returns the cluster's whole access map: which accounts reach which VM. An
+    # ACL-scoped caller arrives here through the #248 fallback in check_cluster_access, so
+    # cluster reach proves nothing. A plain cluster-wide operator still sees every row.
+    from pegaprox.api.helpers import caller_is_scoped, scope_vm_rows
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_caller, cluster_id):
+        result = scope_vm_rows(cluster_id, result)
+
     return jsonify(result)
 
 
@@ -1959,7 +2031,13 @@ def get_vm_acl(cluster_id, vmid):
     """Get ACL for a specific VM"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    # same gap as the list route above, one object at a time
+    from pegaprox.api.helpers import caller_is_scoped
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_caller, cluster_id) and not user_can_access_vm(
+            _caller, cluster_id, vmid, 'vm.view'):
+        return jsonify({'error': 'Access denied to this VM'}), 403
+
     acls = get_vm_acls()
     cluster_acls = acls.get(cluster_id, {})
     vm_acl = cluster_acls.get(str(vmid), {})
@@ -2174,7 +2252,14 @@ def get_pool_permissions_api(cluster_id, pool_id):
     """Get permissions for a pool"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    # MK Sep 2026 (audit) — the H3 disclosure gave get_pool_details() the pool-level gate
+    # because check_cluster_access's #555 fallback admits a pool-scoped caller to the whole
+    # cluster. This route sits directly beside it, answers for the same object, and was left
+    # on cluster reach alone: pool-A's admin could read who holds what on pool B.
+    _confined, _granted = _pool_visibility(cluster_id)
+    if _confined and pool_id not in _granted:
+        return jsonify({'error': 'Access denied to this pool'}), 403
+
     db = get_db()
     perms = db.get_pool_permissions(cluster_id, pool_id)
     
@@ -2406,8 +2491,14 @@ def rm_pool(cluster_id, pool_id):
         db = get_db()
         for p in db.get_pool_permissions(cluster_id, pool_id):
             db.delete_pool_permission(cluster_id, pool_id, p['subject_type'], p['subject_id'])
-    except:
-        pass  # NS: not critical, orphaned perms don't hurt
+    except Exception as e:
+        # MK Sep 2026 (audit) — "orphaned perms don't hurt" is not true: grants are keyed by
+        # (cluster, pool_id) and a pool id is free to reuse, so a pool recreated under the same
+        # name silently inherits whoever was granted on the old one. We cannot undo the PVE
+        # delete at this point, so the honest thing is to say so loudly rather than swallow it.
+        logging.error(f"[POOL] deleted pool '{_sl(pool_id)}' on {_sl(cluster_id)} but could not "
+                      f"remove its permission rows - a pool recreated under this id would "
+                      f"inherit them: {e}")
     return jsonify({'success': True})
 
 

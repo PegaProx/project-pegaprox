@@ -6055,6 +6055,13 @@ def snapshots_overview():
                 results.append({
                     "vmid": vmid, "vm_name": vm_name, "vm_type": vm_type, "node": node,
                     "snapshot_name": snap_name, "snapshot_date": snap_dt.strftime('%Y-%m-%d %H:%M'),
+                    # MK Sep 2026 (#939) — hand over the raw epoch as well. Formatting the
+                    # time server-side in UTC and printing that string meant this overview
+                    # disagreed with the per-VM snapshot list, which renders browser-local;
+                    # in CEST the same snapshot showed two different times depending on
+                    # which page you opened. snapshot_date stays for older frontends and
+                    # because the table sorts on it.
+                    "snapshot_ts": int(snap_ts),
                     "age": age, "cluster_id": cid
                 })
             return results
@@ -6829,7 +6836,16 @@ def _untagged_replica_error(job_id, vmid, node, detail):
 # ============================================================================
 
 def _xcincr_node_ip(mgr, node):
-    """Resolve a cluster node name to an IP for SSH (cluster/status)."""
+    """Resolve a cluster node name to an IP for SSH (cluster/status), or None.
+
+    MK Sep 2026 — this used to hand the name straight back when cluster/status did not
+    list it. The name comes off the stored replication job, where it was supplied when
+    the job was created, so an unresolvable one became the SSH destination itself and
+    _ssh_connect offers THAT cluster's stored root credentials to it. Same contract as
+    manager.member_node_ip, and for the same reason: None means refuse, never "use the
+    name". A deployment that was relying on the node name resolving in DNS now fails
+    the job with a message saying so instead of dialling a host we never verified.
+    """
     try:
         r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/status")
         if r.status_code == 200:
@@ -6838,7 +6854,7 @@ def _xcincr_node_ip(mgr, node):
                     return it['ip']
     except Exception:
         pass
-    return node
+    return None
 
 
 def _xcincr_rbd_pool(ssh, storage):
@@ -7050,8 +7066,16 @@ def _execute_replication_incremental(job):
                  f"({len(disks)} disk(s), base={last_snap or 'none/seed'})")
     src_ssh = tgt_ssh = None
     try:
-        src_ssh = source_mgr._ssh_connect(_xcincr_node_ip(source_mgr, source_node))
-        tgt_ssh = target_mgr._ssh_connect(_xcincr_node_ip(target_mgr, target_node))
+        _src_ip = _xcincr_node_ip(source_mgr, source_node)
+        _tgt_ip = _xcincr_node_ip(target_mgr, target_node)
+        if not _src_ip or not _tgt_ip:
+            _missing = source_node if not _src_ip else target_node
+            _update_repl_status(db, job_id, 'error',
+                                f'Node {_missing!r} is not listed as a member of its cluster - '
+                                f'refusing to SSH to it')
+            return True
+        src_ssh = source_mgr._ssh_connect(_src_ip)
+        tgt_ssh = target_mgr._ssh_connect(_tgt_ip)
         if not src_ssh or not tgt_ssh:
             _update_repl_status(db, job_id, 'error', 'SSH to source/target node failed (incremental needs SSH creds on both clusters)')
             return True
@@ -10574,6 +10598,23 @@ def delete_vm_api(cluster_id, node, vm_type, vmid):
     
     if result.get('success'):
         usr = getattr(request, 'session', {}).get('user', 'system')
+        # MK Sep 2026 - drop the per-VM ACL with the VM. The row is keyed by the NUMERIC
+        # vmid, and Proxmox hands out the lowest free one, so a recycled id is the normal
+        # case rather than a corner: leave the grant behind and the next guest to land on
+        # this number is reachable by the previous one's users, across tenants. The portal's
+        # own teardown route has done this since #556 for exactly this reason; the main
+        # delete path, which is where almost every VM actually goes, never did.
+        # Only on success, so a refused delete does not strip a live VM's grants.
+        try:
+            if get_db().delete_vm_acl(cluster_id, vmid):
+                # the ACL snapshot is cached behind a 30s TTL and every write path is
+                # expected to invalidate it - without this the grant outlives the row
+                from pegaprox.utils.rbac import invalidate_vm_acls_cache
+                invalidate_vm_acls_cache()
+        except Exception as e:
+            logging.error(f"{vm_type.upper()} {vmid} deleted but its VM ACL was NOT removed: {e} "
+                          f"- remove the stale vm_acls row by hand, a recycled VMID would "
+                          f"inherit the grant")
         log_audit(usr, 'vm.deleted', f"{vm_type.upper()} {vmid} deleted from {node}" + (" (purged)" if purge else ""), cluster=manager.config.name)
         broadcast_action('delete', vm_type, str(vmid), {'node': node, 'purge': purge}, cluster_id, usr)
         

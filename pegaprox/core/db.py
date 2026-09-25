@@ -51,6 +51,50 @@ try:
 except ImportError:
     pass
 
+# MK Sep 2026 (audit) — a pool_permissions row whose permission list is empty grants
+# nothing inside the pool, but this query returned its cluster anyway, and the #555
+# fallback in check_cluster_access turns "holds a pool grant here" into cluster reach.
+# So an emptied grant kept the door open while the UI showed no permissions at all.
+# rbac.user_has_any_pool_access already gets this right (`any(p for p in perms.values())`),
+# which is what makes the difference a bug rather than a decision. Empty is stored as
+# '[]' by the write path and as NULL/'' by older rows.
+_NON_EMPTY_GRANT = " AND permissions IS NOT NULL AND TRIM(permissions) NOT IN ('', '[]')"
+
+
+def _group_grant_spellings(group):
+    """Every spelling a pool grant might plausibly use for one directory group.
+
+    #940 — an LDAP/AD login stores memberships as full DNs
+    ("CN=PVE-Admins,OU=Groups,DC=corp,DC=local"); utils/ldap.py puts member_of straight
+    into the user's `groups`. The pool-permission dialog, meanwhile, labels its field
+    "Group Name" / "Gruppenname" in all three places it appears and the operator types
+    `PVE-Admins`. The lookup compared the whole string, so the grant never matched, the
+    pool stayed empty, and nothing anywhere raised — which is why this sat unnoticed.
+
+    Returns the value as stored plus, when it parses as a DN, its first RDN value. A
+    grant written as a DN still matches only the DN (the leaf candidate is a bare name);
+    a grant written as a bare name now matches the DN's leaf. Note the consequence: two
+    groups in different OUs sharing a CN both match a bare-name grant. That is inherent
+    to typing a bare name and is what the dialog asks for — an operator who needs them
+    separated can enter the full DN, which stays exact.
+
+    The role/tenant mapping side of LDAP is unaffected: its field is called `group_dn`
+    and compares whole strings, which is consistent with what it asks for. MK
+    """
+    import re as _re
+    g = (group or '').strip()
+    if not g:
+        return []
+    out = [g]
+    # first RDN of a DN — split on a comma that is not escaped (RFC 4514 allows "\,")
+    head = _re.split(r'(?<!\\),', g, maxsplit=1)[0].strip()
+    if '=' in head:
+        leaf = head.split('=', 1)[1].strip().replace('\\,', ',')
+        if leaf and leaf.lower() != g.lower():
+            out.append(leaf)
+    return out
+
+
 class PegaProxDB:
     """
     SQLite database wrapper - MK
@@ -1199,6 +1243,11 @@ class PegaProxDB:
                 ('balance_io_weight', "REAL DEFAULT 1.0"),
                 ('cpu_baseline', "TEXT DEFAULT ''"),
                 ('vnc_tunnel', "INTEGER DEFAULT 0"),
+                # MK Sep 2026 (#941) — an operator-facing off switch for SSH to this
+                # cluster's nodes. A cluster with no usable SSH credential is already
+                # refused without this; the flag is for the site that HAS a key stored
+                # and still wants no SSH from the PegaProx host at all.
+                ('ssh_disabled', "INTEGER DEFAULT 0"),
                 ('backup_sla_max_age_hours', "INTEGER DEFAULT 0"),
                 # MK May 2026 — Proxmox API port override (default 8006). Direct
                 # TLS only — we don't support reverse-proxied PVE by design.
@@ -3057,6 +3106,7 @@ class PegaProxDB:
                 'balance_io_weight': row['balance_io_weight'] if 'balance_io_weight' in row.keys() else 1.0,
                 'cpu_baseline': row['cpu_baseline'] if 'cpu_baseline' in row.keys() else '',
                 'vnc_tunnel': bool(row['vnc_tunnel']) if 'vnc_tunnel' in row.keys() else False,
+                'ssh_disabled': bool(row['ssh_disabled']) if 'ssh_disabled' in row.keys() else False,
                 'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
                 'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
                 # MK May 2026 — worldmap fields (per-cluster)
@@ -3144,6 +3194,7 @@ class PegaProxDB:
             'balance_io_weight': row['balance_io_weight'] if 'balance_io_weight' in row.keys() else 1.0,
             'cpu_baseline': row['cpu_baseline'] if 'cpu_baseline' in row.keys() else '',
             'vnc_tunnel': bool(row['vnc_tunnel']) if 'vnc_tunnel' in row.keys() else False,
+            'ssh_disabled': bool(row['ssh_disabled']) if 'ssh_disabled' in row.keys() else False,
             'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
             # MK May 2026 — Proxmox API port override (default 8006). Direct-TLS only, never proxied.
             'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
@@ -3192,7 +3243,7 @@ class PegaProxDB:
              cluster_type,
              predictive_balancing, predictive_threshold,
              balance_cpu_weight, balance_mem_weight, balance_io_weight,
-             cpu_baseline, vnc_tunnel,
+             cpu_baseline, vnc_tunnel, ssh_disabled,
              backup_sla_max_age_hours,
              api_port,
              latitude, longitude, location_label,
@@ -3200,7 +3251,7 @@ class PegaProxDB:
              proxlb_tags_enabled,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -3237,6 +3288,7 @@ class PegaProxDB:
             float(data.get('balance_io_weight', 1.0) or 1.0),
             data.get('cpu_baseline', '') or '',
             1 if data.get('vnc_tunnel', False) else 0,
+            1 if data.get('ssh_disabled', False) else 0,
             int(data.get('backup_sla_max_age_hours', 0) or 0),
             int(data.get('api_port', 8006) or 8006),
             data.get('latitude', existing_lat),
@@ -4230,10 +4282,18 @@ class PegaProxDB:
         # collide here — realm group names are unique case-wise in practice.
         if groups:
             for group in groups:
-                cursor.execute('''
+                # #940 — match the DN as stored AND its bare group name, because the
+                # dialog that writes these grants asks for a name while the login stores
+                # a DN.
+                _spellings = _group_grant_spellings(group)
+                if not _spellings:
+                    continue
+                _ph = ','.join('?' * len(_spellings))
+                cursor.execute(f'''
                     SELECT pool_id, permissions FROM pool_permissions
-                    WHERE cluster_id = ? AND subject_type = 'group' AND LOWER(subject_id) = LOWER(?)
-                ''', (cluster_id, group))
+                    WHERE cluster_id = ? AND subject_type = 'group'
+                      AND LOWER(subject_id) IN ({_ph})
+                ''', (cluster_id, *[v.lower() for v in _spellings]))
                 
                 for row in cursor.fetchall():
                     pool_id = row[0]
@@ -4259,12 +4319,22 @@ class PegaProxDB:
             # MK #555 — group names match case-insensitively (see get_user_pool_permissions),
             # users stay exact.
             if stype == 'group':
+                # #940 — same two spellings as get_user_pool_permissions. This one gates
+                # whether the cluster is visible at all, so missing it left the pool user
+                # without even the cluster the grant was on.
+                _spellings = _group_grant_spellings(sid)
+                if not _spellings:
+                    continue
+                _ph = ','.join('?' * len(_spellings))
                 cursor.execute(
-                    "SELECT DISTINCT cluster_id FROM pool_permissions WHERE subject_type = 'group' AND LOWER(subject_id) = LOWER(?)",
-                    (sid,))
+                    "SELECT DISTINCT cluster_id FROM pool_permissions "
+                    f"WHERE subject_type = 'group' AND LOWER(subject_id) IN ({_ph})"
+                    + _NON_EMPTY_GRANT,
+                    tuple(v.lower() for v in _spellings))
             else:
                 cursor.execute(
-                    "SELECT DISTINCT cluster_id FROM pool_permissions WHERE subject_type = ? AND subject_id = ?",
+                    "SELECT DISTINCT cluster_id FROM pool_permissions "
+                    "WHERE subject_type = ? AND subject_id = ?" + _NON_EMPTY_GRANT,
                     (stype, sid))
             for row in cursor.fetchall():
                 out.add(row[0])

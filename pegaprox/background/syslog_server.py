@@ -450,6 +450,15 @@ def _tcp_listener(host, port):
                     break
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
+                    # MK Sep 2026 - the guard above only fires while no terminator has
+                    # arrived, so a peer could still frame one oversized line and have it
+                    # parsed and queued. The queue's byte budget bounds the damage either
+                    # way, but a 64 KB "syslog line" is not syslog; drop it here too so
+                    # the cap means the same thing on both paths.
+                    if len(line) > _MAX_LINE:
+                        logging.warning(f"[Syslog] {addr[0]} sent a {len(line)}-byte line - "
+                                        f"over the {_MAX_LINE}-byte cap, dropping it")
+                        continue
                     message = line.decode(errors="ignore").strip()
                     if message:
                         hostname, facility, severity, severity_text, msg = parse_syslog(message)
@@ -500,6 +509,28 @@ SYSLOG_SETTINGS_ATTEMPTS = 10      # 10 x 30s = 5 min, dann bleibt der Port zu
 SYSLOG_SETTINGS_RETRY_S = 30
 
 
+def _settings_store_readable():
+    """Can the settings table actually be read right now? Raises if it cannot.
+
+    MK Sep 2026 - this exists because load_server_settings() answers the wrong question.
+    It catches its own database errors, logs them, and returns its DEFAULTS, and the
+    default for syslog_enabled is True. So the gate below could not tell "the operator
+    wants the receiver" from "the store is not answering" - both arrive as True, and the
+    permissive one is the guess. Wrapping the call in try/except cannot see it either,
+    because nothing is ever raised.
+
+    A cheap SELECT against the same table, with the exception left alone, is the missing
+    half. It deliberately does not read or parse syslog_enabled: the value still comes
+    from load_server_settings so there is one place that knows how settings decode. All
+    this decides is whether that value was an answer or a shrug.
+    """
+    from pegaprox.core.db import get_db
+    cur = get_db().conn.cursor()
+    cur.execute("SELECT 1 FROM server_settings LIMIT 1")
+    cur.fetchone()
+    return True
+
+
 def _syslog_loop():
     """Main syslog server loop — runs UDP + TCP in gevent greenlets"""
     import gevent
@@ -514,10 +545,16 @@ def _syslog_loop():
     # default-on only applies when we actually managed to read and found nothing, so on a
     # read failure keep retrying rather than guessing - a transient problem at boot heals
     # itself within a few minutes, and a persistent one leaves the port closed and says so.
+    # MK Sep 2026 (follow-up) - the first version of this gate wrapped
+    # load_server_settings() in try/except, which looks right and is not: that helper
+    # swallows its own database errors and hands back its defaults, so the except branch
+    # only ever caught a failed IMPORT. A locked or missing database went straight through
+    # it as syslog_enabled=True. Confirm the store answers BEFORE trusting the value.
     _settings = None
     for _attempt in range(SYSLOG_SETTINGS_ATTEMPTS):
         try:
             from pegaprox.api.helpers import load_server_settings
+            _settings_store_readable()
             _settings = load_server_settings()
             break
         except Exception as _e:
@@ -525,7 +562,8 @@ def _syslog_loop():
                 "[Syslog] cannot read server settings (attempt %d/%d): %s - not binding "
                 "1514 until we know whether it is wanted",
                 _attempt + 1, SYSLOG_SETTINGS_ATTEMPTS, _e)
-            gevent.sleep(SYSLOG_SETTINGS_RETRY_S)
+            if _attempt + 1 < SYSLOG_SETTINGS_ATTEMPTS:
+                gevent.sleep(SYSLOG_SETTINGS_RETRY_S)
 
     if _settings is None:
         logging.error(

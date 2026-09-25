@@ -1672,7 +1672,27 @@ def setup_2fa():
     if user.get('auth_source', 'local') in ('oidc', 'entra'):
         provider_name = 'Microsoft Entra ID' if user.get('auth_source') == 'entra' else 'your OIDC provider'
         return jsonify({'error': f'2FA is managed by {provider_name}. Please enable MFA there instead.'}), 400
-    
+
+    # MK Sep 2026 (audit) — REPLACING an existing factor needs the password, enrolling a
+    # first one does not. Nothing here looked at totp_enabled, so a live session on an
+    # account that already had 2FA could enrol a new secret and verify it with its own
+    # authenticator: the account's second factor becomes the attacker's, and the password
+    # they never knew is now the only thing they lack. disable_2fa - the weaker operation,
+    # since it leaves the account on one factor rather than handing the second one over -
+    # has always asked for the password. Same question, same rate limit.
+    if user.get('totp_enabled') and user.get('totp_secret'):
+        _pw = (request.get_json(silent=True) or {}).get('password', '')
+        if not _pw:
+            return jsonify({'error': 'Password required to replace an existing 2FA device',
+                            'code': 'PASSWORD_REQUIRED'}), 400
+        if not check_auth_action_rate_limit(f'2fa_setup:{username}', max_attempts=5, window=300):
+            return jsonify({'error': 'Too many attempts. Try again in 5 minutes.'}), 429
+        if user.get('auth_source') == 'ldap':
+            if not ldap_authenticate(username, _pw).get('success'):
+                return jsonify({'error': 'Invalid LDAP password'}), 401
+        elif not verify_password(_pw, user['password_salt'], user['password_hash']):
+            return jsonify({'error': 'Invalid password'}), 401
+
     # Generate new secret
     secret = pyotp.random_base32()
     

@@ -846,7 +846,7 @@ def login_iscsi_target(cluster_id, node):
     target_q = shlex.quote(target)
     portal_q = shlex.quote(portal)
     username_q = shlex.quote(username) if username else ''
-    password_q = shlex.quote(password) if password else ''
+    # no password_q — the CHAP secret never gets interpolated, see the _exec below
 
     ssh = None
     try:
@@ -865,8 +865,15 @@ def login_iscsi_target(cluster_id, node):
         if not ssh:
             return jsonify({'error': f'SSH connection failed to {node} ({node_ip}). Check credentials.'}), 400
 
-        def _exec(cmd, timeout=30):
+        def _exec(cmd, timeout=30, feed=None):
             stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+            if feed is not None:
+                try:
+                    stdin.write(feed)
+                    stdin.flush()
+                except (OSError, EOFError):
+                    pass  # remote is already gone; the exit status below says so
+                stdin.channel.shutdown_write()
             out = _read_capped(stdout)
             err = _read_capped(stderr)
             rc = stdout.channel.recv_exit_status()
@@ -874,9 +881,22 @@ def login_iscsi_target(cluster_id, node):
 
         # If CHAP credentials provided, set them first
         if username and password:
-            _exec(f'''iscsiadm -m node -T {target_q} -p {portal_q} --op update -n node.session.auth.authmethod -v CHAP && \
-                iscsiadm -m node -T {target_q} -p {portal_q} --op update -n node.session.auth.username -v {username_q} && \
-                iscsiadm -m node -T {target_q} -p {portal_q} --op update -n node.session.auth.password -v {password_q}''')
+            # MK Sep 2026 — the secret travels down the channel on stdin, never in
+            # the command string. exec_command hands that string to a shell on the
+            # node and /proc/<pid>/cmdline is world-readable there, so the password
+            # used to be sitting in `ps` for every local account to read, for the
+            # whole length of the attach. `read` keeps it in the shell's own memory.
+            # iscsiadm still takes it as -v on its own argv for the single call that
+            # writes the field — open-iscsi has no file or stdin form for -v — so the
+            # residue is one short-lived process, not the entire operation.
+            _exec('IFS= read -r _pp || exit 64; '
+                  f'iscsiadm -m node -T {target_q} -p {portal_q} --op update'
+                  ' -n node.session.auth.authmethod -v CHAP && '
+                  f'iscsiadm -m node -T {target_q} -p {portal_q} --op update'
+                  f' -n node.session.auth.username -v {username_q} && '
+                  f'iscsiadm -m node -T {target_q} -p {portal_q} --op update'
+                  ' -n node.session.auth.password -v "$_pp"',
+                  feed=password + '\n')
 
         # Discovery
         _exec(f'iscsiadm -m discovery -t sendtargets -p {portal_q}')

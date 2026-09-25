@@ -72,15 +72,23 @@ def check_auth_action_rate_limit(key: str, max_attempts: int = 5, window: int = 
         if win is None:
             if len(_auth_action_windows) >= _AUTH_ACTION_MAX_BUCKETS:
                 # More distinct budgets than the code has call sites means somebody is
-                # passing them in from a request. Drop the least recently created one;
-                # the budgets themselves are not secret and a re-created window simply
-                # starts counting again.
-                oldest = next(iter(_auth_action_windows))
-                _auth_action_windows.pop(oldest, None)
+                # passing them in from a request.
+                #
+                # MK Sep 2026 (follow-up) - this used to evict `next(iter(...))`, which on
+                # an insertion-ordered dict is the FIRST bucket ever created, i.e. one of
+                # the literal ones the real login paths have been counting in since boot.
+                # Evicting a window resets it, so the defence against a caller-chosen
+                # budget would have cleared the rate limit protecting password change or
+                # TOTP verification - it fed the attack it was meant to stop. Refuse the
+                # unknown budget instead: nothing is evicted, the map cannot grow, and a
+                # caller doing this gets a 429 rather than a reset. Unreachable today (four
+                # call sites, three distinct literal pairs) and it should stay that way.
                 logging.warning(
-                    '[RATELIMIT] auth-action budgets exceeded %d distinct pairs - '
-                    'evicted %s. A caller is choosing the budget; it should be a literal.',
-                    _AUTH_ACTION_MAX_BUCKETS, oldest)
+                    '[RATELIMIT] auth-action budgets exceeded %d distinct pairs - refusing '
+                    '%s rather than evicting an established window. A caller is choosing '
+                    'the budget; it should be a literal.',
+                    _AUTH_ACTION_MAX_BUCKETS, bucket)
+                return False
             win = SlidingWindow(limit=max_attempts, window=window, max_keys=4096,
                                 name=f'auth-action-{max_attempts}/{window}')
             _auth_action_windows[bucket] = win
@@ -484,7 +492,10 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             _diag = pve_mgr.ssh_diagnose(node)
         except Exception:
             pass   # older managers without the classifier — behave as before
-        if _diag and _diag[0] == 'SSH_NO_CREDENTIALS':
+        # MK Sep 2026 (#941) — SSH_DISABLED belongs here too. There are two ways out of
+        # this process to a node: paramiko via manager._ssh_connect, and this shell-out.
+        # An off switch that only closed one of them would be worth nothing.
+        if _diag and _diag[0] in ('SSH_NO_CREDENTIALS', 'SSH_DISABLED'):
             return 1, '', _diag[1]
 
         _ssh_user = getattr(pve_mgr.config, 'ssh_user', '') or 'root'

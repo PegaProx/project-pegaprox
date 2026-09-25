@@ -312,6 +312,47 @@ def load_users(readonly: bool = False) -> dict:
     return {}
 
 
+def apply_token_role(user: dict, token_role: str) -> dict:
+    """Return a COPY of `user` carrying the effective_role an API token acts under.
+
+    One implementation for the two places that need it. build_authz_user does this for
+    the object-level checks; check_cluster_access had its own inline copy so the cluster
+    hot path would not have to load the whole users table — and the two drifted. The
+    inline one collapsed a tenant CUSTOM role to a builtin level, which is exactly what
+    NS removed from build_authz_user in Aug 2026 (Aikido 469089255): a builtin makes
+    get_user_clusters skip its custom-role -> tenant remap, so the caller falls back to
+    the default tenant, and THAT tenant's empty cluster list means "all clusters". A
+    token deliberately scoped narrower than its owner therefore came out wider — it read
+    every cluster on the installation, across tenants. Shared now so it cannot drift a
+    third time. MK Sep 2026, Aikido 700488915.
+    """
+    _h = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
+    out = dict(user)
+    if token_role and token_role not in _h:
+        # a custom role keeps its NAME — see build_authz_user for why, and for what
+        # _token_owner_capped then has to do about the missing numeric floor
+        out['effective_role'] = token_role
+        out['_token_owner_capped'] = True
+        # SPEC-011 multi-key (FIX3, 110lymph): a key pinned to a tenant CUSTOM role
+        # adopts THAT role's tenant as its own - cluster visibility for the key comes
+        # from the role's tenant, NOT the owner's home tenant or the owner's membership
+        # union (D5 single-role visibility for tokens). Lives here in the shared
+        # apply_token_role so both call sites (build_authz_user + check_cluster_access)
+        # get it and cannot drift apart - which is the whole point of this function.
+        try:
+            _rrow = get_db().conn.execute(
+                'SELECT tenant_id FROM custom_roles WHERE name = ?',
+                (token_role,)).fetchone()
+            if _rrow and _rrow[0]:
+                out['tenant_id'] = _rrow[0]
+        except Exception:
+            pass
+    else:
+        eff = min(_h.get(token_role, 1), _h.get(user.get('role'), 1))
+        out['effective_role'] = next((r for r, lvl in _h.items() if lvl == eff), ROLE_VIEWER)
+    return out
+
+
 def build_authz_user(username: str, session: dict) -> dict:
     # MK: user dict for object-level checks (user_can_access_vm & co). For API tokens the
     # stored account role would let an admin-owned 'viewer' token short-circuit those checks,
@@ -321,46 +362,15 @@ def build_authz_user(username: str, session: dict) -> dict:
     user = users.get(username, {})
     user['username'] = username
     if session.get('api_token'):
-        _h = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
-        token_role = session.get('role')
         # NS Aug 2026 (Aikido 469089255 core) — a token bound to a tenant CUSTOM role must KEEP that
         # role name, not collapse to a builtin level. The old collapse both under-privileged the token
         # (has_permission then only saw viewer perms) AND — the security bug — made get_user_clusters
-        # see a builtin, SKIP its custom-role→tenant remap (rbac.py:318), fall back to the owner's
+        # see a builtin, SKIP its custom-role→tenant remap (rbac.py), fall back to the owner's
         # (default) tenant and return None = "all clusters". Keeping the name lets get_user_clusters
         # scope the token to the role's tenant and lets its real permissions resolve. It can't outrank
         # the owner: create_api_token binds a token at/below the owner's level and require_auth
         # re-floors the numeric role every request. A BUILTIN token role is still floored numerically.
-        if token_role and token_role not in _h:
-            user['effective_role'] = token_role
-            # MK Sep 2026 - a CUSTOM token role keeps its name (see above), and the numeric
-            # floor above therefore never runs for it. So the token kept resolving through
-            # that role's permission list no matter what happened to its owner afterwards:
-            # demote the owner to viewer, strip a permission from their account, and a token
-            # they minted while they still held it carried on working. Mark the identity so
-            # get_user_permissions can intersect with what the owner holds TODAY - it has to
-            # happen there, not here, because the answer is per-tenant.
-            user['_token_owner_capped'] = True
-            # SPEC-011 multi-key (FIX3, 110lymph): a key pinned to a tenant CUSTOM role
-            # adopts THAT role's tenant as its own — cluster visibility for the
-            # key comes from the role's tenant, NOT the owner's home tenant or
-            # the owner's membership union (D5 single-role visibility for
-            # tokens). _tenant_defining_role only remaps default-tenant
-            # callers, so without this pin an owner sitting in tenant A with a
-            # tenant-B role key saw tenant A's clusters. Composes with the
-            # owner-cap above: the cap intersects permissions for the CURRENT
-            # owner; this pin decides WHICH tenant the key operates in.
-            try:
-                _rrow = get_db().conn.execute(
-                    'SELECT tenant_id FROM custom_roles WHERE name = ?',
-                    (token_role,)).fetchone()
-                if _rrow and _rrow[0]:
-                    user['tenant_id'] = _rrow[0]
-            except Exception:
-                pass
-        else:
-            eff = min(_h.get(token_role, 1), _h.get(user.get('role'), 1))
-            user['effective_role'] = next((r for r, lvl in _h.items() if lvl == eff), ROLE_VIEWER)
+        user = apply_token_role(user, session.get('role'))
     return user
 
 
@@ -901,8 +911,11 @@ def create_api_token(username: str, token_name: str, role: str = None,
             'expires_at': expires_at
         }
     except Exception as e:
+        # MK Sep 2026 (audit) — the caller gets this straight back as the JSON body, so a
+        # persistence error handed the client raw backend text. The detail is already in
+        # the log line above; the response only needs to say it did not work.
         logging.error(f"[APIToken] Failed to create token: {e}")
-        return {'error': str(e)}
+        return {'error': 'Failed to create API token'}
 
 
 def revoke_user_api_tokens(username: str) -> int:

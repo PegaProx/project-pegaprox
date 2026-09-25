@@ -435,6 +435,15 @@ def drift_status(cluster_id):
     """Counts of open events grouped by kind + severity."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Sep 2026 - the four siblings in this file (events, scan, baseline, acknowledge)
+    # all settled on "drift is a whole-cluster notion" and refuse a confined caller. This
+    # one was left on cluster.view alone, so an ACL- or pool-scoped user still read the
+    # per-kind and per-severity counts for the entire cluster - how much storage, network
+    # and node config has drifted, and when it last did. The dashboard fetches this
+    # side by side with /drift/events, which already refuses them, so the panel was
+    # never usable for these callers anyway.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr: return _cerr
     try:
         c = get_db().conn.cursor()
         c.execute('''
@@ -532,7 +541,10 @@ def acknowledge_event(eid):
         from pegaprox.api.helpers import check_cluster_access
         ok, err = check_cluster_access(ev['cluster_id'])
         if not ok:
-            return err
+            # NS Sep 2026 (audit) — returning the cluster-access refusal here answers a
+            # question the caller was not allowed to ask: it says the event id exists.
+            # A drift event they may not touch is, to them, an event that is not there.
+            return jsonify({'error': 'not found'}), 404
         # acknowledging - and especially promoting, which rewrites the baseline the next
         # scan compares against - is a whole-cluster act for the same reason
         _cerr = require_unconfined(ev['cluster_id'])

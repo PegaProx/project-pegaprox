@@ -849,7 +849,15 @@ def main(debug_mode=False):
     # operator's terminal. Guarding the call sites means seventy-five edits and a
     # seventy-sixth somebody forgets, so it goes on the handlers instead. Tracebacks
     # arrive via exc_info and keep their newlines.
-    from pegaprox.utils.sanitization import install_log_injection_filter
+    # MK Sep 2026 (follow-up) - the handler filter alone missed the per-cluster loggers
+    # in core/manager.py and core/xcpng.py: their handlers are attached when a cluster is
+    # constructed, long after this runs, and a cluster logger writes through its own
+    # handlers before propagating here. The record factory sanitises at construction, so
+    # it covers loggers that do not exist yet. Both stay: the filter is harmless and the
+    # sanitiser is idempotent.
+    from pegaprox.utils.sanitization import (install_log_injection_filter,
+                                             install_log_record_sanitizer)
+    install_log_record_sanitizer()
     install_log_injection_filter()
 
     if not debug_mode:

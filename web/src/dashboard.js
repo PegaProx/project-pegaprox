@@ -16027,7 +16027,7 @@
                                                                                 </td>
                                                                                 <td className={isCorporate ? '' : 'px-4 py-3 text-gray-300'}>{snap.node ?? '-'}</td>
                                                                                 <td className={isCorporate ? 'corp-snap-mono' : 'px-4 py-3 font-mono text-gray-200'}>{snap.snapshot_name ?? '-'}</td>
-                                                                                <td className={isCorporate ? '' : 'px-4 py-3 text-gray-300'}>{snap.snapshot_date ?? '-'}</td>
+                                                                                <td className={isCorporate ? '' : 'px-4 py-3 text-gray-300'}>{snap.snapshot_ts ? fmtDate(snap.snapshot_ts) : (snap.snapshot_date ?? '-')}</td>
                                                                                 <td className={isCorporate ? 'corp-snap-age' : 'px-4 py-3 text-yellow-400'}>{snap.age ?? '-'}</td>
                                                                                 <td className={isCorporate ? 'corp-snap-action' : 'px-4 py-3 text-right'}>
                                                                                     <button

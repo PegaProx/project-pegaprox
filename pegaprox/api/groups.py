@@ -37,6 +37,30 @@ def _authz_caller():
     return build_authz_user(sess.get('user', ''), sess)
 
 
+
+def _group_denied_as_missing(group, user):
+    """True when this caller must not learn that `group` exists.
+
+    NS Sep 2026 (audit) — every group route looked the record up, answered 404 when it
+    was absent, and 403 when it belonged to another tenant. The pair is the leak: a
+    tenant-scoped caller could walk group ids and read the status code to learn which
+    ones exist, without ever being allowed to see one.
+
+    The rule itself is unchanged and stays where the earlier hardening put it: a
+    tenant-scoped caller may act on their own tenant's groups only, and a global
+    (tenant_id NULL) group is admin-only. What changes is what the CALLER is told —
+    routes now answer the same 404 either way. The audit entry still records the denial,
+    because that is about what we keep, not about what we disclose.
+    """
+    _ut = _user_tenant(user)
+    if not _ut:
+        return False                      # global admin / default tenant: unscoped
+    tid = group['tenant_id'] if 'tenant_id' in group.keys() else group.get('tenant_id')
+    return tid is None or tid != _ut
+
+
+_GROUP_MISSING = ({'error': 'Group not found'}, 404)
+
 def _is_admin(user) -> bool:
     return (user or {}).get('effective_role', (user or {}).get('role')) == ROLE_ADMIN
 
@@ -154,9 +178,9 @@ def update_cluster_group(group_id):
         # NS Aug 2026 (Aikido pentest) — a global (tenant_id NULL) group is admin-only for writes;
         # the old `group['tenant_id'] and ...` let any admin.groups holder edit a global group
         # (and flip its cross-cluster live-migration settings). NULL now denies non-admins too.
-        if group['tenant_id'] is None or group['tenant_id'] != user_tenant:
+        if _group_denied_as_missing(group, user):
             log_audit(usr, 'cluster_group.update_denied', f"Access denied to group '{group['name']}' (ID: {group_id}) - tenant mismatch", ip_address=ip)
-            return jsonify({'error': 'Access denied - group belongs to different tenant'}), 403
+            return jsonify(_GROUP_MISSING[0]), _GROUP_MISSING[1]
     
     # Non-admins cannot change tenant_id
     tenant_id = data.get('tenant_id', group['tenant_id'])
@@ -226,9 +250,9 @@ def delete_cluster_group(group_id):
         # NS Aug 2026 (Aikido pentest) — a global (tenant_id NULL) group is admin-only for
         # writes; the old `group['tenant_id'] and ...` let any admin.groups holder delete a
         # global group (which the background balancer acts on across ALL tenants' clusters).
-        if group['tenant_id'] is None or group['tenant_id'] != user_tenant:
+        if _group_denied_as_missing(group, user):
             log_audit(usr, 'cluster_group.delete_denied', f"Access denied to delete group '{group['name']}' (ID: {group_id}) - tenant mismatch", ip_address=ip)
-            return jsonify({'error': 'Access denied - group belongs to different tenant'}), 403
+            return jsonify(_GROUP_MISSING[0]), _GROUP_MISSING[1]
     
     # Count affected clusters for audit
     affected = db.query_one('SELECT COUNT(*) as cnt FROM clusters WHERE group_id = ?', (group_id,))
@@ -406,10 +430,9 @@ def get_cluster_group_status(group_id):
         # exact form update/delete_cluster_group were hardened away from; and the member clusters
         # were aggregated with no per-cluster access check at all.
         user = _authz_caller()
-        tenant_id = _user_tenant(user)
-        if tenant_id:
-            if group['tenant_id'] is None or group['tenant_id'] != tenant_id:
-                return jsonify({'error': 'Access denied'}), 403
+        if _group_denied_as_missing(group, user):
+            # same answer as a group that does not exist - see _group_denied_as_missing
+            return jsonify(_GROUP_MISSING[0]), _GROUP_MISSING[1]
 
         clusters = db.query('SELECT id FROM clusters WHERE group_id = ?', (group_id,))
         cluster_ids = [c['id'] for c in clusters] if clusters else []
@@ -529,9 +552,8 @@ def get_cluster_group_lb_history(group_id):
 
     # M-3: don't leak another tenant's xclb audit trail. Admins/default unscoped.
     # sec (audit): raw record + the NULL-tenant short-circuit, same as the status route above.
-    _ut = _user_tenant(_authz_caller())
-    if _ut and (group['tenant_id'] is None or group['tenant_id'] != _ut):
-        return jsonify({'error': 'Access denied'}), 403
+    if _group_denied_as_missing(group, _authz_caller()):
+        return jsonify(_GROUP_MISSING[0]), _GROUP_MISSING[1]
 
     # MK: grab anything tagged with xclb.* that mentions this group
     events = db.query(
@@ -560,10 +582,11 @@ def trigger_xclb_balance_now(group_id):
     _ut = _user_tenant(_authz_caller())
     # NS Aug 2026 (Aikido pentest) — a tenant-scoped user (_ut set) must not trigger balancing
     # on a global (tenant_id NULL) group either; treat NULL-tenant as admin-only for this write.
-    if _ut and (group.get('tenant_id') is None or group.get('tenant_id') != _ut):
+    if _group_denied_as_missing(group, _authz_caller()):
+        # the denial is still recorded; only what the caller is told changes
         log_audit(usr, 'xclb.manual_denied',
                   f"Denied cross-cluster balance on group {_sl(str(group.get('name', group_id)))} (tenant mismatch)")
-        return jsonify({'error': 'Access denied'}), 403
+        return jsonify(_GROUP_MISSING[0]), _GROUP_MISSING[1]
 
     if not group.get('cross_cluster_lb_enabled'):
         return jsonify({'error': 'Cross-cluster LB is not enabled for this group'}), 400

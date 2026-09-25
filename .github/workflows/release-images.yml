@@ -141,6 +141,10 @@ jobs:
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # NS Sep 2026 (audit) - build-vm has had this since its own review; this job
+          # was left writing the job token into .git/config for every later step.
+          persist-credentials: false
 
       # Registers the kernel-level emulators used both by distrobuilder and by
       # the arm64 LXC smoke-test container.
@@ -213,8 +217,27 @@ jobs:
                 set -eu
                 apt-get update
                 apt-get -y install wget
+                # NS Sep 2026 (audit) - these two came off the CDN unverified and were
+                # installed as root into the appliance. Pin the bytes.
+                #
+                # The better fix would be apt from gyptazy's SIGNED repo, which the next
+                # lines configure - but it currently carries python3-flask-sock 0.7.0-1
+                # and python3-xenapi 26.8.0, i.e. OLDER than what we ship. Installing from
+                # there would quietly downgrade the appliance, so the checksum stands in
+                # until those versions land in the repo. Checked 2026-09-22.
+                #
+                # Being honest about what this is: the hashes were taken from the CDN, so
+                # this is trust-on-first-use. It proves the bytes have not changed since;
+                # it does not prove they were ever right. When the build breaks here,
+                # that is the check working - confirm the new artifact before bumping.
                 wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
                 wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
+                cat > /tmp/deb.sha256 <<'SUMS'
+                125ec5a4e2bbc10c57b7b9e3ab05aecda5edf1b8f6646aff4131cab441b53c24  python3-flask-sock_0.7.1_all.deb
+                db36397c5db4448459dee349fc2a0b6f147ddf4b346dc8480687903c38fc822e  python3-xenapi_26.8.1_all.deb
+                SUMS
+                sed -i 's/^[[:space:]]*//' /tmp/deb.sha256
+                sha256sum -c /tmp/deb.sha256
                 dpkg -i python3-flask-sock_0.7.1_all.deb
                 dpkg -i python3-xenapi_26.8.1_all.deb
                 install -d -m 0755 /etc/apt/keyrings
@@ -395,8 +418,16 @@ jobs:
 
           # --- Basis-Tools + PegaProx ---
           apt-get update
+          # NS Sep 2026 (audit) - same two unverified CDN packages as the LXC job; see
+          # the note there for why the signed gyptazy repo cannot carry them yet.
           wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
           wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
+          cat > /tmp/deb.sha256 <<'SUMS'
+          125ec5a4e2bbc10c57b7b9e3ab05aecda5edf1b8f6646aff4131cab441b53c24  python3-flask-sock_0.7.1_all.deb
+          db36397c5db4448459dee349fc2a0b6f147ddf4b346dc8480687903c38fc822e  python3-xenapi_26.8.1_all.deb
+          SUMS
+          sed -i 's/^[[:space:]]*//' /tmp/deb.sha256
+          sha256sum -c /tmp/deb.sha256
           dpkg -i python3-flask-sock_0.7.1_all.deb
           dpkg -i python3-xenapi_26.8.1_all.deb
           apt-get -y install sudo sqlite3 ca-certificates curl

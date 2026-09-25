@@ -2922,7 +2922,7 @@
                                                                     <div>
                                                                         <div className="font-medium text-white">{snap.name}</div>
                                                                         <div className="text-xs text-gray-400">
-                                                                            {snap.snaptime ? new Date(snap.snaptime * 1000).toLocaleString() : t('unknown')}
+                                                                            {snap.snaptime ? fmtDate(snap.snaptime) : t('unknown')}
                                                                             {snap.vmstate && <span className="ml-2 text-blue-400">+ RAM</span>}
                                                                         </div>
                                                                         {snap.description && (

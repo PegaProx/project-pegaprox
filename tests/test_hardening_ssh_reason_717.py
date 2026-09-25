@@ -45,8 +45,16 @@ def _mgr(api, **kw):
         m.config.user = kw.get('user', 'root@pam!pegaprox')
     elif 'user' in kw:
         m.config.user = kw['user']
+    # #941 — an unset attribute on a MagicMock config is a truthy MagicMock, so every
+    # cluster here would read as "SSH switched off". Set it like the other fields.
+    m.config.ssh_disabled = kw.get('ssh_disabled', False)
     m.config.ssh_key = kw.get('ssh_key', '')
     m.config.pass_ = kw.get('password', '')
+    # ssh_diagnose no longer carries its own copy of the credential rule — it asks
+    # ssh_blocked_reason, which _ssh_connect needed too and did not have, which is how
+    # the token secret ended up being offered to sshd (#941). Bind both onto the mock
+    # or the real method calls a MagicMock and every answer comes back as None.
+    m.ssh_blocked_reason = PegaProxManager.ssh_blocked_reason.__get__(m, PegaProxManager)
     m.ssh_diagnose = PegaProxManager.ssh_diagnose.__get__(m, PegaProxManager)
     return api.set_manager(CLUSTER, m)
 
@@ -172,3 +180,24 @@ def test_a_cluster_whose_token_we_minted_still_counts_its_password(api, admin):
     body = _hardening(admin).get_json()
     assert body.get('code') != 'SSH_NO_CREDENTIALS', \
         "a minted token does not make the account password disappear"
+
+
+def test_a_cluster_with_ssh_switched_off_says_so(api, admin):
+    """#941 — the operator switch. A stored key is a perfectly good credential, so
+    the no-credentials answer does not apply; the dashboard still has to be told why
+    nothing can be read rather than rendering a bare connection failure."""
+    _mgr(api, ssh_key='-----BEGIN OPENSSH PRIVATE KEY-----', ssh_disabled=True)
+
+    r = _hardening(admin)
+
+    assert r.status_code == 412
+    body = r.get_json()
+    assert body['code'] == 'SSH_DISABLED'
+    assert 'hint' in body and body['hint']
+
+
+def test_the_switch_is_not_on_by_accident(api, admin):
+    """The mirror. Every cluster that has not asked for it keeps its SSH."""
+    _mgr(api, ssh_key='-----BEGIN OPENSSH PRIVATE KEY-----')
+
+    assert _hardening(admin).get_json().get('code') != 'SSH_DISABLED'

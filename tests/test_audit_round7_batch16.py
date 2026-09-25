@@ -270,7 +270,12 @@ def test_global_group_status_denied_to_a_tenant_user(api, seed, db):
     db.conn.execute("INSERT INTO cluster_groups (id, name, tenant_id) VALUES ('g1', 'global', NULL)")
     db.conn.commit()
     r = api.as_user(u).get('/api/cluster-groups/g1/status')
-    assert r.status_code == 403, r.get_data(as_text=True)
+    # NS Sep 2026 (audit) - the denial is now indistinguishable from a missing
+    # group, matching toggle_group_collapse, which has answered 404 here since its
+    # own review ("the 404/200 split was a group-id oracle"). The property is that
+    # the action is refused; the status code was only ever the mechanism.
+    assert r.status_code == 404, r.get_data(as_text=True)
+    assert 'global' not in r.get_data(as_text=True), 'the group leaked through the refusal'
 
 
 def test_global_group_collapse_denied_to_a_tenant_user(api, seed, db):

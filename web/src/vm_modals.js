@@ -2563,7 +2563,7 @@
                                                         )}
                                                     </div>
                                                     <div className="text-[11px] mt-0.5" style={{color: 'var(--corp-text-muted, #728b9a)'}}>
-                                                        {node.snaptime ? new Date(node.snaptime * 1000).toLocaleString() : ''}
+                                                        {node.snaptime ? fmtDate(node.snaptime) : ''}
                                                         {node.description && <span className="ml-2" style={{color: '#5a7a8a'}}>— {node.description}</span>}
                                                     </div>
                                                 </div>

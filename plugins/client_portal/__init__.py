@@ -821,6 +821,26 @@ def _create_ct():
     from pegaprox.utils.rbac import DEFAULT_TENANT_ID as _DT
     tenant_id = user.get('tenant_id') or _DT
 
+    # MK Sep 2026 - the quota below is computed over the clusters the TENANT holds, while
+    # the container is created on the one the hoster configured. Nothing tied the two
+    # together, so if ct_create.cluster_id sits outside the customer's tenant the two
+    # halves measure different worlds: usage never counts what this route creates, and an
+    # enforced quota silently stops enforcing on the one path a customer can call in a
+    # loop. Same cluster resolver the quota uses, so they cannot disagree. A default-tenant
+    # account answers None ("all clusters") and is unaffected.
+    from pegaprox.utils.rbac import get_user_clusters as _get_user_clusters
+    _target_cid = cc['cluster_id']
+    try:
+        _allowed = _get_user_clusters(dict(user, tenant_id=tenant_id))
+    except Exception:
+        logging.exception('[client_portal] could not resolve the caller\'s clusters')
+        return {'error': 'Cannot verify your quota right now - try again shortly'}, 503
+    if _allowed is not None and _target_cid not in _allowed:
+        logging.error(f"[client_portal] ct_create targets {_target_cid!r}, which is outside "
+                      f"tenant {tenant_id!r} - refusing, because that tenant's quota would "
+                      f"never account for the container")
+        return {'error': 'Container creation is not configured for your account'}, 403
+
     # MK Sep 2026 - the check and the create were two separate steps with nothing between
     # them. Usage is computed from what exists, so two requests arriving together both
     # measured the world before either had created anything, both passed, and both went on
@@ -843,7 +863,7 @@ def _create_ct():
             return {'error': 'Quota exceeded (' + ', '.join(q['violations']) + ')',
                     'quota': q.get('quota'), 'usage': q.get('usage')}, 403
 
-        cluster_id = cc['cluster_id']; node = cc['node']
+        cluster_id = _target_cid; node = cc['node']
         mgr = cluster_managers.get(cluster_id)
         if not mgr or not mgr.is_connected:
             return {'error': 'Target cluster is currently unavailable'}, 503
@@ -961,7 +981,12 @@ def _destroy_guest():
     # drop the stale VM-ACL row so a recycled VMID doesn't inherit this grant.
     try:
         from pegaprox.core.db import get_db
-        get_db().delete_vm_acl(cluster_id, vmid_int)
+        if get_db().delete_vm_acl(cluster_id, vmid_int):
+            # MK Sep 2026 - the row went but the cached snapshot did not: load_vm_acls
+            # keeps a 30s TTL copy and every write path is supposed to invalidate it, so
+            # until this the grant outlived the row it was read from.
+            from pegaprox.utils.rbac import invalidate_vm_acls_cache
+            invalidate_vm_acls_cache()
     except Exception as e:
         # ACL cleanup failed AFTER the guest was already purged (irreversible). A
         # lingering vm_acls row would grant the old owner access if PVE recycles this

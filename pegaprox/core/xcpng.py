@@ -3133,6 +3133,17 @@ class XcpngManager:
         """Open SSH connection to XCP-ng host."""
         import paramiko
 
+        # MK Sep 2026 (#941) — XCP-ng carries the same PegaProxConfig, so an operator can
+        # set ssh_disabled on one of these clusters too. This manager has its own SSH
+        # implementation and would have gone on connecting regardless: a switch that is
+        # settable and silently ignored is worse than no switch. The credential rule from
+        # the PVE side does NOT apply here — XenAPI authenticates with a real username and
+        # password, so config.pass_ is never a token secret.
+        if bool(getattr(self.config, 'ssh_disabled', False)):
+            self.logger.info("SSH is switched off for this cluster - not connecting to "
+                             "its hosts")
+            return None
+
         ssh_user = self.config.ssh_user or 'root'
         ssh_port = getattr(self.config, 'ssh_port', 22) or 22
 

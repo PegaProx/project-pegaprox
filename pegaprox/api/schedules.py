@@ -832,7 +832,11 @@ def delete_schedule(schedule_id):
     if not schedule:
         return jsonify({'error': 'Schedule not found'}), 404
     ok, err = check_cluster_access(schedule.get('cluster_id', ''))
-    if not ok: return err
+    if not ok:
+        # NS Sep 2026 (audit) — a schedule on a cluster this caller cannot reach must
+        # read as absent, not as forbidden; the pair of answers is what turns an id
+        # into an enumerable oracle.
+        return jsonify({'error': 'Schedule not found'}), 404
 
     perm_err = _require_action_perm(schedule.get('action', 'start'))
     if perm_err:

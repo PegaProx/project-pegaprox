@@ -112,9 +112,21 @@ class StorageDataCache:
                 else:
                     del self._cache[cluster_id]
     
-    def get_stats(self) -> dict:
-        """Get cache statistics"""
+    def get_stats(self, cluster_id: str = None) -> dict:
+        """Get cache statistics, for one cluster or for the whole process.
+
+        MK Sep 2026 (audit) — the caller of this is a cluster-scoped route, and it was
+        handing back how many clusters the installation has cached and how many entries
+        in total. That is deployment-wide inventory, answered to somebody who asked
+        about one cluster. Pass the cluster and get only its numbers; the argument-less
+        form stays for genuinely process-wide callers.
+        """
         with self._lock:
+            if cluster_id is not None:
+                return {
+                    'clusters_cached': 1 if cluster_id in self._cache else 0,
+                    'total_entries': len(self._cache.get(cluster_id, {})),
+                }
             total_entries = sum(len(c) for c in self._cache.values())
             return {
                 'clusters_cached': len(self._cache),

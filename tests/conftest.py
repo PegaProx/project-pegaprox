@@ -66,6 +66,16 @@ def db():
         _reset_rbac_caches()
 
 
+def _reset_api_rate_window():
+    """Forget every client the API rate limiter has seen. Shared process state, and the
+    whole harness looks like one client to it."""
+    try:
+        import pegaprox.globals as ppglobals
+        ppglobals.api_rate_window.reset()
+    except Exception:
+        pass
+
+
 def _reset_rbac_caches():
     """rbac.py caches tenants / custom-roles / VM-ACLs / pool-membership at module
     scope (lazy-loaded and pinned). Without resetting them, the first test to touch
@@ -248,6 +258,14 @@ def api(_integration_app, db):
     with authmod.sessions_lock:
         authmod.active_sessions.clear()
     ppglobals.cluster_managers.clear()
+    # MK Sep 2026 — the API rate limiter is a process-global sliding window keyed by client
+    # IP (1200 requests / 60s), and every request in this harness arrives from the same one.
+    # Nothing reset it between tests, so a long integration run could put more than the
+    # budget into a single 60s window and everything after that failed with 429s instead of
+    # whatever it was actually asserting. That is what took the Testing CI red on ae8674d
+    # (run 35697303667) while the same tree was green on a slower machine here. reset() is
+    # already the method the unlock endpoints use.
+    _reset_api_rate_window()
 
     client = _integration_app.test_client()
 
@@ -276,6 +294,7 @@ def api(_integration_app, db):
         with authmod.sessions_lock:
             authmod.active_sessions.clear()
         ppglobals.cluster_managers.clear()
+        _reset_api_rate_window()
 
 
 @pytest.fixture

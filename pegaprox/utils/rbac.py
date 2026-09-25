@@ -244,9 +244,25 @@ def get_role_permissions_for_user(user: dict, tenant_id: str = None) -> list:
     global_roles = custom.get('global', {})
     if role in global_roles:
         return global_roles[role].get('permissions', []).copy()
-    
-    # fallback to viewer
-    return ROLE_PERMISSIONS[ROLE_VIEWER].copy()
+
+    # NS Sep 2026 (audit) — this used to fall back to the ROLE_VIEWER set, which is 31
+    # permissions covering vm.view, cluster.view, node.view and the whole PBS read
+    # surface. A custom role exists precisely because somebody wanted something NARROWER
+    # than that, so an unresolvable role handed its holders MORE than the role ever
+    # granted: delete a role that allowed only vm.view and its accounts silently gained
+    # thirty permissions. Deleting a role means "revoke this", never "promote them".
+    #
+    # Both ways of getting here deserve the same answer. A genuinely deleted role is
+    # gone, and an unreadable role store is a failure we must not resolve in the
+    # caller's favour - store_unavailable() keeps that case out of the cache so it
+    # retries, and until it succeeds nobody should be inheriting a default.
+    logging.warning(
+        f"[RBAC] role {role!r} did not resolve for "
+        f"{user.get('username', '?')!r} (tenant={tenant_id!r}) - granting nothing. "
+        f"Either the role was deleted while accounts still held it, or the custom-role "
+        f"store could not be read."
+    )
+    return []
 
 # =============================================================================
 # MULTI-TENANCY
@@ -312,6 +328,11 @@ def save_tenants(tenants: dict):
 # tenant cache - reloaded on changes
 tenants_db = {}
 
+# No tenant id can contain a NUL, so this never collides with a real one. It is a
+# tenant that does not exist on purpose — see the ambiguity branch below.
+_AMBIGUOUS_ROLE_TENANT = '\x00ambiguous'
+
+
 def _tenant_defining_role(role: str, tenant_id: str) -> str:
     """The tenant whose custom-role table defines `role`, or `tenant_id` unchanged.
 
@@ -323,12 +344,37 @@ def _tenant_defining_role(role: str, tenant_id: str) -> str:
 
     Deliberately narrow, matching the remap it is factored out of: only a caller sitting in
     the DEFAULT tenant is remapped. A user placed in tenant A keeps tenant A's answer even if
-    some other tenant happens to define a role by the same name."""
+    some other tenant happens to define a role by the same name. A name defined by two or
+    more tenants has no single answer and is refused outright rather than guessed at."""
     if not role or role in BUILTIN_ROLES or tenant_id != DEFAULT_TENANT_ID:
         return tenant_id
-    for tid, roles in get_custom_roles().get('tenants', {}).items():
-        if role in roles:
-            return tid
+    owners = [tid for tid, roles in get_custom_roles().get('tenants', {}).items()
+              if role in roles]
+    if len(owners) == 1:
+        return owners[0]
+    if owners:
+        # MK Sep 2026 — more than one tenant defines this name, so "the tenant that
+        # defines it" has no answer. The loop this replaces took whichever one dict
+        # iteration happened to reach first, which made both the caller's permissions
+        # and their cluster list depend on insertion order: the same account could
+        # resolve into tenant A today and tenant B after a restart. Two tenants each
+        # having an "ops" role is an ordinary thing for an MSP to do, so this is a
+        # configuration to report, not a case to guess at.
+        #
+        # Answering with the DEFAULT tenant would be the wrong direction: an empty
+        # cluster list there means "all clusters", so the ambiguous caller would come
+        # out wider than either candidate. Hand back an id no tenant can hold instead —
+        # the role then fails to resolve (get_role_permissions_for_user grants nothing
+        # and says so) and the cluster lookup lands on the non-default empty branch,
+        # which is []. The operator's fix is to put the account in the tenant they
+        # meant; that takes the early return above and resolves cleanly.
+        logging.warning(
+            f"[RBAC] custom role {role!r} is defined by {len(owners)} tenants "
+            f"({', '.join(sorted(owners))}) — refusing to guess which one a "
+            f"default-tenant caller meant. Granting nothing; place the account in "
+            f"the intended tenant to resolve it."
+        )
+        return _AMBIGUOUS_ROLE_TENANT
     return tenant_id
 
 
@@ -501,6 +547,26 @@ def get_user_permissions(user: dict, tenant_id: str = None) -> list:
 
     return base_perms
 
+def _admin_is_capped_in_own_tenant(user: dict) -> bool:
+    """True when a tenant override governs this caller's own tenant and downgrades them.
+
+    tenant_permissions is written by the LDAP group mappings (utils/ldap.py), so an
+    account whose global role is admin really can be mapped down to viewer or a custom
+    role inside the tenant it lives in. get_user_permissions has always honoured that —
+    it defaults tenant_id to the caller's own tenant and takes the override branch. The
+    two admin fast paths below never looked, so the two disagreed: the permission list
+    said viewer while the yes/no gate in front of it said admin, and the gate is the one
+    routes actually ask. Same for the cluster scope. Only skip the shortcut when the
+    override genuinely lowers them — an override that re-states admin is not a downgrade,
+    and an account with no override at all (nearly all of them) takes the same path it
+    always did. MK Sep 2026, Aikido 700487698.
+    """
+    tp = (user.get('tenant_permissions') or {}).get(user.get('tenant_id', DEFAULT_TENANT_ID))
+    if not isinstance(tp, dict):
+        return False
+    return tp.get('role', user.get('role')) != ROLE_ADMIN
+
+
 def has_permission(user: dict, permission: str, tenant_id: str = None) -> bool:
     """check if user has a specific permission
     
@@ -508,8 +574,10 @@ def has_permission(user: dict, permission: str, tenant_id: str = None) -> bool:
     """
     if not user:
         return False
-    # admin always has access (safety net) - unless checking tenant-specific
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN and not tenant_id:
+    # admin always has access (safety net) - unless checking tenant-specific, or a
+    # tenant override has downgraded them where they live
+    if (user.get('effective_role', user.get('role')) == ROLE_ADMIN and not tenant_id
+            and not _admin_is_capped_in_own_tenant(user)):
         return True
     return permission in get_user_permissions(user, tenant_id)
 
@@ -544,8 +612,10 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
         tenants_db = load_tenants()
     
     # admin sees all — honor the token-scoped effective_role (#491) so an admin-owned API token
-    # restricted to viewer/user doesn't inherit the owner's all-cluster access.
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # restricted to viewer/user doesn't inherit the owner's all-cluster access, and the LDAP
+    # tenant override for the same reason (see _admin_is_capped_in_own_tenant).
+    if (user.get('effective_role', user.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(user)):
         return None  # None means all clusters
 
     # MK Sep 2026 - we could not read the tenant table, so we do not know what this caller
@@ -1076,8 +1146,16 @@ def user_has_any_pool_access(user: dict, cluster_id: str) -> bool:
     try:
         perms = _pool_perms_for(cluster_id, username, user.get('groups', []))
     except Exception as e:
+        # NS Sep 2026 (audit) — this used to answer False, and False here does not mean
+        # "no pool grant", it means "not confined by a pool". helpers.caller_is_scoped
+        # asks this question to decide whether the caller is a plain cluster-wide
+        # operator, and it wraps the call in its own try/except precisely so a failure
+        # falls closed — but swallowing the error in here meant that except never fired
+        # and an unreadable pool-permission table silently promoted every pool-scoped
+        # caller to unconfined. Let it out; the caller is the one that knows what a
+        # failure should mean.
         logging.error(f"[POOL] any-access check failed for {username}@{cluster_id}: {e}")
-        return False
+        raise
     return any(p for p in perms.values())
 
 
@@ -1162,7 +1240,7 @@ def invalidate_vm_acls_cache():
     _vm_acls_cache = None
     _vm_acls_cache_time = 0
 
-def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str = 'vm.view', vm_type: str = None) -> bool:
+def _user_can_access_vm_uncapped(user: dict, cluster_id: str, vmid: int, permission: str = 'vm.view', vm_type: str = None) -> bool:
     """Check if user can access a specific VM
     
     NS: Dec 2025 - VM ACLs are ADDITIVE, not restrictive
@@ -1321,6 +1399,59 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
     result = has_permission(user, permission)
     logging.debug(f"[VM-ACL] Fallback to general permission check for {permission}: {result}")
     return result
+
+
+def _within_token_role(user: dict, permission: str) -> bool:
+    """An API token must not exceed its own role through an object grant.
+
+    NS Sep 2026 (audit) — effective_role exists only for API-token auth
+    (utils/auth.build_authz_user sets it under `if session.get('api_token')`), and it is
+    the role the token was minted with, floored to the owner's. Object grants ignored it:
+    a VM ACL row or a pool grant on the OWNER's account returned True for vm.delete even
+    on a token the owner had deliberately scoped to viewer. The token's whole point is
+    being weaker than the account, and the ACL handed the difference straight back.
+
+    Deliberately a no-op for anything that is not a reduced token. VM ACLs are ADDITIVE by
+    design — that is the documented model — so capping an ordinary session by its role
+    would delete the feature rather than fix a hole. Only a token whose effective_role
+    differs from the stored role is capped, and only to what that role grants.
+    """
+    eff = user.get('effective_role')
+    if not eff or eff == user.get('role'):
+        return True
+    # MK Sep 2026 — resolve a CUSTOM effective_role the same way everything else does. This
+    # asked get_role_permissions_for_user for the caller's own tenant, while
+    # get_user_permissions asks _tenant_defining_role first; for a token minted with a
+    # tenant custom role whose holder sits in the default tenant the two then disagreed
+    # outright. Measured: the permission list resolved 'ops' to vm.view/vm.start/vm.config
+    # while this ceiling resolved it to nothing, so the route gate said yes and the object
+    # gate said no to every per-VM operation — a custom-role token could touch no guest at
+    # all. Fails closed, so it read as "tokens are broken" rather than as a hole, but the
+    # two must give one answer. The owner ceiling still applies on top (_token_owner_capped
+    # in get_user_permissions), so this cannot lift a token above the account that minted it.
+    _tid = user.get('tenant_id')
+    allowed = get_role_permissions_for_user({'role': eff, 'tenant_id': _tid},
+                                            _tenant_defining_role(eff, _tid))
+    return permission in (allowed or [])
+
+
+def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str = 'vm.view', vm_type: str = None) -> bool:
+    """Per-VM authorization, with the API-token ceiling applied to the result.
+
+    The decision itself lives in _user_can_access_vm_uncapped. The cap is applied HERE,
+    once, rather than at each of its five grant points — the #941 follow-up was a lesson
+    in what happens when a guard is added to the path you happened to read instead of to
+    the place every path passes through.
+    """
+    if not _user_can_access_vm_uncapped(user, cluster_id, vmid, permission, vm_type):
+        return False
+    if not _within_token_role(user, permission):
+        logging.debug(f"[TOKEN-CEILING] {user.get('username','')} denied {permission} on "
+                      f"{cluster_id}/{vmid}: token role {user.get('effective_role')!r} "
+                      f"does not carry it")
+        return False
+    return True
+
 
 def get_user_vms(user: dict, cluster_id: str) -> list:
     """Get list of VMIDs user can access in a cluster
