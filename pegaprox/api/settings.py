@@ -4026,62 +4026,79 @@ def check_cluster_updates(cluster_id):
             }
         })
     
-    for node_name in node_names:
-        # NS (Sep 2026): Proxmox's GET /nodes/{node}/apt/update only ever returns the
-        # output of the LAST `apt update` that ran, and yum's `check-update` reads a
-        # local cache — so a bare GET reports stale / uncached data. Force a fresh
-        # refresh FIRST (POST for Proxmox, `yum makecache` for XCP-ng), wait for it to
-        # finish, and only then read the results.
+    # SS (Sep 2026): touch only online nodes and validate each name against the same
+    # RFC-ish allow-list the /health fan-out uses: PVE controls these, but a crafted
+    # name like `../foo` must not reach the URL builders.
+    import re as _re
+    _SAFE_NODE = _re.compile(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$')
+    safe_node_names = [n for n in node_names if n and _SAFE_NODE.match(n)]
+
+    # SS (Sep 2026): Proxmox's GET /nodes/{node}/apt/update only ever returns the
+    # output of the LAST `apt update` that ran, and yum's `check-update` reads a local
+    # cache, so a bare GET reports stale / uncached data. We must POST first to trigger
+    # a fresh refresh, wait for it, then read. Doing that per node serially costs
+    # N×(apt-update time) and trips the gateway timeout on big clusters, so every node's
+    # refresh+read runs concurrently through the shared gevent pool instead.
+    from pegaprox.utils.concurrent import run_concurrent_dict
+
+    def _check_one(node_name):
+        # 1) Refresh first (POST for Proxmox, `yum makecache` for XCP-ng). Proxmox
+        #    hands back a UPID; wait on that task so the read below is guaranteed fresh.
+        #    XCP-ng's makecache has no task to await, so give it a moment to settle.
         try:
             refreshed = mgr.refresh_node_apt(node_name)
             task_ref = refreshed.get('task') if isinstance(refreshed, dict) else None
             if task_ref:
-                # Proxmox: the POST returns a UPID; wait on the apt-update task so the
-                # GET below is guaranteed to reflect the refresh we just triggered.
-                mgr._wait_for_task(node_name, task_ref, timeout=300)
+                mgr._wait_for_task(node_name, task_ref, timeout=120)
             else:
-                # Yum (XCP-ng) has no task to await; give `makecache` a moment to settle.
                 time.sleep(10)
-        except Exception as refresh_err:
-            logging.warning(f"[UpdateCheck] refresh failed for {node_name}: {refresh_err}")
+        except Exception as e:
+            logging.warning(f"[UpdateCheck] refresh failed for {node_name}: {e}")
 
-        # MK: Feb 2026 - Retry up to 2 times on failure, with clear error reporting
-        max_retries = 2
-        last_error = None
-        for attempt in range(max_retries + 1):
+        # 2) Read the available-updates list, retrying briefly on a transient failure so
+        #    one flaky node doesn't sink the whole cluster.
+        last_err = None
+        for attempt in range(3):
             try:
                 updates = mgr.get_node_apt_updates(node_name)
-                
+
                 if isinstance(updates, list):
                     update_list = updates
                 elif isinstance(updates, dict):
                     update_list = updates.get('data', [])
                 else:
                     update_list = []
-                
-                results[node_name] = {
+                return {
                     'success': True,
                     'updates': update_list,
                     'count': len(update_list),
-                    'retries': attempt
+                    'retries': attempt,
                 }
-                last_error = None
-                break  # Success, no more retries
             except Exception as e:
-                last_error = str(e)
-                if attempt < max_retries:
-                    logging.warning(f"[UpdateCheck] {node_name} attempt {attempt+1} failed: {e}, retrying...")
-                    time.sleep(2)
-        
-        # LW: If all retries failed, show clear error state
-        if last_error:
-            logging.error(f"[UpdateCheck] {node_name} failed after {max_retries+1} attempts: {last_error}")
-            results[node_name] = {
-                'success': False,
-                'error': last_error,
-                'updates': [],
-                'count': -1  # NS: -1 signals "check failed" vs 0 which means "no updates"
-            }
+                last_err = e
+                logging.warning(f"[UpdateCheck] {node_name} read attempt {attempt+1} failed: {e}")
+                time.sleep(2)
+
+        # All retries failed — record a clear failed-check state (count == -1).
+        logging.error(f"[UpdateCheck] {node_name} failed after 3 attempts: {last_err}")
+        return {
+            'success': False,
+            'error': str(last_err),
+            'updates': [],
+            'count': -1,
+        }
+
+    per_node = run_concurrent_dict(
+        {n: (lambda nn=n: _check_one(nn)) for n in safe_node_names},
+        timeout=180,
+    )
+    for node_name, node_result in per_node.items():
+        results[node_name] = node_result or {
+            'success': False,
+            'error': 'Update check timed out',
+            'updates': [],
+            'count': -1,
+        }
     
     # MK: count > 0 for updates, ignore -1 (failed checks)
     total_updates = sum(max(r.get('count', 0), 0) for r in results.values())
