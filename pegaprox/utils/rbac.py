@@ -148,7 +148,12 @@ def save_custom_roles(roles: dict):
     except ValueError:
         raise
     except Exception as _e:
-        logging.error(f"[user_roles] grant-guard check failed: {_e}")
+        # MK Sep 2026 - fail closed. The block above is the ONLY thing standing
+        # between a live grant and the DELETE+reinsert below; if we could not
+        # read user_roles we do not know whether a role is still granted, and
+        # "could not tell" must not resolve into the destructive direction.
+        logging.error(f"[user_roles] grant-guard check failed, refusing the rewrite: {_e}")
+        return False
 
 
     try:

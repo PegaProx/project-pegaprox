@@ -3717,6 +3717,10 @@ class PegaProxDB:
         # semantics, app-enforced -- no DB FK by design, see user_roles DDL).
         # audit_log grant history remains.
         cursor.execute('DELETE FROM user_roles WHERE username = ?', (username,))
+        # MK Sep 2026 - a membership is a grant too. Leaving these behind is the
+        # exact thing purge_user_grants() exists to prevent: the next account
+        # created with this username would inherit every tenant this one was in.
+        cursor.execute('DELETE FROM user_tenants WHERE username = ?', (username,))
         cursor.execute('DELETE FROM users WHERE username = ?', (username,))
         self.conn.commit()
         # the grants outlive the account otherwise, and the next account with this
