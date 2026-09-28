@@ -922,9 +922,9 @@
                         const r = await fetch(`${API_URL}/roles`, { credentials: 'include', headers: getAuthHeaders() });
                         if (r.ok) { setAllRoles(await r.json()); return; }
                     } catch(e) {}
-                    if (attempt === 0) addToast('Failed to load roles — retrying…', 'error');
+                    if (attempt === 0) addToast(t('rolesLoadRetry'), 'error');
                 }
-                addToast('Failed to load roles', 'error');
+                addToast(t('rolesLoadFailed'), 'error');
             };
             
             // check for updates on component mount
@@ -2977,7 +2977,7 @@
                                                                                     }).then(resp => {
                                                                                         if (resp && resp.ok) {
                                                                                             setGrantedRoles(p => ({ ...p, [user.username]: (p[user.username] || []).filter(x => x !== r.id) }));
-                                                                                            addToast(t('roleRevoked') || 'Role updated', 'success');
+                                                                                            addToast(t('roleRevoked'), 'success');
                                                                                             if (isScalar) {
                                                                                                 const remaining = (grantedRoles[user.username] || []).filter(x => x !== r.id);
                                                                                                 const customRemaining = remaining.map(x => allRoles.find(ar => ar.id === x && !ar.builtin)).filter(Boolean)
@@ -2990,16 +2990,16 @@
                                                                                                     body: JSON.stringify(upd)
                                                                                                 }).then(resp2 => {
                                                                                                     if (resp2 && resp2.ok) { fetchUsers(); }
-                                                                                                    else { addToast('Role revoked but primary role sync FAILED — retry in UI', 'error'); }
-                                                                                                }).catch(() => addToast('Role revoked but primary role sync FAILED — retry in UI', 'error'));
+                                                                                                    else { addToast(t('roleSyncFailed'), 'error'); }
+                                                                                                }).catch(() => addToast(t('roleSyncFailed'), 'error'));
                                                                                             }
                                                                                         } else {
-                                                                                            resp.json().then(d => addToast(d.error || 'Error updating roles', 'error')).catch(() => addToast('Error updating roles', 'error'));
+                                                                                            resp.json().then(d => addToast(d.error || t('rolesUpdateError'), 'error')).catch(() => addToast(t('rolesUpdateError'), 'error'));
                                                                                         }
-                                                                                    }).catch(() => addToast('Error updating roles', 'error')).finally(() => setPcBusy(false));
+                                                                                    }).catch(() => addToast(t('rolesUpdateError'), 'error')).finally(() => setPcBusy(false));
                                                                                 };
                                                                                 if (isScalar && (grantedRoles[user.username] || []).length === 0) {
-                                                                                    if (!confirm('Removing the last role falls back to viewer. Continue?')) return;
+                                                                                    if (!confirm(t('lastRoleFallbackConfirm'))) return;
                                                                                 }
                                                                                 revoke();
                                                                             };
@@ -3013,11 +3013,11 @@
                                                                                 }).then(resp => {
                                                                                     if (resp && resp.ok) {
                                                                                         setGrantedRoles(p => ({ ...p, [user.username]: [...(p[user.username] || []), r.id] }));
-                                                                                        addToast(t('roleGranted') || 'Role updated', 'success');
+                                                                                        addToast(t('roleGranted'), 'success');
                                                                                     } else {
-                                                                                        resp.json().then(d => addToast(d.error || 'Error updating roles', 'error')).catch(() => addToast('Error updating roles', 'error'));
+                                                                                        resp.json().then(d => addToast(d.error || t('rolesUpdateError'), 'error')).catch(() => addToast(t('rolesUpdateError'), 'error'));
                                                                                     }
-                                                                                }).catch(() => addToast('Error updating roles', 'error')).finally(() => setPcBusy(false));
+                                                                                }).catch(() => addToast(t('rolesUpdateError'), 'error')).finally(() => setPcBusy(false));
                                                                             };
                                                                             return (
                                                                                 <div data-spec011="picker-home">
@@ -3027,7 +3027,7 @@
                                                                                         return (
                                                                                             <div key={'g' + r.id} className="flex items-center gap-1.5 text-xs text-gray-300">
                                                                                                 <span className="truncate" title={r.id}>{r.name || r.id}</span>
-                                                                                                {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400 text-[10px] shrink-0">primary</span>}
+                                                                                                {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400 text-[10px] shrink-0">{t('primaryRoleBadge')}</span>}
                                                                                                 {isGranted ? (
                                                                                                     <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-40 shrink-0" onClick={() => doRevoke(r, isScalar)}>×</button>
                                                                                                 ) : (
@@ -3038,13 +3038,13 @@
                                                                                     })}
                                                                                     {other.length > 0 && (
                                                                                         <div className="mt-1 pt-1 border-t border-gray-700/50" data-spec011="picker-other">
-                                                                                            <div className="text-[10px] text-gray-500">grants in other tenants:</div>
+                                                                                            <div className="text-[10px] text-gray-500">{t('grantsOtherTenants')}</div>
                                                                                             {other.map(r => {
                                                                                                 const isScalar = user.role === r.id;
                                                                                                 return (
                                                                                                     <div key={'go' + r.id} className="flex items-center gap-1.5 text-xs text-gray-500">
                                                                                                         <span className="truncate">{tName(r.tenant_id)}: {r.name || r.id}</span>
-                                                                                                        {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400/70 text-[10px] shrink-0">primary</span>}
+                                                                                                        {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400/70 text-[10px] shrink-0">{t('primaryRoleBadge')}</span>}
                                                                                                         <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-red-400/70 hover:bg-red-500/10 disabled:opacity-40 shrink-0" onClick={() => doRevoke(r, isScalar)}>×</button>
                                                                                                     </div>
                                                                                                 );
@@ -3052,7 +3052,7 @@
                                                                                         </div>
                                                                                     )}
                                                                                     {home.length === 0 && other.length === 0 && (
-                                                                                        <div className="text-xs text-gray-500">no tenant-scoped roles available for this user's tenant</div>
+                                                                                        <div className="text-xs text-gray-500">{t('noTenantRolesForUser')}</div>
                                                                                     )}
                                                                                 </div>
                                                                             );

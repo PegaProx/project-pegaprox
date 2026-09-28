@@ -2565,10 +2565,14 @@
                         }
                     } catch (e) { console.error('fetchMintableRoles error:', e); }
                     if (attempt === 0) {
-                        if (addToast) addToast('Failed to load tenant roles — retrying…', 'error');
+                        if (addToast) addToast(t('tokenRolesLoadRetry'), 'error');
                     }
                 }
-                if (addToast) addToast('Failed to load tenant roles — role picker limited to builtin', 'error');
+                // LW Sep 2026 - drop the previous list too. Leaving it rendered
+                // contradicts the toast we are about to show, and the stale
+                // entries still look pickable.
+                setMintableRoles([]);
+                if (addToast) addToast(t('tokenRolesLoadFailed'), 'error');
             };
 
             const createToken = async () => {
@@ -3470,21 +3474,21 @@
                                                     >
                                                         <option value="">Same as my role</option>
                                                         {mintableRoles.length > 0 && (
-                                                            <optgroup label="My tenant roles">
+                                                            <optgroup label={t('myTenantRoles')}>
                                                                 {mintableRoles.map(r => (
                                                                     <option key={r.name} value={r.name}>{r.name} · {r.tenant_id}</option>
                                                                 ))}
                                                             </optgroup>
                                                         )}
                                                         {user?.role === 'admin' && (
-                                                            <optgroup label="Builtin">
+                                                            <optgroup label={t('builtinRoles')}>
                                                                 <option value="viewer">Viewer</option>
                                                                 <option value="user">User</option>
                                                                 <option value="admin">Admin</option>
                                                             </optgroup>
                                                         )}
                                                     </select>
-                                                    <p className="text-xs text-gray-500 mt-1">One key per tenant role — each key is pinned to that role's tenant.</p>
+                                                    <p className="text-xs text-gray-500 mt-1">{t('tokenTenantPinHint')}</p>
                                                 </div>
                                                 <div>
                                                     <label className="block text-sm text-gray-400 mb-1">Expires (optional)</label>
