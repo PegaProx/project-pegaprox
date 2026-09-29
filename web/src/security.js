@@ -2068,6 +2068,19 @@
             );
         }
 
+        // One line of an update job's log. The backend stores {timestamp, text}
+        // (models/tasks.py UpdateTask.add_output) and the node views already read
+        // .text, so this only exists because the PBS panel did not. Anything that
+        // is not that shape still has to come out as a string the caller can run
+        // .includes() on, exit codes included (#584).
+        function pbsLogText(line) {
+            if (line == null) return '';
+            if (typeof line === 'object') {
+                return typeof line.text === 'string' ? line.text : JSON.stringify(line);
+            }
+            return String(line);
+        }
+
         // update Manager Section Component (for Settings tab)
         function UpdateManagerSection({ clusterId, addToast }) {
             const { t } = useTranslation();
@@ -2854,9 +2867,12 @@
                                                     {pbsJob && (pbsJob.output_lines || []).length > 0 && (
                                                         <div className="p-3 bg-black/50 max-h-48 overflow-y-auto font-mono text-xs">
                                                             {(pbsJob.output_lines || []).map((line, i) => {
-                                                                // LW: output_lines can carry a non-string entry (e.g. an exit code) — String() it
-                                                                // so .includes() can't blow up the whole page (#584 white-screen)
-                                                                const s = String(line);
+                                                                // UpdateTask.add_output stores {timestamp, text}, so the line is an
+                                                                // object and the bare String() from #584 printed [object Object] for
+                                                                // every one of them. Read the text, and keep a fallback for the
+                                                                // non-string entries (an exit code) that #584 was about — those must
+                                                                // not blow up .includes() and take the page down with them.
+                                                                const s = pbsLogText(line);
                                                                 return <div key={i} className={`${s.includes('[ERROR]') ? 'text-red-400' : s.includes('[OK]') ? 'text-green-400' : 'text-gray-300'}`}>{s}</div>;
                                                             })}
                                                             {pbsJob.error && <div className="text-red-400 mt-2">⚠ {pbsJob.error}</div>}
