@@ -543,12 +543,36 @@ class PegaProxDB:
         # junction rows. Builtins (admin/user/viewer) intentionally get NO row
         # (D7 backfill edge: admin bypasses; builtins resolve without
         # custom_roles) -- P1 count checks must expect that.
+        #
+        # MK #950 review (uniqueness — his sharpest case): the original JOIN
+        # was on name alone, so where TWO tenants both define a role called
+        # "operator", a member of tenant_a holding primary role "operator"
+        # received BOTH rows — a cross-tenant grant nobody made. Names that
+        # resolve unambiguously are pinned to their defining tenant; ambiguous
+        # names are SKIPPED (never guessed) with a warning naming the fix.
         cursor.execute('''
             INSERT OR IGNORE INTO user_roles (username, role_name, tenant_id, granted_at, granted_by)
             SELECT u.username, u.role, COALESCE(r.tenant_id, ''), ?, 'migration-2026-09'
             FROM users u
             JOIN custom_roles r ON r.name = u.role
+            WHERE (
+                SELECT COUNT(*) FROM custom_roles r2 WHERE r2.name = u.role
+            ) = 1
         ''', (datetime.now().isoformat(),))
+        try:
+            _ambig = cursor.execute('''
+                SELECT name, COUNT(*) AS n FROM custom_roles
+                GROUP BY name HAVING n > 1
+            ''').fetchall()
+            for _row in _ambig:
+                _nm = _row['name'] if isinstance(_row, dict) else _row[0]
+                logging.warning(
+                    f"[migration] primary-role backfill SKIPPED for role "
+                    f"{_nm!r}: defined by {(_row[1] if not isinstance(_row, dict) else _row['n'])} "
+                    f"tenants. Users holding it as their PRIMARY role got no "
+                    f"junction row — resolve the duplicate name, then re-grant.")
+        except Exception:
+            pass
 
         # SRK (SPEC-2026-011 D6): user_tenants junction -- membership beyond
         # the scalar home tenant. users.tenant stays the HOME/default; the

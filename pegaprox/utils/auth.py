@@ -340,11 +340,21 @@ def apply_token_role(user: dict, token_role: str) -> dict:
         # apply_token_role so both call sites (build_authz_user + check_cluster_access)
         # get it and cannot drift apart - which is the whole point of this function.
         try:
-            _rrow = get_db().conn.execute(
-                'SELECT tenant_id FROM custom_roles WHERE name = ?',
+            # MK #950 review (uniqueness): name can exist in several tenants.
+            # Only pin when the resolution is unambiguous — a row-count>1
+            # leaves the owner's tenant untouched (matches _roles_tenant_of
+            # and _tenant_defining_role, which refuse to guess).
+            _prow = get_db().conn.execute(
+                'SELECT COUNT(*) FROM custom_roles WHERE name = ?',
                 (token_role,)).fetchone()
-            if _rrow and _rrow[0]:
-                out['tenant_id'] = _rrow[0]
+            _pcount = (_prow[0] if not isinstance(_prow, dict)
+                       else list(_prow.values())[0]) if _prow else 0
+            if _pcount == 1:
+                _rrow = get_db().conn.execute(
+                    'SELECT tenant_id FROM custom_roles WHERE name = ?',
+                    (token_role,)).fetchone()
+                if _rrow and _rrow[0]:
+                    out['tenant_id'] = _rrow[0]
         except Exception:
             pass
     else:

@@ -2962,7 +2962,30 @@
                                                         <td className="px-4 py-3">
                                                             {editingUser === user.username ? (
                                                                 <div>
-                                                                {/* SPEC-2026-011 P2: legacy single-role <select> REMOVED (superseded by tenant-first access-list editor; scalar user.role never deleted server-side) */}
+                                                                {/* MK #950 review (UI regression): legacy single-role <select> restored
+                                                                    as the PRIMARY-role control. The junction editor below only covers
+                                                                    tenant-scoped customs — without this there was no way to promote to
+                                                                    admin, demote to viewer, or set a global custom role, and a vanilla
+                                                                    install (zero custom roles) rendered an empty role cell. Setting a
+                                                                    custom role here moves the scalar primary; per-tenant extras stay in
+                                                                    the editor underneath. */}
+                                                                <select
+                                                                    defaultValue={user.role}
+                                                                    disabled={pcBusy}
+                                                                    onChange={e => handleUpdateUser(user.username, { role: e.target.value })}
+                                                                    className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-xs text-white mb-1.5"
+                                                                    data-spec010="primary-role-select"
+                                                                >
+                                                                    {['admin', 'user', 'viewer'].map(b => (
+                                                                        <option key={'b' + b} value={b}>{b === 'admin' ? t('roleAdmin') : b === 'user' ? t('roleUser') : t('roleViewer')}</option>
+                                                                    ))}
+                                                                    {allRoles.filter(r => !r.builtin && r.scope !== 'tenant').map(r => (
+                                                                        <option key={'g' + r.id} value={r.id}>{r.name || r.id}</option>
+                                                                    ))}
+                                                                    {allRoles.filter(r => !r.builtin && r.scope === 'tenant' && r.tenant_id && (new Set([user.tenant_id || 'default'].concat(userTenants[user.username] || []))).has(r.tenant_id)).map(r => (
+                                                                        <option key={'t' + r.id} value={r.id}>{(tenants.find(x => x.id === r.tenant_id) || {}).name || r.tenant_id}: {r.name || r.id}</option>
+                                                                    ))}
+                                                                </select>
                                                                 {/* SPEC-2026-010 P3: additional tenant roles (union model) */}
                                                                 {allRoles.filter(r => !r.builtin).length > 0 && (
                                                                     <div className="mt-1.5 space-y-0.5" data-spec010="granted-roles-editor">

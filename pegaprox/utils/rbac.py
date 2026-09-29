@@ -393,7 +393,33 @@ def _tenant_defining_role(role: str, tenant_id: str) -> str:
 # bite on the NEXT request (M2 acceptance gate).
 
 def get_user_role_grants(username: str) -> list:
-    """Junction rows for a user: [{'role_name':..., 'tenant_id':...}, ...]."""
+    """Junction rows for a user: [{'role_name':..., 'tenant_id':...}, ...].
+
+    MK #950 review (scale): the per-VM authz loop calls this once PER VM with
+    identical args — 2 queries x 10k guests on one list route. Memoised on
+    Flask's request global, same shape as _pool_perms_for: the memo only ever
+    lives for one request, so revocation still bites on the NEXT request (M2
+    gate). Writers (roles grant/revoke, delete_user purge) MUST call
+    invalidate_user_grants_memo() after committing, or the same request's own
+    response snapshot would be stale."""
+    key = username
+    try:
+        from flask import g, has_request_context
+        if has_request_context():
+            memo = getattr(g, '_user_grants_memo', None)
+            if memo is None:
+                memo = {}
+                g._user_grants_memo = memo
+            if key not in memo:
+                memo[key] = _user_role_grants_read(username)
+            return memo[key]
+    except Exception:
+        pass
+    return _user_role_grants_read(username)
+
+
+def _user_role_grants_read(username: str) -> list:
+    """Uncached junction read — the single source of truth."""
     try:
         rows = get_db().query(
             'SELECT role_name, tenant_id FROM user_roles WHERE username = ?',
@@ -403,6 +429,18 @@ def get_user_role_grants(username: str) -> list:
     except Exception as e:
         logging.error(f"[user_roles] grant lookup failed for '{username}': {e}")
         return []
+
+
+def invalidate_user_grants_memo(username: str):
+    """Drop the per-request memo for one user (call AFTER any user_roles write)."""
+    try:
+        from flask import g, has_request_context
+        if has_request_context():
+            memo = getattr(g, '_user_grants_memo', None)
+            if memo is not None:
+                memo.pop(username, None)
+    except Exception:
+        pass
 
 
 def get_role_grants(role_name: str, tenant_id: str = None) -> list:
@@ -437,6 +475,16 @@ def _effective_tenant_ids(user: dict) -> list:
     if base_defining and base_defining not in tenants:
         tenants.append(base_defining)
     for g in get_user_role_grants(user.get('username', '')):
+        # MK #950 review (revoke-dormancy): a grant pinned to an explicit
+        # tenant is only live while that membership exists. Legacy migration
+        # rows (tenant_id='') keep the old resolve-through-role behavior.
+        if g['tenant_id']:
+            import pegaprox.utils.rbac as _rb_self
+            if g['tenant_id'] not in _rb_self.get_user_tenant_memberships(
+                    user.get('username', '')) and \
+                    g['tenant_id'] != (user.get('tenant_id')
+                                       or DEFAULT_TENANT_ID):
+                continue
         tid = g['tenant_id'] or _tenant_defining_role(g['role_name'], base)
         if tid and tid not in tenants:
             tenants.append(tid)

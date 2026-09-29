@@ -31,7 +31,7 @@ from pegaprox.utils.rbac import (
     load_vm_acls, save_vm_acls, get_vm_acls, invalidate_vm_acls_cache,
     user_can_access_vm, get_user_vms,
     get_pool_membership_cache, invalidate_pool_cache, get_vm_pool_cached,
-    DEFAULT_TENANT_ID, ROLE_TEMPLATES,
+    DEFAULT_TENANT_ID, ROLE_TEMPLATES, _AMBIGUOUS_ROLE_TENANT,
 )
 from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error
 
@@ -2596,16 +2596,31 @@ def delete_user_folder(folder_id):
 # resolvers are cache-free, so revocation bites on the next request.
 # ======================================================================
 def _roles_tenant_of(role_name):
-    """Tenant of a custom role, or None if the role does not exist."""
+    """Tenant of a custom role, or None if the role does not exist.
+
+    MK #950 review (uniqueness): custom_roles is keyed (name, tenant_id), so a
+    name can exist in several tenants. Granting by bare name in that case has
+    no single answer — this returns the sentinel _AMBIGUOUS_ROLE_TENANT, which
+    then fails the role_tenant containment check in _roles_guard (no caller
+    sits in the NUL tenant) and can never be inserted (tenant_id NOT NULL there
+    would record a nonexistent tenant). Legacy resolve-through-role rows are
+    unaffected: they exist only for names defined in exactly one tenant.
+    """
     try:
         cur = get_db().conn.cursor()
         cur.execute('SELECT tenant_id FROM custom_roles WHERE name = ?', (role_name,))
-        row = cur.fetchone()
-        if row is None:
+        rows = cur.fetchall()
+        if not rows:
             return None
-        row = row if isinstance(row, dict) else dict(zip(
-            ['tenant_id'], [row[0]]))
-        return row.get('tenant_id')
+        if len(rows) > 1:
+            from pegaprox.utils.rbac import _AMBIGUOUS_ROLE_TENANT
+            logging.warning(
+                f"[roles-api] role {role_name!r} is defined by "
+                f"{len(rows)} tenants — refusing to guess which one the "
+                f"grant meant. Disambiguate the role name first.")
+            return _AMBIGUOUS_ROLE_TENANT
+        row = rows[0]
+        return row['tenant_id'] if isinstance(row, dict) else row[0]
     except Exception as e:
         logging.error(f"[roles-api] role lookup failed for '{role_name}': {e}")
         return None
@@ -2616,19 +2631,25 @@ def _roles_guard(username, role_tenant=None):
 
     Containment: caller must exist; global admin passes; otherwise caller
     tenant must equal target tenant AND (when given) role tenant.
+
+    MK #950 review (authz gap 3): the caller record must be the ACTING one,
+    not the stored row from load_users() — under API-token auth the stored
+    role is the OWNER's, so an admin-owned viewer-capped token sailed through
+    the admin shortcut. acting_user() applies the token ceiling (#491); same
+    rule every other self-scoping route follows.
     """
     users = load_users()
     if username not in users:
         return None, (jsonify({'error': 'User not found'}), 404)
     target = users[username]
-    sess = getattr(request, 'session', {}) or {}
-    caller_name = sess.get('user', '')
-    caller = users.get(caller_name)
+    from pegaprox.api.helpers import acting_user
+    caller = acting_user()
+    caller_name = (caller or {}).get('username', '')
     if not caller:
         # cannot establish containment -> deny (defense in depth; the
         # require_auth decorator has already authenticated the principal)
         return None, (jsonify({'error': 'Access denied'}), 403)
-    if caller.get('role') == ROLE_ADMIN:
+    if caller.get('effective_role', caller.get('role')) == ROLE_ADMIN:
         return target, None
     caller_t = caller.get('tenant_id') or DEFAULT_TENANT_ID
     target_t = target.get('tenant_id') or DEFAULT_TENANT_ID
@@ -2678,9 +2699,32 @@ def roles_grant(username):
     if r_tenant is None:
         # invariant 2: role must exist in custom_roles; no wildcard/derived
         return jsonify({'error': 'Unknown role'}), 404
+    if r_tenant == _AMBIGUOUS_ROLE_TENANT:
+        # MK #950 review (uniqueness): the name resolves in more than one
+        # tenant. Never insert a sentinel row; the grant needs a disambiguated
+        # name (this also covers the admin shortcut in _roles_guard, which
+        # skips role_tenant containment on purpose).
+        return jsonify({'error': f'Role "{role}" is defined in multiple tenants; '
+                        'rename per tenant and grant the specific one'}), 409
     target, err = _roles_guard(username, role_tenant=r_tenant)
     if err:
         return err
+    # MK #950 review (authz gap 1): a delegate must not grant permissions
+    # stronger than their own — same rule users._authz_object_write already
+    # enforces for vm-acls/pool grants. Global admins pass inside the guard;
+    # here the EFFECTIVE (token-capped) caller is the yardstick.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_role_permissions_for_user, has_permission
+    _caller_authz = build_authz_user(
+        getattr(request, 'session', {}).get('user', ''),
+        getattr(request, 'session', {}) or {})
+    _held = set(get_user_permissions(_caller_authz) or [])
+    _missing = [p for p in get_role_permissions_for_user(
+        {'role': role}, r_tenant) if p not in _held]
+    if _missing and _caller_authz.get('effective_role',
+                                      _caller_authz.get('role')) != ROLE_ADMIN:
+        return jsonify({'error': 'Cannot grant permissions you do not hold: '
+                        + ', '.join(sorted(_missing))}), 403
     sess = getattr(request, 'session', {}) or {}
     caller_name = sess.get('user', '')
     db = get_db()
@@ -2735,8 +2779,11 @@ def roles_revoke(username):
                         'change it via user edit'}), 400
     sess = getattr(request, 'session', {}) or {}
     caller_name = sess.get('user', '')
-    caller = load_users().get(caller_name, {})
-    scoped = caller.get('role') != ROLE_ADMIN
+    # MK #950 review: acting-user rule — a viewer-capped token owned by an
+    # admin must revoke SCOPED, not with the owner's admin shortcut.
+    from pegaprox.api.helpers import acting_user
+    caller = acting_user() or {}
+    scoped = caller.get('effective_role', caller.get('role')) != ROLE_ADMIN
     db = get_db()
     cur = db.conn.cursor()
     try:
@@ -2794,14 +2841,22 @@ def tenants_grant_d6(username):
         return err
     sess = getattr(request, 'session', {}) or {}
     caller_name = sess.get('user', '')
-    caller = load_users().get(caller_name, {})
-    # Q1: non-admin caller needs a shared tenant with the target
-    if caller.get('role') != ROLE_ADMIN:
+    # MK #950 review: same acting-user rule as _roles_guard — the admin
+    # shortcut must weigh the token-capped role, not the owner's stored one.
+    from pegaprox.api.helpers import acting_user
+    caller = acting_user() or {}
+    if caller.get('effective_role', caller.get('role')) != ROLE_ADMIN:
         import pegaprox.utils.rbac as _rbac_d6
         _cset = set(_rbac_d6.get_user_tenant_memberships(caller_name)) | {caller.get('tenant_id', DEFAULT_TENANT_ID)}
         _tset = set(_rbac_d6.get_user_tenant_memberships(username)) | {target.get('tenant_id', DEFAULT_TENANT_ID)}
         if not (_cset & _tset):
             return jsonify({'error': 'Access denied: no shared tenant with this user'}), 403
+        # MK #950 review (authz gap 2): the body tid was inserted unvalidated,
+        # so a tenant-A delegate could mint membership in tenant B and
+        # _effective_tenant_ids turned that into cluster visibility. A
+        # non-admin may only grant tenants THEY are a member of.
+        if tid not in _cset:
+            return jsonify({'error': 'Access denied: cannot grant a tenant you are not a member of'}), 403
     db = get_db()
     cur = db.conn.cursor()
     try:
