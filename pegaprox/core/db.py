@@ -547,17 +547,30 @@ class PegaProxDB:
         # MK #950 review (uniqueness — his sharpest case): the original JOIN
         # was on name alone, so where TWO tenants both define a role called
         # "operator", a member of tenant_a holding primary role "operator"
-        # received BOTH rows — a cross-tenant grant nobody made. Names that
-        # resolve unambiguously are pinned to their defining tenant; ambiguous
-        # names are SKIPPED (never guessed) with a warning naming the fix.
+        # received BOTH rows — a cross-tenant grant nobody made. Resolution
+        # order: a name defined by exactly ONE tenant pins that tenant; an
+        # ambiguous name pins the user's OWN tenant when it defines the name
+        # (the one answer that is not a guess); anything else is SKIPPED with
+        # a warning naming the fix. Scalar subqueries, never a multi-row JOIN:
+        # an ambiguous name must not multiply into two inserts again.
         cursor.execute('''
             INSERT OR IGNORE INTO user_roles (username, role_name, tenant_id, granted_at, granted_by)
-            SELECT u.username, u.role, COALESCE(r.tenant_id, ''), ?, 'migration-2026-09'
+            SELECT u.username, u.role,
+                   CASE
+                     WHEN (SELECT COUNT(*) FROM custom_roles r2
+                           WHERE r2.name = u.role) = 1
+                       THEN (SELECT r2.tenant_id FROM custom_roles r2
+                             WHERE r2.name = u.role)
+                     ELSE COALESCE(NULLIF(u.tenant, ''), 'default')
+                   END,
+                   ?, 'migration-2026-09'
             FROM users u
-            JOIN custom_roles r ON r.name = u.role
-            WHERE (
-                SELECT COUNT(*) FROM custom_roles r2 WHERE r2.name = u.role
-            ) = 1
+            WHERE EXISTS (SELECT 1 FROM custom_roles r4 WHERE r4.name = u.role)
+              AND ( (SELECT COUNT(*) FROM custom_roles r2
+                     WHERE r2.name = u.role) = 1
+                    OR EXISTS (SELECT 1 FROM custom_roles r3
+                               WHERE r3.name = u.role
+                                 AND r3.tenant_id = COALESCE(NULLIF(u.tenant, ''), 'default')) )
         ''', (datetime.now().isoformat(),))
         try:
             _ambig = cursor.execute('''
@@ -567,9 +580,9 @@ class PegaProxDB:
             for _row in _ambig:
                 _nm = _row['name'] if isinstance(_row, dict) else _row[0]
                 logging.warning(
-                    f"[migration] primary-role backfill SKIPPED for role "
-                    f"{_nm!r}: defined by {(_row[1] if not isinstance(_row, dict) else _row['n'])} "
-                    f"tenants. Users holding it as their PRIMARY role got no "
+                    f"[migration] primary-role backfill for role {_nm!r}: "
+                    f"defined by {(_row[1] if not isinstance(_row, dict) else _row['n'])} "
+                    f"tenants. Users whose OWN tenant does not define it got no "
                     f"junction row — resolve the duplicate name, then re-grant.")
         except Exception:
             pass
