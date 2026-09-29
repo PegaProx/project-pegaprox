@@ -479,8 +479,7 @@ def _effective_tenant_ids(user: dict) -> list:
         # tenant is only live while that membership exists. Legacy migration
         # rows (tenant_id='') keep the old resolve-through-role behavior.
         if g['tenant_id']:
-            import pegaprox.utils.rbac as _rb_self
-            if g['tenant_id'] not in _rb_self.get_user_tenant_memberships(
+            if g['tenant_id'] not in get_user_tenant_memberships(
                     user.get('username', '')) and \
                     g['tenant_id'] != (user.get('tenant_id')
                                        or DEFAULT_TENANT_ID):
