@@ -1811,11 +1811,20 @@
             }, [vm.vmid, vm.status, clusterId, !!guestInfo]);
 
             // Fetch VM hardware config
+            // LW Sep 2026 (#813 Frisch12) — clear FIRST, and drop an answer that arrives
+            // after the user has moved on. The clear used to sit inside the isQemu guard,
+            // so it only ran for containers; switching between two VMs left the previous
+            // one's values on screen until the new request came back. Nobody noticed while
+            // the fields were machine types that read alike — a description is a sentence
+            // about a specific VM, and reading the wrong one is worse than reading none.
             useEffect(() => {
-                if (!isQemu) { setVmHwInfo(null); return; }
+                setVmHwInfo(null);
+                if (!isQemu) return;
+                let stale = false;
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`)
                     .then(r => r && r.ok ? r.json() : null)
                     .then(cfg => {
+                        if (stale) return;
                         if (!cfg) { setVmHwInfo(null); return; }
                         const raw = cfg.raw || cfg;
                         setVmHwInfo({
@@ -1823,12 +1832,15 @@
                             cpu: raw.cpu || 'kvm64', scsihw: raw.scsihw || 'lsi',
                             cores: raw.cores || 1, sockets: raw.sockets || 1,
                             ostype: raw.ostype,
+                            // #813 — rides along in the same response, no extra request
+                            description: (raw.description || '').trim(),
                             net: (() => { const nk = Object.keys(raw).find(k => k.startsWith('net')); return nk ? raw[nk].split(',')[0].split('=')[0] : null; })(),
                             agent: raw.agent,
                         });
                     })
-                    .catch(() => setVmHwInfo(null));
-            }, [vm.vmid, clusterId]);
+                    .catch(() => { if (!stale) setVmHwInfo(null); });
+                return () => { stale = true; };
+            }, [vm.vmid, vm.node, clusterId]);
 
             // Fetch HA status
             useEffect(() => {
@@ -2089,6 +2101,11 @@
                                             {vm.tags && <tr><td>Tags</td><td><div className="flex flex-wrap gap-1">{(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                                 <span key={tag} className="px-1.5 py-0.5 text-[11px]" style={{background: 'rgba(73, 175, 217, 0.12)', color: '#49afd9', border: '1px solid rgba(73, 175, 217, 0.25)'}}>{tag}</span>
                                             ))}</div></td></tr>}
+                                            {/* #813 — operator-entered free text, rendered as text: React escapes it,
+                                                pre-wrap keeps the author's line breaks, break-word stops a pasted URL
+                                                from widening the whole grid. The Config editor keeps its Markdown. */}
+                                            {vmHwInfo?.description && <tr><td>{t('description') || 'Description'}</td>
+                                                <td style={{whiteSpace: 'pre-wrap', overflowWrap: 'break-word', maxWidth: 0}}>{vmHwInfo.description}</td></tr>}
                                         </tbody>
                                     </table>
                                     {/* stats */}

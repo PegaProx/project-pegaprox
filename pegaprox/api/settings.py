@@ -1594,7 +1594,8 @@ def update_server_settings():
                     'proxmoxDark', 'proxmoxLight', 'midnight', 'forest', 'rose', 'ocean',
                     'highContrast', 'dracula', 'nord', 'monokai', 'matrix', 'sunset',
                     'cyberpunk', 'github', 'solarizedDark', 'gruvbox',
-                    'corporateDark', 'corporateLight', 'enterpriseBlue'  # NS: Corporate themes
+                    'corporateDark', 'corporateLight', 'enterpriseBlue',  # NS: Corporate themes
+                    'cloud', 'system'  # LW Sep 2026 (#743); `cloud` was missing here
                 ]
                 if data['default_theme'] in allowed_themes:
                     settings['default_theme'] = data['default_theme']
@@ -1807,7 +1808,8 @@ def update_server_settings():
                 'proxmoxDark', 'proxmoxLight', 'midnight', 'forest', 'rose', 'ocean',
                 'highContrast', 'dracula', 'nord', 'monokai', 'matrix', 'sunset',
                 'cyberpunk', 'github', 'solarizedDark', 'gruvbox',
-                'corporateDark', 'corporateLight', 'enterpriseBlue'  # NS: Corporate themes
+                'corporateDark', 'corporateLight', 'enterpriseBlue',  # NS: Corporate themes
+                'cloud', 'system'  # LW Sep 2026 (#743); `cloud` was missing here
             ]
             if default_theme in allowed_themes:
                 settings['default_theme'] = default_theme
@@ -4026,45 +4028,122 @@ def check_cluster_updates(cluster_id):
             }
         })
     
-    for node_name in node_names:
-        # MK: Feb 2026 - Retry up to 2 times on failure, with clear error reporting
-        max_retries = 2
-        last_error = None
-        for attempt in range(max_retries + 1):
+    # SS (Sep 2026): validate each node name against an allow-list that permits letters,
+    # digits, dots and hyphens but rejects path separators, so a crafted name like
+    # `../foo` can't reach the URL builders. (node_names is already trimmed to online
+    # nodes upstream — the only thing added here is the name allow-list.)
+    import re as _re
+    _SAFE_NODE = _re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9.\-]{0,62}$')
+    safe_node_names = []
+    unsafe_node_names = []
+    for n in node_names:
+        if n and _SAFE_NODE.match(n):
+            safe_node_names.append(n)
+        else:
+            unsafe_node_names.append(n)
+
+    # SS (Sep 2026): Proxmox's GET /nodes/{node}/apt/update only ever returns the
+    # output of the LAST `apt update` that ran, and yum's `check-update` reads a local
+    # cache, so a bare GET reports stale / uncached data. We must POST first to trigger
+    # a fresh refresh, wait for it, then read. Doing that per node serially costs
+    # N×(apt-update time) and trips the gateway timeout on big clusters, so every node's
+    # refresh+read runs concurrently through the shared gevent pool instead.
+    from pegaprox.utils.concurrent import run_concurrent_dict
+
+    def _check_one(node_name):
+        # 1) Refresh first (POST for Proxmox, `yum makecache` for XCP-ng). Proxmox
+        #    hands back a UPID; wait on that task so the read below is guaranteed fresh.
+        #    XCP-ng's makecache has no task to await, so give it a moment to settle.
+        refresh_error = None
+        try:
+            refreshed = mgr.refresh_node_apt(node_name)
+            if not isinstance(refreshed, dict):
+                refresh_error = 'refresh returned an unexpected shape'
+            elif refreshed.get('success') is False:
+                refresh_error = refreshed.get('error') or 'apt refresh failed'
+            else:
+                task_ref = refreshed.get('task')
+                if task_ref:
+                    if not mgr._wait_for_task(node_name, task_ref, timeout=120):
+                        refresh_error = 'the apt refresh task did not finish cleanly'
+                else:
+                    time.sleep(10)
+        except Exception as e:
+            refresh_error = str(e)
+
+        # MK Sep 2026 - a failed refresh must NOT fall through to the read below.
+        # get_node_apt_updates answers from whatever apt last wrote on the node, so
+        # reading after a failed refresh returns stale data that then goes out as
+        # success: True and is held by the 24h update-check cache. "could not
+        # refresh" is not "no updates"; report it with the same count == -1 the
+        # read failures use.
+        if refresh_error:
+            logging.error(f"[UpdateCheck] {node_name} refresh failed: {refresh_error}")
+            return {
+                'success': False,
+                'error': f"apt refresh failed: {refresh_error}",
+                'updates': [],
+                'count': -1,
+            }
+
+        # 2) Read the available-updates list, retrying briefly on a transient failure so
+        #    one flaky node doesn't sink the whole cluster.
+        last_err = None
+        for attempt in range(3):
             try:
                 updates = mgr.get_node_apt_updates(node_name)
-                
+
                 if isinstance(updates, list):
                     update_list = updates
                 elif isinstance(updates, dict):
                     update_list = updates.get('data', [])
                 else:
                     update_list = []
-                
-                results[node_name] = {
+                return {
                     'success': True,
                     'updates': update_list,
                     'count': len(update_list),
-                    'retries': attempt
+                    'retries': attempt,
                 }
-                last_error = None
-                break  # Success, no more retries
             except Exception as e:
-                last_error = str(e)
-                if attempt < max_retries:
-                    logging.warning(f"[UpdateCheck] {node_name} attempt {attempt+1} failed: {e}, retrying...")
-                    time.sleep(2)
-        
-        # LW: If all retries failed, show clear error state
-        if last_error:
-            logging.error(f"[UpdateCheck] {node_name} failed after {max_retries+1} attempts: {last_error}")
-            results[node_name] = {
-                'success': False,
-                'error': last_error,
-                'updates': [],
-                'count': -1  # NS: -1 signals "check failed" vs 0 which means "no updates"
-            }
-    
+                last_err = e
+                logging.warning(f"[UpdateCheck] {node_name} read attempt {attempt+1} failed: {e}")
+                time.sleep(2)
+
+        # All retries failed — record a clear failed-check state (count == -1).
+        logging.error(f"[UpdateCheck] {node_name} failed after 3 attempts: {last_err}")
+        return {
+            'success': False,
+            'error': str(last_err),
+            'updates': [],
+            'count': -1,
+        }
+
+    per_node = run_concurrent_dict(
+        {n: (lambda nn=n: _check_one(nn)) for n in safe_node_names},
+        timeout=180,
+    )
+    for node_name, node_result in per_node.items():
+        results[node_name] = node_result or {
+            'success': False,
+            'error': 'Update check timed out',
+            'updates': [],
+            'count': -1,
+        }
+
+    # SS (Sep 2026): node names that fail the allow-list are excluded from the concurrent
+    # check above, but we still record them as an explicit unchecked failure (count == -1),
+    # same as a failed read. Otherwise a dropped node reads as "nothing to report" instead
+    # of "we never looked" — and a legal digit-led hostname like `1blade` would vanish.
+    for node_name in unsafe_node_names:
+        results[node_name] = {
+            'success': False,
+            'error': 'Node name failed allow-list validation',
+            'updates': [],
+            'count': -1,
+        }
+        logging.warning(f"[UpdateCheck] rejecting node name outside allow-list: {node_name!r}")
+
     # MK: count > 0 for updates, ignore -1 (failed checks)
     total_updates = sum(max(r.get('count', 0), 0) for r in results.values())
     nodes_with_updates = sum(1 for r in results.values() if r.get('count', 0) > 0)
@@ -4279,6 +4358,15 @@ def start_rolling_update(cluster_id):
     
     mgr = cluster_managers[cluster_id]
     data = request.get_json() or {}
+
+    # MK Sep 2026 (#716 hugobugomugo) — alert channels to tell about this run, so the
+    # on-call monitoring can be muted for its actual duration instead of a guessed
+    # maintenance window. Opt-in: no ids, no traffic.
+    notify_channels = data.get('notify_channels', [])
+    if notify_channels is None:
+        notify_channels = []
+    if not isinstance(notify_channels, list) or not all(isinstance(c, str) for c in notify_channels):
+        return jsonify({'error': 'notify_channels must be a list of channel ids'}), 400
     
     # Configuration options
     include_reboot = data.get('include_reboot', False)
@@ -4384,9 +4472,16 @@ def start_rolling_update(cluster_id):
 
     # Start the rolling update in a background thread
     def run_rolling_update():
+        from pegaprox.utils.webhooks import notify_lifecycle   # #716
         try:
             logging.info(f"[RollingUpdate] Starting rolling update for cluster, nodes: {nodes_to_update}")
             _log("Rolling update started")
+            # #716 — the signal the monitoring mutes on
+            notify_lifecycle('rolling_update.started',
+                             f"Rolling update started on {mgr.config.name}",
+                             f"{len(nodes_to_update)} node(s) queued: {', '.join(nodes_to_update)}"
+                             + (" · reboots included" if include_reboot else ""),
+                             cluster_id=cluster_id, channel_ids=notify_channels)
             _log(f"Settings: skip_up_to_date={skip_up_to_date}, skip_evacuation={skip_evacuation}, evacuation_timeout={evacuation_timeout}s, reboot_timeout={reboot_timeout}s, allow_local_disks={allow_local_disks}, ceph_health_gate={ceph_health_gate}")
 
             if skip_evacuation:
@@ -4853,13 +4948,26 @@ def start_rolling_update(cluster_id):
             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] === Rolling update completed ===")
             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Summary: {completed} updated, {skipped} skipped (up-to-date), {failed} failed")
             logging.info(f"[RollingUpdate] Rolling update completed: {completed} updated, {skipped} skipped, {failed} failed")
-            
+            # #716 — un-mute, and say whether anyone needs to look
+            notify_lifecycle('rolling_update.finished',
+                             f"Rolling update finished on {mgr.config.name}",
+                             f"{completed} updated, {skipped} skipped (up-to-date), {failed} failed",
+                             cluster_id=cluster_id,
+                             severity='warning' if failed else 'info',
+                             channel_ids=notify_channels)
+
         except Exception as e:
             logging.error(f"[RollingUpdate] Rolling update failed with exception: {e}")
             mgr._rolling_update['status'] = 'failed'
             mgr._rolling_update['completed_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
             mgr._rolling_update['error'] = str(e)
             mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Rolling update failed: {e}")
+            # #716 — a run that died is exactly when the on-call wants to be un-muted
+            notify_lifecycle('rolling_update.finished',
+                             f"Rolling update FAILED on {mgr.config.name}",
+                             f"The run stopped with an error: {e}",
+                             cluster_id=cluster_id, severity='critical',
+                             channel_ids=notify_channels)
     
     import threading
     update_thread = threading.Thread(target=run_rolling_update, daemon=True)

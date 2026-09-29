@@ -8489,6 +8489,16 @@
                 if (saved === 'light') document.body.dataset.corpTheme = 'light';
                 return saved === 'light';
             });
+            // LW Sep 2026 (#743 Frisch12) — Corporate hides the theme grid (#742), so the
+            // header toggle is the only place a corporate user can reach the new option.
+            // It cycles system -> light -> dark -> system instead of growing a third control.
+            const [corpMode, setCorpMode] = useState(() => {
+                try {
+                    return localStorage.getItem('pegaprox-theme') === 'system'
+                        ? 'system'
+                        : (localStorage.getItem('corp-theme') === 'light' ? 'light' : 'dark');
+                } catch (_) { return 'dark'; }
+            });
             const [globalSearchResults, setGlobalSearchResults] = useState(null);
             const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
             const [showGlobalSearch, setShowGlobalSearch] = useState(false);
@@ -14218,11 +14228,22 @@
                                     {isCorporate && (
                                         <button
                                             onClick={() => {
-                                                const next = !corpLight;
-                                                document.body.dataset.corpTheme = next ? 'light' : '';
-                                                localStorage.setItem('corp-theme', next ? 'light' : '');
-                                                applyTheme(next ? 'corporateLight' : 'corporateDark');
-                                                setCorpLight(next);
+                                                const order = { system: 'light', light: 'dark', dark: 'system' };
+                                                const next = order[corpMode] || 'system';
+                                                const theme = next === 'system' ? 'system'
+                                                            : (next === 'light' ? 'corporateLight' : 'corporateDark');
+                                                // in system mode applyTheme() owns data-corp-theme and the
+                                                // local toggle must stop claiming to know better
+                                                if (next === 'system') {
+                                                    localStorage.removeItem('corp-theme');
+                                                } else {
+                                                    document.body.dataset.corpTheme = next === 'light' ? 'light' : '';
+                                                    localStorage.setItem('corp-theme', next === 'light' ? 'light' : '');
+                                                }
+                                                applyTheme(theme);
+                                                setCorpMode(next);
+                                                setCorpLight(next === 'light' ||
+                                                    (next === 'system' && document.body.dataset.corpTheme === 'light'));
                                                 // MK May 2026 — also persist on server so checkSession on next
                                                 // F5 doesn't apply a stale user.theme that mismatches the local
                                                 // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
@@ -14230,13 +14251,16 @@
                                                 fetch(`${API_URL}/user/preferences`, {
                                                     method: 'PUT', credentials: 'include',
                                                     headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                                                    body: JSON.stringify({ theme: next ? 'corporateLight' : 'corporateDark' })
+                                                    body: JSON.stringify({ theme })
                                                 }).catch(() => {});
                                             }}
                                             className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
-                                            title={corpLight ? 'Dark Mode' : 'Light Mode'}
+                                            title={corpMode === 'system' ? (t('lightMode') || 'Light Mode')
+                                                 : corpMode === 'light' ? (t('darkMode') || 'Dark Mode')
+                                                 : (t('followSystem') || 'Follow system')}
                                         >
-                                            {corpLight ? <Icons.Moon /> : <Icons.Sun />}
+                                            {corpMode === 'system' ? <Icons.Monitor />
+                                             : corpMode === 'light' ? <Icons.Moon /> : <Icons.Sun />}
                                         </button>
                                     )}
 
@@ -15169,8 +15193,10 @@
                                                 // render when the manifest declared has_frontend AND the
                                                 // server normalised frontend_route to /api/plugins/<id>/...
                                                 // (server-side validation in pegaprox/api/plugins.py).
+                                                // #642 — and only on the clusters it was limited to
                                                 const pluginFrontendTabs = (enabledPlugins || [])
                                                     .filter(p => p && p.has_frontend && p.frontend_route)
+                                                    .filter(p => pluginAppliesToCluster(p, selectedCluster?.id))
                                                     .map(p => ({
                                                         id: `plugin:${p.id}`,
                                                         label: p.name || p.id,  // shown verbatim
@@ -20236,11 +20262,11 @@
                                                     <div className={`flex items-center gap-3 ${isCorporate ? 'text-[12px]' : 'text-sm'}`} style={{color: '#adbbc4'}}>
                                                         <span>{selectedVMware.host}:{selectedVMware.port || 443}</span>
                                                         <span>•</span>
-                                                        <span>{vmwareVms.length} VMs</span>
+                                                        <span>{t('vms')}: {vmwareVms.length}</span>
                                                         <span>•</span>
-                                                        <span>{vmwareHosts.length} Hosts</span>
+                                                        <span>{t('hosts')}: {vmwareHosts.length}</span>
                                                         <span>•</span>
-                                                        <span>{vmwareDatastores.length} Datastores</span>
+                                                        <span>{t('datastores')}: {vmwareDatastores.length}</span>
                                                     </div>
                                                 </div>
                                             </div>
@@ -21660,8 +21686,8 @@
                                                             <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('status')}</th>
                                                             <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('name')}</th>
                                                             <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('model')}</th>
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">CPUs</th>
-                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">Memory</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('esxiCpus')}</th>
+                                                            <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('memory')}</th>
                                                             <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('vms')}</th>
                                                         </tr>
                                                     </thead>
@@ -21672,7 +21698,7 @@
                                                                 <td className="p-3 text-white text-sm font-medium">{host.name}</td>
                                                                 <td className="p-3 text-gray-400 text-sm">{host.model || '-'}</td>
                                                                 <td className="p-3 text-gray-400 text-sm">
-                                                                    <div>{host.cpu_cores || host.num_cpu_cores || '-'} cores</div>
+                                                                    <div>{host.cpu_cores || host.num_cpu_cores || '-'} {t('cpuCoresUnit')}</div>
                                                                     {host.cpu_usage !== undefined && (
                                                                         <div className="w-20 h-1.5 bg-proxmox-dark rounded-full mt-1 overflow-hidden">
                                                                             <div className={`h-full rounded-full ${host.cpu_usage > 80 ? 'bg-red-400' : host.cpu_usage > 60 ? 'bg-yellow-400' : 'bg-emerald-400'}`} style={{width: `${Math.min(100, host.cpu_usage || 0)}%`}} />
@@ -21692,7 +21718,7 @@
                                                         ))}
                                                     </tbody>
                                                 </table>
-                                                {vmwareHosts.length === 0 && <div className="text-center py-8 text-gray-500">No hosts found</div>}
+                                                {vmwareHosts.length === 0 && <div className="text-center py-8 text-gray-500">{t('noHostsFound')}</div>}
                                             </div>
                                         )}
                                         
@@ -21723,15 +21749,15 @@
                                                                         <div className={`h-full rounded-full ${parseInt(pct) > 85 ? 'bg-red-400' : parseInt(pct) > 65 ? 'bg-yellow-400' : 'bg-emerald-400'}`} style={{width: `${pct}%`}} />
                                                                     </div>
                                                                     <div className="flex justify-between text-xs text-gray-500 mt-1">
-                                                                        <span>{usedGB} GB used</span>
-                                                                        <span>{freeGB} GB free / {capGB} GB</span>
+                                                                        <span>{usedGB} GB {t('used')}</span>
+                                                                        <span>{freeGB} GB {t('free')} / {capGB} GB</span>
                                                                     </div>
                                                                 </div>
                                                             )}
                                                         </div>
                                                     );
                                                 })}
-                                                {vmwareDatastores.length === 0 && <div className="col-span-3 text-center py-12 text-gray-500">No datastores found</div>}
+                                                {vmwareDatastores.length === 0 && <div className="col-span-3 text-center py-12 text-gray-500">{t('noDatastores')}</div>}
                                             </div>
                                         )}
                                         
@@ -21752,7 +21778,7 @@
                                             return (
                                                 <div className="space-y-4">
                                                     <button onClick={() => { setVmwareSelectedDs(null); setVmwareDsDetail(null); }} className="flex items-center gap-2 text-gray-400 hover:text-white text-sm">
-                                                        <span style={{display:"inline-block",transform:"rotate(180deg)"}}><Icons.ChevronRight className="w-4 h-4" /></span> Back to Datastores
+                                                        <span style={{display:"inline-block",transform:"rotate(180deg)"}}><Icons.ChevronRight className="w-4 h-4" /></span> {t('backToDatastores')}
                                                     </button>
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5">
                                                         <div className="flex items-center gap-4 mb-4">
@@ -21761,20 +21787,20 @@
                                                             </div>
                                                             <div>
                                                                 <h2 className="text-xl font-bold text-white">{ds.name}</h2>
-                                                                <div className="text-sm text-gray-500">{ds.type || detail.type || 'VMFS'} • {capGB} GB total{detail.multiple_host_access ? ' • Shared' : ''}</div>
+                                                                <div className="text-sm text-gray-500">{ds.type || detail.type || 'VMFS'} • {capGB} GB {t('total')}{detail.multiple_host_access ? ` • ${t('shared')}` : ''}</div>
                                                             </div>
                                                         </div>
                                                         <div className="mb-4">
                                                             <div className="h-4 bg-proxmox-dark rounded-full overflow-hidden">
                                                                 <div className={`h-full rounded-full ${parseInt(pct) > 85 ? 'bg-red-400' : parseInt(pct) > 65 ? 'bg-yellow-400' : 'bg-emerald-400'}`} style={{width: `${pct}%`}} />
                                                             </div>
-                                                            <div className="flex justify-between mt-1 text-sm"><span className="text-gray-400">{usedGB} GB used ({pct}%)</span><span className="text-emerald-400">{freeGB} GB free</span></div>
+                                                            <div className="flex justify-between mt-1 text-sm"><span className="text-gray-400">{usedGB} GB {t('used')} ({pct}%)</span><span className="text-emerald-400">{freeGB} GB {t('free')}</span></div>
                                                         </div>
                                                         <div className="grid grid-cols-4 gap-3">
-                                                            {[['Capacity', capGB, 'text-white'], ['Used', usedGB, 'text-white'], ['Free', freeGB, 'text-emerald-400'], ['VMs', dsVms.length, 'text-white']].map(([l, v, c]) => (
-                                                                <div key={l} className="bg-proxmox-dark rounded-lg p-3 text-center">
+                                                            {[['capacity', t('capacity'), capGB, 'text-white'], ['used', t('usedSpace'), usedGB, 'text-white'], ['free', t('freeSpace'), freeGB, 'text-emerald-400'], ['vms', t('vms'), dsVms.length, 'text-white']].map(([key, label, v, c]) => (
+                                                                <div key={key} className="bg-proxmox-dark rounded-lg p-3 text-center">
                                                                     <div className={`text-lg font-bold ${c}`}>{v}</div>
-                                                                    <div className="text-xs text-gray-500">{l === 'VMs' ? l : `GB ${l}`}</div>
+                                                                    <div className="text-xs text-gray-500">{key === 'vms' ? label : `${label} (GB)`}</div>
                                                                 </div>
                                                             ))}
                                                         </div>
@@ -21784,7 +21810,7 @@
                                                     {dsHosts.length > 0 && (
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <div className="p-4 border-b border-proxmox-border">
-                                                                <h3 className="text-sm font-semibold text-gray-400 uppercase">Connected Hosts ({dsHosts.length})</h3>
+                                                                <h3 className="text-sm font-semibold text-gray-400 uppercase">{t('connectedHosts').replace('{count}', () => String(dsHosts.length))}</h3>
                                                             </div>
                                                             <div className="divide-y divide-proxmox-border/50">
                                                                 {dsHosts.map(h => (
@@ -21800,14 +21826,14 @@
                                                     {/* VMs on Datastore */}
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                         <div className="p-4 border-b border-proxmox-border">
-                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase">VMs on {ds.name} ({dsVms.length})</h3>
+                                                            <h3 className="text-sm font-semibold text-gray-400 uppercase">{t('vmsOnDatastore').replace('{datastore}', () => ds.name).replace('{count}', () => String(dsVms.length))}</h3>
                                                         </div>
                                                         {dsVms.length > 0 ? (
                                                             <table className="w-full">
                                                                 <thead><tr className="border-b border-proxmox-border">
                                                                     <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('status')}</th>
                                                                     <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('name')}</th>
-                                                                    <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">OS</th>
+                                                                    <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase">{t('os')}</th>
                                                                 </tr></thead>
                                                                 <tbody>
                                                                     {dsVms.map(vm => (
@@ -21820,7 +21846,7 @@
                                                                     ))}
                                                                 </tbody>
                                                             </table>
-                                                        ) : <div className="p-8 text-center text-gray-500 text-sm">No VMs on this datastore</div>}
+                                                        ) : <div className="p-8 text-center text-gray-500 text-sm">{t('noVmsOnDatastore')}</div>}
                                                     </div>
                                                 </div>
                                             );
@@ -21847,7 +21873,7 @@
                                                         ))}
                                                     </tbody>
                                                 </table>
-                                                {vmwareNetworks.length === 0 && <div className="text-center py-8 text-gray-500">No networks found</div>}
+                                                {vmwareNetworks.length === 0 && <div className="text-center py-8 text-gray-500">{t('noNetworks')}</div>}
                                             </div>
                                         )}
                                         
@@ -21857,8 +21883,8 @@
                                                 {vmwareClusters.length === 0 ? (
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center text-gray-500">
                                                         <Icons.Layers className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                                                        <p>No compute clusters found</p>
-                                                        <p className="text-xs mt-1">Clusters are only available on connected management servers (not on standalone hosts)</p>
+                                                        <p>{t('noComputeClusters')}</p>
+                                                        <p className="text-xs mt-1">{t('computeClustersManagementOnly')}</p>
                                                     </div>
                                                 ) : (
                                                     vmwareClusters.map(cl => (
@@ -21871,7 +21897,7 @@
                                                                         </div>
                                                                         <div>
                                                                             <h3 className="text-white font-semibold">{cl.name}</h3>
-                                                                            <p className="text-xs text-gray-500">{cl.num_hosts || 0} Hosts • {cl.cluster}</p>
+                                                                            <p className="text-xs text-gray-500">{t('hosts')}: {cl.num_hosts || 0} • {cl.cluster}</p>
                                                                         </div>
                                                                     </div>
                                                                     <button onClick={() => fetchVMwareClusters(selectedVMware.id)} className="text-gray-500 hover:text-white">
@@ -21887,11 +21913,11 @@
                                                                     <div className="text-sm text-white font-medium">{cl.total_cpu ? (cl.total_cpu / 1000).toFixed(1) + ' GHz' : 'N/A'}</div>
                                                                 </div>
                                                                 <div className="text-center">
-                                                                    <div className="text-xs text-gray-500">Memory</div>
+                                                                    <div className="text-xs text-gray-500">{t('memory')}</div>
                                                                     <div className="text-sm text-white font-medium">{cl.total_memory ? (cl.total_memory / (1024**3)).toFixed(0) + ' GB' : 'N/A'}</div>
                                                                 </div>
                                                                 <div className="text-center">
-                                                                    <div className="text-xs text-gray-500">Hosts</div>
+                                                                    <div className="text-xs text-gray-500">{t('hosts')}</div>
                                                                     <div className="text-sm text-white font-medium">{cl.num_hosts || 0}</div>
                                                                 </div>
                                                             </div>
@@ -21905,9 +21931,9 @@
                                                                             <Icons.RotateCw className={`w-4 h-4 ${cl.drs_enabled ? 'text-blue-400' : 'text-gray-600'}`} />
                                                                         </div>
                                                                         <div>
-                                                                            <div className="text-sm text-white font-medium">DRS (Distributed Resource Scheduler)</div>
+                                                                            <div className="text-sm text-white font-medium">{t('drsFullName')}</div>
                                                                             <div className="text-xs text-gray-500">
-                                                                                {cl.drs_enabled ? `Active - ${(cl.drs_automation || 'MANUAL').replace(/_/g, ' ').toLowerCase()}` : 'Disabled'}
+                                                                                {cl.drs_enabled ? t('active') + ' - ' + (cl.drs_automation === 'FULLY_AUTOMATED' ? t('fullyAutomated') : cl.drs_automation === 'PARTIALLY_AUTOMATED' ? t('partiallyAutomated') : !cl.drs_automation || cl.drs_automation === 'MANUAL' ? t('manual') : cl.drs_automation.replace(/_/g, ' ').toLowerCase()) : t('disabled')}
                                                                             </div>
                                                                         </div>
                                                                     </div>
@@ -21918,8 +21944,8 @@
                                                                                 onChange={(e) => toggleVMwareDRS(selectedVMware.id, cl.cluster, true, e.target.value)}
                                                                                 className="bg-proxmox-card border border-proxmox-border rounded px-2 py-1 text-xs text-gray-300"
                                                                             >
-                                                                                <option value="FULLY_AUTOMATED">Fully Automated</option>
-                                                                                <option value="PARTIALLY_AUTOMATED">Partially Automated</option>
+                                                                                <option value="FULLY_AUTOMATED">{t('fullyAutomated')}</option>
+                                                                                <option value="PARTIALLY_AUTOMATED">{t('partiallyAutomated')}</option>
                                                                                 <option value="MANUAL">{t('manual')}</option>
                                                                             </select>
                                                                         )}
@@ -21931,7 +21957,7 @@
                                                                                     : 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'
                                                                             }`}
                                                                         >
-                                                                            {cl.drs_enabled ? 'Disable' : 'Enable'}
+                                                                            {cl.drs_enabled ? t('disable') : t('enable')}
                                                                         </button>
                                                                     </div>
                                                                 </div>
@@ -21943,11 +21969,11 @@
                                                                             <Icons.Shield className={`w-4 h-4 ${cl.ha_enabled ? 'text-green-400' : 'text-gray-600'}`} />
                                                                         </div>
                                                                         <div>
-                                                                            <div className="text-sm text-white font-medium">HA (High Availability)</div>
+                                                                            <div className="text-sm text-white font-medium">{t('haFullName')}</div>
                                                                             <div className="text-xs text-gray-500">
                                                                                 {cl.ha_enabled 
-                                                                                    ? `Active${cl.ha_admission_control ? ' - Admission Control enabled' : ''}`
-                                                                                    : 'Disabled'}
+                                                                                    ? t('active') + (cl.ha_admission_control ? ' - ' + t('admissionControlEnabled') : '')
+                                                                                    : t('disabled')}
                                                                             </div>
                                                                         </div>
                                                                     </div>
@@ -21959,14 +21985,14 @@
                                                                                 : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
                                                                         }`}
                                                                     >
-                                                                        {cl.ha_enabled ? 'Disable' : 'Enable'}
+                                                                        {cl.ha_enabled ? t('disable') : t('enable')}
                                                                     </button>
                                                                 </div>
                                                                 
                                                                 {/* Cluster Hosts */}
                                                                 {cl.hosts && cl.hosts.length > 0 && (
                                                                     <div className="mt-2">
-                                                                        <div className="text-xs text-gray-500 mb-2 font-semibold uppercase">Cluster Hosts</div>
+                                                                        <div className="text-xs text-gray-500 mb-2 font-semibold uppercase">{t('clusterHosts')}</div>
                                                                         <div className="space-y-1">
                                                                             {cl.hosts.map(h => (
                                                                                 <div key={h.host || h.name} className="flex items-center justify-between py-1.5 px-2 rounded bg-proxmox-dark/30">
@@ -23875,8 +23901,8 @@
                                         target_type: form.target_type.value,
                                         target_id: form.target_id.value || null,
                                         metric: form.metric.value,
-                                        operator: form.operator.value,
-                                        threshold: parseInt(form.threshold.value),
+                                        operator: alertMetricSel === 'rolling_update' ? 'event' : form.operator.value,
+                                        threshold: alertMetricSel === 'rolling_update' ? 1 : parseInt(form.threshold.value),
                                         channels,
                                         severity: form.severity.value,  // NS #501
                                         escalation: escSteps.filter(s => s.after_minutes > 0),  // NS #501
@@ -23916,12 +23942,18 @@
                                                 <option value="cpu">CPU</option>
                                                 <option value="memory">Memory</option>
                                                 <option value="disk">Disk</option>
+                                                <option value="rolling_update">{t('rollingUpdates') || 'Rolling Updates'}</option>
                                                 <option value="temperature">{t('temperatureC') || 'Temperature (°C)'}</option>
                                                 <option value="hardware_health">{t('hardwareHealth') || 'Hardware health'}</option>
                                                 <option value="backup_sla_breached_pct">{t('backupSlaBreachedPct') || 'Backup SLA breached %'}</option>
                                                 <option value="backup_sla_compliance_pct">{t('backupSlaCompliancePct') || 'Backup SLA compliance %'}</option>
                                             </select>
                                         </div>
+                                        {alertMetricSel === 'rolling_update' ? (
+                                            <div className="col-span-2 rounded-lg border border-proxmox-border bg-proxmox-dark px-3 py-2 text-sm text-gray-400">
+                                                {t('rollingUpdateAlarmHelp') || 'Fires when a selected node is rebooted during a rolling update.'}
+                                            </div>
+                                        ) : <>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('condition') || 'Condition'}</label>
                                             <select name="operator" defaultValue={editingAlert ? editingAlert.operator : '>'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
@@ -23941,6 +23973,7 @@
                                                 <input name="threshold" type="number" min="0" max={alertMetricSel === 'temperature' ? 150 : 100} defaultValue={editingAlert ? editingAlert.threshold : 80} required className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg" />
                                             )}
                                         </div>
+                                        </>}
                                     </div>
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">{t('notifyVia') || 'Notify via'}</label>

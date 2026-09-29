@@ -9443,6 +9443,18 @@ echo "AGENT_INSTALLED_OK"
                             channel.close()
                             task.add_output("Reboot command sent / Reboot-Befehl gesendet")
                             task.reboot_issued = True   # #715 — let the RU loop skip the offline-wait
+                            # A rolling update may elect not to reboot a fully patched node.
+                            # Notify only after this node's reboot command was actually issued,
+                            # rather than when the run merely has include_reboot enabled.
+                            if (getattr(self, '_rolling_update', {}).get('status') == 'running'
+                                    and not getattr(task, 'rolling_reboot_alert_emitted', False)):
+                                try:
+                                    from pegaprox.background.alerts import emit_rolling_update_reboot_event
+                                    emit_rolling_update_reboot_event(self.id, node_name)
+                                    task.rolling_reboot_alert_emitted = True
+                                except Exception as alert_error:
+                                    self.logger.debug(
+                                        f"Could not publish rolling-update reboot alert for {node_name}: {alert_error}")
                         else:
                             self.logger.info(f"Skipping reboot for node: {node_name}")
                             task.add_output(f"Skipping reboot for node: {node_name}")
@@ -9452,6 +9464,15 @@ echo "AGENT_INSTALLED_OK"
                         self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
                         task.add_output("Reboot command sent / Reboot-Befehl gesendet")
                         task.reboot_issued = True   # #715 — assume reboot on a dropped connection (safe: wait)
+                        if (getattr(self, '_rolling_update', {}).get('status') == 'running'
+                                and not getattr(task, 'rolling_reboot_alert_emitted', False)):
+                            try:
+                                from pegaprox.background.alerts import emit_rolling_update_reboot_event
+                                emit_rolling_update_reboot_event(self.id, node_name)
+                                task.rolling_reboot_alert_emitted = True
+                            except Exception as alert_error:
+                                self.logger.debug(
+                                    f"Could not publish rolling-update reboot alert for {node_name}: {alert_error}")
                     finally:
                         try:
                             ssh.close()

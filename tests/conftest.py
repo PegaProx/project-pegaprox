@@ -258,6 +258,14 @@ def api(_integration_app, db):
     with authmod.sessions_lock:
         authmod.active_sessions.clear()
     ppglobals.cluster_managers.clear()
+    # MK Sep 2026 - cluster_managers was the only manager registry being reset, so a fake
+    # PBS or ESXi manager left behind by an earlier test stayed visible to every test after
+    # it. That is invisible until a test touches a route that walks one of those registries:
+    # check_cluster_updates does `pbs_results[pmgr.name or pid]`, and `pmgr.name` on a
+    # leftover MagicMock is a MagicMock, so jsonify died with "keys must be str ... not
+    # MagicMock" in a full-suite run while the same test passed on its own.
+    for _registry in ('pbs_managers', 'vmware_managers'):
+        getattr(ppglobals, _registry, {}).clear()
     # MK Sep 2026 — the API rate limiter is a process-global sliding window keyed by client
     # IP (1200 requests / 60s), and every request in this harness arrives from the same one.
     # Nothing reset it between tests, so a long integration run could put more than the
@@ -294,6 +302,8 @@ def api(_integration_app, db):
         with authmod.sessions_lock:
             authmod.active_sessions.clear()
         ppglobals.cluster_managers.clear()
+        for _registry in ('pbs_managers', 'vmware_managers'):
+            getattr(ppglobals, _registry, {}).clear()
         _reset_api_rate_window()
 
 

@@ -1153,6 +1153,11 @@ def main(debug_mode=False):
             print("Falling back to 0.0.0.0")
             bind_host = '0.0.0.0'
 
+    # Publish the resolved listen address for anything that has to reach us from
+    # this host later (see globals.SERVER_BIND_HOST). MK Sep 2026 (#957)
+    g.SERVER_BIND_HOST = bind_host
+    g.SERVER_BIND_PORT = port
+
     # MK: when behind proxy, SSL is handled by nginx/haproxy - we run plain HTTP
     #
     # MK Aug 2026: we deliberately do NOT gate on the `ssl_enabled` setting here.
@@ -1499,12 +1504,50 @@ class _IdleTimeoutMixin:
             t.close()
 
 
+def _should_bypass_gevent_upgrade(app, environ):
+    """Is this request one that flask-sock will handshake itself?
+
+    geventwebsocket upgrades every request carrying `Upgrade: websocket` at the
+    WSGI layer, before Flask routes anything. Our three `@sock.route` endpoints
+    are served by simple_websocket, which performs its own handshake once it is
+    reached, so the client got two 101 responses, read the second as a frame and
+    closed with 1002 (#945.3).
+
+    Decided from the URL map instead of by matching path suffixes: flask-sock
+    registers its rules with websocket=True, so this keeps working when a route
+    is added or renamed. Anything unroutable, or a werkzeug without websocket
+    routing, answers False and leaves the previous behaviour alone.
+    MK Sep 2026
+    """
+    env = environ or {}
+    # only an upgrade can be double-upgraded, so ordinary traffic never reaches
+    # the routing lookup below
+    if 'websocket' not in str(env.get('HTTP_UPGRADE', '')).lower():
+        return False
+    try:
+        adapter = app.url_map.bind('localhost')
+        rule = adapter.match(env.get('PATH_INFO', '/'),
+                             method=env.get('REQUEST_METHOD', 'GET'),
+                             websocket=True, return_rule=True)[0]
+        return str(rule.endpoint).startswith('__flask_sock')
+    except Exception:
+        return False
+
+
 def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port=-1):
     """Start production server with Gevent."""
     from gevent.pywsgi import WSGIServer
 
     print(f"Starting PegaProx with Gevent WSGIServer ({workers} greenlets)", flush=True)
     print("Mode: Production (async I/O optimized)", flush=True)
+
+    # #945.5 — simple-websocket writes frames with a bare send(), which is allowed
+    # to write only part of one. Has to happen before the first websocket is served.
+    try:
+        from pegaprox.utils.ws_sendall import apply_sendall_patch
+        apply_sendall_patch()
+    except Exception as _e:
+        logging.warning(f"[ws-patch] could not make simple-websocket write whole frames: {_e}")
 
     # NS: Suppress noisy errors from bots/scanners/disconnects
     import logging as log_module
@@ -1604,6 +1647,25 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
     # These happen when users close browser tabs - totally normal
     if use_websocket_handler:
         class QuietWebSocketHandler(WebSocketHandler):
+            # MK Sep 2026 (#945.3) — geventwebsocket upgrades EVERY request that
+            # carries `Upgrade: websocket`, at the WSGI layer, before Flask routes
+            # anything. Three of our routes are flask-sock (`@sock.route`), and
+            # simple_websocket.Server performs its own handshake once it is reached.
+            # The client therefore received two 101 responses back to back, parsed
+            # the second one as a frame, and closed with 1002 Protocol Error. Hand
+            # those paths to the plain WSGI handler so exactly one handshake happens.
+            #
+            # Decided from the URL map rather than by matching path suffixes: a rule
+            # registered by flask-sock carries websocket=True, so this stays correct
+            # when a route is added or renamed.
+            def run_application(self):
+                # `app` is the Flask app from the enclosing _start_gevent_server;
+                # self.application may be a WSGI wrapper without a url_map
+                if _should_bypass_gevent_upgrade(app, self.environ):
+                    from gevent.pywsgi import WSGIHandler as _PlainWSGIHandler
+                    return _PlainWSGIHandler.run_application(self)
+                return super().run_application()
+
             def handle_one_response(self):
                 try:
                     return super().handle_one_response()

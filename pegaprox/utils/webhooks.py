@@ -261,6 +261,38 @@ def send_to_channels(alert, channel_ids=None):
             logging.debug(f"[webhooks] channel {ch.get('id')} dispatch error: {_redact_webhook_url(str(e))}")
 
 
+def notify_lifecycle(event, title, message, cluster_id=None, severity='info', channel_ids=None):
+    """Fire a maintenance-lifecycle event at the chosen alert channels (#716).
+
+    Alert channels already carry the URL guard, the per-type body builders and the
+    admin-facing configuration, so a lifecycle event is just an alert with an extra
+    `event` key: a generic channel (n8n and friends) gets it verbatim in the payload,
+    the chatty ones render it as any other alert.
+
+    channel_ids is deliberately opt-in - None or [] send nothing. The callers run
+    inside maintenance threads, so this never raises: a webhook that is down must not
+    be able to stop a node update halfway through an evacuation.
+    MK Sep 2026
+    """
+    if not channel_ids:
+        return
+    try:
+        alert = {
+            'event': event,
+            'alert_name': title,
+            'message': message,
+            'severity': severity,
+            'target_type': 'cluster',
+            'target_name': cluster_id or '',
+            'cluster_id': cluster_id or '',
+            'metric': 'lifecycle',
+            'current_value': event,
+        }
+        send_to_channels(alert, channel_ids)
+    except Exception as e:
+        logging.debug(f"[webhooks] lifecycle {event} dispatch failed: {_redact_webhook_url(str(e))}")
+
+
 def new_channel(payload):
     """Normalize admin-submitted channel data — strips unknown fields, assigns id."""
     allowed = {'name', 'type', 'url', 'token', 'topic', 'enabled'}

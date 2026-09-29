@@ -91,11 +91,23 @@ def test_a_global_custom_role_resolves_to_its_own_permissions(roles):
     assert sorted(perms) == sorted(GLOBAL_OPS)
 
 
-@pytest.mark.parametrize('role,count', [('admin', 127), ('viewer', 31)])
+def _builtin_size(role):
+    """MK Sep 2026 (#818) — admin is `list(PERMISSIONS.keys())`, so a literal here turns
+    every new permission into a failure of a test about something else entirely. Derive it.
+
+    Viewer stays a hand-written literal on purpose: its list is hand-maintained, and a
+    permission quietly appearing in it is exactly the mistake worth failing over - it is
+    how every existing read-only account would silently gain reach on an upgrade."""
+    from pegaprox.models.permissions import PERMISSIONS, ROLE_PERMISSIONS, ROLE_VIEWER
+    return len(PERMISSIONS) if role == 'admin' else len(ROLE_PERMISSIONS[ROLE_VIEWER])
+
+
+@pytest.mark.parametrize('role,count', [('admin', None), ('viewer', 31)])
 def test_the_builtin_roles_are_unchanged(roles, role, count):
     """The remap must not touch a builtin — that is the regression this could cause."""
+    expected = _builtin_size(role) if count is None else count
     assert len(rbac.get_user_permissions({'username': 'u', 'role': role,
-                                          'tenant_id': 'acme'})) == count
+                                          'tenant_id': 'acme'})) == expected
 
 
 def test_a_role_defined_in_another_tenant_does_not_reach_across(roles):

@@ -281,15 +281,17 @@ def create_cluster_alert(cluster_id):
     # background loop never knew where to dispatch and which cluster the alert
     # belonged to. Persist both in the JSON config.
     channels = _sanitize_channels(data.get('channels'))
+    metric = data.get('metric', 'cpu')
+    is_rolling_update = metric == 'rolling_update'
     alert = {
         'id': str(uuid.uuid4())[:8],
         'name': data.get('name', 'Unnamed Alert'),
         'cluster_id': cluster_id,
-        'metric': data.get('metric', 'cpu'),
+        'metric': metric,
         # #609: the categorical hardware_health code (0/1/2) is only meaningful with '>';
         # a '<' rule would silently never fire on degraded hardware — pin it to '>'.
-        'operator': '>' if data.get('metric') == 'hardware_health' else data.get('operator', '>'),
-        'threshold': data.get('threshold', 80),
+        'operator': 'event' if is_rolling_update else ('>' if metric == 'hardware_health' else data.get('operator', '>')),
+        'threshold': 1 if is_rolling_update else data.get('threshold', 80),
         'target_type': data.get('target_type', 'cluster'),
         'target_id': data.get('target_id'),
         'channels': channels,
@@ -333,6 +335,24 @@ def update_cluster_alert(cluster_id, alert_id):
             # #609: keep hardware_health rules on '>' (the categorical 0/1/2 ladder)
             if alert.get('metric') == 'hardware_health':
                 alert['operator'] = '>'
+            elif alert.get('metric') == 'rolling_update':
+                alert['operator'] = 'event'
+                alert['threshold'] = 1
+            elif alert.get('operator') == 'event':
+                # MK Sep 2026 (scan) — this rule WAS a rolling-update rule and has just
+                # been moved to a metric that is compared against a number. 'event' is
+                # not a comparison, so the poll would stop skipping the rule and then
+                # never match anything: a rule that looks configured and silently never
+                # fires.
+                # The operator is reset unconditionally. Guarding on "the caller did not
+                # send one" reads careful and is dead: the copy loop above has already
+                # written any operator from the request, so reaching here at all means
+                # the value IS 'event' - either left over or sent that way, and neither
+                # belongs on a metric that gets compared. The threshold is different: a
+                # caller-supplied number is meaningful, so only a leftover 1 is replaced.
+                alert['operator'] = '>'
+                if 'threshold' not in data:
+                    alert['threshold'] = 80
             # ensure cluster_id is always present for older rows
             alert.setdefault('cluster_id', cluster_id)
             save_cluster_alerts(alerts)
@@ -958,4 +978,3 @@ def alerts_force_check():
 
 
 # =====================================================
-

@@ -691,8 +691,36 @@
                     text: '#e6f1f8', textMuted: '#8aa4b8',
                     success: '#2dd4a7', warning: '#f5b945', error: '#f87171', info: '#38bdf8'
                 }
+            },
+            // LW Sep 2026 (#743 Frisch12) — not a palette of its own: it borrows whichever
+            // one resolveSystemTheme() picks right now. Keeping it an ordinary entry means
+            // the server whitelist, session restore and both theme grids need no special
+            // case, and the card in the picker previews the palette it would actually apply.
+            system: {
+                name: 'System',
+                icon: '🖥️',
+                description: 'Follows your operating system',
+                followsOS: true,
+                get colors() { return PEGAPROX_THEMES[resolveSystemTheme()].colors; }
             }
         };
+
+        // LW Sep 2026 (#743) — the one place where "system" becomes a real palette.
+        // corporateLight is the only light palette the frontend defines, so both layout
+        // families share it; dark differs, because Corporate deliberately does not wear
+        // the orange chrome. No preference at all stays dark, which is what every user
+        // sees today and therefore the safe answer.
+        function resolveSystemTheme() {
+            var prefersLight = false;
+            try {
+                prefersLight = !!(window.matchMedia &&
+                                  window.matchMedia('(prefers-color-scheme: light)').matches);
+            } catch (_) {}
+            if (prefersLight) return 'corporateLight';
+            var corporate = false;
+            try { corporate = !!(document.body && document.body.dataset.layout === 'corporate'); } catch (_) {}
+            return corporate ? 'corporateDark' : 'proxmoxDark';
+        }
         
         // MK: Mar 2026 - hex to RGB channels for Tailwind opacity modifiers (#118)
         function hexToRgb(hex) {
@@ -704,7 +732,12 @@
 
         // Apply theme by setting CSS variables
         function applyTheme(themeName) {
-            const theme = PEGAPROX_THEMES[themeName] || PEGAPROX_THEMES.proxmoxDark;
+            // #743 — store what the user asked for, paint what it resolves to. Writing the
+            // resolved name back would freeze the app on whatever the OS happened to be at
+            // the moment of the click, and the next OS switch would do nothing.
+            const requested = PEGAPROX_THEMES[themeName] ? themeName : 'proxmoxDark';
+            const effective = requested === 'system' ? resolveSystemTheme() : requested;
+            const theme = PEGAPROX_THEMES[effective] || PEGAPROX_THEMES.proxmoxDark;
             const root = document.documentElement;
 
             Object.entries(theme.colors).forEach(([key, value]) => {
@@ -718,17 +751,26 @@
             // Special handling for light theme - only if body exists
             if (document.body) {
                 const lightThemes = ['corporateLight'];
-                if (lightThemes.includes(themeName)) {
+                const isLight = lightThemes.includes(effective);
+                if (isLight) {
                     document.body.classList.add('light-theme');
                     document.body.classList.remove('dark-theme');
                 } else {
                     document.body.classList.add('dark-theme');
                     document.body.classList.remove('light-theme');
                 }
+                // #743 — data-corp-theme gates every light override in the corporate
+                // stylesheet (#296). The header toggle used to be the only thing that
+                // set it; the OS-change listener has no toggle to go through, so the
+                // gate has to follow the palette we just painted or Corporate ends up
+                // with light variables on dark components.
+                if (document.body.dataset.layout === 'corporate') {
+                    document.body.dataset.corpTheme = isLight ? 'light' : '';
+                }
             }
             
-            localStorage.setItem('pegaprox-theme', themeName);
-            console.log(`Theme applied: ${theme.name}`);
+            localStorage.setItem('pegaprox-theme', requested);
+            console.log(`Theme applied: ${theme.name}` + (requested === 'system' ? ' (system)' : ''));
         }
         
         // Load saved theme on page load - apply CSS vars immediately, body classes after DOM ready
@@ -736,7 +778,11 @@
             const saved = localStorage.getItem('pegaprox-theme') || 'proxmoxDark';
             console.log('[Theme] Initial load from localStorage:', saved);
             // Apply CSS variables immediately (works on documentElement)
-            const theme = PEGAPROX_THEMES[saved] || PEGAPROX_THEMES.proxmoxDark;
+            // #743 — resolve here as well; this block runs before applyTheme() does and
+            // would otherwise paint `system` (which has no palette of its own) as the
+            // proxmoxDark fallback for a beat on a light desktop.
+            const theme = PEGAPROX_THEMES[saved === 'system' ? resolveSystemTheme() : saved]
+                          || PEGAPROX_THEMES.proxmoxDark;
             Object.entries(theme.colors).forEach(([key, value]) => {
                 document.documentElement.style.setProperty(`--color-${key}`, value);
                 if (value && value.startsWith('#')) {
@@ -749,6 +795,21 @@
             } else {
                 applyTheme(saved);
             }
+
+            // #743 — follow the OS live. Only repaints while "system" is the stored
+            // choice, so an explicit theme is never yanked out from under the user.
+            // addListener is the Safari <14 spelling and costs one line to keep.
+            try {
+                const mq = window.matchMedia('(prefers-color-scheme: light)');
+                const onOSThemeChange = () => {
+                    if (localStorage.getItem('pegaprox-theme') === 'system') {
+                        console.log('[Theme] OS switched, re-resolving system theme');
+                        applyTheme('system');
+                    }
+                };
+                if (mq.addEventListener) mq.addEventListener('change', onOSThemeChange);
+                else if (mq.addListener) mq.addListener(onOSThemeChange);
+            } catch (_) {}
         })();
         
         // ============================================
@@ -1704,6 +1765,18 @@
         body[data-corp-theme="light"] button.bg-proxmox-card.text-gray-400 { color: #455560 !important; }
         body[data-corp-theme="light"] button.bg-proxmox-card:hover { color: #0072a3 !important; background: #e8f0f4 !important; }
         /* active tab styling already lands via bg-proxmox-orange → leave it */
+
+        /* MK Sep 2026 (#727 nvaert1986) - xterm 5.3.0 parks its width cache on <body>:
+           a `position: absolute; top: -50000px; width: 50000px` div that lives as long as
+           a terminal does. Vertically it is out of sight, but it makes the DOCUMENT 50000px
+           wide, and in Firefox a page that wide pans sideways on a drag - which is the
+           report: part of the layout slides off-screen after the shell has been opened.
+           Taking it out of flow removes the overflow at its source; the div keeps its own
+           width, so xterm still measures what it measured before.
+           Not `overflow-x: hidden` on the page root: that stops the pan too, but it turns
+           the root into a scroll box and the sticky header stops sticking (measured at
+           top -314 instead of 0). The phone block below says the same thing in prose. */
+        body > div[style*="-50000px"] { position: fixed !important; }
 
         /* NS: xterm.js terminal must not inherit corporate spacing/font overrides */
         body[data-layout="corporate"] .xterm,

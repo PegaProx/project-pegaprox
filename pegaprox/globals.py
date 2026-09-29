@@ -36,6 +36,14 @@ login_attempts_by_user = {}
 _auth_action_attempts = {}
 _auth_action_lock = threading.Lock()
 
+# Where the HTTP server actually listens. main() fills these in once it has
+# resolved the bind address, so anything that needs to reach PegaProx from the
+# same host (the SSH-websocket subprocess validating its sessions) can aim at the
+# right place instead of assuming loopback. Empty / 0.0.0.0 / :: all mean
+# "loopback works"; a specific address means it does not. MK Sep 2026 (#957)
+SERVER_BIND_HOST = ''
+SERVER_BIND_PORT = None
+
 # Session secret
 SESSION_SECRET = None
 

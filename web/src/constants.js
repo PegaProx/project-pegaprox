@@ -72,6 +72,18 @@
         ];
 
 
+        // MK Sep 2026 (#642 maxilee) — a plugin can be limited to certain clusters.
+        // Both layouts build their own plugin list, so the rule lives here once.
+        // No scope at all means every cluster: that is where every plugin starts and
+        // what every installation had before the column existed. Getting this the
+        // wrong way round would hide all of them.
+        function pluginAppliesToCluster(plugin, clusterId) {
+            const scope = (plugin && plugin.clusters) || [];
+            if (!scope.length) return true;
+            return !!clusterId && scope.indexOf(clusterId) >= 0;
+        }
+
+
         // =====================================================
         // TRANSLATION SYSTEM
         // LW: German first because thats what we started with

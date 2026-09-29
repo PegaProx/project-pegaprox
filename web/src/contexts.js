@@ -262,7 +262,10 @@
                             // in sync; reading the toggle avoids a stale server value overriding it on F5.
                             let userTheme = d.user?.theme || d.default_theme || 'proxmoxDark';
                             try {
-                                if (d.user?.ui_layout === 'corporate') {
+                                // LW Sep 2026 (#743) — 'system' is a deliberate choice and outranks
+                                // the local toggle; reading corp-theme here would turn "follow my
+                                // desktop" into whatever the toggle was last set to.
+                                if (d.user?.ui_layout === 'corporate' && userTheme !== 'system') {
                                     const isLight = localStorage.getItem('corp-theme') === 'light';
                                     userTheme = isLight ? 'corporateLight' : 'corporateDark';
                                 }
@@ -362,7 +365,7 @@
                         // NS: Apply user's theme (with fallback to default)
                         let userTheme = data.user?.theme || data.default_theme || 'proxmoxDark';
                         try {
-                            if (data.user?.ui_layout === 'corporate') {
+                            if (data.user?.ui_layout === 'corporate' && userTheme !== 'system') {
                                 const isLight = localStorage.getItem('corp-theme') === 'light';
                                 userTheme = isLight ? 'corporateLight' : 'corporateDark';
                             }
@@ -503,6 +506,12 @@
             useEffect(() => {
                 document.body.setAttribute('data-layout', layout);
                 if (isCorporate) {
+                    // LW Sep 2026 (#743) — applyTheme('system') resolves and sets the
+                    // corp gate itself, so the stored choice wins over the local toggle
+                    // here too. Anything else keeps the old path unchanged.
+                    if (localStorage.getItem('pegaprox-theme') === 'system') {
+                        applyTheme('system');
+                    } else {
                     const isLight = localStorage.getItem('corp-theme') === 'light';
                     // MK May 2026 (#296): the data-corp-theme attribute gates ALL light-mode
                     // CSS overrides. The header toggle sets this on click, but on a fresh
@@ -510,6 +519,7 @@
                     // body still had no data-corp-theme, leaving every component in dark.
                     document.body.dataset.corpTheme = isLight ? 'light' : '';
                     applyTheme(isLight ? 'corporateLight' : 'corporateDark');
+                    }
                 } else if (isCloud) {
                     // NS: force the cloud theme on layout change + F5-restore so the
                     // teal/navy variables apply even if a stale theme was stored.

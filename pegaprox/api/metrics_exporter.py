@@ -22,9 +22,10 @@ from pegaprox.globals import (
     active_sessions, sessions_lock,
 )
 from pegaprox.api.helpers import load_server_settings
-from pegaprox.utils.auth import validate_api_token, load_users
+from pegaprox.utils.auth import validate_api_token, load_users, build_authz_user
 from pegaprox.core.db import get_db
 from pegaprox.models.permissions import ROLE_ADMIN
+from pegaprox.utils.rbac import has_permission
 from pegaprox.utils import auth as auth_state
 
 
@@ -119,13 +120,33 @@ def _node_apt_updates_available(cid, mgr, node):
     return available
 
 
+# MK Sep 2026 (#818) — tokens we have already said the warning about, so a 15-second
+# scrape interval does not turn one warning into 5 760 a day. Keyed by the token id
+# from our own table, so nothing a caller invents lands in here, and it is rebuilt on
+# restart which is exactly when an operator wants to see it again.
+_metrics_perm_announced = set()
+
+
 def _auth_ok():
-    """Allow scrape if: (a) bearer token is a valid ADMIN-role API token, or (b) metrics_public=true.
+    """Allow a scrape when one of these holds:
+
+      (a) metrics_public = true
+      (b) the bearer token is an ADMIN-role token whose owner is still an enabled admin
+      (c) MK Sep 2026 (#818) — the token carries `metrics.view`
 
     NS Aug 2026 (Aikido pentest): /api/metrics emits cluster-wide, cross-tenant infra gauges
     (node status, quorum, CPU, VM counts across every cluster). Mere token validity is not
     enough — a viewer/tenant-scoped token would otherwise scrape all tenants' operational data.
-    Require the token's role to be admin (matches the 'admin-view role is enough' docstring intent).
+    That is why (b) demands the admin role rather than any valid token.
+
+    (c) does not weaken that: it is a permission nobody holds unless an admin grants it, it is
+    in no builtin role, and the UI says out loud at the point of granting that it is not
+    tenant-scoped. What it buys is the thing #818 asked for — a monitoring account that can
+    scrape and do nothing else, instead of an admin token in a Prometheus config file.
+
+    The permission is resolved through build_authz_user(), not off the stored account: a token
+    is capped by its own role AND by what its owner holds today, and reading the account
+    directly would let an admin-owned, viewer-capped token through.
     """
     settings = load_server_settings()
     if settings.get('metrics_public', False):
@@ -139,15 +160,34 @@ def _auth_ok():
             # account-exists / account-enabled checks. validate_api_token only looks at revoked +
             # expires_at, and disabling a user does NOT revoke their tokens — so a disabled or
             # demoted admin kept scraping every cluster's inventory. Re-check the owner here.
-            if info and info.get('role') == ROLE_ADMIN:
+            if info:
                 try:
                     owner = get_db().get_user(info.get('user'))
                 except Exception:
                     owner = None
-                if owner and owner.get('enabled', True) and owner.get('role') == ROLE_ADMIN:
-                    return True
-                logging.warning(f"[metrics] rejected admin token for '{info.get('user')}' — "
-                                "account is gone, disabled, or no longer admin")
+                if not (owner and owner.get('enabled', True)):
+                    logging.warning(f"[metrics] rejected token for '{info.get('user')}' — "
+                                    "account is gone or disabled")
+                    return False
+                if info.get('role') == ROLE_ADMIN:
+                    if owner.get('role') == ROLE_ADMIN:
+                        return True
+                    logging.warning(f"[metrics] rejected admin token for '{info.get('user')}' — "
+                                    "owner is no longer admin")
+                    return False
+                # (c) #818
+                try:
+                    if has_permission(build_authz_user(info.get('user'), info), 'metrics.view'):
+                        tid = info.get('token_id')
+                        if tid not in _metrics_perm_announced:
+                            _metrics_perm_announced.add(tid)
+                            logging.warning(
+                                f"[metrics] token '{info.get('token_name')}' of "
+                                f"'{info.get('user')}' scrapes /api/metrics via metrics.view — "
+                                "this endpoint is NOT tenant-scoped and exposes every cluster")
+                        return True
+                except Exception as e:
+                    logging.debug(f"[metrics] metrics.view check failed: {e}")
         except Exception as e:
             logging.debug(f"[metrics] token validate failed: {e}")
     return False
@@ -157,7 +197,8 @@ def _auth_ok():
 def prometheus_metrics():
     if not _auth_ok():
         return Response(
-            '# unauthorized — set Authorization: Bearer <api_token>, or enable metrics_public\n',
+            '# unauthorized — use an admin API token, a token with the metrics.view '
+            'permission, or enable metrics_public\n',
             status=401, mimetype='text/plain; version=0.0.4'
         )
 

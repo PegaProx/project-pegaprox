@@ -1645,6 +1645,16 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating plugin_state table: {e}")
 
+        # MK: Sep 2026 (#642) - which clusters a plugin applies to, comma separated.
+        # Empty means every cluster, which is what every install had before this.
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(plugin_state)").fetchall()]
+            if 'clusters' not in cols:
+                cursor.execute("ALTER TABLE plugin_state ADD COLUMN clusters TEXT DEFAULT ''")
+                logging.info("Added clusters column to plugin_state table")
+        except Exception as e:
+            logging.error(f"Error adding clusters column to plugin_state: {e}")
+
         # NS: Apr 2026 - Backup verification results
         try:
             cursor.execute('''

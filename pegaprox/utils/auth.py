@@ -1224,6 +1224,11 @@ def require_auth(roles: list = None, perms: list = None):
             request.session = session
             
             return f(*args, **kwargs)
+        # MK Sep 2026 - publish what this route demands so the OpenAPI generator can
+        # read it instead of re-deriving it from the decorator source. functools.wraps
+        # copies __dict__ from f, so this has to be set AFTER the wrapper is built or
+        # a stacked decorator underneath would overwrite it.
+        decorated_function._pp_auth = {'roles': list(roles or []), 'perms': list(perms or [])}
         return decorated_function
     return decorator
 

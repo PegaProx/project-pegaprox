@@ -2082,6 +2082,25 @@
             const [rollingUpdate, setRollingUpdate] = useState(null);
             const [includeReboot, setIncludeReboot] = useState(true);
             const [skipUpToDate, setSkipUpToDate] = useState(true);  // NS: Skip nodes without updates
+            // MK Sep 2026 (#716 hugobugomugo) — which alert channels hear about this run,
+            // so the on-call monitoring can be muted for its real duration. Opt-in: nothing
+            // ticked, nothing sent.
+            const [notifyChannels, setNotifyChannels] = useState([]);
+            const [alertChannels, setAlertChannels] = useState([]);
+            useEffect(() => {
+                let gone = false;
+                (async () => {
+                    try {
+                        const r = await fetch('/api/alert-channels', {
+                            credentials: 'include', headers: getAuthHeaders() });
+                        if (r && r.ok && !gone) {
+                            const d = await r.json();
+                            setAlertChannels(Array.isArray(d) ? d : (d.channels || []));
+                        }
+                    } catch (_) { /* no channels configured is the normal case */ }
+                })();
+                return () => { gone = true; };
+            }, []);
             const [skipEvacuation, setSkipEvacuation] = useState(false);  // NS: Issue #22 - skip VM evacuation (NOT RECOMMENDED)
             const [evacuationTimeout, setEvacuationTimeout] = useState(1800);  // NS: 30 min default
             const [rebootTimeout, setRebootTimeout] = useState(600);  // NS Apr 2026 (#328): 10 min default, extend for Ceph/slow-boot nodes
@@ -2394,6 +2413,7 @@
                             reboot_timeout: rebootTimeout,  // NS Apr 2026 (#328): per-cluster override for slow-boot nodes
                             allow_local_disks: allowLocalDisks,  // #330
                             ceph_health_gate: cephHealthGate,  // NS #403 part 2 — hold on unsafe Ceph
+                            notify_channels: notifyChannels,  // MK #716 — mute/un-mute the monitoring
                         })
                     });
                     const data = await response.json();
@@ -3301,6 +3321,32 @@
                                         />
                                         <span className="text-white">{t('skipUpToDate') || 'Skip up-to-date nodes'}</span>
                                     </label>
+
+                                    {/* MK Sep 2026 (#716) — tell the monitoring when this starts and ends.
+                                        Only rendered when somebody has actually configured a channel. */}
+                                    {alertChannels.length > 0 && (
+                                        <div className="pl-1">
+                                            <p className="text-gray-400 text-sm mb-1">
+                                                {t('notifyChannelsLabel') || 'Notify on start and finish'}
+                                            </p>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {alertChannels.map(ch => {
+                                                    const on = notifyChannels.indexOf(ch.id) >= 0;
+                                                    return (
+                                                        <button key={ch.id} type="button"
+                                                            onClick={() => setNotifyChannels(on
+                                                                ? notifyChannels.filter(x => x !== ch.id)
+                                                                : notifyChannels.concat([ch.id]))}
+                                                            className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                                                                on ? 'border-proxmox-orange text-proxmox-orange'
+                                                                   : 'border-proxmox-border text-gray-500 hover:text-gray-300'}`}>
+                                                            {ch.name || ch.id}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
                                     
                                     {/* MK: Skip evacuation - moved from advanced options for visibility */}
                                     <label className="flex items-center gap-2 cursor-pointer">

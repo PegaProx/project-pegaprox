@@ -177,6 +177,22 @@ PERMISSIONS = {
     'xapi.pool.manage': 'Manage XCP-ng pool operations (join/leave)',
     'xapi.template.view': 'View XCP-ng VM templates',
     'xapi.template.manage': 'Create/delete XCP-ng VM templates',
+
+    # Telemetry - MK Sep 2026 (#818 falschgeldkind)
+    'metrics.view': 'Scrape the Prometheus endpoint (/api/metrics)',
+}
+
+# MK Sep 2026 (#818) — permissions whose scope is wider than their name suggests.
+# The UI shows this next to the checkbox, because the moment somebody ticks it is
+# the moment they need to know. Keep these short and factual: an alarming tone on a
+# permission people legitimately need gets read as boilerplate and then ignored.
+PERMISSION_WARNINGS = {
+    'metrics.view': (
+        'Not tenant-scoped. /api/metrics emits gauges for EVERY cluster this '
+        'installation knows - node status, quorum, CPU, VM counts - regardless of '
+        'which clusters or tenants the holder is otherwise limited to. Grant it to '
+        'a dedicated monitoring account, not to a tenant role.'
+    ),
 }
 
 # Default permissions per role

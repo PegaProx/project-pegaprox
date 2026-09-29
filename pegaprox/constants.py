@@ -12,8 +12,23 @@ PEGAPROX_VERSION = "1.2.0"
 PEGAPROX_BUILD = "2026.09.20"
 
 # File Paths & Directories
-CONFIG_DIR = 'config'
-Path(CONFIG_DIR).mkdir(exist_ok=True)
+# MK Sep 2026 (#826 avsdev-cw): both directories are resolvable from the environment.
+# They used to be relative to the working directory, which is /opt/PegaProx, /var/lib/
+# pegaprox or /app depending on how you installed — so "keep the state somewhere else"
+# meant moving the whole install. Everything below derives from CONFIG_DIR, so setting
+# it here is enough; read it before anything is joined onto it.
+#   PEGAPROX_CONFIG_DIR — database, master key, settings, TLS pair, branding
+#   PEGAPROX_LOG_DIR    — the per-cluster log files
+# Unset or blank keeps today's relative paths, which is what every install has.
+def _dir_from_env(var, default):
+    raw = os.environ.get(var, '')
+    return raw.strip() if isinstance(raw, str) and raw.strip() else default
+
+
+CONFIG_DIR = _dir_from_env('PEGAPROX_CONFIG_DIR', 'config')
+# parents=True because a moved path is typically nested (/srv/state/pegaprox/config)
+# and mkdir would otherwise fail on the very first start.
+Path(CONFIG_DIR).mkdir(parents=True, exist_ok=True)
 try:
     os.chmod(CONFIG_DIR, 0o700)
 except Exception:
@@ -53,7 +68,7 @@ SSL_KEY_FILE = os.path.join(CONFIG_DIR, 'ssl', 'key.pem')
 SSL_CERT_FILE_LEGACY = 'ssl/cert.pem'
 SSL_KEY_FILE_LEGACY = 'ssl/key.pem'
 BRANDING_DIR = os.path.join(CONFIG_DIR, 'branding')
-LOG_DIR = 'logs'
+LOG_DIR = _dir_from_env('PEGAPROX_LOG_DIR', 'logs')   # #826
 
 # MK May 2026 (#357 SeeJayEmm): expose log level + per-cluster file-handler
 # behaviour via env vars so operators shipping logs to a central collector
@@ -96,7 +111,7 @@ def _config_owned_by_us():
 CONFIG_OWNED_BY_US = _config_owned_by_us()
 
 # Ensure directories exist
-Path(LOG_DIR).mkdir(exist_ok=True)
+Path(LOG_DIR).mkdir(parents=True, exist_ok=True)   # #826: a moved log path is usually nested
 Path(PLUGINS_DIR).mkdir(exist_ok=True)
 Path(WEB_DIR).mkdir(exist_ok=True)
 if CONFIG_OWNED_BY_US:

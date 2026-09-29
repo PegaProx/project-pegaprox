@@ -3597,6 +3597,9 @@
             const { t } = useTranslation();
             const { isCorporate } = useLayout(); // LW: corporate corporate chrome
             const canvasRef = useRef(null);
+            // #959 - the datacenter keymap, as reported by the console ticket. A ref and not
+            // state: only the paste handler reads it, and it must not re-render the canvas.
+            const keymapRef = useRef('');
             const [isFullscreen, setIsFullscreen] = useState(false);
             const [connectionStatus, setConnectionStatus] = useState('connecting');
             const [vncPort, setVncPort] = useState(null);
@@ -3677,6 +3680,7 @@
                             return;
                         }
 
+                        keymapRef.current = ticketData.keymap || '';
                         const vncPassword = ticketData.ticket;
                         const stableHandle = ticketData.stable;   // {session_id, key_b64, ...} when stable mode active
                         console.log('VNC: Got ticket' + (stableHandle ? ' + crypto session' : ''));
@@ -3973,18 +3977,24 @@
             // Shift for us, so paste has to do the same: hold Shift_L, tap the *base* key on that
             // physical key, release Shift_L — exactly what pressing it by hand does. Uppercase
             // already works (qemu shifts A-Z itself), so leave those on the plain path.
+            // MK Sep 2026 #959 (grupoaxium) - and only while the datacenter runs a US keymap.
+            // With `keyboard: es` set, qemu maps the keysym to the Spanish layout itself, so
+            // holding Shift over the US base key produced '"' where the reporter pasted '@'.
+            // An unset keymap stays on this path: qemu assumes en-us when it is given none,
+            // which is the situation #653 was reported from.
             const SHIFTED_US = {
                 '!':0x31,'@':0x32,'#':0x33,'$':0x34,'%':0x35,'^':0x36,'&':0x37,'*':0x38,'(':0x39,')':0x30,
                 '_':0x2D,'+':0x3D,'{':0x5B,'}':0x5D,'|':0x5C,':':0x3B,'"':0x27,'<':0x2C,'>':0x2E,'?':0x2F,'~':0x60,
             };
-            const typeTextToVM = (conn, text) => {
+            const typeTextToVM = (conn, text, keymap) => {
+                const usLayout = !keymap || keymap === 'en-us';
                 for (const ch of text) {
                     const code = ch.charCodeAt(0);
                     if (code === 10 || code === 13) {
                         conn.sendKey(0xFF0D); // Return
                     } else if (code === 9) {
                         conn.sendKey(0xFF09); // Tab
-                    } else if (SHIFTED_US[ch] !== undefined) {
+                    } else if (usLayout && SHIFTED_US[ch] !== undefined) {
                         conn.sendKey(0xFFE1, 'ShiftLeft', true);   // Shift_L down
                         conn.sendKey(SHIFTED_US[ch]);              // tap the unshifted base key
                         conn.sendKey(0xFFE1, 'ShiftLeft', false);  // Shift_L up
@@ -4119,7 +4129,7 @@
                                             const conn = rfbRef.current;
                                             if (!conn) return;
                                             const text = prompt('Paste text:');
-                                            if (text) typeTextToVM(conn, text);
+                                            if (text) typeTextToVM(conn, text, keymapRef.current);
                                         }}
                                         className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1"
                                         title={t('pasteClipboard') || 'Paste from clipboard'}
@@ -4202,7 +4212,7 @@
                                             const conn = rfbRef.current;
                                             if (!conn) return;
                                             const text = prompt('Paste text:');
-                                            if (text) typeTextToVM(conn, text);
+                                            if (text) typeTextToVM(conn, text, keymapRef.current);
                                         }}
                                         className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
                                         title={t('pasteClipboard') || 'Paste from clipboard'}

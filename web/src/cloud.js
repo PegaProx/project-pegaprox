@@ -1940,7 +1940,10 @@
         function CloudPlugins({ clusterId, t }) {
             const { data, loading, err, reload } = useCloudData('/api/plugins');
             const mut = useCloudMutate(reload);
-            const list = (Array.isArray(data) ? data : []).filter(p => p && p.enabled);
+            // #642 — a plugin limited to other clusters has nothing to say about this one
+            const list = (Array.isArray(data) ? data : [])
+                .filter(p => p && p.enabled)
+                .filter(p => pluginAppliesToCluster(p, clusterId));
             const [sel, setSel] = React.useState(null);
             const cur = list.find(p => p.id === sel) || null;
             return (

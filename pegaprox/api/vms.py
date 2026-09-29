@@ -409,13 +409,17 @@ def get_join_info(cluster_id):
                     if isinstance(node_entry, dict) and node_entry.get('pve_fp'):
                         data['fingerprint'] = node_entry['pve_fp']
                         break
-            # Still no fingerprint? Get from SSL cert
+            # Still no fingerprint? Get from SSL cert.
+            # MK Sep 2026 (#956) — on the cluster's own API port. This read the cert from a
+            # literal 8006 two lines after unpacking manager.api_port for the request above,
+            # so a cluster reached on any other port silently produced no fingerprint and the
+            # join command could not be built.
             if not data.get('fingerprint'):
                 try:
                     context = ssl.create_default_context()
                     context.check_hostname = False
                     context.verify_mode = ssl.CERT_NONE
-                    with socket.create_connection((host, 8006), timeout=5) as sock:
+                    with socket.create_connection((host, port), timeout=5) as sock:
                         with context.wrap_socket(sock, server_hostname=host) as ssock:
                             cert_der = ssock.getpeercert(binary_form=True)
                             fp_hex = hashlib.sha256(cert_der).hexdigest()
@@ -463,7 +467,7 @@ def get_join_info(cluster_id):
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             
-            with socket.create_connection((host, 8006), timeout=5) as sock:
+            with socket.create_connection((host, port), timeout=5) as sock:
                 with context.wrap_socket(sock, server_hostname=host) as ssock:
                     cert_der = ssock.getpeercert(binary_form=True)
                     fingerprint = hashlib.sha256(cert_der).hexdigest()
@@ -2828,7 +2832,7 @@ def join_node_to_cluster(cluster_id):
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
                 
-                with socket.create_connection((host, 8006), timeout=5) as sock:
+                with socket.create_connection((host, port), timeout=5) as sock:
                     with context.wrap_socket(sock, server_hostname=host) as ssock:
                         cert_der = ssock.getpeercert(binary_form=True)
                         fp_hex = hashlib.sha256(cert_der).hexdigest()
@@ -3797,6 +3801,40 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': result['error']}), 500
 
 
+# MK Sep 2026 (#959, grupoaxium) - the console answer carries the datacenter keymap so the
+# browser can stop emulating a US keyboard when the cluster is not running one. /cluster/options
+# is a value nobody touches twice in a year, and the console path has its own latency history
+# (#713/#777/#782), so it gets a short TTL instead of a round trip per console open.
+_DC_KEYMAP_TTL = 300
+_dc_keymap_cache = {}
+
+
+def _datacenter_keymap(cluster_id, manager):
+    """Configured VNC keymap of the datacenter, '' when none is set.
+
+    The per-VM `keyboard` option is deliberately not consulted: PVE deprecates it in favour
+    of this one, and reading it would cost another round trip on the console path. A VM that
+    overrides it just stays on the old US behaviour - no worse than before.
+    """
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return ''
+    hit = _dc_keymap_cache.get(cluster_id)
+    if hit and (time.time() - hit[0]) < _DC_KEYMAP_TTL:
+        return hit[1]
+    try:
+        url = f"https://{manager.host}:{manager.api_port}/api2/json/cluster/options"
+        resp = manager._create_session().get(url, timeout=4)
+        if resp.status_code != 200:
+            return ''
+        keymap = (resp.json().get('data') or {}).get('keyboard') or ''
+    except Exception as exc:
+        # not worth failing a console over; the browser falls back to what it did before
+        logging.debug(f"[VNC] keymap lookup failed for {_sl(str(cluster_id))}: {_sl(str(exc))}")
+        return ''
+    _dc_keymap_cache[cluster_id] = (time.time(), keymap)
+    return keymap
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/console', methods=['GET'])
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/vnc', methods=['GET'])
 @require_auth()
@@ -3848,6 +3886,10 @@ def get_console_ticket(cluster_id, node, vm_type, vmid):
                 }
             except Exception as _enc_err:
                 logging.warning(f"[VNC] stable-mode key generation failed (falling back to plain): {_enc_err}")
+
+        # #959 - which keyboard the guest side thinks it has. The paste helper in the
+        # browser needs it to decide whether its US shift emulation still applies.
+        result['keymap'] = _datacenter_keymap(cluster_id, mgr)
 
         return jsonify(result)
     return jsonify({'error': result.get('error', 'Failed')}), 500
@@ -3978,9 +4020,12 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
     vnc_ticket = vnc_data['ticket']
     vnc_port = vnc_data['port']
 
-    # optional SSH tunnel for clusters where 8006 isn't directly reachable from us
+    # optional SSH tunnel for clusters where the API port isn't directly reachable
+    # MK Sep 2026 (#956) — was a literal 8006 and broke the screenshot tile for any
+    # cluster reachable on a forwarded port, the same way the console did.
+    _api_port = getattr(mgr, 'api_port', 8006) or 8006
     tunnel_endpoint = None
-    target_host, target_port = host, 8006
+    target_host, target_port = host, _api_port
     try:
         if bool(getattr(mgr.config, 'vnc_tunnel', False)):
             from pegaprox.utils import vnc_tunnel as _vt
@@ -3991,13 +4036,13 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
                 ssh_user=_ssh_user, ssh_port=_ssh_port,
                 ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
                 ssh_password=getattr(mgr.config, 'pass_', '') or '',
-                target_host='127.0.0.1', target_port=8006,
+                target_host='127.0.0.1', target_port=_api_port,
             )
             target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
     except Exception as te:
         logging.warning(f"[Screenshot] RFB tunnel setup failed ({te}) — direct")
         tunnel_endpoint = None
-        target_host, target_port = host, 8006
+        target_host, target_port = host, _api_port
 
     encoded_ticket = url_quote(vnc_ticket, safe='')
     pve_ws_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid}/vncwebsocket?port={vnc_port}&vncticket={encoded_ticket}"
@@ -4184,7 +4229,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         # Optional SSH tunnel (same path as WS handler)
         tunnel_endpoint = None
         target_host = host
-        target_port = 8006
+        target_port = port          # MK Sep 2026 (#956): the cluster's API port
         try:
             if bool(getattr(mgr.config, 'vnc_tunnel', False)):
                 from pegaprox.utils import vnc_tunnel as _vt
@@ -4195,7 +4240,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                     ssh_user=_ssh_user, ssh_port=_ssh_port,
                     ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
                     ssh_password=getattr(mgr.config, 'pass_', '') or '',
-                    target_host='127.0.0.1', target_port=8006,
+                    target_host='127.0.0.1', target_port=port,
                 )
                 target_host = '127.0.0.1'
                 target_port = tunnel_endpoint.local_port
@@ -4204,7 +4249,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
             logging.warning(f"[VncPoll] tunnel setup failed ({te}) — direct WSS to PVE")
             tunnel_endpoint = None
             target_host = host
-            target_port = 8006
+            target_port = port
 
         pve_ws_url = f"wss://{target_host}:{target_port}{pve_ws_path}"
         try:
@@ -6308,6 +6353,71 @@ def _safe_vnc_passthrough(port_raw, ticket_raw):
     return (True, p)
 
 
+def _ws_subprocess_base_url(main_port, ssl_cert=None):
+    """Base URL the SSH-websocket subprocess should use to reach PegaProx.
+
+    It validates every session against this address, and it used to be pinned to
+    127.0.0.1. That only holds while we bind a wildcard: with "Proxy Bind Address"
+    set to one LAN IP the app listens there and nowhere else, loopback refuses the
+    connection, and every terminal ends with "Auth server unreachable" (#957).
+
+    A wildcard bind keeps loopback, which is the shortest path and does not depend
+    on an interface staying up. Read through the globals MODULE, never the
+    star-import: main() fills the value in long after this module is imported.
+    MK Sep 2026
+    """
+    from pegaprox import globals as _ppg
+    bind = (getattr(_ppg, 'SERVER_BIND_HOST', '') or '').strip()
+    target = '127.0.0.1' if bind in ('', '0.0.0.0', '::', '*') else bind
+    if ':' in target and not target.startswith('['):
+        target = f"[{target}]"          # IPv6 literal needs brackets in a URL
+    return f"https://{target}:{main_port}" if ssl_cert else f"http://{target}:{main_port}"
+
+
+def _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket):
+    """Path of PVE's vncwebsocket endpoint for one guest.
+
+    The API port and the VNC port are two different things, and only ONE of them
+    belongs in the URL authority. The VNC port goes in the query string; the
+    authority has to be the port pveproxy answers on. Getting that backwards is
+    what #945 and #956 both are: one handler reassigned its `port` variable to
+    the vncproxy port before building the URL and then dialled that, another
+    hardcoded 8006 and ignored a cluster reachable on a different API port.
+    Building the path here keeps the two apart for every caller. MK Sep 2026
+    """
+    kind = 'qemu' if vm_type == 'qemu' else 'lxc'
+    return (f"/api2/json/nodes/{node}/{kind}/{vmid}/vncwebsocket"
+            f"?port={vnc_port}&vncticket={url_quote(str(vnc_ticket), safe='')}")
+
+
+def _pve_console_ws_auth(manager, netloc, fresh_ticket=None, reuse_manager_auth=False):
+    """Headers for the upgrade to PVE's vncwebsocket.
+
+    PVE binds a vncproxy ticket to whoever asked for it. When we reuse the ticket
+    the browser already obtained through /console (#352 passthrough), the asker
+    was the manager's own auth context, so the upgrade has to present THAT: the
+    API token if the cluster authenticates with one, otherwise the manager's
+    stored access cookie. Presenting a freshly minted login cookie instead is
+    what produces "permission denied - invalid PVEVNC ticket" on PVE 9.1+ and is
+    the second half of #945; on a token-only cluster there is no fresh login to
+    mint in the first place, which is #955.
+
+    Without passthrough we issued the vncproxy call ourselves with fresh_ticket,
+    so that is the right cookie to send. MK Sep 2026
+    """
+    headers = {"Host": netloc}
+    if reuse_manager_auth:
+        if getattr(manager, '_using_api_token', False) and getattr(manager, '_api_token', None):
+            headers['Authorization'] = f"PVEAPIToken={manager._api_token}"
+            return headers
+        if getattr(manager, '_ticket', None):
+            headers['Cookie'] = f"PVEAuthCookie={manager._ticket}"
+            return headers
+    if fresh_ticket:
+        headers['Cookie'] = f"PVEAuthCookie={fresh_ticket}"
+    return headers
+
+
 def _resolve_vm_node(mgr, vmid, vm_type='qemu'):
     """Authoritatively locate which node a VMID lives on by probing each node's
     status endpoint directly. /cluster/resources is fed by pmxcfs and lags by
@@ -8236,10 +8346,17 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         pve_port_q = request.args.get('pve_port')
         pve_ticket_q = request.args.get('pve_ticket')
         _ppt_ok, _ppt_port = _safe_vnc_passthrough(pve_port_q, pve_ticket_q)
+        # MK Sep 2026 (#945, #956) — the vncproxy port goes in its OWN variable. It
+        # used to overwrite `port`, which still had to be the API port for the URL
+        # authority two steps down, so the upgrade was dialled against :5900 and got
+        # ECONNREFUSED. Reusing the browser's ticket also means the upgrade has to
+        # present the manager's auth, not a fresh login cookie (#945.2 / #955).
+        _reuse_manager_auth = False
         if pve_port_q and pve_ticket_q and _ppt_ok:
             vnc_ticket = pve_ticket_q
-            port = _ppt_port
-            print(f"Reusing JS-issued vncproxy ticket port={port}")
+            vnc_port = _ppt_port
+            _reuse_manager_auth = True
+            print(f"Reusing JS-issued vncproxy ticket port={vnc_port}")
         else:
             print(f"Step 2: Get VNC ticket...")
             if vm_type == 'qemu':
@@ -8253,24 +8370,19 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
             with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
                 vnc_result = json.loads(response.read().decode('utf-8'))
             vnc_ticket = vnc_result['data']['ticket']
-            port = vnc_result['data']['port']
-            print(f"Got VNC ticket, port={port} (no JS pass-through — PVE 9.1.x users may hit issue #352)")
+            vnc_port = vnc_result['data']['port']
+            print(f"Got VNC ticket, port={vnc_port} (no JS pass-through — PVE 9.1.x users may hit issue #352)")
         
         # Step 3: Connect to Proxmox WebSocket
         print(f"Step 3: Connect to Proxmox...")
-        encoded_vnc_ticket = url_quote(vnc_ticket, safe='')
-        
-        if vm_type == 'qemu':
-            pve_ws_path = f"/api2/json/nodes/{node}/qemu/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
-        else:
-            pve_ws_path = f"/api2/json/nodes/{node}/lxc/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
-        
+        pve_ws_path = _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket)
         pve_ws_url = f"wss://{host}:{port}{pve_ws_path}"
 
         pve_ws = websocket.create_connection(
             pve_ws_url,
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
-            header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
+            header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
+                                        reuse_manager_auth=_reuse_manager_auth),
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
         # MK Apr 2026 — TCP_NODELAY + keepalive: survives idle conntrack drops
@@ -8623,8 +8735,8 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             if pve_port_q and pve_ticket_q:
                 # Single-vncproxy mode: trust the caller-supplied port+ticket.
                 vnc_ticket = pve_ticket_q
-                port = _ppt_port
-                logging.info(f"[VNC] reusing JS-issued vncproxy ticket port={port} (single-call mode)")
+                vnc_port = _ppt_port
+                logging.info(f"[VNC] reusing JS-issued vncproxy ticket port={vnc_port} (single-call mode)")
             else:
                 # Backwards-compat fallback: issue our own vncproxy. This still
                 # works on older PVE where two vncproxy calls produce matching
@@ -8640,15 +8752,10 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 vnc_body = await _aiowrap.to_thread(_do_urlopen, vnc_req)
                 vnc_result = json.loads(vnc_body.decode('utf-8'))
                 vnc_ticket = vnc_result['data']['ticket']
-                port = vnc_result['data']['port']
-                logging.warning(f"[VNC] no pve_port/pve_ticket in URL — issued fresh vncproxy (port={port}). Update the frontend to pass JS-issued ticket through to avoid PVE 9.1.x password-mismatch (issue #352).")
+                vnc_port = vnc_result['data']['port']
+                logging.warning(f"[VNC] no pve_port/pve_ticket in URL — issued fresh vncproxy (port={vnc_port}). Update the frontend to pass JS-issued ticket through to avoid PVE 9.1.x password-mismatch (issue #352).")
 
-            encoded_vnc_ticket = url_quote(vnc_ticket, safe='')
-
-            if vm_type == 'qemu':
-                pve_ws_path = f"/api2/json/nodes/{node}/qemu/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
-            else:
-                pve_ws_path = f"/api2/json/nodes/{node}/lxc/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
+            pve_ws_path = _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket)
 
             # MK Apr 2026 — VNC SSH-Tunnel-Mode (D2 / second leg).
             # If the cluster is flagged with vnc_tunnel=True, we open a persistent
@@ -8659,7 +8766,9 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             # Multi-user: each session gets its own ephemeral local port.
             tunnel_endpoint = None
             tunnel_target_host = host
-            tunnel_target_port = 8006
+            # MK Sep 2026 (#956) — the cluster's API port, not a literal 8006. A
+            # cluster reachable on a forwarded port worked everywhere except here.
+            tunnel_target_port = port
             try:
                 _use_tunnel = bool(getattr(manager.config, 'vnc_tunnel', False))
             except Exception:
@@ -8689,7 +8798,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                         ssh_key_content=_ssh_key,
                         ssh_password=_ssh_pass,
                         target_host='127.0.0.1',
-                        target_port=8006,
+                        target_port=port,
                     )
                     # Reroute the WSS through the local listener
                     tunnel_target_host = '127.0.0.1'
@@ -8706,7 +8815,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                     )
                     tunnel_endpoint = None
                     tunnel_target_host = host
-                    tunnel_target_port = 8006
+                    tunnel_target_port = port
 
             pve_ws_url = f"wss://{tunnel_target_host}:{tunnel_target_port}{pve_ws_path}"
 
@@ -8716,16 +8825,9 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             # access cookie). Using a fresh login's cookie produces "permission
             # denied - invalid PVEVNC ticket" on PVE 9.1.x. Reuse the manager's
             # stored auth instead. Backwards-compat path keeps the fresh login.
-            ws_auth_header = {"Host": f"{host}:{port}"}
-            if pve_port_q and pve_ticket_q:
-                if getattr(manager, '_using_api_token', False) and getattr(manager, '_api_token', None):
-                    ws_auth_header['Authorization'] = f"PVEAPIToken={manager._api_token}"
-                elif getattr(manager, '_ticket', None):
-                    ws_auth_header['Cookie'] = f"PVEAuthCookie={manager._ticket}"
-                else:
-                    ws_auth_header['Cookie'] = f"PVEAuthCookie={pve_ticket}"
-            else:
-                ws_auth_header['Cookie'] = f"PVEAuthCookie={pve_ticket}"
+            ws_auth_header = _pve_console_ws_auth(
+                manager, f"{tunnel_target_host}:{tunnel_target_port}", pve_ticket,
+                reuse_manager_auth=bool(pve_port_q and pve_ticket_q))
 
             # MK Apr 2026 — ws_client.create_connection is synchronous; offload to
             # a worker thread so concurrent VNC handlers don't serialize on the
@@ -9237,10 +9339,17 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         pve_port_q = request.args.get('pve_port')
         pve_ticket_q = request.args.get('pve_ticket')
         _ppt_ok, _ppt_port = _safe_vnc_passthrough(pve_port_q, pve_ticket_q)
+        # MK Sep 2026 (#945, #956) — the vncproxy port goes in its OWN variable. It
+        # used to overwrite `port`, which still had to be the API port for the URL
+        # authority two steps down, so the upgrade was dialled against :5900 and got
+        # ECONNREFUSED. Reusing the browser's ticket also means the upgrade has to
+        # present the manager's auth, not a fresh login cookie (#945.2 / #955).
+        _reuse_manager_auth = False
         if pve_port_q and pve_ticket_q and _ppt_ok:
             vnc_ticket = pve_ticket_q
-            port = _ppt_port
-            print(f"Reusing JS-issued vncproxy ticket port={port}")
+            vnc_port = _ppt_port
+            _reuse_manager_auth = True
+            print(f"Reusing JS-issued vncproxy ticket port={vnc_port}")
         else:
             print(f"Step 2: Get VNC ticket...")
             if vm_type == 'qemu':
@@ -9254,24 +9363,19 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
                 vnc_result = json.loads(response.read().decode('utf-8'))
             vnc_ticket = vnc_result['data']['ticket']
-            port = vnc_result['data']['port']
-            print(f"Got VNC ticket, port={port} (no JS pass-through — PVE 9.1.x users may hit issue #352)")
+            vnc_port = vnc_result['data']['port']
+            print(f"Got VNC ticket, port={vnc_port} (no JS pass-through — PVE 9.1.x users may hit issue #352)")
         
         # Step 3: Connect to Proxmox WebSocket
         print(f"Step 3: Connect to Proxmox...")
-        encoded_vnc_ticket = url_quote(vnc_ticket, safe='')
-        
-        if vm_type == 'qemu':
-            pve_ws_path = f"/api2/json/nodes/{node}/qemu/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
-        else:
-            pve_ws_path = f"/api2/json/nodes/{node}/lxc/{vmid}/vncwebsocket?port={port}&vncticket={encoded_vnc_ticket}"
-        
+        pve_ws_path = _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket)
         pve_ws_url = f"wss://{host}:{port}{pve_ws_path}"
 
         pve_ws = websocket.create_connection(
             pve_ws_url,
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
-            header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
+            header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
+                                        reuse_manager_auth=_reuse_manager_auth),
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
         # MK Apr 2026 — TCP_NODELAY + keepalive (consolidated helper)
@@ -9327,6 +9431,15 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             try:
                 data = ws.receive(timeout=0.1)
                 if data is None:
+                    # MK Sep 2026 (#945.4) — simple-websocket returns None for BOTH
+                    # "timed out with nothing to read" and "the peer is gone", and
+                    # this read times out ten times a second by design. Treating it
+                    # as a disconnect ended the session ~0.1s after it opened unless
+                    # the browser happened to send something first. Ask the socket
+                    # whether it is actually still connected.
+                    if getattr(ws, 'connected', False):
+                        gsleep(0.01)
+                        continue
                     print("Client disconnected")
                     running = False
                     break
@@ -9963,6 +10076,12 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
     # certs and most labs run them. Admins toggle on once they've installed
     # a real cert + the cluster's `ssl_verify` config field is true.
     verify_pve_tls = bool(ctx.get('verify_pve_tls', False))
+    # MK Sep 2026 (#956) — the API port of this cluster. 8006 stays the default for a
+    # context built before this field existed.
+    try:
+        pve_api_port = int(ctx.get('api_port') or 8006)
+    except (TypeError, ValueError):
+        pve_api_port = 8006
     if not allowed_hosts and session_id:
         try:
             cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
@@ -9975,6 +10094,11 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
                 # Honour the cluster-side ssl_verify flag from the creds payload.
                 if 'verify_pve_tls' in cr_data:
                     verify_pve_tls = bool(cr_data['verify_pve_tls'])
+                if cr_data.get('api_port'):
+                    try:
+                        pve_api_port = int(cr_data['api_port'])
+                    except (TypeError, ValueError):
+                        pass
                 # C-1: server-side PVE session cookie (session-cookie flow)
                 if cr_data.get('pve_auth_ticket'):
                     pve_auth = cr_data['pve_auth_ticket']
@@ -10003,7 +10127,7 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
 
     # Connect to PVE WS — Cookie uses session auth ticket; URL uses termproxy ticket.
     pve_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid_str}/vncwebsocket?port={pve_port}&vncticket={quote_plus(pve_ticket)}"
-    pve_url = f"wss://{pve_host}:8006{pve_path}"
+    pve_url = f"wss://{pve_host}:{pve_api_port}{pve_path}"
     # NS Jul 2026 (CodeAnt sensitive-data-in-url) — never log the vncticket (a live PVE console
     # credential in the query string); redact it (self-contained: runs in the WS subprocess).
     print("[TERMPROXY] connecting to PVE: " + pve_url.split('vncticket=')[0] + "vncticket=[REDACTED]")
@@ -10147,7 +10271,15 @@ if __name__ == '__main__':
     pkg_base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     script_dir = os.path.dirname(os.path.abspath(__file__))
     if not os.access(script_dir, os.W_OK):
-        script_dir = tempfile.gettempdir()
+        # MK Sep 2026 (#958) — CONFIG_DIR before the shared temp dir. On a package
+        # install the fallback above put an executable under a predictable name in
+        # a world-writable directory; CONFIG_DIR is the service's own (created 0700
+        # next to the database), so nobody else can pre-create or swap the file.
+        # gettempdir() stays as the last resort for installs where even that fails.
+        for _cand in (CONFIG_DIR, tempfile.gettempdir()):
+            if _cand and os.path.isdir(_cand) and os.access(_cand, os.W_OK):
+                script_dir = _cand
+                break
     script_path = os.path.join(script_dir, '.ssh_ws_server.py')
     
     try:
@@ -10182,8 +10314,31 @@ if __name__ == '__main__':
             except:
                 pass  # Neither fuser nor lsof available, hope for the best
         
-        with open(script_path, 'w') as f:
-            f.write(server_script)
+        # MK Sep 2026 (#958) — O_NOFOLLOW so a symlink planted at script_path is an
+        # error rather than a write through it, O_EXCL so a plain file somebody else
+        # got there first is refused instead of written into (O_NOFOLLOW alone only
+        # covers the symlink half, and O_TRUNC would have handed us their inode to
+        # rewrite between our write and the exec), and 0600 so the file we are about
+        # to execute is not readable or writable by anyone else. Our own leftover from
+        # the last start has to go first or O_EXCL would refuse every restart; if the
+        # unlink fails because the file is not ours, the open fails too, and the
+        # terminal not starting is the right outcome there.
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
+        _fd = os.open(script_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(_fd, 'w') as f:
+                _fd = None
+                f.write(server_script)
+        finally:
+            if _fd is not None:
+                os.close(_fd)
+        try:
+            os.chmod(script_path, 0o600)   # pre-existing file keeps its old mode otherwise
+        except OSError:
+            pass
         
         # Set environment variables for the subprocess
         env = os.environ.copy()
@@ -10198,7 +10353,7 @@ if __name__ == '__main__':
         env['SSH_WS_PORT'] = str(port)
         env['SSH_WS_HOST'] = host  # Issue #71: IPv6 support
         main_port = port - 2
-        env['PEGAPROX_URL'] = f"https://127.0.0.1:{main_port}" if ssl_cert else f"http://127.0.0.1:{main_port}"
+        env['PEGAPROX_URL'] = _ws_subprocess_base_url(main_port, ssl_cert)   # #957
         if ssl_cert:
             env['SSH_WS_SSL_CERT'] = ssl_cert
         if ssl_key:

@@ -117,10 +117,26 @@ def _discover_plugins():
     return found
 
 
+# MK Sep 2026 (#642) — a cluster id as it appears in the URL of every cluster route.
+_SAFE_CLUSTER_ID = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+
+def _parse_cluster_scope(raw):
+    """Stored form ('a,b') to list. Empty / missing / NULL all mean every cluster."""
+    if not raw:
+        return []
+    return [c for c in (part.strip() for part in str(raw).split(',')) if c]
+
+
 def _get_plugin_states():
     db = get_db()
-    rows = db.query('SELECT plugin_id, enabled, loaded_at, error FROM plugin_state') or []
-    return {r['plugin_id']: dict(r) for r in rows}
+    rows = db.query('SELECT plugin_id, enabled, loaded_at, error, clusters FROM plugin_state') or []
+    out = {}
+    for r in rows:
+        state = dict(r)
+        state['clusters'] = _parse_cluster_scope(state.get('clusters'))
+        out[state['plugin_id']] = state
+    return out
 
 
 def _set_plugin_state(plugin_id, enabled, error=''):
@@ -331,6 +347,8 @@ def list_plugins():
             'trusted': plugin.get('author', '').startswith('PegaProx'),
             'has_frontend': has_frontend,
             'frontend_route': frontend_route,
+            # #642 — empty list = every cluster; the frontend filters on this
+            'clusters': state.get('clusters') or [],
         })
 
     return jsonify(result)
@@ -456,6 +474,47 @@ def _safe_plugin_path(plugin_id, filename='config.json'):
     if not str(resolved).startswith(str(Path(PLUGINS_DIR).resolve())):
         return None
     return resolved
+
+
+@bp.route('/api/plugins/<plugin_id>/clusters', methods=['PUT'])
+@require_auth(perms=['plugins.manage'])
+def set_plugin_clusters(plugin_id):
+    """Limit a plugin to specific clusters (#642 maxilee).
+
+    An empty list puts it back on every cluster, which is where every plugin starts.
+    Ids are not checked against the live cluster list on purpose: a cluster can be
+    offline or added later, and dropping its id here would silently widen the scope
+    back to everything the next time somebody saved.
+    """
+    if not _valid_plugin_id(plugin_id):
+        return jsonify({'error': 'Invalid plugin id'}), 400
+    if not any(p['_id'] == plugin_id for p in _discover_plugins()):
+        return jsonify({'error': 'Plugin not found'}), 404
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get('clusters', [])
+    if not isinstance(raw, list):
+        return jsonify({'error': 'clusters must be a list'}), 400
+    clusters = []
+    for entry in raw:
+        if not isinstance(entry, str) or not _SAFE_CLUSTER_ID.match(entry):
+            return jsonify({'error': f'Invalid cluster id: {entry!r}'}), 400
+        if entry not in clusters:
+            clusters.append(entry)
+
+    db = get_db()
+    stored = ','.join(clusters)
+    existing = db.query_one('SELECT plugin_id FROM plugin_state WHERE plugin_id = ?', (plugin_id,))
+    if existing:
+        db.execute('UPDATE plugin_state SET clusters = ? WHERE plugin_id = ?', (stored, plugin_id))
+    else:
+        db.execute('INSERT INTO plugin_state (plugin_id, enabled, clusters) VALUES (?, 0, ?)',
+                   (plugin_id, stored))
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'plugins.scope_changed',
+              f"Plugin {plugin_id} limited to: {stored or 'all clusters'}")
+    return jsonify({'success': True, 'clusters': clusters})
 
 
 @bp.route('/api/plugins/<plugin_id>/config', methods=['GET'])

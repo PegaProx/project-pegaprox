@@ -3616,6 +3616,13 @@ class XcpngManager:
                 task.status = 'rebooting'
                 task.add_output(f"Rebooting {node_name}...")
                 ssh.exec_command("reboot", timeout=5)
+                if getattr(self, '_rolling_update', {}).get('status') == 'running':
+                    try:
+                        from pegaprox.background.alerts import emit_rolling_update_reboot_event
+                        emit_rolling_update_reboot_event(self.id, node_name)
+                    except Exception as alert_error:
+                        self.logger.debug(
+                            f"Could not publish rolling-update reboot alert for {node_name}: {alert_error}")
                 try:
                     ssh.close()
                 except Exception:
