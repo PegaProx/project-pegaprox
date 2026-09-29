@@ -232,8 +232,99 @@ def test_legacy_empty_tenant_grant_still_resolves_through_role(db, seed):
 
 
 # ===========================================================================
-# 6. Scale: one junction read per request, not per VM
+# 7. CodeRabbit re-review round: token pin must die with the membership
 # ===========================================================================
+
+def test_token_pin_dies_when_membership_revoked(api, db, seed):
+    """CodeRabbit #950 (Major): a token pinned to a tenant custom role at
+    AUTHZ time must stop adopting that tenant once the owner's membership is
+    revoked — an existing token cannot keep tenant visibility forever."""
+    seed.tenant('tenant_a', clusters=('cluster_1',))
+    seed.tenant('tenant_b', clusters=('cluster_2',))
+    rbac.save_custom_roles({'global': {}, 'tenants': {
+        'tenant_b': {'b_observer': {'permissions': ['vm.view']}}}})
+    rbac._custom_roles_cache = None
+    owner = seed.user('owner1', role='viewer', tenant_id='tenant_a')
+
+    cur = db.conn.cursor()
+    cur.execute("INSERT INTO user_tenants (username, tenant_id, granted_at, granted_by) "
+                "VALUES ('owner1', 'tenant_b', '2026-09-29', 'test')")
+    db.conn.commit()
+
+    from pegaprox.utils.auth import apply_token_role
+    from pegaprox.utils.rbac import DEFAULT_TENANT_ID
+
+    def pinned_tenant():
+        u = apply_token_role(dict(owner), 'b_observer')
+        return u.get('tenant_id')
+
+    assert pinned_tenant() == 'tenant_b', \
+        'precondition: live membership lets the token adopt tenant_b'
+
+    cur.execute("DELETE FROM user_tenants WHERE username = 'owner1' "
+                "AND tenant_id = 'tenant_b'")
+    db.conn.commit()
+
+    assert pinned_tenant() != 'tenant_b', \
+        'revoked membership still lets the existing token adopt tenant_b'
+    assert pinned_tenant() == (owner.get('tenant_id') or DEFAULT_TENANT_ID), \
+        'token must fall back to the owner home tenant, not keep the dead pin'
+
+
+def test_delete_role_race_surfaces_as_409_not_500(api, db, seed, monkeypatch):
+    """CodeRabbit #950 (Minor): a grant landing between the holders check and
+    the save makes save_custom_roles raise ValueError — the endpoint must
+    answer the same 409 as the pre-check, never a bare 500."""
+    from pegaprox.api.users import bp as users_bp
+    seed.tenant('tenant_a', clusters=('cluster_1',))
+    rbac.save_custom_roles({'global': {}, 'tenants': {
+        'tenant_a': {'doomed': {'permissions': ['vm.view']}}}})
+    rbac._custom_roles_cache = None
+    admin = seed.user('race_admin', role='admin', tenant_id='tenant_a')
+
+    import pegaprox.api.users as users_mod
+    real_save = users_mod.save_custom_roles
+
+    def racing_save(roles):
+        raise ValueError("Cannot delete role 'doomed' (tenant 'tenant_a'): "
+                         "still granted to 'someone'. Revoke the grant first.")
+    monkeypatch.setattr(users_mod, 'save_custom_roles', racing_save)
+
+    r = api.as_user(admin).delete('/api/roles/doomed?tenant_id=tenant_a')
+    assert r.status_code == 409, f'grant race became a {r.status_code}, not 409'
+    assert b'ROLE_HAS_GRANTS' in r.data
+
+
+# ===========================================================================
+# 8. CodeRabbit nitpick: memberships read once, not once per grant row
+# ===========================================================================
+
+def test_effective_tenant_ids_reads_memberships_once(db, seed, monkeypatch):
+    """N explicit-tenant grants must cost one memberships read, not N."""
+    seed.tenant('tenant_a', clusters=('cluster_1',))
+    seed.tenant('tenant_b', clusters=('cluster_2',))
+    seed.tenant('tenant_c', clusters=('cluster_3',))
+    eve = seed.user('eve', role='viewer', tenant_id='tenant_a')
+
+    cur = db.conn.cursor()
+    for t in ('tenant_b', 'tenant_c'):
+        cur.execute("INSERT INTO user_tenants (username, tenant_id, granted_at, granted_by) "
+                    f"VALUES ('eve', '{t}', '2026-09-29', 'test')")
+        cur.execute("INSERT INTO user_roles (username, role_name, tenant_id, granted_at, granted_by) "
+                    f"VALUES ('eve', 'some_role', '{t}', '2026-09-29', 'test')")
+    db.conn.commit()
+
+    calls = {'n': 0}
+    real = rbac.get_user_tenant_memberships
+
+    def counting(username):
+        calls['n'] += 1
+        return real(username)
+
+    monkeypatch.setattr(rbac, 'get_user_tenant_memberships', counting)
+    rbac._effective_tenant_ids(eve)
+    assert calls['n'] == 1, f'memberships read {calls["n"]}x for 2 explicit grants'
+
 
 def test_grant_lookup_memoised_within_request(api, monkeypatch):
     """The per-VM loop must hit the junction read once per request."""

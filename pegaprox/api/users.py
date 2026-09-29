@@ -1895,12 +1895,22 @@ def delete_custom_role(role_id):
     else:
         del custom['global'][role_id]
 
-    _saved = save_custom_roles(custom)
+    try:
+        _saved = save_custom_roles(custom)
+    except ValueError as exc:
+        # CodeRabbit #950 re-review (Minor): the grant-guard inside
+        # save_custom_roles raises ValueError when a user_roles row would be
+        # orphaned by the rewrite. That race (a grant created between the
+        # holders check above and this save) must surface as the SAME 409 the
+        # pre-check produces, not Flask's default 500. Cache goes either way:
+        # `custom` is the live dict and the role entry is already popped.
+        invalidate_roles_cache()
+        return jsonify({'error': str(exc), 'code': 'ROLE_HAS_GRANTS'}), 409
     invalidate_roles_cache()   # `custom` is the live cache - drop it either way
     if not _saved:
         return jsonify({'error': 'Could not save the role - check the server logs',
                         'code': 'ROLE_WRITE_FAILED'}), 500
-    
+
     log_audit(request.session['user'], 'role.deleted', f"Deleted role: {role_id}")
     return jsonify({'success': True})
 

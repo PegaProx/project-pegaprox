@@ -3061,11 +3061,11 @@
                                                                                             <div key={'g' + r.id} className="flex items-center gap-1.5 text-xs text-gray-300">
                                                                                                 <span className="truncate" title={r.id}>{r.name || r.id}</span>
                                                                                                 {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400 text-[10px] shrink-0">{t('primaryRoleBadge')}</span>}
-                                                                                                {isGranted ? (
+                                                                                                {isGranted && !isScalar ? (
                                                                                                     <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-40 shrink-0" onClick={() => doRevoke(r, isScalar)}>×</button>
-                                                                                                ) : (
+                                                                                                ) : !isScalar ? (
                                                                                                     <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-green-400 hover:bg-green-500/10 disabled:opacity-40 shrink-0" onClick={() => doGrant(r)}>+</button>
-                                                                                                )}
+                                                                                                ) : null}
                                                                                             </div>
                                                                                         );
                                                                                     })}
@@ -3078,7 +3078,7 @@
                                                                                                     <div key={'go' + r.id} className="flex items-center gap-1.5 text-xs text-gray-500">
                                                                                                         <span className="truncate">{tName(r.tenant_id)}: {r.name || r.id}</span>
                                                                                                         {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400/70 text-[10px] shrink-0">{t('primaryRoleBadge')}</span>}
-                                                                                                        <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-red-400/70 hover:bg-red-500/10 disabled:opacity-40 shrink-0" onClick={() => doRevoke(r, isScalar)}>×</button>
+                                                                                                        {!isScalar && <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-red-400/70 hover:bg-red-500/10 disabled:opacity-40 shrink-0" onClick={() => doRevoke(r, isScalar)}>×</button>}
                                                                                                     </div>
                                                                                                 );
                                                                                             })}
@@ -3156,13 +3156,13 @@
                                                                 </select>
                                                             ) : (
                                                                 <div className="flex flex-wrap items-center gap-1" data-spec011="tenant-multi">
-                                                                    <span className="px-2 py-1 rounded text-xs bg-cyan-500/10 text-cyan-400" title="home tenant">
+                                                                    <span className="px-2 py-1 rounded text-xs bg-cyan-500/10 text-cyan-400" title={t('membershipHomeTitle')}>
                                                                         {tenants.find(t => t.id === user.tenant_id)?.name || user.tenant_id || 'Default'}
                                                                     </span>
                                                                     {(userTenants[user.username] || []).filter(tid => tid !== user.tenant_id).map(tid => (
                                                                         <span key={'mt' + tid} className="inline-flex items-center gap-0.5 px-1.5 py-1 rounded text-xs bg-cyan-500/10 text-cyan-400">
                                                                             {tenants.find(t => t.id === tid)?.name || tid}
-                                                                            <button type="button" className="text-cyan-400/70 hover:text-red-400 ml-0.5" title="remove tenant membership"
+                                                                            <button type="button" className="text-cyan-400/70 hover:text-red-400 ml-0.5" title={t('membershipRemoveTitle')}
                                                                                 onClick={() => {
                                                                                     fetch(`${API_URL}/users/${user.username}/tenants`, {
                                                                                         method: 'DELETE', credentials: 'include',
@@ -3174,13 +3174,13 @@
                                                                                             addToast(t('tenantRemoved') || 'Tenant removed', 'success');
                                                                                             fetchUsers();
                                                                                         } else {
-                                                                                            resp.json().then(d => addToast(d.error || 'Error removing tenant', 'error')).catch(() => addToast('Error removing tenant', 'error'));
+                                                                                            resp.json().then(d => addToast(d.error || t('tenantRemoveError'), 'error')).catch(() => addToast(t('tenantRemoveError'), 'error'));
                                                                                         }
-                                                                                    }).catch(() => addToast('Error removing tenant', 'error'));
+                                                                                    }).catch(() => addToast(t('tenantRemoveError'), 'error'));
                                                                                 }}>×</button>
                                                                         </span>
                                                                     ))}
-                                                                    <select className="px-1 py-0.5 rounded text-xs bg-proxmox-darker border border-proxmox-border text-gray-300" value="" title="add tenant membership"
+                                                                    <select className="px-1 py-0.5 rounded text-xs bg-proxmox-darker border border-proxmox-border text-gray-300" value="" title={t('membershipAddTitle')}
                                                                         onChange={e => {
                                                                             const tid = e.target.value;
                                                                             if (!tid) return;
@@ -3195,11 +3195,11 @@
                                                                                     addToast(t('tenantAdded') || 'Tenant added', 'success');
                                                                                     fetchUsers();
                                                                                 } else {
-                                                                                    resp.json().then(d => addToast(d.error || 'Error adding tenant', 'error')).catch(() => addToast('Error adding tenant', 'error'));
+                                                                                    resp.json().then(d => addToast(d.error || t('tenantAddError'), 'error')).catch(() => addToast(t('tenantAddError'), 'error'));
                                                                                 }
-                                                                            }).catch(() => addToast('Error adding tenant', 'error'));
+                                                                            }).catch(() => addToast(t('tenantAddError'), 'error'));
                                                                         }}>
-                                                                        <option value="">+ tenant</option>
+                                                                        <option value="">{t('tenantAddPrompt')}</option>
                                                                         {tenants.filter(t => t.id !== user.tenant_id && !(userTenants[user.username] || []).includes(t.id)).map(t => (
                                                                             <option key={'at' + t.id} value={t.id}>{t.name || t.id}</option>
                                                                         ))}

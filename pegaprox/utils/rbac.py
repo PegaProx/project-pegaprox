@@ -474,13 +474,16 @@ def _effective_tenant_ids(user: dict) -> list:
     base_defining = _tenant_defining_role(role, base)
     if base_defining and base_defining not in tenants:
         tenants.append(base_defining)
+    _memberships = None  # CodeRabbit #950: one memberships read, not one per grant
     for g in get_user_role_grants(user.get('username', '')):
         # MK #950 review (revoke-dormancy): a grant pinned to an explicit
         # tenant is only live while that membership exists. Legacy migration
         # rows (tenant_id='') keep the old resolve-through-role behavior.
         if g['tenant_id']:
-            if g['tenant_id'] not in get_user_tenant_memberships(
-                    user.get('username', '')) and \
+            if _memberships is None:
+                _memberships = get_user_tenant_memberships(
+                    user.get('username', ''))
+            if g['tenant_id'] not in _memberships and \
                     g['tenant_id'] != (user.get('tenant_id')
                                        or DEFAULT_TENANT_ID):
                 continue

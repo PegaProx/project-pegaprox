@@ -354,7 +354,22 @@ def apply_token_role(user: dict, token_role: str) -> dict:
                     'SELECT tenant_id FROM custom_roles WHERE name = ?',
                     (token_role,)).fetchone()
                 if _rrow and _rrow[0]:
-                    out['tenant_id'] = _rrow[0]
+                    # CodeRabbit #950 re-review (Major): the pin is resolved at
+                    # AUTHZ time, so the membership check must live here too —
+                    # a mint-time check would not touch tokens that already
+                    # exist. If the owner's membership in the role's tenant was
+                    # revoked after minting, the role's permission list still
+                    # applies but the token no longer ADOPTS that tenant: its
+                    # cluster visibility falls back to the owner's own scope.
+                    # DB-unreadable counts as not-live (fail closed to the
+                    # owner's scope, never to the dead tenant).
+                    from pegaprox.utils.rbac import (get_user_tenant_memberships,
+                                                     DEFAULT_TENANT_ID)
+                    _tid = _rrow[0]
+                    _mem = get_user_tenant_memberships(user.get('username', ''))
+                    if _tid in _mem or _tid == (user.get('tenant_id')
+                                                or DEFAULT_TENANT_ID):
+                        out['tenant_id'] = _tid
         except Exception:
             pass
     else:
