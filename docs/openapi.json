@@ -758,6 +758,36 @@
         ]
       }
     },
+    "/api/auth/tokens/mintable-roles": {
+      "get": {
+        "operationId": "auth.list_mintable_token_roles_get",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "SPEC-011 multi-key: tenant-scoped roles the caller may pin a new key to.",
+        "description": "Self-service: computed from the caller's OWN effective tenant set\n(scalar home + user_tenants rows, SPEC-011 P5). A9 intact — this only\nlists pin choices; create_api_token's permission-ceiling check still\nguards every mint. Builtin-role picking stays admin-only in the UI.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
     "/api/auth/tokens/{token_id}": {
       "delete": {
         "operationId": "auth.revoke_api_token_endpoint_delete",
@@ -2959,6 +2989,289 @@
         "parameters": [
           {
             "name": "folder_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/users/{username}/roles": {
+      "get": {
+        "operationId": "users.roles_list_get",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "List a user's granted junction roles + effective tenant set.",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      },
+      "put": {
+        "operationId": "users.roles_grant_put",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Grant one tenant-pure role. Body: {\"role\": \"<custom_role_name>\"}",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      },
+      "delete": {
+        "operationId": "users.roles_revoke_delete",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Revoke one granted role. Body: {\"role\": \"<custom_role_name>\"}",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/users/{username}/tenants": {
+      "get": {
+        "operationId": "users.tenants_list_d6_get",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "List a user's explicit tenant memberships + home tenant.",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      },
+      "put": {
+        "operationId": "users.tenants_grant_d6_put",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Add a tenant membership. Body: {\"tenant_id\": \"<id>\"}",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      },
+      "delete": {
+        "operationId": "users.tenants_revoke_d6_delete",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Remove a tenant membership. Body: {\"tenant_id\": \"<id>\"}",
+        "description": "Role grants in the removed tenant stay in user_roles but go DORMANT (A10).\nRemoving the HOME tenant re-points users.tenant to the oldest remaining\nmembership (granted_at order) and re-adds the old home as a membership row\nso nothing is silently lost.",
+        "parameters": [
+          {
+            "name": "username",
             "in": "path",
             "required": true,
             "schema": {
