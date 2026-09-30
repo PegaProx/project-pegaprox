@@ -17783,18 +17783,20 @@
                                                                             <Icons.HardDrive className="text-yellow-400 w-4 h-4" />
                                                                             {t('storageOverview') || 'Node Storage'}
                                                                         </h3>
-                                                                        <div className="space-y-2">
+                                                                        {/* Name column is one grid track, so the longest node name sets its
+                                                                            width for every row instead of a fixed w-28 clipping them all. */}
+                                                                        <div className="grid items-center gap-x-4 gap-y-2 text-sm" style={{gridTemplateColumns: 'minmax(0, max-content) minmax(6rem, 1fr) max-content'}}>
                                                                             {Object.entries(clusterMetrics).filter(([, m]) => m && m.disk_percent != null && m.disk_total > 0).map(([name, m]) => (
-                                                                                <div key={name} className="flex items-center gap-3 text-sm">
-                                                                                    <span className="w-28 truncate text-gray-400">{name}</span>
-                                                                                    <div className="flex-1 h-2.5 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                                <React.Fragment key={name}>
+                                                                                    <span className="truncate text-gray-400" title={name}>{name}</span>
+                                                                                    <div className="h-2.5 bg-proxmox-dark rounded-full overflow-hidden">
                                                                                         <div className="h-full rounded-full" style={{
                                                                                             width: `${m.disk_percent}%`,
                                                                                             background: m.disk_percent > 90 ? '#ef4444' : m.disk_percent > 70 ? '#eab308' : '#22c55e'
                                                                                         }} />
                                                                                     </div>
                                                                                     <span className="font-mono text-xs text-gray-400 w-14 text-right">{m.disk_percent?.toFixed(1)}%</span>
-                                                                                </div>
+                                                                                </React.Fragment>
                                                                             ))}
                                                                         </div>
                                                                     </div>

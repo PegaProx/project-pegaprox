@@ -29,6 +29,22 @@ from pegaprox.api.schedules import start_scheduler
 bp = Blueprint('reports', __name__)
 
 
+# The three report endpoints below take period=hour|day|week and used to cut the
+# window out of "the newest 1000 snapshot rows". At the 5-min cadence that cap is
+# ~3.5 days, and less whenever rows land more often, so "Last Week" quietly ended
+# wherever those rows ended and looked identical to "Last 24h". Load the window
+# the caller actually asked for instead.
+def _period_cutoff(period):
+    """(window_days, cutoff_datetime) for a period param. hour shares the 1-day
+    window with day so the two views hit the same cached read."""
+    now = datetime.now()
+    if period == 'hour':
+        return 1, now - timedelta(hours=1)
+    if period == 'week':
+        return 7, now - timedelta(days=7)
+    return 1, now - timedelta(days=1)
+
+
 def _syslog_search_terms(search_text):
     return [term for term in re.split(r'\s+', search_text.strip()) if term]
 
@@ -180,20 +196,12 @@ def get_reports_summary():
     user_data = build_authz_user(usr, getattr(request, 'session', {}) or {})
     accessible_clusters = get_user_clusters(user_data)  # None = admin (all clusters)
 
-    history = load_metrics_history()
+    window_days, cutoff = _period_cutoff(period)
+    history = load_metrics_history(days=window_days)
     snapshots = history.get('snapshots', [])
 
     if not snapshots:
         return jsonify({'error': 'No historical data available yet'}), 404
-
-    # Filter by period
-    now = datetime.now()
-    if period == 'hour':
-        cutoff = now - timedelta(hours=1)
-    elif period == 'week':
-        cutoff = now - timedelta(days=7)
-    else:  # day
-        cutoff = now - timedelta(days=1)
 
     cutoff_str = cutoff.isoformat()
     filtered = [s for s in snapshots if s.get('timestamp', '') >= cutoff_str]
@@ -477,20 +485,12 @@ def get_reports_timeline():
     user_data = build_authz_user(usr, getattr(request, 'session', {}) or {})
     accessible_clusters = get_user_clusters(user_data)  # None = admin (all clusters)
 
-    history = load_metrics_history()
+    window_days, cutoff = _period_cutoff(period)
+    history = load_metrics_history(days=window_days)
     snapshots = history.get('snapshots', [])
 
     if not snapshots:
         return jsonify({'error': 'No historical data available'}), 404
-
-    # Filter by period
-    now = datetime.now()
-    if period == 'hour':
-        cutoff = now - timedelta(hours=1)
-    elif period == 'week':
-        cutoff = now - timedelta(days=7)
-    else:
-        cutoff = now - timedelta(days=1)
 
     cutoff_str = cutoff.isoformat()
     filtered = [s for s in snapshots if s.get('timestamp', '') >= cutoff_str]
@@ -1071,18 +1071,11 @@ def get_cluster_report_summary(cluster_id):
     live_cpu_pct = round(live_cpu, 1)
     live_mem_pct = round(mem_used / max(mem_total, 1) * 100, 1) if mem_total > 0 else 0
 
-    # Load historical metrics
-    history = load_metrics_history()
+    # Load historical metrics for the requested window (oldest first, so the
+    # chart below runs left-to-right and 'current' really is the newest sample)
+    window_days, cutoff = _period_cutoff(period)
+    history = load_metrics_history(days=window_days)
     snapshots = history.get('snapshots', [])
-
-    # Filter by period
-    now = datetime.now()
-    if period == 'hour':
-        cutoff = now - timedelta(hours=1)
-    elif period == 'week':
-        cutoff = now - timedelta(days=7)
-    else:
-        cutoff = now - timedelta(days=1)
 
     cutoff_str = cutoff.isoformat()
     filtered = [s for s in snapshots if s.get('timestamp', '') >= cutoff_str]

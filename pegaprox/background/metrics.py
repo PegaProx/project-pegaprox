@@ -128,7 +128,14 @@ def _node_hw_summary_redfish(mgr, cluster_id, node):
     return _compact_hw(res)
 
 
-def load_metrics_history():
+# Upper bound on a windowed history read. A week at the 5-min cadence and
+# stride 3 is ~670 rows, so this only bites where snapshots land far more often
+# than they should, and there it stops one report from dragging tens of
+# thousands of encrypted blobs through the parser.
+_WINDOW_ROW_CAP = 4000
+
+
+def load_metrics_history(days=None):
     """Load historical metrics from SQLite database.
 
     NS 2026-06-05 (#528 scaling): this SELECTed up to 1000 snapshot rows and
@@ -136,8 +143,17 @@ def load_metrics_history():
     freeze per report (reports.py calls this up to 3× per report). Now the fetch
     + parse run off-hub via run_heavy_read, with a short TTL cache so the repeated
     calls within a report (and back-to-back reports) coalesce onto one query.
+
+    `days` bounds the read by TIME. The flat LIMIT 1000 covers ~3.5 days at the
+    5-min cadence and a good deal less when snapshots land more often, so a
+    caller asking for a week got "the newest 1000 rows" and no way to tell the
+    difference. That is why the reports page showed the same window for
+    "Last 24h" and "Last Week". Callers that know their window pass it, and the
+    windowed read comes back oldest-first, which is the order a timeline wants.
+    days=None keeps the old row-capped (newest-first) behaviour.
     """
     try:
+        from datetime import timedelta
         from pegaprox.core.dbcrypto import run_heavy_read
 
         def _parse(rows):
@@ -151,9 +167,42 @@ def load_metrics_history():
                     pass
             return out
 
-        snapshots = run_heavy_read(
-            'SELECT timestamp, data FROM metrics_history ORDER BY timestamp DESC LIMIT 1000',
-            cache_key='mh_reports_1000', transform=_parse)
+        if days:
+            # One decimation policy for every history consumer rather than a
+            # second copy of it here. A week of 5-min rows is ~2000 blobs to
+            # decrypt + parse, and every consumer either averages or feeds a
+            # chart that decimates to 200 points anyway, so the skipped rows are
+            # never decrypted: the modulo is answered from the timestamp index.
+            from pegaprox.api.helpers import _history_stride
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            stride = _history_stride(days)
+            if stride > 1:
+                # Anchored on the newest row instead of a bare `id % stride = 0`.
+                # A plain modulo keeps the last snapshot only when its id happens
+                # to divide, so two times out of three the newest sample is
+                # dropped and a report's `current` is silently a stride older
+                # than the data it was read from.
+                where = ('WHERE timestamp >= ? AND '
+                         '((SELECT MAX(id) FROM metrics_history) - id) % ? = 0')
+                params = (cutoff, stride)
+            else:
+                where = 'WHERE timestamp >= ?'
+                params = (cutoff,)
+            # The old flat LIMIT was also the only thing bounding the work. A
+            # window is a time span, so on an install writing far more often than
+            # the 5-min cadence a week is unbounded decrypt + parse. Keep a
+            # backstop, and trim it from the OLD end so the recent resolution the
+            # charts are about survives.
+            sql = ('SELECT timestamp, data FROM ('
+                   'SELECT id, timestamp, data FROM metrics_history '
+                   f'{where} ORDER BY timestamp DESC LIMIT {_WINDOW_ROW_CAP}'
+                   ') ORDER BY timestamp ASC')
+            snapshots = run_heavy_read(
+                sql, params, cache_key=f'mh_reports_d{days}', transform=_parse)
+        else:
+            snapshots = run_heavy_read(
+                'SELECT timestamp, data FROM metrics_history ORDER BY timestamp DESC LIMIT 1000',
+                cache_key='mh_reports_1000', transform=_parse)
         return {'snapshots': snapshots, 'last_cleanup': None}
     except Exception as e:
         logging.error(f"Error loading metrics history from database: {e}")
