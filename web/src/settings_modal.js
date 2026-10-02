@@ -2558,6 +2558,12 @@
             
             // custom roles state - NS: Dec 2025
             const [allRoles, setAllRoles] = useState([]);
+            // SPEC-2026-010 P3: per-user granted (extra) tenant roles
+            const [grantedRoles, setGrantedRoles] = useState({});
+            // SPEC-2026-011 P2b: picker state (pcBusy shared by role row buttons)
+            const [pcBusy, setPcBusy] = useState(false);
+            // SPEC-2026-011 P5: multi-tenant memberships per user
+            const [userTenants, setUserTenants] = useState({});
             const [showAddRole, setShowAddRole] = useState(false);
             const [newRole, setNewRole] = useState({ id: '', name: '', permissions: [], tenant_id: '' });
             const [editingRole, setEditingRole] = useState(null);
@@ -2810,10 +2816,15 @@
 
             // fetch all roles (builtin + custom) - NS
             const fetchRoles = async () => {
-                try {
-                    const r = await fetch(`${API_URL}/roles`, { credentials: 'include', headers: getAuthHeaders() });
-                    if(r.ok) setAllRoles(await r.json());
-                } catch(e) {}
+                // SPEC-2026-011 P3: loud failure on BOTH paths (network + !ok), 1 retry
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const r = await fetch(`${API_URL}/roles`, { credentials: 'include', headers: getAuthHeaders() });
+                        if (r.ok) { setAllRoles(await r.json()); return; }
+                    } catch(e) {}
+                    if (attempt === 0) addToast(t('rolesLoadRetry'), 'error');
+                }
+                addToast(t('rolesLoadFailed'), 'error');
             };
             
             // check for updates on component mount
@@ -3976,6 +3987,14 @@
                     });
                     if (response && response.ok) {
                         const data = await response.json();
+                        // SPEC-2026-010 P3: keep granted (extra) roles for chips/checkboxes
+                        const gmap = {};
+                        (data || []).forEach(uu => { gmap[uu.username] = uu.granted_roles || []; });
+                        setGrantedRoles(gmap);
+                        // SPEC-2026-011 P5: hydrate tenant memberships
+                        const tmap = {};
+                        (data || []).forEach(uu => { tmap[uu.username] = uu.granted_tenants || []; });
+                        setUserTenants(tmap);
                         setUsers(data);
                     }
                 } catch (err) {
@@ -4311,8 +4330,8 @@
                     <div
                         className={isCorporate
                             ? 'corp-vm-modal'
-                            : 'w-full max-w-5xl max-h-[90vh] bg-proxmox-card border border-proxmox-border overflow-hidden flex flex-col rounded-2xl shadow-2xl'}
-                        style={isCorporate ? {maxWidth: '1100px', width: '100%'} : undefined}
+                            : 'w-full max-w-[120rem] max-h-[90vh] bg-proxmox-card border border-proxmox-border overflow-hidden flex flex-col rounded-2xl shadow-2xl'}
+                        style={isCorporate ? {maxWidth: '2200px', width: '100%'} : undefined}
                         onClick={e => e.stopPropagation()}
                     >
                         {/* Header - LW: corporate uses unified corporate chrome (matches VM Configure) */}
@@ -4796,15 +4815,15 @@
                                         <table className="w-full" style={{tableLayout:'fixed'}}>
                                             <thead>
                                                 <tr className="border-b border-proxmox-border">
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'18%'}}>{t('usernameLabel')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'15%'}}>{t('displayName')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'10%'}}>{t('role')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'10%'}}>{t('tenant') || 'Tenant'}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'12%'}}>{t('usernameLabel')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'12%'}}>{t('displayName')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'26%'}}>{t('role')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'12%'}}>{t('tenant') || 'Tenant'}</th>
                                                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'5%'}}>2FA</th>
                                                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'12%'}}>{t('lastLogin')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'7%'}}>{t('status')}</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'7%'}}>{t('portal') || 'Portal'}</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase" style={{width:'16%'}}>{t('actions')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'6%'}}>{t('status')}</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase" style={{width:'6%'}}>{t('portal') || 'Portal'}</th>
+                                                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase" style={{width:'9%'}}>{t('actions')}</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -4845,33 +4864,138 @@
                                                         <td className="px-4 py-3 text-gray-300"><span className="truncate block" style={{maxWidth:'min(160px, 12vw)'}} title={user.display_name}>{user.display_name || '-'}</span></td>
                                                         <td className="px-4 py-3">
                                                             {editingUser === user.username ? (
+                                                                <div>
+                                                                {/* MK #950 review (UI regression): legacy single-role <select> restored
+                                                                    as the PRIMARY-role control. The junction editor below only covers
+                                                                    tenant-scoped customs — without this there was no way to promote to
+                                                                    admin, demote to viewer, or set a global custom role, and a vanilla
+                                                                    install (zero custom roles) rendered an empty role cell. Setting a
+                                                                    custom role here moves the scalar primary; per-tenant extras stay in
+                                                                    the editor underneath. */}
                                                                 <select
                                                                     defaultValue={user.role}
-                                                                    onChange={e => {
-                                                                        const selectedRole = e.target.value;
-                                                                        // LW: Auto-include tenant_id for tenant roles
-                                                                        const roleObj = allRoles.find(r => r.id === selectedRole);
-                                                                        if (roleObj && roleObj.scope === 'tenant' && roleObj.tenant_id) {
-                                                                            handleUpdateUser(user.username, { role: selectedRole, tenant_id: roleObj.tenant_id });
-                                                                        } else {
-                                                                            handleUpdateUser(user.username, { role: selectedRole });
-                                                                        }
-                                                                    }}
-                                                                    className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-sm text-white"
+                                                                    disabled={pcBusy}
+                                                                    onChange={e => handleUpdateUser(user.username, { role: e.target.value })}
+                                                                    className="px-2 py-1 bg-proxmox-darker border border-proxmox-border rounded text-xs text-white mb-1.5"
+                                                                    data-spec010="primary-role-select"
                                                                 >
-                                                                    <optgroup label={t('builtinRole') || 'Builtin'}>
-                                                                        <option value="admin">{t('roleAdmin')}</option>
-                                                                        <option value="user">{t('roleUser')}</option>
-                                                                        <option value="viewer">{t('roleViewer')}</option>
-                                                                    </optgroup>
-                                                                    {allRoles.filter(r => !r.builtin).length > 0 && (
-                                                                        <optgroup label={t('customRoles') || 'Custom'}>
-                                                                            {allRoles.filter(r => !r.builtin).map(r => (
-                                                                                <option key={r.id} value={r.id}>{r.name || r.id}</option>
-                                                                            ))}
-                                                                        </optgroup>
-                                                                    )}
+                                                                    {['admin', 'user', 'viewer'].map(b => (
+                                                                        <option key={'b' + b} value={b}>{b === 'admin' ? t('roleAdmin') : b === 'user' ? t('roleUser') : t('roleViewer')}</option>
+                                                                    ))}
+                                                                    {allRoles.filter(r => !r.builtin && r.scope !== 'tenant').map(r => (
+                                                                        <option key={'g' + r.id} value={r.id}>{r.name || r.id}</option>
+                                                                    ))}
+                                                                    {allRoles.filter(r => !r.builtin && r.scope === 'tenant' && r.tenant_id && (new Set([user.tenant_id || 'default'].concat(userTenants[user.username] || []))).has(r.tenant_id)).map(r => (
+                                                                        <option key={'t' + r.id} value={r.id}>{(tenants.find(x => x.id === r.tenant_id) || {}).name || r.tenant_id}: {r.name || r.id}</option>
+                                                                    ))}
                                                                 </select>
+                                                                {/* SPEC-2026-010 P3: additional tenant roles (union model) */}
+                                                                {allRoles.filter(r => !r.builtin).length > 0 && (
+                                                                    <div className="mt-1.5 space-y-0.5" data-spec010="granted-roles-editor">
+                                                                        {(() => {
+                                                                            // SPEC-2026-011 P2b (Ray feedback 09-09): flat home-tenant role list.
+                                                                            // Tenant column drives scope; embedded tenant/role add-selector REMOVED.
+                                                                            // Multi-tenant selection in tenant column = D6/P5 (backend pending).
+                                                                            const custom = allRoles.filter(r => !r.builtin && r.scope === 'tenant' && r.tenant_id);
+                                                                            // SPEC-2026-011 P5: role cell scope = tenant column's home UNION memberships
+                                                                            const effTenants = new Set([user.tenant_id || 'default'].concat(userTenants[user.username] || []));
+                                                                            const home = custom.filter(r => effTenants.has(r.tenant_id));
+                                                                            const other = custom.filter(r => !effTenants.has(r.tenant_id) && ((grantedRoles[user.username] || []).includes(r.id) || user.role === r.id));
+                                                                            const eff = (grantedRoles[user.username] || []).concat(custom.some(r => r.id === user.role) ? [user.role] : []);
+                                                                            const tName = tid => (tenants.find(x => x.id === tid) || {}).name || tid;
+                                                                            const doRevoke = (r, isScalar) => {
+                                                                                const revoke = () => {
+                                                                                    setPcBusy(true);
+                                                                                    fetch(`${API_URL}/users/${user.username}/roles`, {
+                                                                                        method: 'DELETE', credentials: 'include',
+                                                                                        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                                                                                        body: JSON.stringify({ role: r.id })
+                                                                                    }).then(resp => {
+                                                                                        if (resp && resp.ok) {
+                                                                                            setGrantedRoles(p => ({ ...p, [user.username]: (p[user.username] || []).filter(x => x !== r.id) }));
+                                                                                            addToast(t('roleRevoked'), 'success');
+                                                                                            if (isScalar) {
+                                                                                                const remaining = (grantedRoles[user.username] || []).filter(x => x !== r.id);
+                                                                                                const customRemaining = remaining.map(x => allRoles.find(ar => ar.id === x && !ar.builtin)).filter(Boolean)
+                                                                                                    .sort((a, b) => (a.granted_at || '').localeCompare(b.granted_at || '') || a.id.localeCompare(b.id));
+                                                                                                const nxt = customRemaining[0];
+                                                                                                const upd = nxt && nxt.scope === 'tenant' && nxt.tenant_id ? { role: nxt.id, tenant_id: nxt.tenant_id } : { role: (nxt && nxt.id) || 'viewer' };
+                                                                                                fetch(`${API_URL}/users/${user.username}`, {
+                                                                                                    method: 'PUT', credentials: 'include',
+                                                                                                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                                                                                                    body: JSON.stringify(upd)
+                                                                                                }).then(resp2 => {
+                                                                                                    if (resp2 && resp2.ok) { fetchUsers(); }
+                                                                                                    else { addToast(t('roleSyncFailed'), 'error'); }
+                                                                                                }).catch(() => addToast(t('roleSyncFailed'), 'error'));
+                                                                                            }
+                                                                                        } else {
+                                                                                            resp.json().then(d => addToast(d.error || t('rolesUpdateError'), 'error')).catch(() => addToast(t('rolesUpdateError'), 'error'));
+                                                                                        }
+                                                                                    }).catch(() => addToast(t('rolesUpdateError'), 'error')).finally(() => setPcBusy(false));
+                                                                                };
+                                                                                if (isScalar && (grantedRoles[user.username] || []).length === 0) {
+                                                                                    if (!confirm(t('lastRoleFallbackConfirm'))) return;
+                                                                                }
+                                                                                revoke();
+                                                                            };
+                                                                            const doGrant = r => {
+                                                                                if ((grantedRoles[user.username] || []).includes(r.id) || user.role === r.id) return;
+                                                                                setPcBusy(true);
+                                                                                fetch(`${API_URL}/users/${user.username}/roles`, {
+                                                                                    method: 'PUT', credentials: 'include',
+                                                                                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                                                                                    body: JSON.stringify({ role: r.id })
+                                                                                }).then(resp => {
+                                                                                    if (resp && resp.ok) {
+                                                                                        setGrantedRoles(p => ({ ...p, [user.username]: [...(p[user.username] || []), r.id] }));
+                                                                                        addToast(t('roleGranted'), 'success');
+                                                                                    } else {
+                                                                                        resp.json().then(d => addToast(d.error || t('rolesUpdateError'), 'error')).catch(() => addToast(t('rolesUpdateError'), 'error'));
+                                                                                    }
+                                                                                }).catch(() => addToast(t('rolesUpdateError'), 'error')).finally(() => setPcBusy(false));
+                                                                            };
+                                                                            return (
+                                                                                <div data-spec011="picker-home">
+                                                                                    {home.map(r => {
+                                                                                        const isScalar = user.role === r.id;
+                                                                                        const isGranted = eff.includes(r.id);
+                                                                                        return (
+                                                                                            <div key={'g' + r.id} className="flex items-center gap-1.5 text-xs text-gray-300">
+                                                                                                <span className="truncate" title={r.id}>{r.name || r.id}</span>
+                                                                                                {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400 text-[10px] shrink-0">{t('primaryRoleBadge')}</span>}
+                                                                                                {isGranted && !isScalar ? (
+                                                                                                    <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-40 shrink-0" onClick={() => doRevoke(r, isScalar)}>×</button>
+                                                                                                ) : !isScalar ? (
+                                                                                                    <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-green-400 hover:bg-green-500/10 disabled:opacity-40 shrink-0" onClick={() => doGrant(r)}>+</button>
+                                                                                                ) : null}
+                                                                                            </div>
+                                                                                        );
+                                                                                    })}
+                                                                                    {other.length > 0 && (
+                                                                                        <div className="mt-1 pt-1 border-t border-gray-700/50" data-spec011="picker-other">
+                                                                                            <div className="text-[10px] text-gray-500">{t('grantsOtherTenants')}</div>
+                                                                                            {other.map(r => {
+                                                                                                const isScalar = user.role === r.id;
+                                                                                                return (
+                                                                                                    <div key={'go' + r.id} className="flex items-center gap-1.5 text-xs text-gray-500">
+                                                                                                        <span className="truncate">{tName(r.tenant_id)}: {r.name || r.id}</span>
+                                                                                                        {isScalar && <span className="px-1 rounded bg-blue-500/10 text-blue-400/70 text-[10px] shrink-0">{t('primaryRoleBadge')}</span>}
+                                                                                                        {!isScalar && <button type="button" disabled={pcBusy} className="ml-auto px-1.5 rounded text-red-400/70 hover:bg-red-500/10 disabled:opacity-40 shrink-0" onClick={() => doRevoke(r, isScalar)}>×</button>}
+                                                                                                    </div>
+                                                                                                );
+                                                                                            })}
+                                                                                        </div>
+                                                                                    )}
+                                                                                    {home.length === 0 && other.length === 0 && (
+                                                                                        <div className="text-xs text-gray-500">{t('noTenantRolesForUser')}</div>
+                                                                                    )}
+                                                                                </div>
+                                                                            );
+                                                                        })()}
+                                                                    </div>
+                                                                )}
+                                                                </div>
                                                             ) : (
                                                                 /* LW Sep 2026 (#795) - these were bare inline siblings, so a custom role id
                                                                    long enough to fill the 10% column pushed the source badge into a mid-word
@@ -4897,6 +5021,27 @@
                                                                 {user.auth_source === 'oidc' && (
                                                                     <span className="px-1.5 py-0.5 rounded text-xs whitespace-nowrap bg-purple-500/10 text-purple-400 border border-purple-500/20">OIDC</span>
                                                                 )}
+                                                                {/* SPEC-2026-011 P2 (D2): tenant-grouped chips — tenant badge + union chips */}
+                                                                {(() => {
+                                                                    const extras = (grantedRoles[user.username] || []).filter(rid => rid !== user.role);
+                                                                    const uRole = allRoles.find(r => r.id === user.role);
+                                                                    const byT = {};
+                                                                    if (extras.length === 0 && !(uRole && uRole.scope === 'tenant' && uRole.tenant_id)) return null;
+                                                                    if (uRole && uRole.scope === 'tenant' && uRole.tenant_id) byT[uRole.tenant_id] = [];
+                                                                    extras.forEach(rid => {
+                                                                        const ro = allRoles.find(r => r.id === rid);
+                                                                        const tid = (ro && ro.tenant_id) || '?';
+                                                                        (byT[tid] = byT[tid] || []).push(rid);
+                                                                    });
+                                                                    return Object.keys(byT).map(tid => (
+                                                                        <span key={'tg' + tid} className="inline-flex items-center gap-0.5">
+                                                                            <span className="px-1 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">{(tenants.find(x => x.id === tid) || {}).name || tid}</span>
+                                                                            {(tid === (uRole && uRole.tenant_id) ? [user.role] : []).concat(byT[tid]).map(rid => (
+                                                                                <span key={'x' + tid + rid} className="px-1.5 py-0.5 rounded text-xs bg-purple-500/10 text-purple-400" data-spec011="role-chip">{rid}</span>
+                                                                            ))}
+                                                                        </span>
+                                                                    ));
+                                                                })()}
                                                                 </div>
                                                             )}
                                                         </td>
@@ -4913,9 +5058,56 @@
                                                                     ))}
                                                                 </select>
                                                             ) : (
-                                                                <span className="px-2 py-1 rounded text-xs bg-cyan-500/10 text-cyan-400">
-                                                                    {tenants.find(t => t.id === user.tenant_id)?.name || user.tenant_id || 'Default'}
-                                                                </span>
+                                                                <div className="flex flex-wrap items-center gap-1" data-spec011="tenant-multi">
+                                                                    <span className="px-2 py-1 rounded text-xs bg-cyan-500/10 text-cyan-400" title={t('membershipHomeTitle')}>
+                                                                        {tenants.find(t => t.id === user.tenant_id)?.name || user.tenant_id || 'Default'}
+                                                                    </span>
+                                                                    {(userTenants[user.username] || []).filter(tid => tid !== user.tenant_id).map(tid => (
+                                                                        <span key={'mt' + tid} className="inline-flex items-center gap-0.5 px-1.5 py-1 rounded text-xs bg-cyan-500/10 text-cyan-400">
+                                                                            {tenants.find(t => t.id === tid)?.name || tid}
+                                                                            <button type="button" className="text-cyan-400/70 hover:text-red-400 ml-0.5" title={t('membershipRemoveTitle')}
+                                                                                onClick={() => {
+                                                                                    fetch(`${API_URL}/users/${user.username}/tenants`, {
+                                                                                        method: 'DELETE', credentials: 'include',
+                                                                                        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                                                                                        body: JSON.stringify({ tenant_id: tid })
+                                                                                    }).then(resp => {
+                                                                                        if (resp && resp.ok) {
+                                                                                            setUserTenants(p => ({ ...p, [user.username]: (p[user.username] || []).filter(x => x !== tid) }));
+                                                                                            addToast(t('tenantRemoved') || 'Tenant removed', 'success');
+                                                                                            fetchUsers();
+                                                                                        } else {
+                                                                                            resp.json().then(d => addToast(d.error || t('tenantRemoveError'), 'error')).catch(() => addToast(t('tenantRemoveError'), 'error'));
+                                                                                        }
+                                                                                    }).catch(() => addToast(t('tenantRemoveError'), 'error'));
+                                                                                }}>×</button>
+                                                                        </span>
+                                                                    ))}
+                                                                    <select className="px-1 py-0.5 rounded text-xs bg-proxmox-darker border border-proxmox-border text-gray-300" value="" title={t('membershipAddTitle')}
+                                                                        onChange={e => {
+                                                                            const tid = e.target.value;
+                                                                            if (!tid) return;
+                                                                            e.target.value = '';
+                                                                            fetch(`${API_URL}/users/${user.username}/tenants`, {
+                                                                                method: 'PUT', credentials: 'include',
+                                                                                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                                                                                body: JSON.stringify({ tenant_id: tid })
+                                                                            }).then(resp => {
+                                                                                if (resp && resp.ok) {
+                                                                                    setUserTenants(p => ({ ...p, [user.username]: [...(p[user.username] || []), tid] }));
+                                                                                    addToast(t('tenantAdded') || 'Tenant added', 'success');
+                                                                                    fetchUsers();
+                                                                                } else {
+                                                                                    resp.json().then(d => addToast(d.error || t('tenantAddError'), 'error')).catch(() => addToast(t('tenantAddError'), 'error'));
+                                                                                }
+                                                                            }).catch(() => addToast(t('tenantAddError'), 'error'));
+                                                                        }}>
+                                                                        <option value="">{t('tenantAddPrompt')}</option>
+                                                                        {tenants.filter(t => t.id !== user.tenant_id && !(userTenants[user.username] || []).includes(t.id)).map(t => (
+                                                                            <option key={'at' + t.id} value={t.id}>{t.name || t.id}</option>
+                                                                        ))}
+                                                                    </select>
+                                                                </div>
                                                             )}
                                                         </td>
                                                         <td className="px-4 py-3">

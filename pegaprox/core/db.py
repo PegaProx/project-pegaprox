@@ -520,6 +520,94 @@ class PegaProxDB:
                 )
             ''')
         
+        # SRK (SPEC-2026-010 P1): user_roles junction -- one user, many
+        # tenant-scoped roles. users.role stays the PRIMARY role; effective
+        # perms/visibility = primary UNION granted. No DB-level FK by design:
+        # save_custom_roles() rewrites custom_roles via DELETE+reinsert (an FK
+        # would break every role edit), integrity is app-enforced instead (see
+        # rbac.save_custom_roles guard + delete_user cleanup). PK includes
+        # tenant_id because custom_roles is keyed (name, tenant_id): a grant
+        # pins the tenant, not just the role name.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_roles (
+                username TEXT NOT NULL,
+                role_name TEXT NOT NULL,
+                tenant_id TEXT NOT NULL DEFAULT '',
+                granted_at TEXT,
+                granted_by TEXT,
+                PRIMARY KEY (username, role_name, tenant_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role_name, tenant_id)')
+        # Backfill (idempotent): primary roles that are custom roles become
+        # junction rows. Builtins (admin/user/viewer) intentionally get NO row
+        # (D7 backfill edge: admin bypasses; builtins resolve without
+        # custom_roles) -- P1 count checks must expect that.
+        #
+        # MK #950 review (uniqueness — his sharpest case): the original JOIN
+        # was on name alone, so where TWO tenants both define a role called
+        # "operator", a member of tenant_a holding primary role "operator"
+        # received BOTH rows — a cross-tenant grant nobody made. Resolution
+        # order: a name defined by exactly ONE tenant pins that tenant; an
+        # ambiguous name pins the user's OWN tenant when it defines the name
+        # (the one answer that is not a guess); anything else is SKIPPED with
+        # a warning naming the fix. Scalar subqueries, never a multi-row JOIN:
+        # an ambiguous name must not multiply into two inserts again.
+        cursor.execute('''
+            INSERT OR IGNORE INTO user_roles (username, role_name, tenant_id, granted_at, granted_by)
+            SELECT u.username, u.role,
+                   CASE
+                     WHEN (SELECT COUNT(*) FROM custom_roles r2
+                           WHERE r2.name = u.role) = 1
+                       THEN (SELECT r2.tenant_id FROM custom_roles r2
+                             WHERE r2.name = u.role)
+                     ELSE COALESCE(NULLIF(u.tenant, ''), 'default')
+                   END,
+                   ?, 'migration-2026-09'
+            FROM users u
+            WHERE EXISTS (SELECT 1 FROM custom_roles r4 WHERE r4.name = u.role)
+              AND ( (SELECT COUNT(*) FROM custom_roles r2
+                     WHERE r2.name = u.role) = 1
+                    OR EXISTS (SELECT 1 FROM custom_roles r3
+                               WHERE r3.name = u.role
+                                 AND r3.tenant_id = COALESCE(NULLIF(u.tenant, ''), 'default')) )
+        ''', (datetime.now().isoformat(),))
+        try:
+            _ambig = cursor.execute('''
+                SELECT name, COUNT(*) AS n FROM custom_roles
+                GROUP BY name HAVING n > 1
+            ''').fetchall()
+            for _row in _ambig:
+                _nm = _row['name'] if isinstance(_row, dict) else _row[0]
+                logging.warning(
+                    f"[migration] primary-role backfill for role {_nm!r}: "
+                    f"defined by {(_row[1] if not isinstance(_row, dict) else _row['n'])} "
+                    f"tenants. Users whose OWN tenant does not define it got no "
+                    f"junction row — resolve the duplicate name, then re-grant.")
+        except Exception:
+            pass
+
+        # SRK (SPEC-2026-011 D6): user_tenants junction -- membership beyond
+        # the scalar home tenant. users.tenant stays the HOME/default; the
+        # effective tenant set = home UNION user_tenants rows. Backfill is
+        # zero-delta: every user's first row IS their current scalar tenant,
+        # so visibility before/after migration is identical.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_tenants (
+                username TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                granted_at TEXT,
+                granted_by TEXT,
+                PRIMARY KEY (username, tenant_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_tenants_tenant ON user_tenants(tenant_id)')
+        cursor.execute('''
+            INSERT OR IGNORE INTO user_tenants (username, tenant_id, granted_at, granted_by)
+            SELECT username, COALESCE(NULLIF(tenant, ''), 'default'), ?, 'migration-2026-09-d6'
+            FROM users
+        ''', (datetime.now().isoformat(),))
+
         # Scheduled tasks table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS scheduled_tasks (
@@ -3522,7 +3610,10 @@ class PegaProxDB:
                 return f"data:{avatar_mime};base64,{avatar_data}"
             return ''
 
+        # SRK (SPEC-2026-010 P1): carry 'username' — resolvers (multi-role
+        # grant lookup, user_roles junction reads) key off user['username'].
         return {
+            'username': username,
             'password_salt': password_salt,
             'password_hash': password_hash,
             'role': row_dict.get('role', 'viewer'),
@@ -3731,6 +3822,14 @@ class PegaProxDB:
     def delete_user(self, username: str):
         """Delete user"""
         cursor = self.conn.cursor()
+        # SRK (SPEC-2026-010 P1): role grants die with the user (CASCADE
+        # semantics, app-enforced -- no DB FK by design, see user_roles DDL).
+        # audit_log grant history remains.
+        cursor.execute('DELETE FROM user_roles WHERE username = ?', (username,))
+        # MK Sep 2026 - a membership is a grant too. Leaving these behind is the
+        # exact thing purge_user_grants() exists to prevent: the next account
+        # created with this username would inherit every tenant this one was in.
+        cursor.execute('DELETE FROM user_tenants WHERE username = ?', (username,))
         cursor.execute('DELETE FROM users WHERE username = ?', (username,))
         self.conn.commit()
         # the grants outlive the account otherwise, and the next account with this
