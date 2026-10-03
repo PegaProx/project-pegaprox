@@ -1408,7 +1408,7 @@ def log_message(message):
     """write to log file, nothing fancy"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{{timestamp}}] {{message}}"
-    print(log_entry)
+    print(log_entry, flush=True)
     try:
         with open(LOG_FILE, 'a') as f:
             f.write(log_entry + "\\n")
@@ -1484,7 +1484,13 @@ def parse_smbios_string(smbios_str):
     return params
 
 def needs_smbios_update(vmid):
-    """Check if VM needs SMBIOS configuration"""
+    """Check if VM needs SMBIOS configuration.
+
+    Deliberately NO logging in here: this predicate runs for every
+    already-configured VM on every poll cycle, so any log side-effect
+    becomes constant journal spam. Steady state must be silent; the
+    main loop logs only on state change.
+    """
     smbios_str = get_current_smbios(vmid)
     if not smbios_str:
         return True
@@ -1497,7 +1503,12 @@ def needs_smbios_update(vmid):
     
     if ('manufacturer' in params or 'product' in params or 
         'version' in params or 'serial' in params or 'family' in params):
-        log_message(f"VM {{vmid}} already has SMBIOS configuration")
+        # Previously logged "VM ... already has SMBIOS configuration"
+        # here on every call: the recreate-check in the main loop invokes
+        # this predicate for every already-configured VM on every cycle,
+        # so that line was constant journal spam (~2 lines/sec/node
+        # observed on a 9-node fleet). Silent now - the loop logs only
+        # on state change.
         return False
     
     return True
@@ -1555,7 +1566,7 @@ def cleanup_processed_list(processed):
     return processed
 
 def main():
-    log_message("=== PegaProx SMBIOS Auto-Configurator started ===")
+    log_message("=== PegaProx SMBIOS Auto-Configurator started (journal-quiet) ===")
     log_message(f"Config: {{MANUFACTURER}} | {{PRODUCT}} | {{VERSION}} | {{FAMILY}}")
     
     processed = load_processed_vms()
@@ -1571,18 +1582,24 @@ def main():
             current_vms = get_all_vms()
 
             for vmid in current_vms:
+                if not check_vm_exists(vmid):
+                    continue
                 if vmid not in processed:
-                    if check_vm_exists(vmid):
-                        if needs_smbios_update(vmid):
-                            log_message(f"Configuring SMBIOS for new VM {{vmid}}")
-                            if set_smbios(vmid):
-                                save_processed_vm(vmid)
-                                processed.add(vmid)
-                        else:
+                    if needs_smbios_update(vmid):
+                        log_message(f"Configuring SMBIOS for new VM {{vmid}}")
+                        if set_smbios(vmid):
                             save_processed_vm(vmid)
                             processed.add(vmid)
-                elif vmid in processed and check_vm_exists(vmid) and needs_smbios_update(vmid):
-                    # VM was deleted + recreated with same ID
+                    else:
+                        save_processed_vm(vmid)
+                        processed.add(vmid)
+                elif needs_smbios_update(vmid):
+                    # VM was deleted + recreated with same ID before the
+                    # cleanup sweep dropped it from the processed set.
+                    # needs_smbios_update() returns True only when the
+                    # stamp is genuinely missing/incomplete, so this stays
+                    # silent in steady state (zero log lines, zero qm
+                    # calls for healthy VMs).
                     log_message(f"VM {{vmid}} re-created, reconfiguring SMBIOS")
                     set_smbios(vmid)
             
