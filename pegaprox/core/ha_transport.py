@@ -30,7 +30,7 @@ import shutil
 import signal
 import subprocess
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlparse
 
 import requests
 from urllib3.connection import HTTPConnection, HTTPSConnection
@@ -165,6 +165,28 @@ def guard_adapter(adapter):
     return adapter
 
 
+def _validate_url(url):
+    """Validate URL to prevent SSRF attacks. Raises ValueError if invalid."""
+    try:
+        # Check for path traversal before parsing
+        if "/../" in url or re.search(r"/%2e%2e/", url, re.IGNORECASE):
+            raise ValueError("Invalid URL")
+        
+        parsed = urlparse(url)
+        
+        # Validate protocol
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid URL")
+        
+        # Validate hostname exists
+        if not parsed.hostname:
+            raise ValueError("Invalid URL")
+        
+        return url
+    except Exception:
+        raise ValueError("Invalid URL")
+
+
 def guard_session(session, again=False):
     """Every request of a requests session asks the guard before it is sent, and again
     once its connection is up. Mount adapters before this. `again` for a session of one
@@ -189,11 +211,12 @@ def http(method, url, again=False, **kwargs):
     own that asks the guard before the call is sent and again once its connection is up,
     as guard_session does; `again` for the same call sent once more after a new login.
     requests.request() itself anywhere else."""
+    validated_url = _validate_url(url)
     if not ha.guard_on():
-        return requests.request(method, url, **kwargs)
+        return requests.request(method, validated_url, **kwargs)
     with requests.Session() as session:
         guard_session(session, again=again)
-        return session.request(method, url, **kwargs)
+        return session.request(method, validated_url, **kwargs)
 
 
 def xapi_action(methodname):
