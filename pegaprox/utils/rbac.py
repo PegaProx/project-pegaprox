@@ -123,6 +123,39 @@ def save_custom_roles(roles: dict):
         logging.error("[RBAC] refusing to rewrite custom_roles from a snapshot that "
                       "failed to load")
         return False
+
+    # SRK (SPEC-2026-010 P1, 110lymph): role-deletion guard, BEFORE the try/except so a
+    # blocked delete surfaces as an error instead of being swallowed into the
+    # log. This function REWRITES custom_roles wholesale (DELETE+reinsert), so a
+    # DB-level FK from user_roles is impossible; the "role with live grants must
+    # fail loudly" invariant (SPEC-2026-010 D1 / Orion Q3) is enforced HERE.
+    # Editing a granted role is fine: same (name, tenant) reinserted, grants
+    # stay, the resolver picks up new permissions on the next request.
+    try:
+        _incoming = set()
+        for _tid, _roles in (roles.get('tenants', {}) or {}).items():
+            for _rid in _roles.keys():
+                _incoming.add((_rid, _tid))
+        for _rid in (roles.get('global', {}) or {}).keys():
+            _incoming.add((_rid, ''))
+        for _r in get_db().query('SELECT role_name, tenant_id, username FROM user_roles'):
+            _key = (_r['role_name'], _r['tenant_id'])
+            if _key not in _incoming:
+                raise ValueError(
+                    f"Cannot delete role '{_r['role_name']}' "
+                    f"(tenant '{_r['tenant_id'] or 'global'}'): still granted to "
+                    f"'{_r['username']}'. Revoke the grant first (audited), then retry.")
+    except ValueError:
+        raise
+    except Exception as _e:
+        # MK Sep 2026 - fail closed. The block above is the ONLY thing standing
+        # between a live grant and the DELETE+reinsert below; if we could not
+        # read user_roles we do not know whether a role is still granted, and
+        # "could not tell" must not resolve into the destructive direction.
+        logging.error(f"[user_roles] grant-guard check failed, refusing the rewrite: {_e}")
+        return False
+
+
     try:
         db = get_db()
         cursor = db.conn.cursor()
@@ -350,6 +383,138 @@ def _tenant_defining_role(role: str, tenant_id: str) -> str:
     return tenant_id
 
 
+# -- SRK (SPEC-2026-010 P1): multi-role users --------------------------------
+# One user may hold many tenant-scoped roles (junction user_roles). The PRIMARY
+# role stays users.role; permission/visibility answers are the UNION of
+# primary + granted roles. No DB-level FK: save_custom_roles() rewrites
+# custom_roles wholesale (DELETE+reinsert), so grant integrity is enforced
+# app-side (save_custom_roles guard, delete_user cleanup, grant API in P2).
+# Reads go straight to SQL -- NO caching of resolved sets: revocation must
+# bite on the NEXT request (M2 acceptance gate).
+
+def get_user_role_grants(username: str) -> list:
+    """Junction rows for a user: [{'role_name':..., 'tenant_id':...}, ...].
+
+    MK #950 review (scale): the per-VM authz loop calls this once PER VM with
+    identical args — 2 queries x 10k guests on one list route. Memoised on
+    Flask's request global, same shape as _pool_perms_for: the memo only ever
+    lives for one request, so revocation still bites on the NEXT request (M2
+    gate). Writers (roles grant/revoke, delete_user purge) MUST call
+    invalidate_user_grants_memo() after committing, or the same request's own
+    response snapshot would be stale."""
+    key = username
+    try:
+        from flask import g, has_request_context
+        if has_request_context():
+            memo = getattr(g, '_user_grants_memo', None)
+            if memo is None:
+                memo = {}
+                g._user_grants_memo = memo
+            if key not in memo:
+                memo[key] = _user_role_grants_read(username)
+            return memo[key]
+    except Exception:
+        pass
+    return _user_role_grants_read(username)
+
+
+def _user_role_grants_read(username: str) -> list:
+    """Uncached junction read — the single source of truth."""
+    try:
+        rows = get_db().query(
+            'SELECT role_name, tenant_id FROM user_roles WHERE username = ?',
+            (username,))
+        return [{'role_name': r['role_name'], 'tenant_id': r['tenant_id']}
+                for r in rows]
+    except Exception as e:
+        logging.error(f"[user_roles] grant lookup failed for '{username}': {e}")
+        return []
+
+
+def invalidate_user_grants_memo(username: str):
+    """Drop the per-request memo for one user (call AFTER any user_roles write)."""
+    try:
+        from flask import g, has_request_context
+        if has_request_context():
+            memo = getattr(g, '_user_grants_memo', None)
+            if memo is not None:
+                memo.pop(username, None)
+    except Exception:
+        pass
+
+
+def get_role_grants(role_name: str, tenant_id: str = None) -> list:
+    """Principals holding a granted role -- revoke tooling + delete guard."""
+    try:
+        if tenant_id is None:
+            rows = get_db().query(
+                'SELECT username FROM user_roles WHERE role_name = ?', (role_name,))
+        else:
+            rows = get_db().query(
+                'SELECT username FROM user_roles WHERE role_name = ? AND tenant_id = ?',
+                (role_name, tenant_id))
+        return [r['username'] for r in rows]
+    except Exception as e:
+        logging.error(f"[user_roles] holder lookup failed for role '{role_name}': {e}")
+        return []
+
+
+def _effective_tenant_ids(user: dict) -> list:
+    """Tenants whose resources the user may see: tenants of primary+granted roles.
+
+    Default-tenant semantics follow the same rule as the single-role path:
+    an EMPTY default tenant answers None (= all clusters) via the bottom rule;
+    a configured (confined) default tenant contributes its cluster list like
+    any other tenant."""
+    tenants = []
+    base = user.get('tenant_id', DEFAULT_TENANT_ID)
+    if base and base not in tenants:
+        tenants.append(base)
+    role = user.get('effective_role', user.get('role', ROLE_VIEWER))
+    base_defining = _tenant_defining_role(role, base)
+    if base_defining and base_defining not in tenants:
+        tenants.append(base_defining)
+    _memberships = None  # CodeRabbit #950: one memberships read, not one per grant
+    for g in get_user_role_grants(user.get('username', '')):
+        # MK #950 review (revoke-dormancy): a grant pinned to an explicit
+        # tenant is only live while that membership exists. Legacy migration
+        # rows (tenant_id='') keep the old resolve-through-role behavior.
+        if g['tenant_id']:
+            if _memberships is None:
+                _memberships = get_user_tenant_memberships(
+                    user.get('username', ''))
+            if g['tenant_id'] not in _memberships and \
+                    g['tenant_id'] != (user.get('tenant_id')
+                                       or DEFAULT_TENANT_ID):
+                continue
+        tid = g['tenant_id'] or _tenant_defining_role(g['role_name'], base)
+        if tid and tid not in tenants:
+            tenants.append(tid)
+    return tenants
+
+
+def get_user_tenant_memberships(username: str) -> list:
+    """SRK (SPEC-2026-011 D6): explicit tenant memberships (user_tenants).
+
+    Ordered by granted_at then tenant_id -- deterministic "first remaining"
+    ordering for home re-pointing (A5 analogue).
+    """
+    try:
+        cur = get_db().conn.cursor()
+        cur.execute('SELECT tenant_id FROM user_tenants WHERE username = ? '
+                    'ORDER BY granted_at, tenant_id', (username,))
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            v = r['tenant_id'] if isinstance(r, dict) else r[0]
+            if v and v not in out:
+                out.append(v)
+        return out
+    except Exception as e:
+        logging.error(f"[d6] memberships lookup failed for {username}: {e}")
+        return []
+
+
 def get_user_permissions(user: dict, tenant_id: str = None) -> list:
     """Get effective permissions for a user
     
@@ -387,7 +552,23 @@ def get_user_permissions(user: dict, tenant_id: str = None) -> list:
     
     # get base permissions from role (supports custom roles now)
     base_perms = get_role_permissions_for_user({'role': role}, _tenant_defining_role(role, tenant_id))
-    
+
+    # SRK (SPEC-2026-010 P1): union the user's GRANTED roles (user_roles junction).
+    # Inserted BEFORE extra/deny so denies still win over any granted perm. API
+    # tokens (effective_role set) are excluded here -- they stay single-role by
+    # design (spec D5); the token cap below keeps clamping them regardless.
+    _uname = user.get('username')
+    if _uname and not user.get('effective_role'):
+        for _g in get_user_role_grants(_uname):
+            if _g['role_name'] in BUILTIN_ROLES:
+                continue
+            _gp = get_role_permissions_for_user(
+                {'role': _g['role_name']},
+                _tenant_defining_role(_g['role_name'], _g['tenant_id'] or tenant_id))
+            for p in _gp:
+                if p not in base_perms:
+                    base_perms.append(p)
+
     # add extra
     for p in extra:
         if p not in base_perms:
@@ -510,7 +691,25 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     tenant_id = _tenant_defining_role(role, tenant_id)
     
     tenant = tenants_db.get(tenant_id, {})
-    clusters = tenant.get('clusters', [])
+    clusters = list(tenant.get('clusters', []))
+
+    # SRK (SPEC-2026-010 P1): a user with GRANTED roles sees every tenant their
+    # role set spans (primary + granted). DEFAULT_TENANT_ID leg returns None
+    # (= all clusters), preserving existing default-tenant semantics. Sessions
+    # only: effective_role (token auth) keeps single-role visibility (spec D5).
+    if not user.get('effective_role'):
+        # Union every tenant the role set spans. NO special case for the default
+        # leg: forcing None here bypassed two rules below it — a confined default
+        # tenant (clusters configured) was force-widened to all clusters, and the
+        # contested-custom-role refusal (_AMBIGUOUS_ROLE_TENANT) was overridden.
+        # The legacy answer survives where it belongs: an EMPTY default tenant
+        # still returns None (= all clusters) via the bottom rule, so installs
+        # that never configured the default tenant keep their semantics.
+        for _tid in _effective_tenant_ids(user):
+            _t = tenants_db.get(_tid, {})
+            for _c in _t.get('clusters', []):
+                if _c not in clusters:
+                    clusters.append(_c)
     
     # NS Jan 2026: Also include clusters from groups assigned to this tenant
     try:
