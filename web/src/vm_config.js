@@ -502,6 +502,11 @@
             const [cloudInitFormat, setCloudInitFormat] = useState('raw');
             const [cloudInitBus, setCloudInitBus] = useState('ide');
             const [cloudInitDevice, setCloudInitDevice] = useState('2');
+            // SS Oct 2026 — VirtIO RNG device config (mirror of the cloud-init drive UI)
+            const [showAddRng, setShowAddRng] = useState(false);
+            const [rngSource, setRngSource] = useState('/dev/urandom');
+            const [rngMaxBytes, setRngMaxBytes] = useState(1024);
+            const [rngPeriod, setRngPeriod] = useState(1000);
             const [selectedPciDevice, setSelectedPciDevice] = useState(null);
             const [selectedUsbDevice, setSelectedUsbDevice] = useState(null);
             const [pciOptions, setPciOptions] = useState({ pcie: true, rombar: true });
@@ -2773,6 +2778,77 @@
                                                                             {t('addCloudInitDrive')}
                                                                         </button>
                                                                     </div>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </div>
+                                                    
+                                                    {/* VirtIO RNG (entropy source) Section - SS Oct 2026 */}
+                                                    <div className="mt-6 pt-6 border-t border-proxmox-border">
+                                                        <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+                                                            <Icons.Rng className="w-4 h-4 text-purple-400" />
+                                                            {t('virtioRng')}
+                                                        </h3>
+                                                        {(() => {
+                                                            const rngDevices = Object.entries(config?.raw || {}).filter(([key]) => /^rng\d+$/.test(key));
+                                                            const fmtRngVal = (v) => {
+                                                                const parts = String(v ?? '').split(',');
+                                                                const src = parts[0];
+                                                                const opts = parts.slice(1).filter(Boolean).map(o => ` ${o}`).join('');
+                                                                return `${src}${opts}`;
+                                                            };
+                                                            return rngDevices.length > 0 ? (
+                                                                <div className="space-y-2">
+                                                                    {rngDevices.map(([key, value]) => (
+                                                                        <div key={key} className="p-3 bg-proxmox-dark rounded-lg">
+                                                                            <div className="flex items-center justify-between gap-4">
+                                                                                <div className="flex items-center gap-2 min-w-0">
+                                                                                    <Icons.Rng className="w-4 h-4 text-purple-400 shrink-0" />
+                                                                                    <span className="text-xs text-gray-500 font-mono">{key}</span>
+                                                                                    <span className="text-sm font-mono text-gray-300 truncate">{fmtRngVal(value)}</span>
+                                                                                </div>
+                                                                                <button
+                                                                                    onClick={async () => {
+                                                                                        if (!confirm(t('confirmDeleteRng'))) return;
+                                                                                        try {
+                                                                                            const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                                                                                method: 'PUT',
+                                                                                                headers: { 'Content-Type': 'application/json' },
+                                                                                                body: JSON.stringify({ delete: key })
+                                                                                            });
+                                                                                            if (res?.ok) {
+                                                                                                addToast(t('virtioRngRemoved'), 'success');
+                                                                                                fetchConfig();
+                                                                                            } else {
+                                                                                                const err = await res.json();
+                                                                                                addToast(err.error || t('virtioRngRemoveFailed'), 'error');
+                                                                                            }
+                                                                                        } catch (e) {
+                                                                                            addToast(t('connectionError'), 'error');
+                                                                                        }
+                                                                                    }}
+                                                                                    className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded shrink-0"
+                                                                                    title={t('remove')}
+                                                                                >
+                                                                                    <Icons.Trash className="w-3.5 h-3.5" />
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
+                                                                    <div className="flex items-center justify-between gap-4">
+                                                                        <span className="text-sm text-gray-500">{t('noVirtioRng')}</span>
+                                                                        <button
+                                                                            onClick={() => setShowAddRng(true)}
+                                                                            className="shrink-0 text-xs px-3 py-1.5 bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 flex items-center gap-1"
+                                                                        >
+                                                                            <Icons.Plus className="w-3 h-3" />
+                                                                            {t('addVirtioRng')}
+                                                                        </button>
+                                                                    </div>
+                                                                    <p className="text-xs text-gray-600 mt-2">{t('rngHint')}</p>
                                                                 </div>
                                                             );
                                                         })()}
@@ -6409,6 +6485,92 @@
                                             }}
                                             disabled={!cloudInitStorage || !cloudInitDevice || passthroughLoading}
                                             className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded disabled:opacity-50"
+                                        >
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {showAddRng && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                    <Icons.Rng className="text-purple-400" />
+                                    {t('addVirtioRng')}
+                                </h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('rngSource')}</label>
+                                        <select
+                                            value={rngSource}
+                                            onChange={(e) => setRngSource(e.target.value)}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="/dev/urandom">/dev/urandom</option>
+                                            <option value="/dev/random">/dev/random</option>
+                                            <option value="/dev/hwrng">/dev/hwrng</option>
+                                        </select>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('rngMaxBytes')}</label>
+                                            <input
+                                                type="number"
+                                                min="1"
+                                                value={rngMaxBytes}
+                                                onChange={(e) => setRngMaxBytes(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('rngPeriod')}</label>
+                                            <input
+                                                type="number"
+                                                min="1"
+                                                value={rngPeriod}
+                                                onChange={(e) => setRngPeriod(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => setShowAddRng(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button
+                                            onClick={async () => {
+                                                const validSources = ['/dev/urandom', '/dev/random', '/dev/hwrng'];
+                                                if (!validSources.includes(rngSource)) return;
+                                                setPassthroughLoading(true);
+                                                try {
+                                                    const existing = Object.keys(config?.raw || {}).filter(k => /^rng\d+$/.test(k)).map(k => parseInt(k.slice(3), 10));
+                                                    let i = 0; while (existing.includes(i)) i++;
+                                                    const driveId = `rng${i}`;
+                                                    const value = `${rngSource},max_bytes=${rngMaxBytes},period=${rngPeriod}`;
+                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                                        method: 'PUT',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ [driveId]: value })
+                                                    });
+                                                    if (res?.ok) {
+                                                        addToast(t('virtioRngAdded'), 'success');
+                                                        setShowAddRng(false);
+                                                        setRngSource('/dev/urandom');
+                                                        setRngMaxBytes(1024);
+                                                        setRngPeriod(1000);
+                                                        fetchConfig();
+                                                    } else {
+                                                        const err = await res.json();
+                                                        addToast(err.error || t('virtioRngAddFailed'), 'error');
+                                                    }
+                                                } catch (e) {
+                                                    addToast(t('connectionError'), 'error');
+                                                }
+                                                setPassthroughLoading(false);
+                                            }}
+                                            disabled={!['/dev/urandom', '/dev/random', '/dev/hwrng'].includes(rngSource) || passthroughLoading}
+                                            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50"
                                         >
                                             {passthroughLoading ? t('adding') : t('add')}
                                         </button>
