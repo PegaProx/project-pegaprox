@@ -42,11 +42,18 @@ jobs:
     # needs repo write anyway. Deliberately keyed on the EVENT, not on github.ref: a ref
     # test has to allow refs/tags/* to keep the release leg working, and tags are not
     # immutable - we force-moved v1.1.0 ourselves in September.
+    #
+    # SECURITY FIX: release.published events now check out main instead of the release ref.
+    # A release tag can be created or retargeted by anyone with release permissions, so
+    # checking out the release-associated ref would allow an attacker to control the
+    # packaging scripts that run after APT_GPG_PRIVATE_KEY is imported. The version.json
+    # on main is the source of truth for what gets built and signed.
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'release' && 'refs/heads/main' || github.ref }}
           persist-credentials: false   # this job never git-pushes (Pages via artifact) — don't leave the token in .git/config
 
       - name: Version aus version.json in die changelog schreiben
