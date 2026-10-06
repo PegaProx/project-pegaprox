@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -12995,6 +12995,14 @@ def create_vm_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
 
+    # sec (audit): VM creation is a whole-cluster operation with no existing VM identity
+    # to authorize against. check_cluster_access admits pool-/ACL-scoped callers by design,
+    # but a scoped caller must not place a new guest outside their authorized scope.
+    # require_unconfined ensures only whole-cluster operators can create guests.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -13065,6 +13073,14 @@ def create_container_api(cluster_id, node):
     """Create a new container on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+
+    # sec (audit): container creation is a whole-cluster operation with no existing VM identity
+    # to authorize against. check_cluster_access admits pool-/ACL-scoped callers by design,
+    # but a scoped caller must not place a new guest outside their authorized scope.
+    # require_unconfined ensures only whole-cluster operators can create guests.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
