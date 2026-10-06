@@ -1962,7 +1962,7 @@
         });
         const emptyVmwareConfig = () => ({
             name: '', host: '', port: 443, username: 'root', password: '',
-            ssl_verify: false, notes: '',
+            ssl_verify: true, notes: '',
         });
 
         function AddClusterModal({ isOpen, onClose, onSubmit, onAddPBS, onAddVMware, loading, error, initialType = 'proxmox', reconfigureConfig = null }) {

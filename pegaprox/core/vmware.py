@@ -38,7 +38,7 @@ class VMwareManager:
         self.username = config.get('username', 'administrator@vsphere.local')
         self.password = config.get('password', '')
         self.server_type = config.get('server_type', 'vcenter')  # 'vcenter' or 'esxi'
-        self.ssl_verify = config.get('ssl_verify', False)
+        self.ssl_verify = config.get('ssl_verify', True)
         self.enabled = config.get('enabled', True)
         self.linked_clusters = config.get('linked_clusters', [])
         self.notes = config.get('notes', '')
@@ -1926,7 +1926,7 @@ def load_vmware_servers(only=None):
                 'username': username,
                 'password': password,
                 'server_type': row_dict.get('server_type', 'vcenter'),
-                'ssl_verify': bool(row_dict.get('ssl_verify', 0)),
+                'ssl_verify': bool(row_dict.get('ssl_verify', 1)),
                 'enabled': bool(row_dict.get('enabled', 1)),
                 'linked_clusters': json.loads(row_dict.get('linked_clusters', '[]')),
                 'notes': row_dict.get('notes', ''),
@@ -1983,7 +1983,7 @@ def save_vmware_server(vmware_id: str, config: dict):
         config.get('username', 'administrator@vsphere.local'),
         pass_encrypted or (cursor.execute("SELECT pass_encrypted FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone() or [''])[0],
         config.get('server_type', 'vcenter'),
-        int(config.get('ssl_verify', False)),
+        int(config.get('ssl_verify', True)),
         int(config.get('enabled', True)), linked_json,
         config.get('notes', ''),
         vmware_id, datetime.now().isoformat(), datetime.now().isoformat(),

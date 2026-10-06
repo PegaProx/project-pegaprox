@@ -1006,7 +1006,7 @@ class PegaProxDB:
                 username TEXT NOT NULL,
                 pass_encrypted TEXT DEFAULT '',
                 server_type TEXT DEFAULT 'vcenter',
-                ssl_verify INTEGER DEFAULT 0,
+                ssl_verify INTEGER DEFAULT 1,
                 enabled INTEGER DEFAULT 1,
                 linked_clusters TEXT DEFAULT '[]',
                 notes TEXT DEFAULT '',
