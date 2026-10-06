@@ -130,6 +130,9 @@ def add_pbs_server():
     try:
         mgr = PBSManager(pbs_id, data)
     except ValueError as e:
+        err_msg = str(e)
+        if 'ssl_verify' in err_msg or 'fingerprint' in err_msg:
+            return jsonify({'error': err_msg}), 400
         return jsonify({'error': 'Invalid PBS host'}), 400
     
     if not mgr.connect():
@@ -268,6 +271,9 @@ def update_pbs_server(pbs_id):
     try:
         mgr = PBSManager(pbs_id, data)
     except ValueError as e:
+        err_msg = str(e)
+        if 'ssl_verify' in err_msg or 'fingerprint' in err_msg:
+            return jsonify({'error': err_msg}), 400
         return jsonify({'error': 'Invalid PBS host'}), 400
 
     if data.get('enabled', True):
@@ -312,6 +318,9 @@ def test_pbs_new_connection():
     try:
         test_mgr = PBSManager('test', data)
     except ValueError as e:
+        err_msg = str(e)
+        if 'ssl_verify' in err_msg or 'fingerprint' in err_msg:
+            return jsonify({'success': False, 'error': err_msg}), 400
         return jsonify({'success': False, 'error': 'Invalid PBS host'}), 400
     
     success = test_mgr.connect()
@@ -357,6 +366,9 @@ def test_pbs_connection(pbs_id):
         try:
             test_mgr = PBSManager('test', data)
         except ValueError as e:
+            err_msg = str(e)
+            if 'ssl_verify' in err_msg or 'fingerprint' in err_msg:
+                return jsonify({'success': False, 'error': err_msg}), 400
             return jsonify({'success': False, 'error': 'Invalid PBS host'}), 400
         
         success = test_mgr.connect()

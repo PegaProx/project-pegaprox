@@ -91,6 +91,17 @@ class PBSManager:
         # Validate host against allowlist
         if not _validate_pbs_host(self.host):
             raise ValueError(f"Invalid or disallowed PBS host")
+        
+        # MK 2026-06-01 (pentest) — Require TLS peer authentication before sending credentials.
+        # PBS ships a self-signed certificate, so CA verification is off for most installs and
+        # turning it on by default would break them. Certificate pinning is the check that fits:
+        # a configured fingerprint authenticates the peer even when the certificate has no chain.
+        # Fail closed: either CA verification OR a fingerprint must be configured; an empty
+        # fingerprint with ssl_verify=False creates an unauthenticated channel that sends PBS
+        # passwords, API tokens, tickets, and backup data to whoever answers on that host:port.
+        _pin = (self.fingerprint or '').strip()
+        if not self.ssl_verify and not _pin:
+            raise ValueError("PBS connection requires either ssl_verify=True or a certificate fingerprint")
 
         self._session = requests.Session()
         self._session.verify = self.ssl_verify
@@ -1166,7 +1177,13 @@ def load_pbs_servers(only=None):
                     mgr.connect()
                 pbs_managers[pbs_id] = mgr
             except ValueError as e:
-                logging.warning(f"[PBS] Skipping PBS server {pbs_id} ({config.get('name', 'unknown')}): Invalid or disallowed host")
+                err_msg = str(e)
+                if 'ssl_verify' in err_msg or 'fingerprint' in err_msg:
+                    logging.warning(f"[PBS] Skipping PBS server {pbs_id} ({config.get('name', 'unknown')}): "
+                                  f"{err_msg}. Configure ssl_verify=True or a certificate fingerprint.")
+                else:
+                    logging.warning(f"[PBS] Skipping PBS server {pbs_id} ({config.get('name', 'unknown')}): "
+                                  f"Invalid or disallowed host")
                 continue
             
         logging.info(f"[PBS] Loaded {len(rows)} PBS servers ({sum(1 for m in pbs_managers.values() if m.connected)} connected)")
