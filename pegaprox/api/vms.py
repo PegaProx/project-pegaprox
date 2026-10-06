@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -9401,14 +9401,21 @@ def delete_cross_cluster_replication(job_id):
     # tear down the replica). Under the same #563 carve-out as the loop above: once the source
     # cluster is gone there are no ACLs or pool grants left to answer the question with, and the
     # guest went with it — gating there would only make the orphaned job undeletable again.
+    _xu = build_authz_user(request.session.get('user', ''), request.session)
     _src = job.get('source_cluster') or ''
     if _src in cluster_managers:
-        _xu = build_authz_user(request.session.get('user', ''), request.session)
         try:
             if not user_can_access_vm(_xu, _src, int(job.get('vmid')), 'vm.migrate'):
                 return jsonify({'error': 'Access denied to this replication job'}), 403
         except (TypeError, ValueError):
             return jsonify({'error': 'Replication job has no valid guest'}), 403
+    
+    # sec: target-side confinement boundary (same as create) — a scoped caller with unrelated
+    # target-cluster ACL or pool access must not delete or replace a co-tenant's replica.
+    _tgt = job.get('target_cluster') or ''
+    if _tgt and _tgt in cluster_managers:
+        if caller_is_scoped(_xu, _tgt):
+            return jsonify({'error': 'Access denied to the target cluster'}), 403
 
     want_teardown = _wants_delete_target(job)
 
@@ -9477,6 +9484,12 @@ def run_cross_cluster_replication(job_id):
             return jsonify({'error': 'Access denied to this replication job'}), 403
     except (TypeError, ValueError):
         return jsonify({'error': 'Replication job has no valid guest'}), 403
+    
+    # sec: target-side confinement boundary (same as create) — a scoped caller with unrelated
+    # target-cluster ACL or pool access must not run a job that replaces a co-tenant's replica.
+    _tgt = _job.get('target_cluster') or ''
+    if _tgt and caller_is_scoped(_xu, _tgt):
+        return jsonify({'error': 'Access denied to the target cluster'}), 403
 
     # MK May 2026 (#455) — block duplicate triggers while a previous run is still
     # in-flight. The scheduler uses the same _claim_job() guard.
