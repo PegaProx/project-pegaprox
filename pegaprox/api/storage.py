@@ -1840,6 +1840,17 @@ def rescan_storage(cluster_id, storage_id):
         deep_scan = data.get('deep_scan', False)  # Use SSH for deeper rescan
         auto_pvresize = data.get('pvresize', True)  # Auto pvresize for LVM
         
+        # sec (pentest): deep_scan uses SSH to execute privileged SCSI, multipath, LVM, and ZFS
+        # commands on nodes (defaulting to root). storage.config authorizes storage operations,
+        # but SSH access to nodes requires node.shell. Reject deep_scan requests from callers
+        # who lack node.shell to prevent confused-deputy privilege escalation.
+        if deep_scan:
+            from pegaprox.utils.rbac import has_permission
+            from pegaprox.utils.auth import build_authz_user
+            user = build_authz_user(request.session.get('user', ''), request.session)
+            if not has_permission(user, 'node.shell'):
+                return jsonify({'error': 'node.shell permission required for deep_scan'}), 403
+        
         # Get storage config to determine type
         config_url = f"https://{host}:{port}/api2/json/storage/{storage_id}"
         config_resp = session.get(config_url, timeout=5)
