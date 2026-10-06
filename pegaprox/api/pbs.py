@@ -181,13 +181,16 @@ def update_pbs_server(pbs_id):
     # a host/port change BEFORE persisting anything.
     old_mgr = pbs_managers.get(pbs_id)
     old_host, old_port = None, None
+    
+    # Always fetch the database row for credential checking (needed for the host-change guard below)
+    db = get_db()
+    row = db.conn.cursor().execute("SELECT * FROM pbs_servers WHERE id = ?", (pbs_id,)).fetchone()
+    if not row:
+        return jsonify({'error': 'PBS server not found'}), 404
+    
     if old_mgr is not None:
         old_host, old_port = old_mgr.host, old_mgr.port
     else:
-        db = get_db()
-        row = db.conn.cursor().execute("SELECT * FROM pbs_servers WHERE id = ?", (pbs_id,)).fetchone()
-        if not row:
-            return jsonify({'error': 'PBS server not found'}), 404
         try:
             _rk = row.keys()
             old_host = row['host'] if 'host' in _rk else None
@@ -214,33 +217,33 @@ def update_pbs_server(pbs_id):
     host_changed = (data.get('host') and data.get('host') != old_host) or \
                    (_new_port is not None and _new_port != _old_port_i)
 
-    # NS Aug 2026 (Aikido 469089267 + AI-pentest re-check) — FAIL CLOSED on a host/port change: every
-    # credential the STORED config holds must be freshly re-entered, otherwise it would be shipped to
-    # the caller-chosen new host (on save+auto-connect, the next daemon reload, or a follow-up /test).
-    # The first guard only checked the '********' sentinel and gated each clause on the key being
-    # PRESENT — so simply OMITTING password/api_token_secret/ssh_key bypassed it and the stored secret
-    # was still preserved against the attacker host. An omitted OR blank OR masked value is NOT a
-    # re-entry.
+    # NS Aug 2026 (Aikido 469089267 + AI-pentest re-check + retest) — FAIL CLOSED on a host/port
+    # change: every credential the STORED config holds must be freshly re-entered, otherwise it would
+    # be shipped to the caller-chosen new host (on save+auto-connect, the next daemon reload, or a
+    # follow-up /test). The first guard only checked the '********' sentinel and gated each clause on
+    # the key being PRESENT — so simply OMITTING password/api_token_secret/ssh_key bypassed it and the
+    # stored secret was still preserved against the attacker host. An omitted OR blank OR masked value
+    # is NOT a re-entry.
+    #
+    # RETEST FIX: The second bypass used a two-request sequence: (1) same-host partial update omitting
+    # credentials, which replaced the in-memory manager with empty credential fields while save_pbs_server
+    # preserved the encrypted database columns, then (2) host-change request, which saw no credentials in
+    # the in-memory manager and did not require re-entry. The credential presence check now reads the
+    # authoritative encrypted database columns in all cases, not the in-memory manager.
     def _fresh(key):
         return data.get(key) not in (None, '', '********')
     if host_changed:
-        if old_mgr is not None:
-            _stored = {'password': bool(getattr(old_mgr, 'password', '')),
-                       'api_token_secret': bool(getattr(old_mgr, 'api_token_secret', '')),
-                       'ssh_key': bool(getattr(old_mgr, 'ssh_key', ''))}
-        else:
-            # disabled/not-loaded server (old_mgr None): introspect the encrypted DB columns — the
-            # earlier "require one connect cred" shortcut still let an attacker re-point a disabled
-            # server by supplying a dummy password and OMITTING api_token_secret/ssh_key, which
-            # save_pbs_server then preserved and shipped to the new host.
-            def _rowhas(col):
-                try:
-                    return bool(row[col])
-                except Exception:
-                    return False
-            _stored = {'password': _rowhas('pass_encrypted'),
-                       'api_token_secret': _rowhas('api_token_secret_encrypted'),
-                       'ssh_key': _rowhas('ssh_key_encrypted')}
+        # Always check the database for stored credentials, regardless of in-memory manager state.
+        # A partial update can replace the in-memory manager with empty credential fields while the
+        # database retains the encrypted values, so the in-memory manager is not authoritative.
+        def _rowhas(col):
+            try:
+                return bool(row[col])
+            except Exception:
+                return False
+        _stored = {'password': _rowhas('pass_encrypted'),
+                   'api_token_secret': _rowhas('api_token_secret_encrypted'),
+                   'ssh_key': _rowhas('ssh_key_encrypted')}
         _stale = [k for k, present in _stored.items() if present and not _fresh(k)]
         if _stale:
             logging.warning(f"[PBS:{pbs_id}] Rejected host/port change without re-entering {_stale} (cred-exfil guard)")
