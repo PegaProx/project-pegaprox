@@ -1239,6 +1239,7 @@ def require_auth(roles: list = None, perms: list = None):
                         'denied_permissions': user.get('denied_permissions', []),
                         'tenant_id': user.get('tenant_id'),
                         'tenant_permissions': _tp,
+                        'effective_role': fresh_role,
                     }
                 else:
                     perm_user = user
