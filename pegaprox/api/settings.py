@@ -1255,14 +1255,32 @@ _SPONSOR_HEAL_SOURCES = (
     "https://updates.pegaprox.com/images/sponsors/{name}",
     "https://raw.githubusercontent.com/PegaProx/project-pegaprox/main/images/sponsors/{name}",
 )
+# MK Jan 2027 (pentest) — bounded negative cache with LRU eviction. The old unbounded
+# dict allowed an unauthenticated attacker to grow process memory indefinitely by
+# requesting distinct syntactically-valid sponsor names. Cap at 256 entries; when
+# breached, evict the oldest (least recently failed) half so the sweep cost is
+# amortized and a single breach doesn't trigger repeated full scans.
 _sponsor_heal_misses = {}  # name -> monotonic ts of last failed remote fetch
+_sponsor_heal_misses_lock = threading.Lock()
+_SPONSOR_HEAL_MISSES_MAX = 256
 _sponsor_mem_cache = {}    # name -> (bytes, content_type) — fallback when images/ isn't writable
+
+# MK Jan 2027 (pentest) — per-IP rate limit for sponsor healing attempts. An
+# unauthenticated client could request distinct missing names to trigger sequential
+# 8-second upstream fetches, tying up the bounded worker pool. Limit to 10 heal
+# attempts per 60 seconds per IP; legitimate users load a handful of sponsor logos
+# once per session, not a sustained stream of unique names.
+from pegaprox.utils.ratelimit import SlidingWindow as _SlidingWindow
+_sponsor_heal_attempts = _SlidingWindow(limit=10, window=60, max_keys=2048, name='sponsor-heal')
 
 def _get_healed_sponsor(filename):
     """Return (content, content_type) for a missing sponsors/* asset pulled from
     the mirror then GitHub. Caches to images/sponsors/ when writable, otherwise
     keeps it in memory so the logo still shows on read-only installs. Returns
-    (None, None) in air-gap mode, on a recent miss, or if it can't be fetched."""
+    (None, None) in air-gap mode, on a recent miss, or if it can't be fetched.
+    
+    MK Jan 2027 (pentest) — rate-limited per remote IP and bounded negative cache
+    to prevent unauthenticated request amplification and unbounded memory growth."""
     name = os.path.basename(filename)
     if not re.match(r'^sponsor[\w-]+\.(png|svg|jpg|jpeg|webp|gif)$', name, re.I):
         return None, None
@@ -1273,9 +1291,20 @@ def _get_healed_sponsor(filename):
             return None, None
     except Exception:
         pass
-    now = time.monotonic()
-    if now - _sponsor_heal_misses.get(name, 0) < 600:
+    
+    # MK Jan 2027 (pentest) — per-IP rate limit before expensive upstream fetches.
+    # Legitimate users load a few sponsor logos once; an attacker streams unique
+    # names to tie up workers with 8-second timeouts.
+    client_ip = get_client_ip()
+    if not _sponsor_heal_attempts.allow(client_ip):
+        logging.warning(f"[sponsors] heal rate limit exceeded for {client_ip}")
         return None, None
+    
+    now = time.monotonic()
+    with _sponsor_heal_misses_lock:
+        if now - _sponsor_heal_misses.get(name, 0) < 600:
+            return None, None
+    
     for tmpl in _SPONSOR_HEAL_SOURCES:
         url = tmpl.format(name=name)
         try:
@@ -1293,11 +1322,24 @@ def _get_healed_sponsor(filename):
                     # renders; perms must not be able to break a sponsor logo.
                     _sponsor_mem_cache[name] = (r.content, ctype)
                     logging.warning(f"[sponsors] fetched {name} via {url.split('/')[2]} but images/ not writable ({werr}); serving from memory")
-                _sponsor_heal_misses.pop(name, None)
+                with _sponsor_heal_misses_lock:
+                    _sponsor_heal_misses.pop(name, None)
                 return r.content, ctype
         except Exception as e:
             logging.debug(f"[sponsors] heal fetch failed ({url}): {e}")
-    _sponsor_heal_misses[name] = now
+    
+    # MK Jan 2027 (pentest) — bounded negative cache with LRU eviction. When the
+    # cache exceeds the ceiling, evict the oldest half (least recently failed) so
+    # the sweep cost is amortized across many insertions.
+    with _sponsor_heal_misses_lock:
+        _sponsor_heal_misses[name] = now
+        if len(_sponsor_heal_misses) > _SPONSOR_HEAL_MISSES_MAX:
+            # over the ceiling: evict the oldest half by timestamp
+            victims = sorted(_sponsor_heal_misses.items(), key=lambda kv: kv[1])
+            for old_name, _ in victims[:len(_sponsor_heal_misses) // 2]:
+                _sponsor_heal_misses.pop(old_name, None)
+            logging.info(f"[sponsors] negative cache exceeded {_SPONSOR_HEAL_MISSES_MAX} entries; "
+                        f"evicted {len(victims) // 2} oldest")
     return None, None
 
 @bp.route('/images/<path:filename>')
@@ -2234,7 +2276,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2464,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
