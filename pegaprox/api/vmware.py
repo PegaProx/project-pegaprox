@@ -98,6 +98,30 @@ def update_vmware_server(vmware_id):
     if not ok:
         return err
     data = request.json or {}
+
+    # MK Dec 2026 (pentest) — linked_clusters is the authorization list check_vmware_access reads,
+    # and an EMPTY one means "reachable by everybody" (the backward-compatibility arm). Omitting
+    # the field was already made safe at the storage layer, but sending it EXPLICITLY empty was
+    # not: any user who reached this server through one of its links could hand the whole VMware
+    # server — every tenant's VMs on it — to every tenant, in one PUT. Widening the list is
+    # the same move at half speed, so a non-admin may only ever narrow it, and only to clusters
+    # they can reach themselves. Mirrors the PBS update route's guard (api/pbs.py:164-178).
+    if 'linked_clusters' in data:
+        from pegaprox.utils.auth import build_authz_user as _bau
+        from pegaprox.utils.rbac import get_user_clusters as _guc
+        from pegaprox.models.permissions import ROLE_ADMIN
+        _caller = _bau(request.session.get('user', ''), request.session)
+        if _caller.get('effective_role', _caller.get('role')) != ROLE_ADMIN:
+            _new_links = list(data.get('linked_clusters') or [])
+            if not _new_links:
+                return jsonify({'error': 'Access denied: only a global admin may unlink a VMware '\
+                                         'server from every cluster'}), 403
+            _reachable = _guc(_caller)
+            if _reachable is not None:
+                _beyond = [c for c in _new_links if c not in set(_reachable)]
+                if _beyond:
+                    return jsonify({'error': 'Access denied: cannot link this VMware server to '\
+                                             + ', '.join(_beyond)}), 403
     
     if vmware_id not in vmware_managers:
         db = get_db()
