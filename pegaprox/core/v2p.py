@@ -858,8 +858,14 @@ def _run_v2p_migration(task):
         #     (avoids thousands of stat() calls -- HUGE reduction in FUSE overhead)
         #   negative_timeout=3600: cache "file not found" for 1h
         #   no_check_root: skip root dir check (faster mount)
+        # NS Dec 2026 (pentest) — node-side SSHFS commands now use cli_hostkey_opts()
+        # to inherit PegaProx's centralized host-key policy and known_hosts path, so
+        # strict mode rejects unknown keys and the node verifies against the same trust
+        # store the management side uses.
+        from pegaprox.utils.ssh_security import cli_hostkey_opts
+        _hkc_node, _kh_node = cli_hostkey_opts()
         sshfs_ssh_opts = (
-            "StrictHostKeyChecking=accept-new,"
+            f"StrictHostKeyChecking={_hkc_node},"
             "allow_other,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,"
             "cache=yes,kernel_cache,"
             "max_read=1048576,max_write=1048576,big_writes,large_read,"
@@ -867,7 +873,8 @@ def _run_v2p_migration(task):
             "no_check_root"
         )
         sshfs_algo_opts = (
-            "ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 "
+            f"ssh_command=ssh -o UserKnownHostsFile={_kh_node} "
+            "-o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 "
             "-o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 "
             "-o PreferredAuthentications=keyboard-interactive\\,password "
             "-o Compression=no "
@@ -888,7 +895,8 @@ def _run_v2p_migration(task):
             mount_cmd2 = (
                 f"mkdir -p {mnt_path} && "
                 f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking=accept-new,"
+                f"StrictHostKeyChecking={_hkc_node},"
+                f"UserKnownHostsFile={_kh_node},"
                 f"allow_other,reconnect,ServerAliveInterval=15,"
                 f"cache=yes,kernel_cache,"
                 f"max_read=1048576,big_writes,large_read,"
@@ -900,7 +908,8 @@ def _run_v2p_migration(task):
             mount_cmd3 = (
                 f"mkdir -p {mnt_path} && "
                 f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking=accept-new,"
+                f"StrictHostKeyChecking={_hkc_node},"
+                f"UserKnownHostsFile={_kh_node},"
                 f"allow_other,reconnect,ServerAliveInterval=15,"
                 f"cache=yes "
                 f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
@@ -3750,9 +3759,14 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     key_id = str(uuid.uuid4())
     key_path = f"/tmp/v2p-key-{key_id}"
     
+    # NS Dec 2026 (pentest) — node-side SSH commands now use cli_hostkey_opts()
+    # to inherit PegaProx's centralized host-key policy and known_hosts path.
+    from pegaprox.utils.ssh_security import cli_hostkey_opts
+    _hkc_node, _kh_node = cli_hostkey_opts()
     # SSH options for key-based verification (after deployment)
     ESXI_SSH_OPTS = (
-        "-o StrictHostKeyChecking=accept-new "
+        f"-o StrictHostKeyChecking={_hkc_node} "
+        f"-o UserKnownHostsFile={_kh_node} "
         "-o LogLevel=ERROR "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 "
         "-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -3859,13 +3873,17 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
             return None
     
     # Step 6: Write an SSH config snippet for QEMU (includes algorithm workarounds)
+    # NS Dec 2026 (pentest) — use cli_hostkey_opts() for the config snippet too.
+    from pegaprox.utils.ssh_security import cli_hostkey_opts
+    _hkc_cfg, _kh_cfg = cli_hostkey_opts()
     ssh_config_path = f"/tmp/v2p-sshcfg-{key_id}"
     ssh_config = (
         f"Host {esxi_host}\n"
         f"  HostName {esxi_host}\n"
         f"  User {esxi_user}\n"
         f"  IdentityFile {key_path}\n"
-        f"  StrictHostKeyChecking accept-new\n"
+        f"  StrictHostKeyChecking {_hkc_cfg}\n"
+        f"  UserKnownHostsFile {_kh_cfg}\n"
         f"  HostKeyAlgorithms +ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256\n"
         f"  PubkeyAcceptedAlgorithms +ssh-rsa,ssh-ed25519\n"
         f"  KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group14-sha256\n"
@@ -3888,8 +3906,12 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     key_id = key_path.replace('/tmp/v2p-key-', '')
     ssh_config_path = f"/tmp/v2p-sshcfg-{key_id}"
     
+    # NS Dec 2026 (pentest) — use cli_hostkey_opts() for cleanup SSH commands too.
+    from pegaprox.utils.ssh_security import cli_hostkey_opts
+    _hkc_cleanup, _kh_cleanup = cli_hostkey_opts()
     ESXI_SSH_OPTS = (
-        "-o StrictHostKeyChecking=accept-new "
+        f"-o StrictHostKeyChecking={_hkc_cleanup} "
+        f"-o UserKnownHostsFile={_kh_cleanup} "
         "-o LogLevel=ERROR "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
         "-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -4052,6 +4074,10 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     esxi_pass = task.esxi_password
     safe_pass = shlex.quote(esxi_pass)
 
+    # NS Dec 2026 (pentest) — node-side SSH commands now use cli_hostkey_opts()
+    # to inherit PegaProx's centralized host-key policy and known_hosts path.
+    from pegaprox.utils.ssh_security import cli_hostkey_opts
+    _hkc_copy, _kh_copy = cli_hostkey_opts()
     # Build SSH command prefix -- works with key or password
     # Include legacy algorithm options for ESXi compatibility (OpenSSH 9.x → ESXi)
     ESXI_ALGO_OPTS = (
@@ -4062,14 +4088,16 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     )
     if key_path:
         ssh_base = (
-            f"-i {key_path} -o StrictHostKeyChecking=accept-new "
+            f"-i {key_path} -o StrictHostKeyChecking={_hkc_copy} "
+            f"-o UserKnownHostsFile={_kh_copy} "
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
         SSH_PREFIX = "ssh"
     else:
         ssh_base = (
-            f"-o StrictHostKeyChecking=accept-new "
+            f"-o StrictHostKeyChecking={_hkc_copy} "
+            f"-o UserKnownHostsFile={_kh_copy} "
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
@@ -4872,8 +4900,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # SSHFS mount failed entirely -- try remounting
         task.log("SSHFS not available - trying to remount...")
         safe_pass_r = shlex.quote(esxi_pass)
+        # NS Dec 2026 (pentest) — node-side SSHFS remount now uses cli_hostkey_opts()
+        from pegaprox.utils.ssh_security import cli_hostkey_opts
+        _hkc_remount, _kh_remount = cli_hostkey_opts()
         sshfs_algo = (
-            "ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519 "
+            f"ssh_command=ssh -o UserKnownHostsFile={_kh_remount} "
+            "-o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519 "
             "-o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 "
             "-o PreferredAuthentications=keyboard-interactive\\,password"
         )
@@ -4891,7 +4923,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             f"fusermount -u {mnt_path} 2>/dev/null; "
             f"mkdir -p {mnt_path} && "
             f"printf '%s' {safe_pass_r} | sshfs -o password_stdin,"
-            f"StrictHostKeyChecking=accept-new,"
+            f"StrictHostKeyChecking={_hkc_remount},"
             f"allow_other,reconnect,ServerAliveInterval=15,"
             f"cache=yes,{sshfs_algo} "
             f"{esxi_user}@{esxi_host}:{shlex.quote(ds_remount)} {mnt_path} 2>&1",
@@ -5091,8 +5123,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     BS_MB = 64  # 64MB blocks -- less syscall overhead than 4MB
     BS = BS_MB * 1024 * 1024
     
+    # NS Dec 2026 (pentest) — node-side SSH commands now use cli_hostkey_opts()
+    from pegaprox.utils.ssh_security import cli_hostkey_opts
+    _hkc_bg, _kh_bg = cli_hostkey_opts()
     bg_ssh_base = (
-        f"-i {key_path} -o StrictHostKeyChecking=accept-new "
+        f"-i {key_path} -o StrictHostKeyChecking={_hkc_bg} "
+        f"-o UserKnownHostsFile={_kh_bg} "
         f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
         f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
         f"-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 "
@@ -6626,8 +6662,12 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             safe_p = shlex.quote(esxi_pass)
             dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"
 
+            # NS Dec 2026 (pentest) — node-side SSH commands now use cli_hostkey_opts()
+            from pegaprox.utils.ssh_security import cli_hostkey_opts
+            _hkc_dd, _kh_dd = cli_hostkey_opts()
             ssh_cmd = (
-                f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking=accept-new "  # NS Feb 2026 - env var instead of -p
+                f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking={_hkc_dd} "  # NS Feb 2026 - env var instead of -p
+                f"-o UserKnownHostsFile={_kh_dd} "
                 f"-o ConnectTimeout=15 "
                 f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
                 f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
@@ -6792,11 +6832,15 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
         f"echo '{b64pass}' | base64 -d > {pass_file} && chmod 600 {pass_file}",
         timeout=10)
     
+    # NS Dec 2026 (pentest) — node-side SSH commands now use cli_hostkey_opts()
+    from pegaprox.utils.ssh_security import cli_hostkey_opts
+    _hkc_delta, _kh_delta = cli_hostkey_opts()
     # Build a script that transfers all differing blocks
     xfer_lines = ['#!/bin/bash', 'ERRORS=0']
     for i in diff_blocks:
         xfer_lines.append(
-            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking=accept-new "
+            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking={_hkc_delta} "
+            f"-o UserKnownHostsFile={_kh_delta} "
             f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
             f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
             f"{esxi_user}@{esxi_host} "
