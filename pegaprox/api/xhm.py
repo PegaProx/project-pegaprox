@@ -86,6 +86,16 @@ def xhm_plan():
     # A new vmid matches no per-object grant, so confinement is the right question to ask.
     if caller_is_scoped(user, target_cluster):
         return jsonify({'error': 'Access denied to target cluster'}), 403
+    
+    # sec (pentest) — cross-cluster migration creates a NEW VM on the target with backend
+    # credentials. The source check above only verifies vm.migrate on the existing guest;
+    # the confinement check above only rejects resource-scoped callers. A cluster-wide
+    # operator who holds vm.migrate but lacks vm.create can therefore plan provisioning on
+    # the target. Verify the caller holds vm.create before returning target options.
+    from pegaprox.utils.rbac import has_permission
+    if not has_permission(user, 'vm.create'):
+        return jsonify({'error': 'Access denied: cross-cluster migration requires vm.create '
+                                 'permission on the target cluster'}), 403
 
     # auto-detect direction from cluster types
     src_mgr = cluster_managers.get(source_cluster)
@@ -167,6 +177,18 @@ def xhm_start():
                                      'vm.delete on it'}), 403
     if caller_is_scoped(user, data['target_cluster']):
         return jsonify({'error': 'Access denied to target cluster'}), 403
+    
+    # sec (pentest) — cross-cluster migration creates a NEW VM on the target with backend
+    # credentials. The source check above only verifies vm.migrate on the existing guest;
+    # the target check above only rejects resource-scoped callers. A cluster-wide operator
+    # who holds vm.migrate but lacks vm.create can therefore provision on the target. The
+    # worker allocates storage, calls the target /qemu endpoint, attaches volumes, and
+    # configures bridges — all operations that require vm.create authority. Verify the
+    # caller holds vm.create on the target cluster before enqueueing the task.
+    from pegaprox.utils.rbac import has_permission
+    if not has_permission(user, 'vm.create'):
+        return jsonify({'error': 'Access denied: cross-cluster migration requires vm.create '
+                                 'permission on the target cluster'}), 403
 
     src_mgr = cluster_managers.get(data['source_cluster'])
     tgt_mgr = cluster_managers.get(data['target_cluster'])

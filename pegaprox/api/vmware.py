@@ -1072,6 +1072,16 @@ def get_vmware_migration_plan(vmware_id, vm_id):
     if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     
+    # sec (pentest) — V2P migration creates a NEW VM on the target with backend credentials.
+    # The source check above only verifies vmware.vm.migrate on the existing guest. A
+    # cluster-wide operator who holds vmware.vm.migrate but lacks vm.create can therefore
+    # plan provisioning on the target. Verify the caller holds vm.create before returning
+    # target options.
+    from pegaprox.utils.rbac import has_permission
+    if not has_permission(user, 'vm.create'):
+        return jsonify({'error': 'Access denied: V2P migration requires vm.create '
+                                 'permission on the target cluster'}), 403
+    
     mgr = vmware_managers[vmware_id]
     # NS Aug 2026 — refresh a stale ESXi REST/CIS session before the read, exactly like the
     # VM-list/detail routes do (get_vmware_vms:270, single-VM GET:295). Without it, a server
@@ -1204,6 +1214,18 @@ def start_vmware_migration(vmware_id, vm_id):
     allowed, err_response = check_cluster_access(data['target_cluster'])
     if not allowed:
         return err_response
+    
+    # sec (pentest) — V2P migration creates a NEW VM on the target with backend credentials.
+    # The source check above only verifies vmware.vm.migrate on the existing guest; the
+    # confinement check above only rejects resource-scoped callers. A cluster-wide operator
+    # who holds vmware.vm.migrate but lacks vm.create can therefore provision on the target.
+    # The worker allocates storage, calls the target /qemu endpoint, attaches volumes, and
+    # configures bridges — all operations that require vm.create authority. Verify the
+    # caller holds vm.create on the target cluster before enqueueing the task.
+    from pegaprox.utils.rbac import has_permission
+    if not has_permission(_v2p_u, 'vm.create'):
+        return jsonify({'error': 'Access denied: V2P migration requires vm.create '
+                                 'permission on the target cluster'}), 403
 
     mgr = vmware_managers[vmware_id]
     # NS Aug 2026 — same stale-session guard as the migration-plan + VM-list routes: a long-lived
