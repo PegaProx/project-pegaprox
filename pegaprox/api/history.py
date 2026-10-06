@@ -44,13 +44,23 @@ def get_scheduled_tasks():
 def create_scheduled_task():
     """Create a new scheduled task"""
     data = request.json or {}
+    cluster_id = data.get('cluster_id', '')
+    
+    # sec (pentest): validate the caller can access the target cluster before creating a task
+    # that will execute operations against it. A globally-admin account whose tenant role is
+    # restricted can otherwise create tasks for out-of-scope clusters and execute them.
+    if cluster_id:
+        ok, err = check_cluster_access(cluster_id)
+        if not ok:
+            return err
+    
     config = load_scheduled_tasks()
     
     import uuid
     new_task = {
         'id': str(uuid.uuid4())[:8],
         'name': data.get('name', 'New Task'),
-        'cluster_id': data.get('cluster_id', ''),
+        'cluster_id': cluster_id,
         'target_type': data.get('target_type', 'qemu'),
         'target_id': data.get('target_id', ''),
         'target_node': data.get('target_node', ''),
@@ -81,9 +91,23 @@ def update_scheduled_task(task_id):
     
     for task in config['tasks']:
         if task['id'] == task_id:
+            # sec (pentest): validate the caller can access the existing task's cluster
+            existing_cluster = task.get('cluster_id', '')
+            if existing_cluster:
+                ok, err = check_cluster_access(existing_cluster)
+                if not ok:
+                    return err
+            
+            # sec (pentest): if the cluster_id is being changed, validate access to the new cluster
+            new_cluster = data.get('cluster_id', task['cluster_id'])
+            if new_cluster != existing_cluster and new_cluster:
+                ok, err = check_cluster_access(new_cluster)
+                if not ok:
+                    return err
+            
             task.update({
                 'name': data.get('name', task['name']),
-                'cluster_id': data.get('cluster_id', task['cluster_id']),
+                'cluster_id': new_cluster,
                 'target_type': data.get('target_type', task['target_type']),
                 'target_id': data.get('target_id', task['target_id']),
                 'target_node': data.get('target_node', task['target_node']),
@@ -104,6 +128,17 @@ def update_scheduled_task(task_id):
 def delete_scheduled_task(task_id):
     """Delete a scheduled task"""
     config = load_scheduled_tasks()
+    
+    # sec (pentest): validate the caller can access the task's cluster before deletion
+    for task in config['tasks']:
+        if task['id'] == task_id:
+            cluster_id = task.get('cluster_id', '')
+            if cluster_id:
+                ok, err = check_cluster_access(cluster_id)
+                if not ok:
+                    return err
+            break
+    
     config['tasks'] = [t for t in config['tasks'] if t['id'] != task_id]
     save_scheduled_tasks(config)
     
@@ -120,6 +155,15 @@ def run_scheduled_task_now(task_id):
     
     for task in config['tasks']:
         if task['id'] == task_id:
+            # sec (pentest): validate the caller can access the task's cluster before execution.
+            # A globally-admin account whose tenant role is restricted can otherwise execute
+            # tasks targeting out-of-scope clusters, bypassing tenant and cluster authorization.
+            cluster_id = task.get('cluster_id', '')
+            if cluster_id:
+                ok, err = check_cluster_access(cluster_id)
+                if not ok:
+                    return err
+            
             execute_scheduled_task(task)
             # the scheduler compares this stamp with the group's clock, not the host's (#625)
             task['last_run'] = ha.schedule_now().isoformat()
