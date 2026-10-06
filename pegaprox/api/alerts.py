@@ -1028,6 +1028,14 @@ def delete_alert_channel(cid):
 @bp.route('/api/alert-channels/<cid>/test', methods=['POST'])
 @require_auth(perms=['alert.manage'])
 def test_alert_channel(cid):
+    # sec (pentest Dec 2026): alert_webhooks is installation-wide, and alert.manage is a
+    # tenant-scoped permission. A tenant-confined caller with alert.manage could select and
+    # invoke any channel in the global list, dispatching test notifications through channels
+    # outside their tenant authority. Require admin.settings (installation-wide) to match
+    # the CRUD operations above.
+    _serr = _require_settings_admin()
+    if _serr:
+        return _serr
     from pegaprox.api.helpers import load_server_settings
     from pegaprox.utils.webhooks import send_to_channel
     channels = (load_server_settings() or {}).get('alert_webhooks') or []
