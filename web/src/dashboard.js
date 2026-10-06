@@ -317,7 +317,7 @@
                             </div>
                             
                             <div className="flex items-center gap-2">
-                                <span className={`transition-transform ${expanded ? 'rotate-180' : ''}`}>
+                                <span className={`transition-transform ${expanded ? '' : 'rotate-180'}`}>
                                     <Icons.ChevronDown />
                                 </span>
                             </div>
