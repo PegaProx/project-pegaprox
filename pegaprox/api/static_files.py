@@ -402,8 +402,15 @@ def get_user_vm_access(username):
         return jsonify({'error': 'User not found'}), 404
     # sec (private disclosure Sep 2026 — audit): a tenant-scoped admin.users holder must not read a
     # user's VM-ACL grants in ANOTHER tenant (cross-tenant disclosure). Mirror get_user_perms.
-    if request.session.get('role') != ROLE_ADMIN:
-        _caller = users.get(request.session.get('user', ''), {})
+    # MK Dec 2026 (pentest) — the raw session role bypassed tenant-specific caps; use the
+    # same tenant-aware logic has_permission applies.
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+    _caller = users.get(request.session.get('user', ''), {})
+    _is_uncapped_admin = (
+        request.session.get('role') == ROLE_ADMIN
+        and not _admin_is_capped_in_own_tenant(_caller)
+    )
+    if not _is_uncapped_admin:
         if users[username].get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
             return jsonify({'error': 'Access denied'}), 403
 
@@ -437,11 +444,19 @@ def get_user_perms(username):
     # NS Sep 2026 — and answer 404, not 403, for a user outside the caller's tenant: the missing-user
     # branch used to run first, so 404-vs-403 still told a tenant admin whether a name existed
     # elsewhere. Both cases now look identical from outside.
+    # MK Dec 2026 (pentest) — the raw session role bypassed tenant-specific caps; use the
+    # same tenant-aware logic has_permission applies.
     user = users.get(username)
-    if user is not None and request.session.get('role') != ROLE_ADMIN:
+    if user is not None:
+        from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
         _caller = users.get(request.session.get('user', ''), {})
-        if user.get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
-            user = None
+        _is_uncapped_admin = (
+            request.session.get('role') == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(_caller)
+        )
+        if not _is_uncapped_admin:
+            if user.get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
+                user = None
     if user is None:
         return jsonify({'error': 'User not found'}), 404
     tenant_id = request.args.get('tenant_id', user.get('tenant_id', DEFAULT_TENANT_ID))

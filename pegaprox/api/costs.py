@@ -408,8 +408,17 @@ def tenant_chargeback(tenant_id):
         # MK Jun 2026 (sec-review) — admin.tenants can be a tenant-scoped custom role;
         # scope to the caller's own tenant unless a real admin, else one tenant could
         # read another tenant's full VM inventory + per-VM cost breakdown (BOLA).
-        if request.session.get('effective_role', request.session.get('role')) != _rbac.ROLE_ADMIN:
-            _caller = get_db().get_user(request.session.get('user', '')) or {}
+        # MK Dec 2026 (pentest) — the raw session role bypassed tenant-specific caps; a
+        # global admin capped by a tenant override still read as ROLE_ADMIN here and
+        # skipped the target-tenant check. Use the same tenant-aware logic has_permission
+        # applies: only skip the check when the caller is BOTH a global admin AND not
+        # capped in their home tenant.
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        _is_uncapped_admin = (
+            request.session.get('effective_role', request.session.get('role')) == _rbac.ROLE_ADMIN
+            and not _rbac._admin_is_capped_in_own_tenant(_caller)
+        )
+        if not _is_uncapped_admin:
             if tenant_id != _caller.get('tenant_id', _rbac.DEFAULT_TENANT_ID):
                 return jsonify({'error': 'Access denied to this tenant'}), 403
         allowed = _rbac.get_user_clusters({'role': _rbac.ROLE_VIEWER, 'tenant_id': tenant_id})  # None = all clusters

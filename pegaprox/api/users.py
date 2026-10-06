@@ -53,9 +53,13 @@ def _caller_tenant_or_none():
     # MK Jun 2026 (sec-review): a global admin manages every tenant; a tenant-scoped admin
     # (custom role carrying admin.users) is confined to their own tenant. Returns the tenant
     # to scope to, or None when the caller is a global admin (no restriction).
-    if request.session.get('role') == ROLE_ADMIN:
-        return None
+    # MK Dec 2026 (pentest) — the raw session role bypassed tenant-specific caps; use the
+    # same tenant-aware logic has_permission applies.
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
     caller = get_db().get_user(request.session.get('user', '')) or {}
+    if (request.session.get('role') == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(caller)):
+        return None
     return caller.get('tenant_id', DEFAULT_TENANT_ID)
 
 
@@ -1425,8 +1429,15 @@ def update_tenant(tenant_id):
 
     # NS Aug 2026 (Aikido pentest) — mirror get_tenant_quota: a tenant-scoped admin.tenants holder
     # may only edit its OWN tenant, else one tenant rewrites another's name/clusters/quota.
-    if request.session.get('role') != ROLE_ADMIN:
-        _caller = get_db().get_user(request.session.get('user', '')) or {}
+    # MK Dec 2026 (pentest) — the raw session role bypassed tenant-specific caps; use the
+    # same tenant-aware logic has_permission applies.
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+    _caller = get_db().get_user(request.session.get('user', '')) or {}
+    _is_uncapped_admin = (
+        request.session.get('role') == ROLE_ADMIN
+        and not _admin_is_capped_in_own_tenant(_caller)
+    )
+    if not _is_uncapped_admin:
         if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
             return jsonify({'error': 'Access denied to this tenant'}), 403
 
@@ -1491,8 +1502,15 @@ def get_tenant_quota(tenant_id):
         # MK Jun 2026 (sec-review) — admin.tenants can be held by a tenant-scoped
         # custom role, so scope to the caller's own tenant unless a real admin —
         # otherwise one tenant could read another's live usage (BOLA).
-        if request.session.get('role') != ROLE_ADMIN:
-            _caller = get_db().get_user(request.session.get('user', '')) or {}
+        # MK Dec 2026 (pentest) — the raw session role bypassed tenant-specific caps; use the
+        # same tenant-aware logic has_permission applies.
+        from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        _is_uncapped_admin = (
+            request.session.get('role') == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(_caller)
+        )
+        if not _is_uncapped_admin:
             if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
                 return jsonify({'error': 'Access denied to this tenant'}), 403
         from pegaprox.utils.rbac import check_tenant_quota
