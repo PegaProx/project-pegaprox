@@ -689,15 +689,26 @@ def prune(root, keep=KEEP):
 def drop_root(state):
     """Started as root: become the owner of the state directory, as witness._drop_root
     does, before any code of it is looked at."""
-    if not hasattr(os, 'geteuid') or os.geteuid() != 0 or not os.path.isdir(state):
+    if not hasattr(os, 'geteuid'):
         return
+    # If we're not running as root, no privilege drop is needed
+    if os.geteuid() != 0:
+        return
+    # Running as root - we MUST drop privileges before proceeding
+    if not os.path.isdir(state):
+        raise BootError(f'{state} does not exist or is not a directory - create it for the user '
+                        'the witness runs as, or pass --dir')
     owner = os.stat(state)
     if owner.st_uid == 0:
-        return
+        raise BootError(f'{state} is owned by root - the witness must run as a dedicated non-root user. '
+                        'Change the owner to the witness user (e.g., chown witness:witness {state})')
     # root's supplementary groups would stay with the process otherwise
     os.setgroups([])
     os.setgid(owner.st_gid)
     os.setuid(owner.st_uid)
+    # Verify the privilege drop succeeded
+    if os.geteuid() == 0 or os.getuid() == 0:
+        raise BootError('Failed to drop root privileges - still running as UID 0')
 
 
 def runner_env(path, trial=False, install='', again=None, environ=None, state=None, base=None, limit=None):
