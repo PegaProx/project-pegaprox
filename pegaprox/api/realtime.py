@@ -92,6 +92,11 @@ def ws_live_updates(ws):
         _is_admin = (_user_data or {}).get('role') == ROLE_ADMIN
 
         with ws_clients_lock:
+            # sec (pentest): enforce per-user WebSocket connection limit to prevent pool exhaustion.
+            # Like SSE streams, WebSocket connections hold a request-pool slot for their entire
+            # lifetime and cannot be reaped by the idle-connection timeout. Supersede the oldest
+            # connection of the same user once they reach the cap, mirroring the SSE behavior.
+            _supersede_oldest_ws_connections(username)
             ws_clients[client_id] = {
                 'ws': ws,
                 'lock': client_lock,
@@ -114,6 +119,13 @@ def ws_live_updates(ws):
         # Keep connection alive
         _next_authz = time.monotonic() + SSE_REAUTHZ_INTERVAL
         while True:
+            # sec (pentest): a connection superseded by the per-user cap is no longer in the
+            # registry, so it will never be fed again — let go of the connection instead of
+            # holding a pool slot open sending pings to nobody. Mirrors the SSE check.
+            if client_id not in ws_clients:
+                logging.info(f"[WS] closing superseded connection {client_id}")
+                break
+
             # sec (audit): identity, cluster scope and is_admin were all resolved during the
             # handshake and then frozen for the life of the socket, with no re-check anywhere —
             # not even a dead one. Disabling, deleting or demoting an account left it receiving
@@ -220,6 +232,14 @@ SSE_REAUTHZ_INTERVAL = 30
 # (which the frontend does on its own watchdog) never locks the user out of their own session.
 MAX_SSE_STREAMS_PER_USER = 20
 
+# sec (pentest): WebSocket connections also hold a request-pool slot for their entire lifetime.
+# Like SSE streams, they are not idle and cannot be reaped by the idle-connection timeout.
+# Without a per-user limit, one authenticated account can open enough persistent WebSocket
+# connections to exhaust the finite gevent worker pool and starve all other application traffic.
+# Apply the same per-user cap as SSE streams; the oldest connection is superseded rather than
+# the new one refused, so a reconnect never locks the user out of their own session.
+MAX_WS_CONNECTIONS_PER_USER = 20
+
 
 def _supersede_oldest_streams(username):
     """Drop this user's oldest streams once they are over the cap. Call with sse_clients_lock
@@ -229,6 +249,16 @@ def _supersede_oldest_streams(username):
     for _, cid in mine[:max(0, len(mine) - MAX_SSE_STREAMS_PER_USER + 1)]:
         sse_clients.pop(cid, None)
         logging.info(f"[SSE] superseded stream {cid} — '{_sl(username)}' over the per-user cap")
+
+
+def _supersede_oldest_ws_connections(username):
+    """Drop this user's oldest WebSocket connections once they are over the cap. Call with
+    ws_clients_lock held; the handlers notice they were dropped and close on their next frame."""
+    mine = sorted(((c.get('connected_at', ''), cid) for cid, c in ws_clients.items()
+                   if c.get('user') == username))
+    for _, cid in mine[:max(0, len(mine) - MAX_WS_CONNECTIONS_PER_USER + 1)]:
+        ws_clients.pop(cid, None)
+        logging.info(f"[WS] superseded connection {cid} — '{_sl(username)}' over the per-user cap")
 
 
 def _stream_identity(username):
