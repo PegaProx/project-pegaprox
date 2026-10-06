@@ -454,8 +454,9 @@ def admin_change_password(username):
     # Invalidate ALL sessions for this user (security: force re-login)
     sessions_removed = invalidate_all_user_sessions(username)
     tokens_revoked = revoke_user_api_tokens(username)  # sec (audit): revoke API tokens too, not just sessions
-    from pegaprox.utils.realtime import invalidate_user_sse_tokens
+    from pegaprox.utils.realtime import invalidate_user_sse_tokens, invalidate_user_ws_tokens
     invalidate_user_sse_tokens(username)               # ...and the SSE stream token
+    invalidate_user_ws_tokens(username)                # sec (pentest): and the WebSocket token (console/shell)
 
     admin_username = request.session['user']
     logging.info(f"Admin '{admin_username}' changed password for user '{username}' — {tokens_revoked} token(s) revoked")
@@ -1111,8 +1112,9 @@ def update_user(username):
         # sec (audit): the dedicated reset route revokes API tokens too; this one didn't, so an
         # exfiltrated pgx_ token survived the standard "lock the intruder out" action for up to a year.
         _revoked = revoke_user_api_tokens(username)
-        from pegaprox.utils.realtime import invalidate_user_sse_tokens
+        from pegaprox.utils.realtime import invalidate_user_sse_tokens, invalidate_user_ws_tokens
         invalidate_user_sse_tokens(username)
+        invalidate_user_ws_tokens(username)  # sec (pentest): and the WebSocket token (console/shell)
         log_audit(request.session['user'], 'user.sessions_invalidated',
                   f"Invalidated sessions after password change for {username} "
                   f"({_revoked} API token(s) revoked)")

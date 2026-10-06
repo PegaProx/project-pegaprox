@@ -1815,8 +1815,9 @@ def auth_change_password():
     current_session_id = request.cookies.get('session_id') or request.headers.get('X-Session-ID')
     sessions_removed = invalidate_all_user_sessions(username)  # no except_session — all go
     tokens_revoked = revoke_user_api_tokens(username)  # sec (audit): tokens survived a password change
-    from pegaprox.utils.realtime import invalidate_user_sse_tokens
+    from pegaprox.utils.realtime import invalidate_user_sse_tokens, invalidate_user_ws_tokens
     invalidate_user_sse_tokens(username)               # ...as did the SSE stream token
+    invalidate_user_ws_tokens(username)                # sec (pentest): and the WebSocket token (console/shell)
 
     logging.info(f"User '{username}' changed their password — all sessions invalidated, {tokens_revoked} token(s) revoked")
     log_audit(username, 'user.password_changed', f"Password changed, {sessions_removed} session(s) invalidated (incl. current), {tokens_revoked} API token(s) revoked")

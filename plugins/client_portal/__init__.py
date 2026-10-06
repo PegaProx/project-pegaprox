@@ -533,9 +533,13 @@ def _change_password():
     # NS Aug 2026 (Aikido pentest) — a password change must revoke the user's other live
     # sessions (matches the main dashboard's behaviour, users.py). Keep the current portal
     # session alive so the customer isn't logged straight back out.
-    from pegaprox.utils.auth import invalidate_all_user_sessions
+    from pegaprox.utils.auth import invalidate_all_user_sessions, revoke_user_api_tokens
+    from pegaprox.utils.realtime import invalidate_user_sse_tokens, invalidate_user_ws_tokens
     _cur_sid = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
     invalidate_all_user_sessions(username, except_session=_cur_sid)
+    revoke_user_api_tokens(username)       # sec (pentest): revoke API tokens too
+    invalidate_user_sse_tokens(username)   # sec (pentest): and SSE tokens
+    invalidate_user_ws_tokens(username)    # sec (pentest): and WebSocket tokens (console/shell)
 
     from pegaprox.utils.audit import log_audit
     log_audit(username, 'portal.password_changed', 'Password changed via client portal')
