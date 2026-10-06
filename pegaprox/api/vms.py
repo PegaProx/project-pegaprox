@@ -3231,7 +3231,7 @@ def join_node_to_cluster(cluster_id):
             channel.recv(4096)
         
         # Build and send the join command
-        join_cmd = f'pvecm add {join_addr} --fingerprint {fingerprint}'
+        join_cmd = f'pvecm add {shlex.quote(join_addr)} --fingerprint {shlex.quote(fingerprint)}'
         if force_rejoin:
             join_cmd += ' --force'
         if link0_address:
@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
