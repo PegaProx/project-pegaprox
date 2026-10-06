@@ -3842,6 +3842,17 @@ def start_node_update(cluster_id, node_name):
     reboot = data.get('reboot', True)
     force = data.get('force', False)
     
+    # MK Sep 2026 - node.reboot is a permission this product defines, ships in the
+    # tenant-admin template and enforced in exactly no route, so an operator who built a
+    # role with node.update and deliberately withheld node.reboot still got their nodes
+    # rebooted. Asked for only when the run will actually reboot one, so an update-only
+    # pass keeps working on node.update alone.
+    if reboot:
+        from pegaprox.utils.rbac import has_permission as _hasp
+        from pegaprox.utils.auth import build_authz_user as _bau
+        if not _hasp(_bau(request.session.get('user', ''), request.session), 'node.reboot'):
+            return jsonify({'error': 'Rebooting nodes needs the node.reboot permission'}), 403
+    
     # check maintenance mode (unless force)
     if not force:
         if node_name not in mgr.nodes_in_maintenance:
@@ -6114,7 +6125,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
