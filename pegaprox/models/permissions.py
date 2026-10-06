@@ -24,6 +24,7 @@ PERMISSIONS = {
     'vm.delete': 'Delete VMs and containers',
     'vm.create': 'Create new VMs and containers',
     'vm.config': 'Modify VM configuration',
+    'vm.hardware.privileged': 'Attach raw PCI/USB devices and modify root-only container features',
     'vm.snapshot': 'Create/delete snapshots',
     'vm.backup': 'Backup VMs',
     'vm.template': 'Convert to/from template',

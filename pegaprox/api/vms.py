@@ -39,6 +39,21 @@ def _require_vm_access(cluster_id, vmid, perm, vm_type=None):
     if not user_can_access_vm(user, cluster_id, vmid, perm, vm_type):
         return jsonify({'error': f'Access denied to this VM ({perm})'}), 403
     return None
+
+
+def _require_privileged_hardware_access():
+    """Authorization guard for root-only Proxmox operations: raw PCI/USB passthrough and
+    root-only LXC feature changes. These operations use _session_as_root() to obtain a
+    privileged Proxmox session, so they require vm.hardware.privileged in addition to
+    vm.config. Returns None when authorized, else a jsonify(403) tuple the caller must
+    return. MK Dec 2026 (pentest mitigation)."""
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    perms = get_user_permissions(user)
+    if 'vm.hardware.privileged' not in perms:
+        return jsonify({'error': 'Access denied: vm.hardware.privileged permission required for '
+                                 'raw device passthrough and root-only container features',
+                        'code': 'PRIVILEGED_HARDWARE_DENIED'}), 403
+    return None
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
@@ -5763,6 +5778,9 @@ def add_pci_passthrough(cluster_id, node, vmid):
             covered = entry['nodes']
         else:
             # a raw address is root@pam's only (check_hostpci_perm in qemu-server)
+            denied = _require_privileged_hardware_access()
+            if denied:
+                return denied
             access = manager.pve_root_access()
             if not access['root']:
                 return _root_refusal(access, 'attach a raw PCI device - use a resource mapping instead')
@@ -5869,6 +5887,9 @@ def add_usb_passthrough(cluster_id, node, vmid):
             covered = entry['nodes']
         else:
             # host= is root@pam's only (check_usb_perm in qemu-server)
+            denied = _require_privileged_hardware_access()
+            if denied:
+                return denied
             access = manager.pve_root_access()
             if not access['root']:
                 return _root_refusal(access, 'attach a raw USB device - use a resource mapping instead')
@@ -6012,6 +6033,9 @@ def remove_passthrough_device(cluster_id, node, vmid, device_type, key):
             current = session.get(update_url, timeout=10)
             value = (current.json().get('data') or {}).get(key) if current.status_code == 200 else None
             if value and _passthrough_is_raw(device_type, value):
+                denied = _require_privileged_hardware_access()
+                if denied:
+                    return denied
                 access = manager.pve_root_access()
                 if not access['root']:
                     return _root_refusal(access, f'remove a raw {device_type.upper()} device')
@@ -6114,7 +6138,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -6595,6 +6619,9 @@ def set_lxc_features(cluster_id, node, vmid):
         access = manager.pve_root_access()
         session = manager._create_session()
         if needs_root:
+            denied = _require_privileged_hardware_access()
+            if denied:
+                return denied
             if not access['root']:
                 what = ('change the feature flags of a privileged container' if not unprivileged
                         else 'change feature flags other than nesting')
