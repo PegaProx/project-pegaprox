@@ -2234,7 +2234,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2422,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -3273,56 +3273,43 @@ def get_cluster_audit_log_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     
-    # Get cluster name for filtering
-    cluster_name = None
-    if cluster_id in cluster_managers:
-        cluster_name = cluster_managers[cluster_id].config.name
-    
-    # Check if we're in multi-cluster mode
-    multi_cluster = len(cluster_managers) > 1
-    
     # Optional filters
     vmid = request.args.get('vmid')
     limit = max(1, min(10000, sanitize_int(request.args.get('limit', 100), default=100)))
     
-    # Get from database
+    # Get from database - filter by immutable cluster_id, not mutable name
+    # sec (audit): the previous implementation derived cluster_name from the manager
+    # configuration and filtered audit rows by that mutable, non-unique display name.
+    # Two clusters with the same name would leak each other's audit data. Authorization
+    # uses the stable cluster_id primary key, so record selection must use it too.
     database = get_db()
     entries = database.get_audit_log(limit=limit * 10)  # Get more to filter
     
-    # Filter by cluster and vmid
+    # Filter by cluster ID (immutable, unique) and vmid
     filtered = []
     for entry in entries:
         entry_cluster = entry.get('cluster', '')
         details = entry.get('details', '')
         
-        # Cluster filter
-        if cluster_name:
-            detected_cluster = None
-            
-            # First check the cluster field
-            if entry_cluster:
-                detected_cluster = entry_cluster
-            else:
-                # Try to detect cluster from details text
-                import re
-                # Look for [SomeCluster] pattern at end
-                bracket_match = re.search(r'\[([^\]]+)\]\s*$', details)
-                if bracket_match:
-                    detected_cluster = bracket_match.group(1)
+        # Cluster filter: match by cluster_id only
+        # The cluster column should contain cluster IDs. For backward compatibility,
+        # also accept entries where cluster matches the current cluster's name, but
+        # only if no other cluster shares that name (ambiguous names are rejected).
+        if entry_cluster != cluster_id:
+            # Backward compat: check if entry_cluster is a name matching this cluster
+            if cluster_id in cluster_managers:
+                cluster_name = cluster_managers[cluster_id].config.name
+                # Only accept name match if it's unambiguous (no other cluster has same name)
+                if entry_cluster == cluster_name:
+                    name_collision = sum(1 for m in cluster_managers.values()
+                                       if getattr(getattr(m, 'config', None), 'name', None) == cluster_name) > 1
+                    if name_collision:
+                        # Ambiguous name - reject to prevent cross-cluster disclosure
+                        continue
                 else:
-                    # Look for "for cluster X" or "cluster X" pattern
-                    cluster_match = re.search(r'(?:for )?cluster\s+(\S+)', details, re.IGNORECASE)
-                    if cluster_match:
-                        detected_cluster = cluster_match.group(1)
-            
-            # If we detected a cluster, it must match
-            if detected_cluster:
-                if detected_cluster != cluster_name:
                     continue
             else:
-                # No cluster info at all - skip in multi-cluster mode
-                if multi_cluster:
-                    continue
+                continue
         
         # Check vmid filter
         if vmid:

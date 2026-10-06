@@ -121,6 +121,14 @@ def _via_standby():
 def log_audit(user: str, action: str, details: str = None, ip_address: str = None, cluster: str = None):
     """Add an entry to the audit log
     
+    Args:
+        user: Username performing the action
+        action: Action identifier (e.g., 'vm.start', 'user.login')
+        details: Human-readable description of the action
+        ip_address: Source IP address (auto-detected if not provided)
+        cluster: Cluster ID (immutable primary key, not display name) for cluster-scoped actions.
+                 Pass the cluster_id from cluster_managers keys, not config.name.
+    
     writes to db now
     """
     global audit_log

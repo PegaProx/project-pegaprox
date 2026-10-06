@@ -59,21 +59,32 @@ def _get_recent_audit_tasks(cluster_id, cluster_name):
         # `cluster` (= cluster name) so this filter attributes each event correctly; non-cluster
         # portal actions (e.g. password change) carry no cluster and simply don't surface here.
         #
-        # sec (audit) — but the name is all the row stores and nothing makes it unique: two
-        # clusters both called "Production" would each publish the other tenant's portal
-        # activity (username + VMID) into their live task feed, which is the same leak again
-        # one level down. Until the rows carry the cluster id, an ambiguous name shows nothing.
+        # sec (audit) — the previous implementation queried by mutable cluster name and explicitly
+        # relabeled selected rows with the current cluster_id before delivery. Two clusters with
+        # the same name would leak each other's portal activity. Query by immutable cluster_id
+        # instead. For backward compatibility with rows written before this fix, also accept
+        # rows where cluster=cluster_name, but only if that name is unambiguous.
         from pegaprox.globals import cluster_managers
-        if sum(1 for m in list(cluster_managers.values())
-               if getattr(getattr(m, 'config', None), 'name', None) == cluster_name) > 1:
-            return []
-        cursor.execute('''
-            SELECT id, timestamp, user, action, details FROM audit_log
-            WHERE action LIKE 'portal.%'
-            AND cluster = ?
-            AND timestamp > ?
-            ORDER BY timestamp DESC LIMIT 10
-        ''', (cluster_name, cutoff,))
+        name_collision = sum(1 for m in list(cluster_managers.values())
+                           if getattr(getattr(m, 'config', None), 'name', None) == cluster_name) > 1
+        if name_collision:
+            # Ambiguous name - only return rows with cluster_id to prevent cross-cluster disclosure
+            cursor.execute('''
+                SELECT id, timestamp, user, action, details FROM audit_log
+                WHERE action LIKE 'portal.%'
+                AND cluster = ?
+                AND timestamp > ?
+                ORDER BY timestamp DESC LIMIT 10
+            ''', (cluster_id, cutoff,))
+        else:
+            # Unambiguous name - accept both cluster_id and cluster_name for backward compat
+            cursor.execute('''
+                SELECT id, timestamp, user, action, details FROM audit_log
+                WHERE action LIKE 'portal.%'
+                AND (cluster = ? OR cluster = ?)
+                AND timestamp > ?
+                ORDER BY timestamp DESC LIMIT 10
+            ''', (cluster_id, cluster_name, cutoff,))
         rows = cursor.fetchall()
         if not rows:
             return []

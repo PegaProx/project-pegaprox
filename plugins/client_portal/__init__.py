@@ -252,7 +252,7 @@ def _vm_power():
         resp = mgr._api_post(url)
         if resp.status_code == 200:
             from pegaprox.utils.audit import log_audit
-            log_audit(username, f'portal.vm.{action}', f'Client portal: {action} VM {vmid}', cluster=mgr.config.name)
+            log_audit(username, f'portal.vm.{action}', f'Client portal: {action} VM {vmid}', cluster=cluster_id)
             return {'success': True, 'action': action, 'vmid': vmid}
         else:
             return {'error': f'Action failed: {resp.text[:100]}'}
@@ -300,7 +300,7 @@ def _vm_console():
                                        user.get('effective_role', user.get('role', 'viewer')))
             result['ws_token'] = ws_token
             from pegaprox.utils.audit import log_audit
-            log_audit(username, 'vm.console', f'Portal: VNC console opened for VM {vmid}', cluster=mgr.config.name)
+            log_audit(username, 'vm.console', f'Portal: VNC console opened for VM {vmid}', cluster=cluster_id)
             return result
         return {'error': result.get('error', 'Console failed')}
     except Exception as e:
@@ -379,7 +379,7 @@ def _vm_snapshots():
             )
             if snap_resp.status_code == 200:
                 from pegaprox.utils.audit import log_audit
-                log_audit(username, 'portal.snapshot_created', f'Snapshot "{snap_name}" on VM {vmid}', cluster=mgr.config.name)
+                log_audit(username, 'portal.snapshot_created', f'Snapshot "{snap_name}" on VM {vmid}', cluster=cluster_id)
                 return {'success': True, 'name': snap_name}
             return {'error': f'Snapshot failed: {snap_resp.text[:100]}'}
         except Exception as e:
@@ -428,7 +428,7 @@ def _vm_snapshot_rollback():
         result = mgr.rollback_snapshot(node, int(vmid), vm_type, snapname)
         if result.get('success'):
             from pegaprox.utils.audit import log_audit
-            log_audit(username, 'portal.snapshot_rollback', f'Rollback to "{snapname}" on VM {vmid}', cluster=mgr.config.name)
+            log_audit(username, 'portal.snapshot_rollback', f'Rollback to "{snapname}" on VM {vmid}', cluster=cluster_id)
             return {'success': True, 'snapname': snapname}
         return {'error': result.get('error', 'Rollback failed')}
     except Exception as e:
@@ -478,7 +478,7 @@ def _vm_snapshot_delete():
         )
         if resp.status_code == 200:
             from pegaprox.utils.audit import log_audit
-            log_audit(username, 'portal.snapshot_deleted', f'Deleted snapshot "{snapname}" on VM {vmid}', cluster=mgr.config.name)
+            log_audit(username, 'portal.snapshot_deleted', f'Deleted snapshot "{snapname}" on VM {vmid}', cluster=cluster_id)
             return {'success': True, 'snapname': snapname}
         return {'error': f'Delete failed: {resp.text[:100]}'}
     except Exception as e:
@@ -637,7 +637,7 @@ def _mount_iso():
         resp = mgr._api_post(url, data={drive: f'{iso_volid},media=cdrom'})
         if resp.status_code == 200:
             from pegaprox.utils.audit import log_audit
-            log_audit(username, 'portal.iso_mount', f'Mounted {iso_volid} on VM {vmid}', cluster=mgr.config.name)
+            log_audit(username, 'portal.iso_mount', f'Mounted {iso_volid} on VM {vmid}', cluster=cluster_id)
             return {'success': True, 'message': f'ISO mounted on {drive}'}
         return {'error': f'Mount failed: {resp.text[:200]}'}, 500
     except Exception as e:
@@ -679,7 +679,7 @@ def _unmount_iso():
         resp = mgr._api_post(url, data={drive: 'none,media=cdrom'})
         if resp.status_code == 200:
             from pegaprox.utils.audit import log_audit
-            log_audit(username, 'portal.iso_unmount', f'Unmounted ISO from VM {vmid}', cluster=mgr.config.name)
+            log_audit(username, 'portal.iso_unmount', f'Unmounted ISO from VM {vmid}', cluster=cluster_id)
             return {'success': True}
         return {'error': f'Unmount failed: {resp.text[:200]}'}, 500
     except Exception as e:
