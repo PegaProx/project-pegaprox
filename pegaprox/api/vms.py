@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -12576,6 +12576,14 @@ def remote_migrate_vm_api(cluster_id, node, vm_type, vmid):
     if denied: return denied
 
     manager = cluster_managers[cluster_id]
+    
+    # NS Jan 2027 (pentest): xapi.vm.migrate for XCP-ng remote migrations
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        from pegaprox.utils.rbac import has_permission
+        user = build_authz_user(request.session.get('user', ''), request.session)
+        if not has_permission(user, 'xapi.vm.migrate'):
+            return jsonify({'error': 'Permission denied: xapi.vm.migrate'}), 403
+    
     data = request.json or {}
     
     target_endpoint = data.get('target_endpoint')
