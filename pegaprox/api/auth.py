@@ -2053,8 +2053,14 @@ def _api_token_admin_scope():
     used IP) and revoke any of it. Same rule the user-management routes use.
     """
     from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
     u = build_authz_user(request.session.get('user', ''), request.session)
-    if u.get('effective_role', u.get('role')) == ROLE_ADMIN:
+    # sec: a raw admin role capped by a tenant override must be scoped to that tenant,
+    # not treated as globally scoped. The authorization path (_has_perm) already accounts
+    # for this via _admin_is_capped_in_own_tenant; the scope helper must do the same or
+    # a tenant-scoped admin.api holder receives unrestricted token inventory and revocation.
+    if (u.get('effective_role', u.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(u)):
         return None
     return u.get('tenant_id', DEFAULT_TENANT_ID)
 
