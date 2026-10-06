@@ -5499,6 +5499,10 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
                 return jsonify({'error': f'Invalid VirtIO RNG: {why}'}), 400
             config_updates[key] = value
 
+    refused = _passthrough_refusal(manager, config_updates)
+    if refused:
+        return refused
+
     refused = _virtiofs_refusal(manager, cluster_id, node, vmid, vm_type, config_updates)
     if refused:
         return refused
@@ -6114,7 +6118,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -6362,6 +6366,33 @@ def _vm_dir_mappings(manager, cluster_id, node, vmid):
         m.pop('digest', None)
     return jsonify({'kind': 'dir', 'node': node, 'supported': True, 'mappings': mappings,
                     'may_add': not confined})
+
+
+def _passthrough_refusal(manager, config_updates):
+    """None when every hostpci*/usb* of a config change may go to PVE, else the response
+    that says why not. Raw PCI/USB device passthrough requires root@pam authorization."""
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return None
+    
+    # Check for raw PCI passthrough
+    pci_keys = [k for k in config_updates if re.fullmatch(r'hostpci\d+', str(k))]
+    for key in pci_keys:
+        value = config_updates[key]
+        if value and _passthrough_is_raw('pci', str(value)):
+            access = manager.pve_root_access()
+            if not access['root']:
+                return _root_refusal(access, 'attach a raw PCI device - use a resource mapping instead')
+    
+    # Check for raw USB passthrough
+    usb_keys = [k for k in config_updates if re.fullmatch(r'usb\d+', str(k))]
+    for key in usb_keys:
+        value = config_updates[key]
+        if value and _passthrough_is_raw('usb', str(value)):
+            access = manager.pve_root_access()
+            if not access['root']:
+                return _root_refusal(access, 'attach a raw USB device - use a resource mapping instead')
+    
+    return None
 
 
 def _virtiofs_refusal(manager, cluster_id, node, vmid, vm_type, config_updates):
