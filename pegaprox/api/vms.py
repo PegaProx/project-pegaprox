@@ -1043,6 +1043,7 @@ def delete_datastore_content(cluster_id, storage_name, volid):
     # scoped tenant admins do routine ISO housekeeping.
     _dc_scoped = False
     _dc_user = build_authz_user(request.session.get('user', ''), request.session)
+    _src = None  # sec: track whether naming heuristics recognized a VMID in this volid
     if caller_is_scoped(_dc_user, cluster_id):
         _dc_scoped = True
         import re as _re
@@ -1085,6 +1086,14 @@ def delete_datastore_content(cluster_id, storage_name, volid):
         resources_url = f"https://{host}:{port}/api2/json/cluster/resources?type=vm"
         resources_response = manager._create_session().get(resources_url, timeout=5)
         
+        # sec: fail-closed for scoped callers with unrecognized volume IDs. The naming heuristics
+        # above (lines 1057-1060) already authorized recognized patterns; for everything else, a
+        # scoped caller must complete a successful inventory scan to prove no VM references exist.
+        # If the scan fails, we cannot establish ownership/non-reference and must block the delete.
+        # Unscoped callers (storage admins) are not subject to this gate — they hold the broader
+        # storage.delete permission and are trusted to manage all content.
+        _inventory_succeeded = resources_response.status_code == 200
+        
         if resources_response.status_code == 200:
             for vm in resources_response.json().get('data', []):
                 vm_node = vm.get('node')
@@ -1122,6 +1131,14 @@ def delete_datastore_content(cluster_id, storage_name, volid):
                             if key.startswith('mp') and isinstance(value, str) and volid in value:
                                 return _in_use_response(f'Volume is mounted in Container {vmid} ({key})', vmid, 'lxc', _dc_scoped, _dc_user,
                                                             cluster_id)
+        
+        # sec: for a scoped caller deleting a volume that was not recognized by the naming heuristics
+        # (lines 1057-1060), require that the inventory scan completed successfully. If it failed, we
+        # cannot prove the volume is unreferenced and must deny the delete. This closes the fail-open
+        # path where a scoped storage operator could exploit a partial discovery failure to delete
+        # foreign content that would normally be blocked by the VM/tenant boundary.
+        if _dc_scoped and _src is None and not _inventory_succeeded:
+            return jsonify({'error': 'Cannot verify volume ownership; cluster inventory unavailable'}), 503
         
         # Delete the volume
         # URL encode the volid properly
@@ -6114,7 +6131,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
