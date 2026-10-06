@@ -474,6 +474,7 @@ def set_user_perms(username):
     
     data = request.json or {}
     tenant_id = data.get('tenant_id')  # if set, update tenant-specific perms
+    _tenant_perms_changed = False  # sec (pentest): track authorization-affecting changes
 
     if tenant_id:
         # MK Jun 2026 (sec-review): only a global admin may set perms in any tenant; a
@@ -538,11 +539,13 @@ def set_user_perms(username):
         if 'tenant_permissions' not in users_db[username]:
             users_db[username]['tenant_permissions'] = {}
         
-        users_db[username]['tenant_permissions'][tenant_id] = {
-            'role': role or users_db[username].get('role', ROLE_VIEWER),
-            'extra': extra,
-            'denied': denied
-        }
+        # sec (pentest): capture whether tenant_permissions changed for this tenant
+        _old_tp = users_db[username]['tenant_permissions'].get(tenant_id, {})
+        _new_tp = {'role': role or users_db[username].get('role', ROLE_VIEWER),
+                   'extra': extra, 'denied': denied}
+        _tenant_perms_changed = (_old_tp != _new_tp)
+        
+        users_db[username]['tenant_permissions'][tenant_id] = _new_tp
         
         log_audit(request.session['user'], 'user.tenant_perms_changed', 
                   f"Changed tenant permissions for {username} in {tenant_id}")
@@ -570,6 +573,18 @@ def set_user_perms(username):
                   f"Changed permissions for: {username}")
     
     save_users(users_db)
+    
+    # sec (pentest): tenant_permissions changes affect authorization context. A custom-role
+    # token preserves its role name and uses it for cluster scope before permission capping.
+    # Revoke tokens when tenant-specific role/permissions change.
+    if tenant_id and _tenant_perms_changed:
+        from pegaprox.utils.auth import revoke_user_api_tokens
+        from pegaprox.utils.realtime import invalidate_user_ws_tokens, invalidate_user_sse_tokens
+        _revoked = revoke_user_api_tokens(username)
+        invalidate_user_ws_tokens(username)
+        invalidate_user_sse_tokens(username)
+        log_audit(request.session['user'], 'user.tokens_revoked',
+                  f"Revoked {_revoked} API token(s) after tenant_permissions change for {username}")
     
     return jsonify({
         'success': True,
@@ -601,6 +616,14 @@ def remove_user_tenant_perms(username, tenant_id):
         save_users(users_db)
         log_audit(request.session['user'], 'user.tenant_perms_removed', 
                   f"Removed tenant permissions for {username} in {tenant_id}")
+        # sec (pentest): removing tenant_permissions changes authorization context
+        from pegaprox.utils.auth import revoke_user_api_tokens
+        from pegaprox.utils.realtime import invalidate_user_ws_tokens, invalidate_user_sse_tokens
+        _revoked = revoke_user_api_tokens(username)
+        invalidate_user_ws_tokens(username)
+        invalidate_user_sse_tokens(username)
+        log_audit(request.session['user'], 'user.tokens_revoked',
+                  f"Revoked {_revoked} API token(s) after tenant_permissions removal for {username}")
     
     return jsonify({'success': True})
 

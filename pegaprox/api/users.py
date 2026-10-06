@@ -987,6 +987,13 @@ def update_user(username):
         if data.get('tenant_id', _ct) != _ct:
             return jsonify({'error': 'Access denied: cannot move users to other tenants'}), 403
 
+    # sec (pentest): track authorization-affecting changes so we can revoke API tokens
+    # that preserve stale role/tenant context. A custom-role token keeps its role name
+    # in effective_role and uses it for cluster scope via _tenant_defining_role before
+    # permission capping runs, so a role/tenant change must invalidate tokens.
+    _role_changed = False
+    _tenant_changed = False
+
     # Update fields
     if 'role' in data:
         # NS: Updated to support custom roles
@@ -1012,6 +1019,8 @@ def update_user(username):
             admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
             if admin_count <= 1:
                 return jsonify({'error': 'Cannot remove admin role from last admin'}), 400
+        # sec (pentest): capture the role change before mutation
+        _role_changed = (user.get('role') != data['role'])
         user['role'] = data['role']
         # clear portal_only if promoted to admin
         if data['role'] == ROLE_ADMIN and user.get('portal_only'):
@@ -1076,6 +1085,8 @@ def update_user(username):
         tenants = load_tenants()
         if data['tenant_id'] not in tenants:
             return jsonify({'error': 'Invalid tenant_id'}), 400
+        # sec (pentest): capture the tenant change before mutation
+        _tenant_changed = (user.get('tenant_id', DEFAULT_TENANT_ID) != data['tenant_id'])
         user['tenant_id'] = data['tenant_id']
     
     _password_changed = False
@@ -1128,6 +1139,24 @@ def update_user(username):
         invalidate_user_sse_tokens(username)  # ...nor a pre-minted SSE token (audit)
         log_audit(request.session['user'], 'user.sessions_invalidated',
                   f"Invalidated sessions after disabling {username}")
+
+    # sec (pentest): role or tenant changes must revoke API tokens. A custom-role token
+    # preserves its role name in effective_role and uses it for cluster scope via
+    # _tenant_defining_role() before permission capping runs. Changing the owner's role,
+    # tenant, or custom-role assignment leaves the token resolving through the former
+    # tenant's cluster list until expiry. Revoke on any authorization-context change.
+    if _role_changed or _tenant_changed:
+        _revoked = revoke_user_api_tokens(username)
+        from pegaprox.utils.realtime import invalidate_user_ws_tokens, invalidate_user_sse_tokens
+        invalidate_user_ws_tokens(username)   # ws_token embeds the stale role
+        invalidate_user_sse_tokens(username)  # sse_token embeds cluster scope
+        _what = []
+        if _role_changed:
+            _what.append('role')
+        if _tenant_changed:
+            _what.append('tenant')
+        log_audit(request.session['user'], 'user.tokens_revoked',
+                  f"Revoked {_revoked} API token(s) after {'/'.join(_what)} change for {username}")
 
     logging.info(f"Admin '{request.session['user']}' updated user '{username}'")
     log_audit(request.session['user'], 'user.updated', f"Updated user: {username}")
