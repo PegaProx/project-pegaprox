@@ -1515,9 +1515,9 @@ ROLE_TEMPLATES = {
     },
     'tenant_viewer': {
         'name': 'Tenant Viewer',
-        'description': 'Read-only + console',
+        'description': 'Read-only access',
         'permissions': [
-            'vm.view', 'vm.console',
+            'vm.view',
             'cluster.view',
             'node.view',
             'storage.view',

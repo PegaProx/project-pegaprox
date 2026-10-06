@@ -237,7 +237,7 @@ ROLE_PERMISSIONS = {
         'xapi.host.view', 'xapi.storage.view', 'xapi.network.view', 'xapi.template.view',
     ],
     ROLE_VIEWER: [
-        'vm.view', 'vm.console',
+        'vm.view',
         'cluster.view',
         'node.view',
         'storage.view',
@@ -251,7 +251,7 @@ ROLE_PERMISSIONS = {
         'pbs.view', 'pbs.datastore.view', 'pbs.jobs.view', 'pbs.tasks.view',
         'pbs.notifications.view', 'pbs.traffic.view', 'pbs.disks.view', 'pbs.subscription.view',
         'vmware.view', 'vmware.vm.view', 'vmware.host.view', 'vmware.datastore.view', 'vmware.network.view',
-        'xapi.view', 'xapi.vm.view', 'xapi.host.view', 'xapi.storage.view', 'xapi.network.view',
+        'xapi.view', 'xapi.host.view', 'xapi.storage.view', 'xapi.network.view',
         'xapi.template.view',
     ],
 }
