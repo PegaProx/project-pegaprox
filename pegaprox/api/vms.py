@@ -39,6 +39,26 @@ def _require_vm_access(cluster_id, vmid, perm, vm_type=None):
     if not user_can_access_vm(user, cluster_id, vmid, perm, vm_type):
         return jsonify({'error': f'Access denied to this VM ({perm})'}), 403
     return None
+
+
+def _require_xapi_permission(cluster_id, xapi_perm):
+    """XCP-ng provider-specific authorization guard. Pentest Dec 2026: mutation routes
+    enforced only generic permissions (vm.delete, vm.clone, vm.snapshot, vm.config) and
+    then dispatched to XCP-ng manager methods, despite separate xapi.vm.* capabilities.
+    A custom or tenant-scoped role with generic VM access but without the corresponding
+    XCP-ng permission could mutate an otherwise in-scope XCP-ng VM. Returns None when
+    the cluster is not XCP-ng or the user has the required xapi permission, else a
+    jsonify(403) tuple the caller must return."""
+    if cluster_id not in cluster_managers:
+        return None
+    manager = cluster_managers[cluster_id]
+    if getattr(manager, 'cluster_type', 'proxmox') != 'xcpng':
+        return None
+    from pegaprox.utils.rbac import has_permission
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not has_permission(user, xapi_perm):
+        return jsonify({'error': f'Permission denied: {xapi_perm}'}), 403
+    return None
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
@@ -4279,6 +4299,10 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.clone', vm_type):
         return jsonify({'error': 'Permission denied: vm.clone'}), 403
     
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.clone')
+    if denied: return denied
+    
     manager = cluster_managers[cluster_id]
     data = request.json or {}
     
@@ -6114,7 +6138,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -6721,6 +6745,11 @@ def add_disk_api(cluster_id, node, vm_type, vmid):
         return err
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
     if denied: return denied
+    
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
+    if denied: return denied
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -6759,6 +6788,10 @@ def remove_disk_api(cluster_id, node, vm_type, vmid, disk_id):
     if not ok:
         return err
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
     if denied: return denied
 
     if cluster_id not in cluster_managers:
@@ -6804,6 +6837,10 @@ def move_disk_api(cluster_id, node, vm_type, vmid, disk_id):
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
     if denied: return denied
 
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
+    if denied: return denied
+
     manager = cluster_managers[cluster_id]
     data = request.json or {}
     target_storage = data.get('storage')
@@ -6838,6 +6875,11 @@ def set_cdrom_api(cluster_id, node, vmid):
         return err
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu')
     if denied: return denied
+    
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
+    if denied: return denied
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -6876,6 +6918,11 @@ def add_network_api(cluster_id, node, vm_type, vmid):
         return err
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
     if denied: return denied
+    
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
+    if denied: return denied
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -6902,6 +6949,10 @@ def update_network_api(cluster_id, node, vm_type, vmid, net_id):
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
     if denied: return denied
 
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
+    if denied: return denied
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -6926,6 +6977,10 @@ def remove_network_api(cluster_id, node, vm_type, vmid, net_id):
     if not ok:
         return err
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
+    if denied: return denied
+
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
     if denied: return denied
 
     if cluster_id not in cluster_managers:
@@ -6957,6 +7012,11 @@ def toggle_network_link_api(cluster_id, node, vm_type, vmid, net_id):
         return err
     denied = _require_vm_access(cluster_id, vmid, 'vm.config', vm_type)
     if denied: return denied
+    
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.config')
+    if denied: return denied
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -7030,6 +7090,10 @@ def create_snapshot_api(cluster_id, node, vm_type, vmid):
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
     
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.snapshot')
+    if denied: return denied
+    
     mgr = cluster_managers[cluster_id]
     data = request.json or {}
     
@@ -7061,6 +7125,10 @@ def delete_snapshot_api(cluster_id, node, vm_type, vmid, snapname):
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
     
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.snapshot')
+    if denied: return denied
+    
     mgr = cluster_managers[cluster_id]
     result = mgr.delete_snapshot(node, vmid, vm_type, snapname)
     
@@ -7085,6 +7153,10 @@ def rollback_snapshot_api(cluster_id, node, vm_type, vmid, snapname):
     user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
+    
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.snapshot')
+    if denied: return denied
     
     mgr = cluster_managers[cluster_id]
     result = mgr.rollback_snapshot(node, vmid, vm_type, snapname)
@@ -7241,6 +7313,10 @@ def create_efficient_snapshot_api(cluster_id, node, vm_type, vmid):
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
 
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.snapshot')
+    if denied: return denied
+
     mgr = cluster_managers[cluster_id]
     data = request.json or {}
 
@@ -7280,6 +7356,10 @@ def delete_efficient_snapshot_api(cluster_id, node, vm_type, vmid, snap_id):
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
 
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.snapshot')
+    if denied: return denied
+
     mgr = cluster_managers[cluster_id]
     result = mgr.delete_efficient_snapshot(node, vmid, snap_id)
 
@@ -7305,6 +7385,10 @@ def rollback_efficient_snapshot_api(cluster_id, node, vm_type, vmid, snap_id):
     user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.snapshot', vm_type):
         return jsonify({'error': 'Permission denied: vm.snapshot'}), 403
+
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.snapshot')
+    if denied: return denied
 
     mgr = cluster_managers[cluster_id]
     result = mgr.rollback_efficient_snapshot(node, vmid, vm_type, snap_id)
@@ -12214,6 +12298,10 @@ def delete_vm_api(cluster_id, node, vm_type, vmid):
     user = build_authz_user(request.session.get('user', ''), request.session)
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.delete', vm_type):
         return jsonify({'error': 'Permission denied: vm.delete'}), 403
+    
+    # Pentest Dec 2026: XCP-ng provider-specific authorization
+    denied = _require_xapi_permission(cluster_id, 'xapi.vm.delete')
+    if denied: return denied
     
     manager = cluster_managers[cluster_id]
     data = request.json or {}
