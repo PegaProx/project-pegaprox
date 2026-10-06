@@ -2589,6 +2589,17 @@ def get_backup_jobs(cluster_id):
         return jsonify([])
 
 
+def _is_pve_true(value):
+    """Parse a value using Proxmox's boolean grammar (case-insensitive 1/on/yes/true).
+    Returns True if the value is truthy per PVE::JSONSchema::parse_boolean, False otherwise.
+    This matches the _pve_bool helper in vms.py and ensures authorization checks recognize
+    the same true spellings that Proxmox itself accepts."""
+    text = str(value or '').strip()
+    if not text or not text.isascii():
+        return False
+    return text.lower() in ('1', 'on', 'yes', 'true')
+
+
 def _authz_backup_targets(cluster_id, data):
     """NS Aug 2026 (Aikido #469089226) — a backup.schedule holder must own every VM a backup
     job targets. Explicit vmids are authorized per-VM; a cluster-wide (all=1) or pool selection
@@ -2603,7 +2614,7 @@ def _authz_backup_targets(cluster_id, data):
     # whose all=1/pool/exclude/foreign-vmid fields survive into `data` on PUT and get re-checked.
     _sel = str(data.get('selMode') or data.get('selmode') or '').strip().lower()
     _vmids = [x.strip() for x in str(data.get('vmid') or '').split(',') if x.strip()]
-    if (str(data.get('all', '')).strip() in ('1', 'true', 'True', 'yes')
+    if (_is_pve_true(data.get('all'))
             or (data.get('pool') or '').strip()
             or (data.get('exclude') or '').strip()
             or _sel in ('all', 'exclude', 'pool')
