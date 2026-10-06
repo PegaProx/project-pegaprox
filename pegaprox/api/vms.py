@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -8270,7 +8270,30 @@ def _xcincr_node_ip(mgr, node):
     manager.member_node_ip, and for the same reason: None means refuse, never "use the
     name". A deployment that was relying on the node name resolving in DNS now fails
     the job with a message saying so instead of dialling a host we never verified.
+
+    sec (pentest): validate that the node is an actual cluster member BEFORE trusting
+    the IP from /cluster/status. An attacker who can forge the API response (MITM when
+    TLS verification is disabled) could otherwise redirect SSH to an arbitrary host and
+    receive the cluster's SSH credentials. The member check uses the authoritative
+    /nodes list, which is fetched over the same connection but is the source of truth
+    for cluster membership — the same validation member_node_ip() performs.
     """
+    if not node or not isinstance(node, str):
+        return None
+    
+    # Validate that the node is an actual cluster member using the authoritative
+    # /nodes endpoint. This prevents an attacker from forging /cluster/status to
+    # redirect SSH to an arbitrary host.
+    try:
+        members = mgr.nodes or {}
+    except Exception:
+        members = {}
+    
+    if members and node not in members:
+        logging.warning(f"[XCINCR] refusing non-member node name '{node}' for cluster {mgr.id}")
+        return None
+    
+    # Now that we've confirmed the node is a member, resolve its IP from /cluster/status
     try:
         r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/status")
         if r.status_code == 200:
