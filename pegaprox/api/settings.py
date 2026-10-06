@@ -32,6 +32,7 @@ from pegaprox.api.helpers import (
     acme_dns_config_from_settings, require_unconfined,
     evacuation_options, evacuation_options_said, rolling_options_intro, rolling_node_templates,
     rolling_moved_templates, rolling_rules_give_way, rolling_rules_back_on,
+    acting_user,
 )
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
@@ -2234,7 +2235,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2423,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -3239,6 +3240,41 @@ def get_audit_log_api():
         action=action_filter,
         verify_integrity=verify
     )
+    
+    # sec (audit): tenant-scoped holders of admin.audit can export the global audit log.
+    # Derive the caller's reachable clusters and filter entries to only those clusters.
+    # Admins (get_user_clusters → None) see all; tenant-scoped callers see only their scope.
+    # Mirrors the cluster-specific audit route's check_cluster_access and the audit-search
+    # endpoint's admin-only gate. MK Sep 2026, private disclosure.
+    from pegaprox.utils.rbac import get_user_clusters
+    user = acting_user()
+    allowed_clusters = get_user_clusters(user, include_pools=False)
+    
+    if allowed_clusters is not None:
+        # Tenant-scoped: filter to only entries from allowed clusters
+        # Build cluster_id → cluster_name mapping for filtering
+        cluster_names = set()
+        for cid in allowed_clusters:
+            if cid in cluster_managers:
+                cluster_names.add(cluster_managers[cid].config.name)
+        
+        # Filter entries: keep only those with a cluster field matching allowed clusters,
+        # or entries with no cluster field (global/system events belong to the caller's scope
+        # only if they are the acting user — e.g., their own login/logout events)
+        username = user.get('username', '')
+        filtered_entries = []
+        for entry in entries:
+            entry_cluster = entry.get('cluster', '')
+            entry_user = entry.get('user', '')
+            
+            # Include if cluster matches allowed set
+            if entry_cluster and entry_cluster in cluster_names:
+                filtered_entries.append(entry)
+            # Include global events (no cluster) only if they are the caller's own actions
+            elif not entry_cluster and entry_user == username:
+                filtered_entries.append(entry)
+        
+        entries = filtered_entries
 
     if fmt == 'csv':
         # NS Apr 2026 — compliance-ready CSV. Streamed to avoid holding the
