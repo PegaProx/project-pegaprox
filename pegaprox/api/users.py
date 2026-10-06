@@ -2264,6 +2264,27 @@ def add_pool_permission_api(cluster_id, pool_id):
     if subject_type not in ('user', 'group'):
         return jsonify({'error': 'subject_type must be "user" or "group"'}), 400
     
+    # sec (pentest Oct 2026): reject ambiguous bare group names. A bare grant like "PVE-Admins"
+    # would match ANY DN with that leaf name (CN=PVE-Admins,OU=Production,... AND
+    # CN=PVE-Admins,OU=Contractors,...), enabling cross-organizational-unit authorization bypass.
+    # Require full DNs (containing "=") or hierarchical paths (starting with "/") to ensure
+    # unique directory identity. This prevents the leaf-name extraction in _group_grant_spellings
+    # from creating authorization ambiguity.
+    if subject_type == 'group':
+        _sid = (subject_id or '').strip()
+        if not _sid:
+            return jsonify({'error': 'subject_id required'}), 400
+        # A full DN contains "=" (e.g., "CN=PVE-Admins,OU=Production,DC=corp,DC=local")
+        # A hierarchical path starts with "/" (e.g., "/Org/PVE-Admins" from OIDC/Keycloak)
+        # Bare names like "PVE-Admins" are ambiguous and must be rejected
+        if '=' not in _sid and not _sid.startswith('/'):
+            return jsonify({
+                'error': 'Group grants require a full distinguished name (DN) or hierarchical path. '
+                         'Bare group names are ambiguous and could match multiple distinct groups. '
+                         'Example DN: "CN=PVE-Admins,OU=Production,DC=corp,DC=local". '
+                         'Example path: "/Org/PVE-Admins".'
+            }), 400
+    
     # Validate permissions
     invalid_perms = [p for p in permissions if p not in POOL_PERMISSIONS]
     if invalid_perms:
