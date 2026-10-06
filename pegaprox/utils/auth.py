@@ -691,11 +691,14 @@ def _load_sessions_legacy():
         except Exception as e:
             logging.debug(f"Could not load legacy sessions file: {e}")
 
-def create_session(username: str, role: str, remember: bool = False) -> str:
+def create_session(username: str, role: str, remember: bool = False, pending_2fa_enrollment: bool = False) -> str:
     """Create a new session for a user
 
     NS: Also does session rotation - invalidates old sessions for same user
     This prevents session fixation attacks and limits concurrent sessions
+    
+    Security: pending_2fa_enrollment marks sessions that require 2FA setup before
+    accessing protected routes (enforced server-side in require_auth decorator)
     """
     session_id = generate_session_id()
 
@@ -724,6 +727,7 @@ def create_session(username: str, role: str, remember: bool = False) -> str:
             'ip': get_client_ip() if request else None,
             'user_agent': request.headers.get('User-Agent', '')[:200] if request else None,
             'remember': remember,  # NS: persistent session (30 days instead of default)
+            'pending_2fa_enrollment': pending_2fa_enrollment,  # Security: server-side enforcement of forced 2FA
         }
 
     # Save sessions to disk (outside lock - I/O operation)
@@ -1178,6 +1182,27 @@ def require_auth(roles: list = None, perms: list = None):
                 pass
             if not user.get('enabled', True):
                 return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
+            
+            # Security: Enforce server-side 2FA enrollment gate. Sessions marked as
+            # pending_2fa_enrollment can only access the 2FA setup/verify endpoints and
+            # session status. All other protected routes are blocked until enrollment completes.
+            if session.get('pending_2fa_enrollment'):
+                # Allow access only to 2FA setup/verify endpoints and session check
+                from flask import request as _flask_req
+                allowed_paths = [
+                    '/api/auth/2fa/setup',
+                    '/api/auth/2fa/verify', 
+                    '/api/auth/2fa/status',
+                    '/api/auth/check',
+                    '/api/auth/logout',
+                ]
+                current_path = _flask_req.path if _flask_req else ''
+                if not any(current_path == p for p in allowed_paths):
+                    return jsonify({
+                        'error': 'Two-factor authentication setup required',
+                        'code': 'PENDING_2FA_ENROLLMENT',
+                        'requires_2fa_setup': True,
+                    }), 403
             
             # MK May 2026 (CodeAnt CWE-269) — DO NOT refresh role from the user record
             # when this is an API-token session. The token has its own role bound at

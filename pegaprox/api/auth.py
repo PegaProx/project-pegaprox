@@ -1045,26 +1045,12 @@ def auth_login():
         except Exception as e:
             logging.warning(f"Failed to migrate password for {username}: {e}")
     
-    # Create session
-    remember = data.get('remember', False)
-    session_id = create_session(username, user['role'], remember=bool(remember))
-    
-    # Update last login - not on a standby, where no login writes the synced row
-    if not ldap_row_untouched and not ha.is_standby():
-        user['last_login'] = datetime.now().isoformat()
-        save_single_user(username, user)
-    
-    logging.info(f"User '{username}' logged in successfully")
-    log_audit(username, 'user.login', f"User logged in" + (" (with 2FA)" if user.get('totp_enabled') else ""))
-
-    # NS: Mar 2026 - removed auto-allow CORS origin on login (security audit)
-    # Was allowing any authenticated origin permanently. Use PEGAPROX_ALLOWED_ORIGINS env var instead.
-
     # NS: Get default theme for response
     settings = load_server_settings()
     default_theme = settings.get('default_theme', 'proxmoxDark')
     
     # NS: Feb 2026 - Check if user needs to set up 2FA (force_2fa setting)
+    # Security: Check BEFORE creating session so we can mark it as pending
     requires_2fa_setup = False
     if settings.get('force_2fa') and TOTP_AVAILABLE:
         has_2fa = user.get('totp_enabled', False)
@@ -1084,6 +1070,22 @@ def auth_login():
             else:
                 requires_2fa_setup = True
     
+    # Create session - mark as pending_2fa_enrollment if required
+    remember = data.get('remember', False)
+    session_id = create_session(username, user['role'], remember=bool(remember),
+                                 pending_2fa_enrollment=requires_2fa_setup)
+    
+    # Update last login - not on a standby, where no login writes the synced row
+    if not ldap_row_untouched and not ha.is_standby():
+        user['last_login'] = datetime.now().isoformat()
+        save_single_user(username, user)
+    
+    logging.info(f"User '{username}' logged in successfully" + (" (pending 2FA enrollment)" if requires_2fa_setup else ""))
+    log_audit(username, 'user.login', f"User logged in" + (" (with 2FA)" if user.get('totp_enabled') else "") + (" (pending 2FA enrollment)" if requires_2fa_setup else ""))
+
+    # NS: Mar 2026 - removed auto-allow CORS origin on login (security audit)
+    # Was allowing any authenticated origin permanently. Use PEGAPROX_ALLOWED_ORIGINS env var instead.
+
     # NS: Debug log for theme sync issues
     user_theme = user.get('theme', '') or default_theme
     logging.info(f"[LOGIN] User {username} theme from DB: '{user.get('theme', '')}', using: '{user_theme}'")
@@ -1956,6 +1958,16 @@ def verify_2fa_setup():
     user['totp_enabled'] = True
     del user['totp_pending_secret']
     save_single_user(username, user)
+    
+    # Security: Clear the pending_2fa_enrollment flag from the session now that enrollment is complete
+    session_id = request.cookies.get('session_id') or request.headers.get('X-Session-ID')
+    if session_id:
+        from pegaprox.utils.auth import active_sessions, sessions_lock
+        with sessions_lock:
+            if session_id in active_sessions:
+                active_sessions[session_id]['pending_2fa_enrollment'] = False
+        from pegaprox.utils.auth import save_sessions
+        save_sessions()
     
     logging.info(f"User '{username}' enabled 2FA")
     log_audit(username, '2fa.enabled', "User enabled 2FA")
