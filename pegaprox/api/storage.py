@@ -2306,6 +2306,13 @@ def download_template(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (pentest): storage mutation with caller-selected node + datastore is a whole-cluster
+    # write operation. check_cluster_access admits VM-ACL / pool-scoped callers (the #248 / #555
+    # fallbacks), but those callers must not write arbitrary content to cluster storage outside
+    # their VM/pool scope. Require unconfined access for storage mutation operations.
+    confinement_err = require_unconfined(cluster_id)
+    if confinement_err:
+        return confinement_err
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2465,6 +2472,13 @@ def download_from_url(cluster_id, node, storage):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # sec (pentest): storage mutation with caller-selected node + datastore is a whole-cluster
+    # write operation. check_cluster_access admits VM-ACL / pool-scoped callers (the #248 / #555
+    # fallbacks), but those callers must not write arbitrary content to cluster storage outside
+    # their VM/pool scope. Require unconfined access for storage mutation operations.
+    confinement_err = require_unconfined(cluster_id)
+    if confinement_err:
+        return confinement_err
 
     manager, error = get_connected_manager(cluster_id)
     if error:
