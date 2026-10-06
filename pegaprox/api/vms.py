@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -9572,6 +9572,49 @@ def get_hardware_options():
 # tenant. Every console entry point must also confirm THIS user is authorised for
 # THIS cluster AND VM. Works without request.session (the async/standalone
 # handlers don't have one) by taking the resolved user dict directly.
+
+
+def _load_console_user(username):
+    """Load and validate user record for console authorization.
+    
+    Returns (user_dict, error_message). If error_message is not None, the caller
+    must deny access. Fails closed when load_users() returns empty (database read
+    failure) or when the username is not found in the loaded users.
+    
+    Security: VNC authorization must not proceed with a synthetic username-only
+    identity. When load_users() catches a database exception and returns {}, or
+    when the authenticated username is not present in the loaded table, the
+    missing role/tenant/VM restrictions would receive default RBAC behavior that
+    can grant unrestricted console access. This gate ensures every console path
+    holds a persisted account record before reaching _console_authz().
+    """
+    users = load_users()
+    if not users:
+        # load_users() returned empty — either uninitialized install or database
+        # read failure. The legacy fallback (_load_users_legacy) also returns {}
+        # on error. Fail closed: no console access during a user-table outage.
+        logging.error(f"Console auth denied for {username}: user table load returned empty")
+        return None, 'user table unavailable'
+    
+    user = users.get(username)
+    if user is None:
+        # Authenticated username not found in loaded users. The token/session was
+        # valid (authentication succeeded) but the account no longer exists or was
+        # never persisted. Fail closed: do not synthesize an identity.
+        logging.warning(f"Console auth denied for {username}: account not found in user table")
+        return None, 'account not found'
+    
+    if not isinstance(user, dict):
+        # Sanity check: load_users() logs this condition but returns the corrupt
+        # entry. Do not proceed with non-dict user data.
+        logging.error(f"Console auth denied for {username}: user data is not a dict")
+        return None, 'invalid account data'
+    
+    # Persisted account record loaded successfully. Add username for _console_authz.
+    user['username'] = username
+    return user, None
+
+
 def _console_authz(user, cluster_id, vmid, vm_type=None):
     """Return (ok, reason) — user must have cluster access AND per-VM console access."""
     from pegaprox.utils.rbac import get_user_clusters, load_vm_acls, user_can_access_vm
@@ -9848,13 +9891,14 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Auth required', 'code': 'AUTH_REQUIRED'}), 401
 
     # Check permissions
-    users = load_users()
-    user = users.get(auth_user, {})
-    user_perms = get_user_permissions(user)
+    # Security: load and validate persisted user record. Fail closed if load_users()
+    # returned empty (database failure) or if the authenticated username is not found.
+    user, load_err = _load_console_user(auth_user)
+    if load_err:
+        return jsonify({'error': 'Permission denied', 'code': 'USER_LOAD_FAILED', 'detail': load_err}), 403
     # MK 2026-06-10 (#537/RBAC): coarse "global vm.console perm OR admin" pre-check dropped —
     # the per-VM _console_authz gate below is authoritative and portal/custom-role aware.
     # H-1/H-2: cluster + per-VM gate (vm.console alone isn't enough)
-    user['username'] = auth_user
     _ok, _why = _console_authz(user, cluster_id, vmid, vm_type)
     if not _ok:
         return jsonify({'error': 'Permission denied', 'code': 'INSUFFICIENT_PERMISSIONS'}), 403
@@ -9970,10 +10014,13 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 print("ERROR: Invalid or expired WS token")
                 await websocket.close(1002, "Invalid token")
                 return
-            # check perms from token
-            users = load_users()
-            user = users.get(token_data['user'], {})
-            user['username'] = token_data['user']
+            # Security: load and validate persisted user record. Fail closed if load_users()
+            # returned empty (database failure) or if the authenticated username is not found.
+            user, load_err = _load_console_user(token_data['user'])
+            if load_err:
+                print(f"ERROR: User load failed for {token_data['user']}: {load_err}")
+                await websocket.close(1002, "Permission denied")
+                return
             # MK 2026-06-10 (#537 abyss1): the per-VM _console_authz gate below (H-1/H-2) is the
             # authoritative check (cluster + per-VM vm.console via user_can_access_vm). The old
             # coarse "global vm.console perm OR admin" pre-check here rejected Client-Portal users
@@ -9986,9 +10033,13 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 print("ERROR: Invalid session")
                 await websocket.close(1002, "Invalid session")
                 return
-            users = load_users()
-            user = users.get(session['user'], {})
-            user['username'] = session['user']
+            # Security: load and validate persisted user record. Fail closed if load_users()
+            # returned empty (database failure) or if the authenticated username is not found.
+            user, load_err = _load_console_user(session['user'])
+            if load_err:
+                print(f"ERROR: User load failed for {session['user']}: {load_err}")
+                await websocket.close(1002, "Permission denied")
+                return
             # #537: per-VM _console_authz below is the authoritative gate (see ws_token note).
             print(f"User {session['user']} authenticated for VNC (session)")
         else:
@@ -10624,9 +10675,13 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             try: ws.send('Invalid or expired token')
             except: pass
             return
-        users = load_users()
-        user = users.get(token_data['user'], {})
-        user_perms = get_user_permissions(user)
+        # Security: load and validate persisted user record. Fail closed if load_users()
+        # returned empty (database failure) or if the authenticated username is not found.
+        user, load_err = _load_console_user(token_data['user'])
+        if load_err:
+            try: ws.send(f'Permission denied: {load_err}')
+            except: pass
+            return
         # #537/RBAC: coarse "global vm.console OR admin" pre-check dropped — _console_authz below is authoritative.
         auth_user = token_data['user']
     elif session_id:
@@ -10635,9 +10690,13 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             try: ws.send('Invalid session')
             except: pass
             return
-        users = load_users()
-        user = users.get(session['user'], {})
-        user_perms = get_user_permissions(user)
+        # Security: load and validate persisted user record. Fail closed if load_users()
+        # returned empty (database failure) or if the authenticated username is not found.
+        user, load_err = _load_console_user(session['user'])
+        if load_err:
+            try: ws.send(f'Permission denied: {load_err}')
+            except: pass
+            return
         # #537/RBAC: coarse pre-check dropped — _console_authz below is authoritative.
         auth_user = session['user']
     else:
@@ -10648,7 +10707,6 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
     print(f"User {auth_user} authenticated for VNC")
 
     # H-1/H-2: cluster + per-VM gate before this proxy self-mints a PVE ticket
-    user['username'] = auth_user
     _ok, _why = _console_authz(user, cluster_id, vmid, vm_type)
     if not _ok:
         try: ws.send('Permission denied')
@@ -11885,8 +11943,16 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         return
 
     # Check permissions - require node.shell or admin role
-    users = load_users()
-    user = users.get(session['user'], {})
+    # Security: load and validate persisted user record. Fail closed if load_users()
+    # returned empty (database failure) or if the authenticated username is not found.
+    user, load_err = _load_console_user(session['user'])
+    if load_err:
+        logging.error(f"SHELL WS: User load failed for {session['user']}: {load_err}")
+        try:
+            ws.send('{"status":"error","message":"Permission denied"}')
+        except:
+            pass
+        return
     user_perms = get_user_permissions(user)
     # MK 2026-06-10 (RBAC): gate on the node.shell perm only — admin holds it via
     # all-perms so the explicit admin bypass was redundant; a custom role with node.shell now works.
