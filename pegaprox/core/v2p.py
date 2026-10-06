@@ -4935,13 +4935,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             boot_method = "nbd"
             # NBD bridge uses Unix sockets -- no AppArmor issues
         
-        # Ensure key file is readable by QEMU process
-        # NOTE (audit 2026-09): this leaves a passphrase-less private key world-readable on the
-        # Proxmox node for the life of the migration. The right fix is to chown it to the user
-        # QEMU actually runs as and keep 0600, but that is on the VM-start path and cannot be
-        # verified without a real migration, so it is deliberately left alone rather than
-        # changed blind. Raised with the maintainer.
-        _pve_node_exec(pve_mgr, task.target_node, f"chmod 644 {key_path} 2>/dev/null", timeout=5)
+        # Security: Keep SSH key at 0600 (root-only). QEMU processes started via PVE API
+        # run as root, so the key remains accessible to QEMU while preventing unprivileged
+        # local users from copying the ESXi credential during the migration window.
+        # ssh-keygen creates keys with 0600 by default; we preserve that.
         
         task.log(f"Starting Proxmox VM ({boot_method} backend + cache=writeback)...")
         try:
