@@ -372,6 +372,12 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
         user['auth_source'] = 'ldap'
         user['ldap_dn'] = ldap_result.get('user_dn', '')
         user['last_ldap_sync'] = datetime.now().isoformat()
+        # NS Dec 2026 (pentest) — clear local credentials when LDAP takes ownership.
+        # A former local password must not remain usable after the account is marked
+        # LDAP-owned; the directory is authoritative and a retained hash would allow
+        # authentication after directory removal or during LDAP unavailability.
+        user['password_hash'] = ''
+        user['password_salt'] = ''
         
         # MK: Sync tenant assignment from LDAP group mapping
         #

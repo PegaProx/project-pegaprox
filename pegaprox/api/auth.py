@@ -921,11 +921,14 @@ def auth_login():
             logging.warning(f"Login attempt for disabled user: {username} from {client_ip}")
             return jsonify({'error': 'Invalid credentials'}), 401
 
-        # NS: LDAP-only users cannot login with local password
-        if user.get('auth_source') == 'ldap' and not user.get('password_hash'):
+        # NS Dec 2026 (pentest) — LDAP-owned accounts must not fall back to local password.
+        # The directory is authoritative; a retained local hash must not authenticate after
+        # the account is removed or disabled in LDAP, or during LDAP unavailability. Block
+        # regardless of whether a hash is present (legacy rows may retain one).
+        if user.get('auth_source') == 'ldap':
             dummy_verify_password(password)
-            logging.warning(f"LDAP user '{username}' tried local login but has no local password")
-            return jsonify({'error': 'Please use LDAP credentials to sign in'}), 401
+            logging.warning(f"LDAP user '{username}' attempted local authentication from {client_ip}")
+            return jsonify({'error': 'Invalid credentials'}), 401
         
         # Verify password
         if not verify_password(password, user['password_salt'], user['password_hash']):
