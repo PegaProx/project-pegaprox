@@ -2234,7 +2234,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2422,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -3702,13 +3702,17 @@ def get_status():
 
 
 @bp.route('/api/support-bundle', methods=['GET'])
-@require_auth(perms=['admin.settings'])
+@require_auth(perms=['admin.settings', 'admin.audit'])
 def generate_support_bundle():
     """Generate a support bundle with logs and system info for troubleshooting
     
     NS: Feb 2026 - Like VMware's support bundle feature
     Collects all relevant diagnostic information into a ZIP file
     Sensitive data (passwords, tokens, secrets) are automatically redacted
+    
+    MK: Dec 2026 (sec-audit) - Requires both admin.settings AND admin.audit because
+    the bundle exports audit logs, SSH session records, user lists, and cluster
+    configurations. Confines tenant-scoped callers to their permitted clusters.
     """
     import zipfile
     import io
@@ -3719,6 +3723,14 @@ def generate_support_bundle():
         username = request.session.get('user', 'unknown')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         bundle_prefix = f"pegaprox_support_{timestamp}"
+        
+        # MK: Dec 2026 (sec-audit) - Determine caller's cluster scope for filtering
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import get_user_clusters
+        _authz_user = build_authz_user(username, request.session)
+        _allowed_clusters = get_user_clusters(_authz_user)
+        # _allowed_clusters is None for global admins (all clusters), or a list for scoped users
+        caller_tenant = _authz_user.get('tenant_id', 'default')
         
         log_audit(username, 'support.bundle_generated', 'Generated support bundle for troubleshooting')
         
@@ -3752,8 +3764,11 @@ def generate_support_bundle():
             zf.writestr(f"{bundle_prefix}/system_info.json", json.dumps(system_info, indent=2))
             
             # 2. Cluster Status (sanitized)
+            # MK: Dec 2026 (sec-audit) - Filter to caller's permitted clusters
             cluster_status = []
             for cluster_id, mgr in cluster_managers.items():
+                if _allowed_clusters is not None and cluster_id not in _allowed_clusters:
+                    continue  # Skip clusters outside caller's scope
                 cluster_status.append({
                     'id': cluster_id,
                     'name': mgr.config.name,
@@ -3778,37 +3793,74 @@ def generate_support_bundle():
                 zf.writestr(f"{bundle_prefix}/ssh_stats_error.txt", f"Failed: {str(e)}")
             
             # 4. SSE Connection Info
-            sse_info = {'active_clients': len(sse_clients), 'clients': []}
+            # MK: Dec 2026 (sec-audit) - Filter to caller's permitted clusters
+            sse_info = {'active_clients': 0, 'clients': []}
             try:
                 with sse_clients_lock:
                     for client_id, client_data in list(sse_clients.items())[:50]:
+                        client_clusters = client_data.get('clusters', [])
+                        # For scoped users, only include SSE clients watching their clusters
+                        if _allowed_clusters is not None:
+                            # Check if any of the client's clusters are in the allowed set
+                            if not any(c in _allowed_clusters for c in client_clusters):
+                                continue
                         sse_info['clients'].append({
                             'user': client_data.get('user', 'unknown'),
-                            'clusters': client_data.get('clusters', []),
+                            'clusters': client_clusters,
                             'connected_at': client_data.get('connected_at'),
                             'auth_method': client_data.get('auth_method')
                         })
+                sse_info['active_clients'] = len(sse_info['clients'])
             except Exception as e:
                 sse_info['error'] = str(e)
             zf.writestr(f"{bundle_prefix}/sse_connections.json", json.dumps(sse_info, indent=2))
             
             # 5. Active Sessions (anonymized)
+            # MK: Dec 2026 (sec-audit) - Filter to caller's tenant
             _sessions = _live_sessions()
-            sessions_info = {'total_active': len(_sessions), 'sessions': []}
+            sessions_info = {'total_active': 0, 'sessions': []}
             for sid, sess in list(_sessions.items())[:50]:
+                # For scoped users, only include sessions from their tenant
+                if _allowed_clusters is not None:
+                    sess_user = sess.get('user', '')
+                    # Load the session user's tenant to compare
+                    try:
+                        sess_user_data = load_users().get(sess_user, {})
+                        sess_tenant = sess_user_data.get('tenant_id', 'default')
+                        if sess_tenant != caller_tenant:
+                            continue  # Skip sessions from other tenants
+                    except:
+                        continue  # Skip if we can't determine tenant
+                
                 sessions_info['sessions'].append({
                     'user': sess.get('user', 'unknown'),
                     'role': sess.get('role', 'unknown'),
                     'created_at': sess.get('created_at'),
                     'last_activity': sess.get('last_activity'),
                 })
+            sessions_info['total_active'] = len(sessions_info['sessions'])
             zf.writestr(f"{bundle_prefix}/sessions_info.json", json.dumps(sessions_info, indent=2))
             
             # 6. Recent Audit Logs (last 500 entries)
+            # MK: Dec 2026 (sec-audit) - Filter to caller's permitted clusters
             try:
                 db = get_db()
                 cursor = db.conn.cursor()
-                cursor.execute('SELECT timestamp, user, action, details, ip_address FROM audit_log ORDER BY timestamp DESC LIMIT 500')
+                
+                # Build query with cluster filtering for scoped users
+                if _allowed_clusters is None:
+                    # Global admin - all audit logs
+                    cursor.execute('SELECT timestamp, user, action, details, ip_address, cluster FROM audit_log ORDER BY timestamp DESC LIMIT 500')
+                else:
+                    # Scoped user - only logs from their clusters (or cluster-less system events)
+                    placeholders = ','.join('?' * len(_allowed_clusters))
+                    cursor.execute(f'''
+                        SELECT timestamp, user, action, details, ip_address, cluster 
+                        FROM audit_log 
+                        WHERE cluster IS NULL OR cluster = '' OR cluster IN ({placeholders})
+                        ORDER BY timestamp DESC LIMIT 500
+                    ''', _allowed_clusters)
+                
                 audit_entries = []
                 for row in cursor.fetchall():
                     audit_entries.append({
@@ -3816,7 +3868,8 @@ def generate_support_bundle():
                         'user': row[1],
                         'action': row[2],
                         'details': row[3],
-                        'ip': (row[4][:10] + '...') if row[4] and len(row[4]) > 10 else row[4]
+                        'ip': (row[4][:10] + '...') if row[4] and len(row[4]) > 10 else row[4],
+                        'cluster': row[5] if len(row) > 5 else ''
                     })
                 zf.writestr(f"{bundle_prefix}/audit_log.json", json.dumps(audit_entries, indent=2))
             except Exception as e:
@@ -3873,10 +3926,19 @@ def generate_support_bundle():
                 zf.writestr(f"{bundle_prefix}/server_settings_error.txt", f"Failed: {str(e)}")
             
             # 9. User List (no sensitive data)
+            # MK: Dec 2026 (sec-audit) - Filter to caller's tenant
             try:
                 users = load_users()
                 user_list = []
+                
                 for uname, udata in users.items():
+                    # For global admins (None scope), include all users
+                    # For scoped users, only include users from their tenant
+                    if _allowed_clusters is not None:
+                        user_tenant = udata.get('tenant_id', 'default')
+                        if user_tenant != caller_tenant:
+                            continue  # Skip users from other tenants
+                    
                     user_list.append({
                         'username': uname,
                         'role': udata.get('role'),
@@ -4004,9 +4066,12 @@ def generate_support_bundle():
                     pass
             
             # 11. Recent Tasks
+            # MK: Dec 2026 (sec-audit) - Filter to caller's permitted clusters
             try:
                 recent_tasks = []
                 for cluster_id, mgr in list(cluster_managers.items()):
+                    if _allowed_clusters is not None and cluster_id not in _allowed_clusters:
+                        continue  # Skip clusters outside caller's scope
                     if mgr.is_connected:
                         try:
                             tasks = mgr.get_tasks(limit=50)
@@ -4034,15 +4099,31 @@ def generate_support_bundle():
             
             # 13. PegaProx SSH Session Log (last 100 entries)
             # NS: Feb 2026 - Track SSH sessions opened through PegaProx WebSocket terminal
+            # MK: Dec 2026 (sec-audit) - Filter to caller's permitted clusters
             try:
                 db = get_db()
                 cursor = db.conn.cursor()
-                cursor.execute('''
-                    SELECT timestamp, user, action, details, ip_address 
-                    FROM audit_log 
-                    WHERE action LIKE 'ssh.%' OR action LIKE 'node.shell%'
-                    ORDER BY timestamp DESC LIMIT 100
-                ''')
+                
+                # Build query with cluster filtering for scoped users
+                if _allowed_clusters is None:
+                    # Global admin - all SSH/shell audit logs
+                    cursor.execute('''
+                        SELECT timestamp, user, action, details, ip_address, cluster
+                        FROM audit_log 
+                        WHERE action LIKE 'ssh.%' OR action LIKE 'node.shell%'
+                        ORDER BY timestamp DESC LIMIT 100
+                    ''')
+                else:
+                    # Scoped user - only logs from their clusters (or cluster-less system events)
+                    placeholders = ','.join('?' * len(_allowed_clusters))
+                    cursor.execute(f'''
+                        SELECT timestamp, user, action, details, ip_address, cluster
+                        FROM audit_log 
+                        WHERE (action LIKE 'ssh.%' OR action LIKE 'node.shell%')
+                          AND (cluster IS NULL OR cluster = '' OR cluster IN ({placeholders}))
+                        ORDER BY timestamp DESC LIMIT 100
+                    ''', _allowed_clusters)
+                
                 ssh_entries = []
                 for row in cursor.fetchall():
                     ssh_entries.append({
@@ -4050,7 +4131,8 @@ def generate_support_bundle():
                         'user': row[1],
                         'action': row[2],
                         'details': row[3],
-                        'ip': row[4]
+                        'ip': row[4],
+                        'cluster': row[5] if len(row) > 5 else ''
                     })
                 zf.writestr(f"{bundle_prefix}/ssh_sessions.json", json.dumps(ssh_entries, indent=2))
             except Exception as e:
