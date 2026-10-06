@@ -4194,11 +4194,13 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         copied = False
         
         # ==============================================================
-        # METHOD 1: Netcat + Compression -- fastest possible
+        # METHOD 1: SSH-tunneled transfer with authenticated encryption
         # ==============================================================
+        # Security: replaced raw netcat with SSH reverse tunnel to prevent
+        # unauthenticated access and plaintext exposure of guest disk data.
         if pve_ip and esxi_nc:
             port = random.randint(49152, 65000)
-            task.log(f"  Method 1: nc+{compress_name} ({esxi_host}→{pve_ip}:{port})")
+            task.log(f"  Method 1: SSH-tunnel+{compress_name} ({esxi_host}→{pve_ip}:{port})")
             
             script = f"/tmp/v2p-nc-{task.id[:8]}-d{di}.sh"
             nc_script = f"""#!/bin/bash
@@ -4207,18 +4209,20 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
 echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true
 ulimit -p 1048576 2>/dev/null || true
 
-# Receiver: listen → decompress → mbuffer → sparse direct-write
-# nice/ionice: idle priority so VM I/O is never impacted
-{NICE} nc -l -p {port} -w 300 \\
+# Receiver: listen on localhost only (SSH tunnel endpoint) → decompress → mbuffer → sparse direct-write
+# Binding to 127.0.0.1 ensures only the SSH tunnel can connect (not external attackers)
+{NICE} nc -l -s 127.0.0.1 -p {port} -w 300 \\
   | mbuffer -q -s {BS_MB}M -m 128M 2>/dev/null \\
   | {pve_decompress} \\
   | {NICE} {DD_WRITE_SPARSE} of={dev_path} 2>/dev/null &
 RECV=$!
 sleep 1
 
-# Sender: read → compress → nc
-{SSH_PREFIX} {ssh_base} {esxi_user}@{esxi_host} \\
-  "{NICE} {DD_READ} if={esxi_path} 2>/dev/null | {esxi_compress} | nc -w 120 {pve_ip} {port}" &
+# Sender: establish SSH reverse tunnel, then send through it
+# -R {port}:127.0.0.1:{port} creates reverse tunnel from ESXi to Proxmox localhost
+# Data flows through authenticated, encrypted SSH connection
+{SSH_PREFIX} {ssh_base} -R {port}:127.0.0.1:{port} {esxi_user}@{esxi_host} \\
+  "{NICE} {DD_READ} if={esxi_path} 2>/dev/null | {esxi_compress} | nc -w 120 127.0.0.1 {port}" &
 SEND=$!
 
 wait $SEND 2>/dev/null; S=$?
@@ -4236,10 +4240,10 @@ exit $((S + R))
             
             if rc_nc_r == 0 and elapsed > 2:
                 speed = disk_gb * 1024 / max(elapsed, 1)
-                task.log(f"  ✓ nc+{compress_name}: {elapsed:.0f}s, {speed:.0f} MB/s effective")
+                task.log(f"  ✓ SSH-tunnel+{compress_name}: {elapsed:.0f}s, {speed:.0f} MB/s effective")
                 copied = True
             else:
-                task.log(f"  nc+{compress_name} failed (rc={rc_nc_r}, {elapsed:.0f}s)")
+                task.log(f"  SSH-tunnel+{compress_name} failed (rc={rc_nc_r}, {elapsed:.0f}s)")
                 _pve_node_exec(pve_mgr, task.target_node,
                     f"kill $(lsof -ti :{port}) 2>/dev/null; true", timeout=5)
         
@@ -5680,10 +5684,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         task.log(f"Copying disk {di} ({disk_gb:.1f} GB) → {vol_id}")
         bg_copied = False
         
-        # Netcat + compression (fastest method: raw TCP, no SSH overhead)
+        # SSH-tunneled transfer with authenticated encryption (background copy)
+        # Security: replaced raw netcat with SSH reverse tunnel to prevent
+        # unauthenticated access and plaintext exposure of guest disk data.
         if bg_pve_ip and bg_nc:
             port = random.randint(49152, 65000)
-            task.log(f"  nc+{compress_name} {esxi_host}→{bg_pve_ip}:{port}")
+            task.log(f"  SSH-tunnel+{compress_name} {esxi_host}→{bg_pve_ip}:{port}")
             nc_s = f"/tmp/v2p-bgnc-{task.id[:8]}-d{di}.sh"
             nc_body = f"""#!/bin/bash
 {BG_CG_EXEC}
@@ -5691,10 +5697,13 @@ echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true
 # Tune TCP buffers for bulk transfer (16MB window)
 sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216 2>/dev/null || true
 sysctl -w net.ipv4.tcp_rmem='4096 1048576 16777216' net.ipv4.tcp_wmem='4096 1048576 16777216' 2>/dev/null || true
-{BG_NICE} nc -l -p {port} -w 300 | {bg_decompress} | {BG_NICE} {BG_DD_WRITE} of={dev_path} 2>/dev/null &
+# Receiver: listen on localhost only (SSH tunnel endpoint)
+{BG_NICE} nc -l -s 127.0.0.1 -p {port} -w 300 | {bg_decompress} | {BG_NICE} {BG_DD_WRITE} of={dev_path} 2>/dev/null &
 RECV=$!
 sleep 1
-ssh {bg_ssh_base} {esxi_user}@{esxi_host} "{BG_NICE} {BG_DD_READ} if={esxi_path} 2>/dev/null | {bg_compress} | nc -w 120 {bg_pve_ip} {port}" &
+# Sender: establish SSH reverse tunnel, then send through it
+# -R {port}:127.0.0.1:{port} creates reverse tunnel from ESXi to Proxmox localhost
+ssh -R {port}:127.0.0.1:{port} {bg_ssh_base} {esxi_user}@{esxi_host} "{BG_NICE} {BG_DD_READ} if={esxi_path} 2>/dev/null | {bg_compress} | nc -w 120 127.0.0.1 {port}" &
 SEND=$!
 wait $SEND 2>/dev/null; S=$?
 wait $RECV 2>/dev/null; R=$?
@@ -5714,12 +5723,12 @@ exit $((S + R))
                 task.log(f"  ✓ {elapsed:.0f}s, {speed:.0f} MB/s effective")
                 bg_copied = True
             else:
-                # nc didn't take. Log the tail before we fall through to
-                # the SSH+compress path so the user knows why nc bailed.
+                # SSH-tunnel didn't take. Log the tail before we fall through to
+                # the SSH+compress path so the user knows why it failed.
                 tail = ((bg_err or bg_out) or '').strip()
                 if tail and rc_bg != 0:
                     excerpt = '\n'.join(tail.splitlines()[-6:])[:400]
-                    task.log(f"  nc rc={rc_bg} after {elapsed:.0f}s — falling through to SSH+compress")
+                    task.log(f"  SSH-tunnel rc={rc_bg} after {elapsed:.0f}s — falling through to SSH+compress")
                     for line in excerpt.splitlines():
                         task.log(f"    {line}")
                 _pve_node_exec(pve_mgr, task.target_node,
