@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -8351,11 +8351,15 @@ def _xcincr_remove_existing_replica(target_mgr, tgt_vmid, vm_type, job_id):
 
 # config keys copied verbatim onto the replica (identity/hardware that isn't a
 # disk, net, or a runtime-only field). Disks + nets are rebuilt separately.
+# Security: 'args' is excluded because it contains arbitrary QEMU command-line
+# arguments that may reference host-specific files, devices, or sockets. Copying
+# args from source to target crosses a trust boundary: source VM configuration
+# authority does not establish authority to specify target-host-sensitive options.
 _XCINCR_COPY_KEYS = (
     'name', 'memory', 'balloon', 'cores', 'sockets', 'vcpus', 'cpu', 'cpulimit',
     'cpuunits', 'numa', 'ostype', 'bios', 'machine', 'agent', 'scsihw', 'vga',
     'tablet', 'kvm', 'hotplug', 'boot', 'bootdisk', 'onboot', 'protection',
-    'rng0', 'tpmstate0', 'args', 'description',
+    'rng0', 'tpmstate0', 'description',
 )
 
 
