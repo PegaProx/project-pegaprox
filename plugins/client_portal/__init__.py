@@ -881,10 +881,14 @@ def _create_ct():
 
     # grant the creator access to their new CT (portal scopes on VM-ACL / pool)
     try:
-        from pegaprox.utils.rbac import save_vm_acls
+        from pegaprox.utils.rbac import save_vm_acls, invalidate_vm_acls_cache
         acls = load_vm_acls()
         acls.setdefault(cluster_id, {})[str(new_vmid)] = {'users': [username]}
         save_vm_acls(acls)
+        # NS Oct 2026 (pentest) — invalidate the 30s TTL cache so the grant takes effect
+        # immediately across all workers. Without this a reused VMID can authorize the
+        # former tenant's user during the stale-cache window (cross-tenant BOLA).
+        invalidate_vm_acls_cache()
     except Exception as e:
         logging.warning(f'[client_portal] CT {new_vmid} created but ACL grant failed: {e}')
 
