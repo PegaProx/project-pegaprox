@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -9855,6 +9855,10 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
     # the per-VM _console_authz gate below is authoritative and portal/custom-role aware.
     # H-1/H-2: cluster + per-VM gate (vm.console alone isn't enough)
     user['username'] = auth_user
+    # NS Dec 2026 (pentest): floor the user dict by the token's embedded role so a lower-authority
+    # token cannot inherit the owner's persistent admin role. Mirrors validate_ws_token_api.
+    from pegaprox.api.realtime import _floor_by_token_role
+    user = _floor_by_token_role(user, auth_role)
     _ok, _why = _console_authz(user, cluster_id, vmid, vm_type)
     if not _ok:
         return jsonify({'error': 'Permission denied', 'code': 'INSUFFICIENT_PERMISSIONS'}), 403
@@ -9979,6 +9983,10 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             # coarse "global vm.console perm OR admin" pre-check here rejected Client-Portal users
             # — they hold per-VM console access through the portal model, not a global RBAC perm —
             # so the portal console hung at "Connecting…". Dropped; _console_authz still enforces it.
+            # NS Dec 2026 (pentest): floor the user dict by the token's embedded role so a lower-authority
+            # token cannot inherit the owner's persistent admin role. Mirrors validate_ws_token_api.
+            from pegaprox.api.realtime import _floor_by_token_role
+            user = _floor_by_token_role(user, token_data.get('role'))
             print(f"User {token_data['user']} authenticated for VNC (ws_token)")
         elif session_id:
             session = validate_session(session_id)
@@ -10618,6 +10626,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
     session_id = request.args.get('session')
 
     auth_user = None
+    auth_role = None
     if ws_token:
         token_data = validate_ws_token(ws_token)
         if not token_data:
@@ -10629,6 +10638,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         user_perms = get_user_permissions(user)
         # #537/RBAC: coarse "global vm.console OR admin" pre-check dropped — _console_authz below is authoritative.
         auth_user = token_data['user']
+        auth_role = token_data.get('role')
     elif session_id:
         session = validate_session(session_id)
         if not session:
@@ -10640,6 +10650,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         user_perms = get_user_permissions(user)
         # #537/RBAC: coarse pre-check dropped — _console_authz below is authoritative.
         auth_user = session['user']
+        auth_role = session.get('role')
     else:
         try: ws.send('Authentication required')
         except: pass
@@ -10649,6 +10660,10 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
 
     # H-1/H-2: cluster + per-VM gate before this proxy self-mints a PVE ticket
     user['username'] = auth_user
+    # NS Dec 2026 (pentest): floor the user dict by the token's embedded role so a lower-authority
+    # token cannot inherit the owner's persistent admin role. Mirrors validate_ws_token_api.
+    from pegaprox.api.realtime import _floor_by_token_role
+    user = _floor_by_token_role(user, auth_role)
     _ok, _why = _console_authz(user, cluster_id, vmid, vm_type)
     if not _ok:
         try: ws.send('Permission denied')
